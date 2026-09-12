@@ -9,6 +9,7 @@
 #include "recoil/recoil_store.h"
 #include <unordered_map>
 #include <cstdlib>
+#include "data_collection/data_collection.h"
 
 #include <algorithm>
 #include <atomic>
@@ -78,6 +79,8 @@ struct Runtime::Impl {
     runtime::detail::SafetyGate safety_gate;
     std::unique_ptr<ICapture> capture;
     std::unique_ptr<Detector> detector;
+    std::shared_ptr<data_collection::Collector> data_collector;
+    std::uint64_t active_detector_generation = 1;
     std::unique_ptr<Aim> aim;
     std::shared_ptr<IMouseController> mouse;
     bool owns_mouse = false;
@@ -272,6 +275,7 @@ struct Runtime::Impl {
             current_snapshot.provider = detector->backend_name();
             current_snapshot.active_model_path = config.detector.model_path;
             current_snapshot.detector_generation = 1;
+            active_detector_generation = 1;
             current_snapshot.output_allowed_by_config =
                 config.mouse.allow_send_input;
             current_snapshot.input_healthy = safety_gate.input_healthy();
@@ -755,6 +759,7 @@ struct Runtime::Impl {
                 pipeline_started - frame->timing.captured_at).count();
 
             std::vector<Detection> detections;
+            std::uint64_t frame_detector_generation = 0;
             {
                 // profile() 必须与同一次 detect() 使用同一代 Detector；重载只会
                 // 在两帧之间取得此锁并交换指针。
@@ -778,6 +783,7 @@ struct Runtime::Impl {
                     detections = detector->detect(frame->bgr);
                 }
                 profile.detector = detector->profile();
+                frame_detector_generation = active_detector_generation;
             }
             if (profile.detector.status != DetectionStatus::SUCCESS) {
                 if (auto trigger = trigger_worker.load()) trigger->publish(std::make_shared<TriggerObservation>());
@@ -973,6 +979,12 @@ struct Runtime::Impl {
                 profile.detector.status == DetectionStatus::SUCCESS
                     ? std::span<const Detection>(aim_frame.detections)
                     : std::span<const Detection>(detections);
+            // 本帧输出已经完成，采集只复制被选中的同帧像素，不等待编码/磁盘。
+            // 此开销位于service尾部，仍会影响下一帧服务时间，不能称作零开销。
+            if (data_collector) {
+                data_collector->offer(*frame, preview_detections,
+                    profile.detector.status, frame_detector_generation);
+            }
             const float control_center_x = frame->source_pixels_per_pixel_x > 0.0
                 ? static_cast<float>(
                     (frame->source_width * 0.5 - frame->roi_x) /
@@ -1125,6 +1137,17 @@ Runtime::~Runtime() {
     stop();
 }
 
+bool Runtime::set_data_collector(
+        std::shared_ptr<data_collection::Collector> collector) noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(impl_->lifecycle_mutex);
+        if (impl_->capture_thread.joinable() || impl_->pipeline_thread.joinable() ||
+            impl_->detector_reload_thread.joinable()) return false;
+        impl_->data_collector = std::move(collector);
+        return true;
+    } catch (...) { return false; }
+}
+
 bool Runtime::start(const AppConfig& config) noexcept {
     return start(config, {});
 }
@@ -1197,6 +1220,7 @@ void Runtime::stop() noexcept {
     const std::uint64_t final_runtime_overwritten_frames =
         impl_->frame_queue.overwritten_frames();
     impl_->detector_reload_running.store(false, std::memory_order_release);
+    if (impl_->data_collector) impl_->data_collector->stop();
     impl_->release_modules();
     // Pipeline 已退出后清除旧预览，但保留三槽大缓冲和用户的启用选择。
     // 下次启动会从新会话首帧重新发布，不把停止前图像误当成实时画面。
@@ -1232,6 +1256,14 @@ bool Runtime::reload_detector(const DetectorConfig& config) noexcept {
     if (!impl_) return false;
     try {
         std::lock_guard<std::mutex> lifecycle_lock(impl_->lifecycle_mutex);
+
+        if (impl_->data_collector && impl_->data_collector->snapshot().active) {
+            std::lock_guard<std::mutex> lock(impl_->snapshot_mutex);
+            impl_->current_snapshot.detector_reload_state = DetectorReloadState::FAILED;
+            impl_->current_snapshot.detector_reload_error =
+                "请先结束图片采集，再切换模型以保持样本身份一致";
+            return false;
+        }
 
         {
             std::lock_guard<std::mutex> lock(impl_->snapshot_mutex);
@@ -1349,6 +1381,7 @@ bool Runtime::reload_detector(const DetectorConfig& config) noexcept {
                         DetectorReloadState::SUCCEEDED;
                     state->current_snapshot.detector_reload_error.clear();
                     generation = ++state->current_snapshot.detector_generation;
+                    state->active_detector_generation = generation;
                     state->current_snapshot.output_armed = false;
                 }
 

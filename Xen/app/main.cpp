@@ -12,6 +12,7 @@
 #include "log/log.h"
 #include "overlay/overlay.h"
 #include "runtime/runtime.h"
+#include "model_workspace/model_workspace.h"
 
 #include <Windows.h>
 
@@ -182,6 +183,15 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
 
     Runtime runtime;
+    auto data_collector = std::make_shared<data_collection::Collector>();
+    runtime.set_data_collector(data_collector);
+    model_workspace::Workspace model_workspace(data_collector);
+    model_workspace::Settings workspace_settings;
+    std::string workspace_error;
+    if (!model_workspace.initialize(model_directory.parent_path(),
+                                    workspace_settings, workspace_error)) {
+        append_message(app_message, workspace_error);
+    }
     std::shared_ptr<IMouseController> input_device;
     if (auto created_mouse = MouseDeviceFactory::create(config.mouse)) {
         input_device = std::shared_ptr<IMouseController>(
@@ -362,7 +372,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             : nullptr;
         const bool overlay_rendered = overlay.render(
             snapshot, preview, model_catalog, backend_catalog,
-            config, app_message, actions);
+            config, workspace_settings, model_workspace.poll(&workspace_settings), app_message, actions);
         if (!startup_boundary.observe_overlay_render(
                 overlay_rendered,
                 overlay.last_error())) {
@@ -387,6 +397,25 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         if (actions.preview_enabled_changed &&
             !runtime.set_preview_enabled(actions.preview_enabled)) {
             app_message = "ROI 预览通道切换失败。";
+        }
+
+        if (actions.workspace_action != model_workspace::Action::NONE) {
+            if (actions.workspace_action == model_workspace::Action::START_COLLECTION &&
+                snapshot.detector_reload_state == DetectorReloadState::LOADING) {
+                app_message = "模型正在切换，请完成后再开始采集。";
+            } else {
+                std::string active_model_path = snapshot.active_model_path;
+                if (active_model_path.empty()) {
+                    DetectorConfig selection = config.detector;
+                    if (resolve_detector_config(selection)) active_model_path = selection.model_path;
+                }
+                const bool busy_runtime = snapshot.state != RuntimeState::STOPPED &&
+                                          snapshot.state != RuntimeState::FAILED;
+                model_workspace.execute(actions.workspace_action, workspace_settings,
+                    busy_runtime,
+                    snapshot.d3d11_cuda_interop || snapshot.d3d11_directml_interop,
+                    active_model_path);
+            }
         }
 
         if (actions.refresh_models_requested) {
@@ -416,7 +445,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             (!actions.start_requested && toggle_requests_stop)) {
             stop_runtime_session();
         } else if (actions.start_requested || toggle_requests_start) {
-            start_runtime_session();
+            if (model_workspace.poll().job_running) {
+                app_message = "请先结束离线数据或训练作业，再启动Runtime。";
+            } else {
+                start_runtime_session();
+            }
         }
         if (actions.reload_detector_requested &&
             !actions.stop_requested) {
@@ -534,6 +567,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
 
     runtime.stop();
+    model_workspace.shutdown();
     finish_debug_report();
     keyboard.close();
     if (input_device) input_device->close();

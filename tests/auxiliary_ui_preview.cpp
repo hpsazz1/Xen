@@ -39,11 +39,14 @@ int main(int argc, char** argv) {
     snapshot.state = RuntimeState::STOPPED;
     const OverlayModelCatalog models;
     const OverlayBackendCatalog backends;
+    model_workspace::Settings workspace_settings;
+    const model_workspace::Snapshot workspace_snapshot;
     std::string message = "界面预览：无设备连接；运行和输出操作均不执行，保存不写配置文件。";
     int result = 0;
     while (overlay.pump_messages()) {
         OverlayActions actions;
-        if (!overlay.render(snapshot, {}, models, backends, config, message, actions)) {
+        if (!overlay.render(snapshot, {}, models, backends, config,
+                workspace_settings, workspace_snapshot, message, actions)) {
             std::cerr << overlay.last_error() << '\n';
             result = 1;
             break;
