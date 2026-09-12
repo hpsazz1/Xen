@@ -26,6 +26,8 @@ public:
     bool physical_previous = false, source_blocked = false;
     int last_source = 0;
     std::uint64_t last_synthetic_id = 0;
+    std::uint64_t sampled_firing_id = 0;
+    std::optional<std::int64_t> sampled_firing_uncertainty_ns;
     RecoilTime physical_started{};
     RecoilInput input() {
         auto result = context();
@@ -41,6 +43,13 @@ public:
         if (result.healthy) physical_previous = physical;
         else source_blocked = true;
         const int source = physical ? 1 : synthetic.confirmed_down ? 2 : 0;
+        sampled_firing_id = source == 2 ? synthetic.id : 0;
+        sampled_firing_uncertainty_ns.reset();
+        if (source == 2 && synthetic.call_started_at != RecoilTime{} &&
+            synthetic.backend_completed_at >= synthetic.call_started_at &&
+            synthetic.uncertainty.count() >= 0 && synthetic.uncertainty ==
+                synthetic.backend_completed_at - synthetic.call_started_at)
+            sampled_firing_uncertainty_ns = synthetic.uncertainty.count();
         if ((physical && synthetic.confirmed_down) || (source && last_source && source != last_source) ||
             (source==2 && last_source==2 && synthetic.id!=last_synthetic_id)) source_blocked = true;
         if (result.healthy && !physical && !synthetic.confirmed_down) {
@@ -64,26 +73,52 @@ public:
         try {
             while (!stopping.load()) {
                 if (canceled.exchange(false)) controller.cancel(RecoilReason::CANCELED, RecoilClock::now());
+                const auto sampled_at = RecoilClock::now();
                 const auto before = input();
                 const auto before_source = last_source;
+                const auto before_firing_id = sampled_firing_id;
+                const auto before_firing_uncertainty_ns = sampled_firing_uncertainty_ns;
                 auto decision = controller.advance(before, RecoilClock::now());
                 if (decision.has_intent) {
-                    auto lock = arbiter->try_enter_aim();
+                    const auto arbitration_at = RecoilClock::now();
+                    OutputArbiterRejection arbitration_rejection{};
+                    auto lock = arbiter->try_enter_aim(OutputArbiterSource::RECOIL, &arbitration_rejection);
                     const auto& intent = decision.intent;
                     RecoilReceipt receipt{intent.command_id, RecoilReceiptStatus::NOT_SENT, RecoilClock::now()};
                     bool backend_called = false;
+                    RecoilDispatchRejection rejection = RecoilDispatchRejection::NONE;
+                    RecoilTime context_checked_at{}, backend_called_at{}, backend_returned_at{};
+                    switch (arbitration_rejection) {
+                    case OutputArbiterRejection::LOCK_BUSY: rejection = RecoilDispatchRejection::ARBITER_LOCK_BUSY; break;
+                    case OutputArbiterRejection::AUXILIARY_PENDING: rejection = RecoilDispatchRejection::ARBITER_AUXILIARY_PENDING; break;
+                    case OutputArbiterRejection::OUTPUT_FAULT: rejection = RecoilDispatchRejection::ARBITER_OUTPUT_FAULT; break;
+                    default: break;
+                    }
                     if (lock.owns_lock()) {
                         const auto current = input();
                         const auto now = RecoilClock::now();
+                        context_checked_at = now;
                         const MouseMoveCommand command{intent.dx_counts, intent.dy_counts};
                         const bool same = current.profile == before.profile && current.weapon_generation == before.weapon_generation &&
                             current.device_epoch == before.device_epoch && current.firing_started_at == before.firing_started_at;
-                        if (same && current.enabled && current.held && current.healthy && current.permission && current.focused &&
-                            current.profile_conditions_match && now <= intent.expires_at && ledger->permits(command, now) &&
-                            !canceled.load() && !stopping.load()) {
+                        if (!same) rejection = RecoilDispatchRejection::CONTEXT_CHANGED;
+                        else if (!current.enabled) rejection = RecoilDispatchRejection::DISABLED;
+                        else if (!current.held) rejection = RecoilDispatchRejection::NOT_HELD;
+                        else if (!current.healthy) rejection = RecoilDispatchRejection::INPUT_UNHEALTHY;
+                        else if (!current.permission) rejection = canceled.load() ? RecoilDispatchRejection::CANCELED :
+                            stopping.load() ? RecoilDispatchRejection::STOPPING : RecoilDispatchRejection::PERMISSION_DENIED;
+                        else if (!current.focused) rejection = RecoilDispatchRejection::NOT_FOCUSED;
+                        else if (!current.profile_conditions_match) rejection = RecoilDispatchRejection::PROFILE_MISMATCH;
+                        else if (now > intent.expires_at) rejection = RecoilDispatchRejection::EXPIRED;
+                        else if (!ledger->permits(command, now)) rejection = RecoilDispatchRejection::BUDGET_EXCEEDED;
+                        else if (canceled.load()) rejection = RecoilDispatchRejection::CANCELED;
+                        else if (stopping.load()) rejection = RecoilDispatchRejection::STOPPING;
+                        if (rejection == RecoilDispatchRejection::NONE) {
                             backend_called = true;
+                            backend_called_at = RecoilClock::now();
                             auto output = mouse->move(command);
                             const auto returned_at = RecoilClock::now();
+                            backend_returned_at = returned_at;
                             if(output.backend_completed_at==RecoilTime{} || output.backend_completed_at<intent.planned_at ||
                                 output.backend_completed_at>returned_at) output.succeeded=false;
                             // 未知不能视作零后重试；同owner后续输出也失去可信账本。
@@ -95,7 +130,9 @@ public:
                     }
                     record({intent,receipt,before.profile,backend_called,before.firing_started_at,
                         before_source==1?RecoilFiringSource::INPUT_ESTIMATED:
-                        before_source==2?RecoilFiringSource::COMMAND_ESTIMATED:RecoilFiringSource::UNKNOWN});
+                        before_source==2?RecoilFiringSource::COMMAND_ESTIMATED:RecoilFiringSource::UNKNOWN,
+                        rejection,sampled_at,arbitration_at,context_checked_at,backend_called_at,backend_returned_at,
+                        before_firing_id,before_firing_uncertainty_ns});
                     controller.acknowledge(receipt, RecoilClock::now());
                 }
                 {

@@ -207,6 +207,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     std::optional<TriggerConfig> debug_trigger_config;
     std::optional<RecoilConfig> debug_recoil_config;
     std::uint64_t debug_recoil_after_command = 0;
+    std::uint64_t debug_trigger_after_event = 0;
     std::uint64_t debug_segment = 0;
     std::vector<RuntimePipelineSample> pending_debug_samples;
     Overlay overlay;
@@ -230,6 +231,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         if (!debug_session_active) return;
         std::string report_error;
         auto final_snapshot = runtime.snapshot();
+        final_snapshot.trigger_execution_log = runtime.trigger_execution_log();
+        auto& trigger_events = final_snapshot.trigger_execution_log.events;
+        std::erase_if(trigger_events, [&](const auto& event) { return event.sequence <= debug_trigger_after_event; });
+        if (!trigger_events.empty()) debug_trigger_after_event = trigger_events.back().sequence;
+        final_snapshot.trigger_execution_log.first_sequence = trigger_events.empty() ? 0 : trigger_events.front().sequence;
+        final_snapshot.trigger_execution_log.last_sequence = trigger_events.empty() ? 0 : trigger_events.back().sequence;
+        final_snapshot.output_arbitration = runtime.output_arbitration();
+        final_snapshot.output_arbitration_available = debug_auto_stop_config->enabled || debug_trigger_config->enabled || debug_recoil_config->enabled;
         final_snapshot.recoil_execution_log = runtime.recoil_execution_log();
         auto& recoil_records = final_snapshot.recoil_execution_log.records;
         // 模型重载会分段写Debug；同一执行记录只归入一个报告，不能变成两份留出。
@@ -297,6 +306,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         debug_trigger_config->head_class_ids = runtime_config.aim.head_class_ids;
         debug_segment = 0;
         debug_recoil_after_command = 0;
+        debug_trigger_after_event = 0;
         detector_reload_pending = false;
         debug_session_active = start_debug_report(runtime.snapshot());
         app_message = debug_session_active

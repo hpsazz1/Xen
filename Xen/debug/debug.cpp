@@ -9,6 +9,7 @@
 
 #include "debug/debug.h"
 #include "debug/recoil_report.h"
+#include "debug/auxiliary_report.h"
 
 #include "log/log.h"
 
@@ -489,7 +490,8 @@ std::string trigger_metadata_json(const TriggerConfig& config,
     nullable_id("sequence", source.sequence);
     output << ",\"age_ms\":";
     if (source.age_ms >= 0) output << source.age_ms; else output << "null";
-    output << "}}";
+    output << "},\"execution\":" << trigger_execution_json(runtime)
+           << ",\"output_arbitration\":" << output_arbitration_json(runtime) << '}';
     return output.str();
 }
 

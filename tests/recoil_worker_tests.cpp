@@ -43,8 +43,10 @@ struct Fixture {
     std::atomic<bool> synthetic_down{false};
     std::atomic<std::uint64_t> synthetic_id{1};
     std::atomic<RecoilTime> synthetic_start{RecoilTime{}};
+    std::atomic<std::int64_t> synthetic_uncertainty_ns{-1};
+    std::atomic<bool> replace_signal_after_read{false};
     std::unique_ptr<RecoilWorker> worker;
-    Fixture(bool rapid=false) {
+    Fixture(bool rapid=false, bool change_generation=true) {
         profile->id = "synthetic"; profile->weapon_id = "synthetic_weapon";
         profile->state = RecoilProfileState::CALIBRATED; profile->phase_tolerance_ms = 100; profile->recovery_ms = 20;
         profile->source.sha256 = std::string(64, 'a'); profile->source.source_unit = "synthetic";
@@ -55,8 +57,20 @@ struct Fixture {
             RecoilInput input; input.enabled = input.permission = input.profile_conditions_match = true;
             input.focused = focused; input.profile = profile; input.device_epoch = 1; input.weapon_generation = generation;
             return input;
-        }, [this] { return TriggerFiringSignal{synthetic_down.load(),synthetic_id.load(),synthetic_start.load()}; });
-        if(rapid)mouse->on_poll=[this]{if(worker->snapshot().phase==RecoilPhase::FIRING&&generation==1)++generation;};
+        }, [this] {
+            TriggerFiringSignal signal{synthetic_down.load(),synthetic_id.load(),synthetic_start.load()};
+            const auto uncertainty=synthetic_uncertainty_ns.load();
+            if(uncertainty>=0) {
+                signal.backend_completed_at=signal.started_at;
+                signal.call_started_at=signal.started_at-std::chrono::nanoseconds(uncertainty);
+                signal.uncertainty=std::chrono::nanoseconds(uncertainty);
+            }
+            if(signal.confirmed_down&&replace_signal_after_read.exchange(false)) {
+                ++synthetic_id;synthetic_uncertainty_ns=4000;
+            }
+            return signal;
+        });
+        if(rapid&&change_generation)mouse->on_poll=[this]{if(worker->snapshot().phase==RecoilPhase::FIRING&&generation==1)++generation;};
         RecoilConfig config; config.enabled = true;
         check(worker->start(config), "worker启动");
     }
@@ -77,6 +91,13 @@ int main() {
             for(const auto& record:log.records)check(record.profile==f.profile&&record.backend_called&&record.receipt.status==RecoilReceiptStatus::ACKNOWLEDGED&&
                 record.firing_started_at!=RecoilTime{}&&record.firing_started_at<=record.intent.planned_at&&
                 record.firing_source==RecoilFiringSource::INPUT_ESTIMATED,"日志保留确切profile、起点与输入估计来源");
+            for(const auto& record:log.records)check(record.dispatch_rejection==RecoilDispatchRejection::NONE&&
+                record.sampled_at!=RecoilTime{}&&record.sampled_at<=record.intent.planned_at&&
+                record.intent.planned_at<=record.arbitration_at&&record.arbitration_at<=record.context_checked_at&&
+                record.context_checked_at<=record.backend_called_at&&record.backend_called_at<=record.receipt.completed_at&&
+                record.receipt.completed_at<=record.backend_returned_at,"派发时点与真实回执有序且成功不伪造拒绝");
+            for(const auto& record:log.records)check(record.source_firing_id==0&&!record.firing_uncertainty_ns,
+                "实体输入没有软件命令id和软件调用区间");
         }
         {
             Fixture f; f.ready(); f.mouse->unknown = true; f.mouse->held = true;
@@ -89,11 +110,28 @@ int main() {
             check(until([&]{return !f.worker->execution_log().records.empty();}),"拒绝预算产生NOT_SENT证据");
             auto log=f.worker->execution_log();check(f.mouse->moves==0&&!log.records[0].backend_called&&
                 log.records[0].receipt.status==RecoilReceiptStatus::NOT_SENT,"NOT_SENT不伪造提交或成功");
+            check(log.records[0].dispatch_rejection==RecoilDispatchRejection::BUDGET_EXCEEDED&&
+                log.records[0].backend_called_at==RecoilTime{}&&log.records[0].backend_returned_at==RecoilTime{},
+                "额度拒绝独立记录且不伪造调用时点");
+        }
+        {
+            Fixture f;f.ready();auto owner=f.arbiter->try_enter_aim();f.mouse->held=true;
+            const bool recorded=until([&]{return !f.worker->execution_log().records.empty();});owner.unlock();
+            check(recorded,"争用应产生独立拒绝记录");
+            const auto record=f.worker->execution_log().records.front();
+            check(record.dispatch_rejection==RecoilDispatchRejection::ARBITER_LOCK_BUSY&&
+                record.receipt.status==RecoilReceiptStatus::NOT_SENT&&record.context_checked_at==RecoilTime{}&&
+                record.backend_called_at==RecoilTime{}&&f.mouse->moves==0,"争用不调用后端且不会伪造复核时点");
+            std::this_thread::sleep_for(20ms);
+            check(f.mouse->moves==0&&f.arbiter->aim_skips()==0&&f.arbiter->snapshot().sources[2].lock_busy==1,
+                "争用仍取消当前曲线，不追发且不污染Aim统计");
         }
         {
             Fixture f(true);f.ready();f.mouse->held=true;
             check(until([&]{return !f.worker->execution_log().records.empty();}),"提交前新代际形成拒绝证据");
             check(f.mouse->moves==0&&f.worker->execution_log().records.front().receipt.status==RecoilReceiptStatus::NOT_SENT,"二次复核拒绝旧上下文");
+            check(f.worker->execution_log().records.front().dispatch_rejection==RecoilDispatchRejection::CONTEXT_CHANGED,
+                "代际变更拒绝与额度、仲裁拒绝区分");
         }
         {
             Fixture f;f.ready();f.mouse->missing_time=true;f.mouse->held=true;
@@ -107,8 +145,21 @@ int main() {
             check(f.mouse->moves==0,"known-down不能冒充干净状态");
         }
         {
+            Fixture f(true,false);f.ready();f.synthetic_start=RecoilClock::now()-2ms;
+            f.synthetic_uncertainty_ns=2000;f.replace_signal_after_read=true;f.synthetic_down=true;
+            check(until([&]{return !f.worker->execution_log().records.empty();}),"二次复核换信号仍保存旧意图关联");
+            const auto record=f.worker->execution_log().records.front();
+            check(record.source_firing_id==1&&record.firing_uncertainty_ns==2000&&
+                record.receipt.status==RecoilReceiptStatus::NOT_SENT&&f.mouse->moves==0,
+                "旧意图不能被第二次输入的新命令id或区间覆盖");
+        }
+        {
             Fixture f;f.ready();f.synthetic_start=RecoilClock::now();f.synthetic_down=true;
             check(until([&]{return f.mouse->moves>0;}),"Trigger已确认down启动补偿");
+            check(until([&]{return !f.worker->execution_log().records.empty();}),"确认软件命令证据完成");
+            check(f.worker->execution_log().records.front().source_firing_id==1&&
+                !f.worker->execution_log().records.front().firing_uncertainty_ns,
+                "旧三字段信号保留命令id但不能伪造零不确定区间");
             f.mouse->held=true;
             check(until([&]{return f.worker->snapshot().reason==RecoilReason::CONTEXT;}),"实体与软件重叠需取消");
             auto count=f.mouse->moves.load();f.synthetic_down=false;std::this_thread::sleep_for(25ms);

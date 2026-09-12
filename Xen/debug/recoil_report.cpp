@@ -1,4 +1,5 @@
 #include "debug/recoil_report.h"
+#include "debug/auxiliary_report.h"
 #include "recoil_tuner/recoil_tuner.h"
 #include <nlohmann/json.hpp>
 #include <set>
@@ -12,6 +13,7 @@ std::string recoil_metadata_json(const RecoilConfig& config, const RuntimeSnapsh
         {"trial_file",config.trial_file},{"budget_window_ms",config.budget_window_ms},
         {"max_observation_age_ms",config.max_observation_age_ms}}}};
     result["final"] = nullptr; result["execution"] = nullptr;
+    result["output_arbitration"] = Json::parse(output_arbitration_json(snapshot));
     if (snapshot.recoil_telemetry_available) {
         const auto& state = snapshot.recoil;
         result["final"] = {{"phase",static_cast<int>(state.phase)}, {"reason",RecoilReasonName(state.reason)},
@@ -38,8 +40,14 @@ std::string recoil_metadata_json(const RecoilConfig& config, const RuntimeSnapsh
                 {"device_epoch",intent.device_epoch},{"planned_at_steady_ns",stamp(intent.planned_at)},
                 {"firing_started_at_steady_ns",stamp(record.firing_started_at)},
                 {"firing_source",RecoilFiringSourceName(record.firing_source)},
+                {"source_firing_id",record.source_firing_id ? Json(std::to_string(record.source_firing_id)) : Json(nullptr)},
+                {"firing_command_interval_ns",record.firing_uncertainty_ns ? Json(std::to_string(*record.firing_uncertainty_ns)) : Json(nullptr)},
                 {"expires_at_steady_ns",stamp(intent.expires_at)}, {"requested_counts",{intent.dx_counts,intent.dy_counts}},
-                {"backend_called",record.backend_called},{"receipt",record.receipt.status == RecoilReceiptStatus::ACKNOWLEDGED ? "ACKNOWLEDGED" :
+                {"backend_called",record.backend_called},{"dispatch_rejection",RecoilDispatchRejectionName(record.dispatch_rejection)},
+                {"sampled_at_steady_ns",stamp(record.sampled_at)}, {"arbitration_at_steady_ns",stamp(record.arbitration_at)},
+                {"context_checked_at_steady_ns",stamp(record.context_checked_at)},
+                {"backend_called_at_steady_ns",stamp(record.backend_called_at)}, {"backend_returned_at_steady_ns",stamp(record.backend_returned_at)},
+                {"receipt",record.receipt.status == RecoilReceiptStatus::ACKNOWLEDGED ? "ACKNOWLEDGED" :
                     record.receipt.status == RecoilReceiptStatus::NOT_SENT ? "NOT_SENT" : "UNKNOWN"},
                 {"completed_at_steady_ns",stamp(record.receipt.completed_at)}, {"physical_effect_observed",nullptr}});
         }

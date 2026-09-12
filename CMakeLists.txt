@@ -890,7 +890,7 @@ target_include_directories(app_input PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(app_input PUBLIC runtime)
 
 add_library(xen_debug STATIC
-    Xen/debug/debug.cpp Xen/debug/recoil_report.cpp)
+    Xen/debug/debug.cpp Xen/debug/recoil_report.cpp Xen/debug/auxiliary_report.cpp)
 target_include_directories(xen_debug PUBLIC
     ${PROJECT_SOURCE_DIR}/Xen
     ${OpenCV_INCLUDE_DIRS})

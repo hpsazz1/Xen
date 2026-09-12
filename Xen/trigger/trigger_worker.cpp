@@ -3,6 +3,9 @@
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#include <algorithm>
+#include <array>
+#include <limits>
 
 class TriggerWorker::Impl {
 public:
@@ -24,8 +27,48 @@ public:
     TriggerFiringSignal firing;
     std::uint64_t reserved_stop_id = 0, deferred_cancel_id = 0;
     unsigned cleanup_attempts = 0;
-    TriggerTime cleanup_due{};
+    TriggerTime cleanup_due{}, cleanup_deadline{};
+    bool cleanup_active = false, cleanup_exhausted = false;
+    std::array<TriggerExecutionEvent, 2048> events{};
+    std::size_t event_begin = 0, event_count = 0;
+    std::uint64_t event_sequence = 0, dropped_count = 0;
     int cleanup_budget_ms = 1000;
+    void record(TriggerExecutionEvent event) {
+        std::lock_guard lock(mutex);
+        if (event_sequence == std::numeric_limits<std::uint64_t>::max()) {
+            if (dropped_count != std::numeric_limits<std::uint64_t>::max()) ++dropped_count;
+            return;
+        }
+        event.sequence = ++event_sequence;
+        if (event_count == events.size()) {
+            event_begin = (event_begin + 1) % events.size();
+            --event_count;
+            if (dropped_count != std::numeric_limits<std::uint64_t>::max()) ++dropped_count;
+        }
+        events[(event_begin + event_count++) % events.size()] = event;
+    }
+    void begin_cleanup(TriggerTime now) {
+        if (cleanup_active) return;
+        cleanup_active = true;
+        cleanup_exhausted = false;
+        cleanup_attempts = 0;
+        cleanup_due = now;
+        cleanup_deadline = now + std::chrono::milliseconds(cleanup_budget_ms);
+    }
+    void check_cleanup_budget(TriggerTime now) {
+        if (!cleanup_active || cleanup_exhausted ||
+            (cleanup_attempts < 3 && now < cleanup_deadline)) return;
+        cleanup_exhausted = true;
+        arbiter->latch_output_fault();
+        TriggerExecutionEvent event;
+        event.snapshot = controller.snapshot();
+        event.snapshot.faulted = true;
+        event.snapshot.phase = TriggerPhase::FAULT;
+        event.snapshot.reason = TriggerReason::UNKNOWN_RECEIPT;
+        event.rejection_reason = cleanup_attempts >= 3 ? "cleanup_attempts_exhausted" : "cleanup_deadline_expired";
+        event.observed_at = now;
+        record(event);
+    }
     TriggerPermit permit(bool allocate_stop_id = false) {
         TriggerPermit p;
         InputSnapshot input;
@@ -57,10 +100,19 @@ public:
     }
     void execute(TriggerDecision decision) {
         for (int chain = 0; chain < 4; ++chain) {
+            TriggerExecutionEvent event;
+            event.snapshot = decision.snapshot;
+            event.button_action = decision.button_action;
+            event.stop_action = decision.stop_action;
+            event.stop_request_id = decision.stop_request_id;
+            event.planned_at = TriggerClock::now();
+            if (evaluated_observation) event.source_observed_at = evaluated_observation->observed_at;
             if (decision.stop_action == TriggerStopAction::REQUEST) {
                 reserved_stop_id = 0;
                 if (!request_stop(decision.stop_request_id)) {
-                    decision = controller.cancel(TriggerReason::STOP_UNVERIFIED, TriggerClock::now());
+                    event.rejection_reason = "stop_request_rejected";
+                    event.observed_at = TriggerClock::now(); record(event);
+                    decision = controller.cancel(TriggerReason::STOP_UNVERIFIED, event.observed_at);
                     continue;
                 }
             } else if (decision.stop_action == TriggerStopAction::CANCEL) {
@@ -68,57 +120,128 @@ public:
                 if (decision.snapshot.button_may_be_down) deferred_cancel_id = decision.stop_request_id;
                 else cancel_stop(decision.stop_request_id);
             }
-            if (decision.button_action == TriggerButtonAction::NONE) break;
+            if (decision.button_action == TriggerButtonAction::NONE) {
+                bool changed;
+                { std::lock_guard lock(mutex); changed = decision.snapshot.reason != state.reason ||
+                    decision.snapshot.phase != state.phase || decision.snapshot.command_id != state.command_id; }
+                if (changed || decision.stop_action != TriggerStopAction::NONE) {
+                    event.observed_at = TriggerClock::now(); record(event);
+                }
+                break;
+            }
             const bool down = decision.button_action == TriggerButtonAction::DOWN;
-            if (!down) { std::lock_guard state_lock(mutex); firing.confirmed_down = false; }
-            auto lock = down ? arbiter->try_enter_aim() : arbiter->try_enter_cleanup();
+            if (!down) {
+                { std::lock_guard state_lock(mutex); firing.confirmed_down = false; }
+                begin_cleanup(event.planned_at);
+                check_cleanup_budget(event.planned_at);
+                if (cleanup_exhausted || event.planned_at < cleanup_due) break;
+            }
+            OutputArbiterRejection rejection = OutputArbiterRejection::NONE;
+            auto lock = down ? arbiter->try_enter_aim(OutputArbiterSource::TRIGGER, &rejection) : arbiter->try_enter_cleanup();
             TriggerReceipt receipt;
             receipt.command_id = decision.command_id;
             receipt.action = decision.button_action;
             receipt.status = TriggerReceiptStatus::NOT_SENT;
+            event.rejection_reason = "arbiter_unavailable";
+            if (rejection == OutputArbiterRejection::LOCK_BUSY) event.rejection_reason = "arbiter_lock_busy";
+            else if (rejection == OutputArbiterRejection::AUXILIARY_PENDING) event.rejection_reason = "arbiter_auxiliary_pending";
+            else if (rejection == OutputArbiterRejection::OUTPUT_FAULT) event.rejection_reason = "arbiter_output_fault";
             if (lock.owns_lock()) {
-                const auto fresh = permit();
                 const auto check_at = TriggerClock::now();
-                const bool stop_valid = !config.require_stop || (fresh.stop_observed_qualified &&
-                    fresh.stop_request_id == decision.snapshot.stop_request_id &&
-                    fresh.stop_observation_epoch == decision.snapshot.observation_epoch &&
-                    fresh.stop_expires_at > check_at && fresh.stop_release_deadline > check_at);
-                if (!down || (fresh.enabled && fresh.armed && fresh.healthy && fresh.held && fresh.focused &&
-                    !fresh.physical_left_down && !canceled.load() && !stopping.load() &&
-                    stop_valid && observation_still_current(decision, check_at))) {
+                bool eligible = !down && check_at < cleanup_deadline;
+                if (down) {
+                    const auto fresh = permit();
+                    const auto revalidated_at = TriggerClock::now();
+                    const bool stop_valid = !config.require_stop || (fresh.stop_observed_qualified &&
+                        fresh.stop_request_id == decision.snapshot.stop_request_id &&
+                        fresh.stop_observation_epoch == decision.snapshot.observation_epoch &&
+                        fresh.stop_expires_at > revalidated_at && fresh.stop_release_deadline > revalidated_at);
+                    eligible = fresh.enabled && fresh.armed && fresh.healthy && fresh.held && fresh.focused &&
+                        !fresh.physical_left_down && !canceled.load() && !stopping.load() &&
+                        stop_valid && observation_still_current(decision, revalidated_at);
+                    event.rejection_reason = !stop_valid ? "stop_unverified" : "permission_or_observation_changed";
+                } else event.rejection_reason = "cleanup_deadline_expired";
+                if (eligible) {
+                    event.backend_called = true;
+                    event.call_started_at = TriggerClock::now();
+                    if (!down) ++cleanup_attempts;
                     const auto result = mouse->set_left_button(down);
-                    receipt.status = result.disposition == ButtonDisposition::ACKNOWLEDGED
+                    event.observed_at = TriggerClock::now();
+                    event.backend_completed_at = result.backend_completed_at;
+                    event.protocol_ack_received_at = result.protocol_ack_received_at;
+                    const bool valid_time = result.backend_completed_at != TriggerTime{} &&
+                        result.backend_completed_at >= event.call_started_at && result.backend_completed_at <= event.observed_at &&
+                        result.protocol_ack_received_at != TriggerTime{} &&
+                        result.protocol_ack_received_at >= event.call_started_at &&
+                        result.protocol_ack_received_at <= result.backend_completed_at;
+                    receipt.status = result.disposition == ButtonDisposition::ACKNOWLEDGED && valid_time
                         ? TriggerReceiptStatus::ACKNOWLEDGED
-                        : result.disposition == ButtonDisposition::APPLICATION_UNKNOWN || result.cleanup_required
+                        : result.disposition == ButtonDisposition::ACKNOWLEDGED ||
+                          result.disposition == ButtonDisposition::APPLICATION_UNKNOWN || result.cleanup_required
                             ? TriggerReceiptStatus::UNKNOWN : TriggerReceiptStatus::NOT_SENT;
-                    if (receipt.status == TriggerReceiptStatus::UNKNOWN) {
-                        arbiter->latch_output_fault();
-                    }
+                    event.rejection_reason = receipt.status == TriggerReceiptStatus::ACKNOWLEDGED ? "none" :
+                        result.disposition == ButtonDisposition::ACKNOWLEDGED && !valid_time ? "invalid_receipt_time" :
+                        receipt.status == TriggerReceiptStatus::UNKNOWN ? "unknown_receipt" : "backend_not_sent";
+                    receipt.completed_at = result.backend_completed_at;
+                    if (receipt.status == TriggerReceiptStatus::UNKNOWN) arbiter->latch_output_fault();
                 }
                 lock.unlock();
             }
-            receipt.completed_at = TriggerClock::now();
-            if (down && receipt.status == TriggerReceiptStatus::ACKNOWLEDGED) {
+            if (event.observed_at == TriggerTime{}) event.observed_at = TriggerClock::now();
+            // 未调用/明确未发送只有本机拒绝时刻；绝不补造成功后端时间。
+            if (receipt.status == TriggerReceiptStatus::NOT_SENT) receipt.completed_at = event.observed_at;
+            event.receipt_status = receipt.status;
+            record(event);
+            if (down && receipt.status == TriggerReceiptStatus::ACKNOWLEDGED && !stopping.load() && !canceled.load()) {
                 std::lock_guard state_lock(mutex);
-                firing = {true, receipt.command_id, receipt.completed_at};
+                firing = {true, receipt.command_id, receipt.completed_at, event.call_started_at,
+                    event.backend_completed_at, event.protocol_ack_received_at, event.observed_at,
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(event.backend_completed_at - event.call_started_at)};
             }
-            decision = controller.acknowledge(receipt, receipt.completed_at);
+            decision = controller.acknowledge(receipt, event.observed_at);
             if (!down) {
-                ++cleanup_attempts;
-                cleanup_due = receipt.completed_at + std::chrono::milliseconds(2);
-                if (receipt.status == TriggerReceiptStatus::ACKNOWLEDGED && deferred_cancel_id) {
-                    cancel_stop(deferred_cancel_id); deferred_cancel_id = 0;
-                }
-            } else cleanup_attempts = 0;
+                cleanup_due = event.observed_at + std::chrono::milliseconds(2);
+                if (receipt.status == TriggerReceiptStatus::ACKNOWLEDGED) {
+                    cleanup_active = false;
+                    if (deferred_cancel_id) { cancel_stop(deferred_cancel_id); deferred_cancel_id = 0; }
+                } else check_cleanup_budget(event.observed_at);
+            }
         }
-        const auto next = controller.snapshot();
+        auto next = controller.snapshot();
+        if (cleanup_exhausted) { next.faulted = true; next.phase = TriggerPhase::FAULT; next.reason = TriggerReason::UNKNOWN_RECEIPT; }
         std::lock_guard lock(mutex);
-        if (next.reason != state.reason || next.command_id != state.command_id) {
-            LOG_DEBUG("trigger", "trigger.schema=1 phase={} reason={} command={} frame={} stop={} possible_down={}",
-                static_cast<int>(next.phase), TriggerReasonName(next.reason), next.command_id,
-                next.observation_sequence, next.stop_request_id, next.button_may_be_down);
-        }
         state = next;
+    }
+    void finish_cleanup() {
+        // 停止/异常是一次独立的最终清理阶段，允许恢复运行阶段已耗尽的债务。
+        // 三条路径共用execute；阶段内只有真实后端调用计数，截止时间不续期。
+        cleanup_active = false;
+        begin_cleanup(TriggerClock::now());
+        execute(controller.cancel(TriggerReason::CANCELED, TriggerClock::now()));
+        if (!controller.snapshot().button_may_be_down && !mouse->left_button_cleanup_required()) {
+            cleanup_active = false;
+            return;
+        }
+        while (controller.snapshot().button_may_be_down || mouse->left_button_cleanup_required()) {
+            check_cleanup_budget(TriggerClock::now());
+            if (cleanup_exhausted) break;
+            const auto pending = controller.snapshot();
+            TriggerDecision retry;
+            retry.button_action = TriggerButtonAction::UP;
+            retry.command_id = pending.command_id;
+            retry.snapshot = pending;
+            execute(retry);
+            if (controller.snapshot().button_may_be_down || mouse->left_button_cleanup_required()) {
+                std::unique_lock lock(mutex);
+                wake.wait_until(lock, std::min(cleanup_due, cleanup_deadline));
+            }
+        }
+        if (controller.snapshot().button_may_be_down || mouse->left_button_cleanup_required()) {
+            arbiter->latch_output_fault();
+            std::lock_guard lock(mutex);
+            state.faulted = true; state.button_may_be_down = true;
+            state.phase = TriggerPhase::FAULT; state.reason = TriggerReason::UNKNOWN_RECEIPT;
+        }
     }
     void run() noexcept {
         try {
@@ -137,7 +260,8 @@ public:
                     consumed = std::move(observation);
                 } else execute(controller.tick(p, now));
                 const auto current = controller.snapshot();
-                if (current.faulted && current.button_may_be_down && cleanup_attempts < 3 &&
+                check_cleanup_budget(TriggerClock::now());
+                if (current.faulted && current.button_may_be_down && !cleanup_exhausted &&
                     TriggerClock::now() >= cleanup_due) {
                     TriggerDecision retry;
                     retry.button_action = TriggerButtonAction::UP;
@@ -148,41 +272,10 @@ public:
                 std::unique_lock lock(mutex);
                 wake.wait_for(lock, std::chrono::milliseconds(2));
             }
-            execute(controller.cancel(TriggerReason::CANCELED, TriggerClock::now()));
-            // 未取得锁不消耗发送次数，不能因连续三次争锁失败就遗留共享设备按下态。
-            // 截止时间约束新清理调用的准入；已在途调用仍受后端command timeout约束。
-            const auto cleanup_deadline = TriggerClock::now() + std::chrono::milliseconds(cleanup_budget_ms);
-            int attempts = 0;
-            while (attempts < 3 && TriggerClock::now() < cleanup_deadline &&
-                (controller.snapshot().button_may_be_down || mouse->left_button_cleanup_required())) {
-                auto lock = arbiter->try_enter_cleanup();
-                if (!lock.owns_lock()) continue;
-                ++attempts;
-                const auto result = mouse->set_left_button(false);
-                if (result.disposition == ButtonDisposition::ACKNOWLEDGED) {
-                    if (deferred_cancel_id) { cancel_stop(deferred_cancel_id); deferred_cancel_id = 0; }
-                    // 已有pending up接收同一个清理回执，快照不假留按下。
-                    const auto pending = controller.snapshot();
-                    TriggerReceipt receipt{pending.command_id, TriggerButtonAction::UP,
-                        TriggerReceiptStatus::ACKNOWLEDGED, TriggerClock::now()};
-                    lock.unlock();
-                    execute(controller.acknowledge(receipt, receipt.completed_at));
-                    break;
-                }
-                arbiter->latch_output_fault();
-            }
-            if (controller.snapshot().button_may_be_down || mouse->left_button_cleanup_required()) {
-                arbiter->latch_output_fault();
-                std::lock_guard lock(mutex);
-                state.faulted = true;
-                state.button_may_be_down = true;
-                state.phase = TriggerPhase::FAULT;
-                state.reason = TriggerReason::UNKNOWN_RECEIPT;
-            }
+            finish_cleanup();
         } catch (...) {
             arbiter->latch_output_fault();
-            auto lock = arbiter->try_enter_cleanup();
-            if (lock.owns_lock()) mouse->set_left_button(false);
+            try { finish_cleanup(); } catch (...) {}
             std::lock_guard state_lock(mutex);
             firing.confirmed_down = false;
             state.faulted = true;
@@ -216,6 +309,7 @@ bool TriggerWorker::start(const TriggerConfig& config, int cleanup_budget_ms) no
         impl_->latest.store({}); impl_->canceled.store(false);
         impl_->evaluated_observation.reset();
         impl_->reserved_stop_id = 0; impl_->cleanup_attempts = 0;
+        impl_->cleanup_active = false; impl_->cleanup_exhausted = false;
         impl_->thread = std::thread([this] { impl_->run(); });
         return true;
     } catch (...) { return false; }
@@ -240,4 +334,17 @@ TriggerFiringSignal TriggerWorker::firing_signal() const noexcept {
 }
 TriggerSnapshot TriggerWorker::snapshot() const noexcept {
     std::lock_guard lock(impl_->mutex); return impl_->state;
+}
+TriggerExecutionLog TriggerWorker::execution_log() const {
+    std::lock_guard lock(impl_->mutex);
+    TriggerExecutionLog result;
+    result.dropped_count = impl_->dropped_count;
+    result.events.reserve(impl_->event_count);
+    for (std::size_t i = 0; i < impl_->event_count; ++i)
+        result.events.push_back(impl_->events[(impl_->event_begin + i) % impl_->events.size()]);
+    if (!result.events.empty()) {
+        result.first_sequence = result.events.front().sequence;
+        result.last_sequence = result.events.back().sequence;
+    }
+    return result;
 }

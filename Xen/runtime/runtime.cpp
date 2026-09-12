@@ -67,6 +67,8 @@ struct Runtime::Impl {
     std::atomic<std::shared_ptr<RecoilWorker>> recoil_worker;
     std::shared_ptr<MotionLedger> motion_ledger;
     std::unordered_map<std::string, std::shared_ptr<const RecoilProfile>> recoil_profiles;
+    // 只在启动时写入，并受snapshot_mutex保护；就绪提示按当前武器查询。
+    std::unordered_map<std::string, std::string> recoil_profile_statuses;
     std::atomic<std::int64_t> recoil_observation_ns{0};
     std::atomic<std::uint64_t> stop_request_watermark{0};
     runtime::detail::LatestFrameQueue frame_queue;
@@ -350,17 +352,20 @@ struct Runtime::Impl {
             motion_ledger = std::make_shared<MotionLedger>();
             motion_ledger->reset(config.aim.max_counts_per_frame, config.recoil.budget_window_ms, RecoilClock::now());
             recoil_profiles.clear(); recoil_observation_ns.store(0);
+            { std::lock_guard lock(snapshot_mutex); recoil_profile_statuses.clear(); }
             RecoilStore store(config.recoil.profile_directory);
             std::vector<RecoilStoredProfile> profiles;
             std::string error;
             if (!store.list(profiles, error)) { set_error("弹道目录读取失败：" + error); return false; }
             for (const auto& entry : profiles) {
                 const auto& id = entry.profile->weapon_id;
-                if (auto resolved = store.resolve(config.recoil, id, error)) recoil_profiles[id] = std::move(resolved);
-                else {
-                    std::lock_guard lock(snapshot_mutex);
-                    current_snapshot.recoil_profile_status = id + "：" + error;
-                }
+                { std::lock_guard lock(snapshot_mutex); if (recoil_profile_statuses.contains(id)) continue; }
+                auto resolved = store.resolve(config.recoil, id, error);
+                const auto status = resolved ? id + "：已匹配 " + resolved->id + " / r" + std::to_string(resolved->revision)
+                                             : id + "：" + error;
+                if (resolved) recoil_profiles[id] = std::move(resolved);
+                std::lock_guard lock(snapshot_mutex);
+                recoil_profile_statuses[id] = status;
             }
             if (profiles.empty()) {
                 std::lock_guard lock(snapshot_mutex);
@@ -1027,6 +1032,7 @@ struct Runtime::Impl {
             std::lock_guard lock(snapshot_mutex);
             current_snapshot.trigger = worker->snapshot();
             current_snapshot.trigger_telemetry_available = true;
+            current_snapshot.trigger_execution_log = worker->execution_log();
         }
         if (auto worker = recoil_worker.exchange(std::shared_ptr<RecoilWorker>{})) {
             worker->stop();
@@ -1034,7 +1040,16 @@ struct Runtime::Impl {
             current_snapshot.recoil = worker->snapshot(); current_snapshot.recoil_telemetry_available = true;
             current_snapshot.recoil_execution_log = worker->execution_log();
         }
-        { std::lock_guard lock(snapshot_mutex); current_snapshot.weapon_snapshot = gsi_receiver.snapshot(); }
+        {
+            std::lock_guard lock(snapshot_mutex);
+            current_snapshot.weapon_snapshot = gsi_receiver.snapshot();
+            if (config.recoil.enabled) {
+                const auto& id = current_snapshot.weapon_snapshot.canonical_id;
+                const auto found = recoil_profile_statuses.find(id);
+                current_snapshot.recoil_profile_status = id.empty() ? "等待有效武器身份" :
+                    found == recoil_profile_statuses.end() ? id + "：无匹配曲线" : found->second;
+            }
+        }
         gsi_receiver.stop();
         source_context_client.stop();
         if (auto worker = auto_stop_worker.exchange(
@@ -1042,6 +1057,11 @@ struct Runtime::Impl {
             worker->stop();
             std::lock_guard<std::mutex> lock(snapshot_mutex);
             current_snapshot.auto_stop = worker->snapshot();
+        }
+        if (output_arbiter) {
+            std::lock_guard lock(snapshot_mutex);
+            current_snapshot.output_arbitration = output_arbiter->snapshot();
+            current_snapshot.output_arbitration_available = true;
         }
         output_arbiter.reset();
         if (mouse && owns_mouse) mouse->close();
@@ -1445,6 +1465,10 @@ RuntimeSnapshot Runtime::snapshot() const noexcept {
             result.weapon_snapshot = impl_->gsi_receiver.snapshot();
         if (auto recoil = impl_->recoil_worker.load()) {
             result.recoil = recoil->snapshot(); result.recoil_telemetry_available = true;
+            const auto& weapon_id = result.weapon_snapshot.canonical_id;
+            const auto found = impl_->recoil_profile_statuses.find(weapon_id);
+            result.recoil_profile_status = weapon_id.empty() ? "等待有效武器身份" :
+                found == impl_->recoil_profile_statuses.end() ? weapon_id + "：无匹配曲线" : found->second;
         }
         if (auto worker = impl_->auto_stop_worker.load()) {
             result.auto_stop = worker->snapshot();
@@ -1491,4 +1515,20 @@ RecoilExecutionLog Runtime::recoil_execution_log() const {
     if (auto worker = impl_->recoil_worker.load()) return worker->execution_log();
     std::lock_guard lock(impl_->snapshot_mutex);
     return impl_->current_snapshot.recoil_execution_log;
+}
+
+TriggerExecutionLog Runtime::trigger_execution_log() const {
+    if (!impl_) return {};
+    if (auto worker = impl_->trigger_worker.load()) return worker->execution_log();
+    std::lock_guard lock(impl_->snapshot_mutex);
+    return impl_->current_snapshot.trigger_execution_log;
+}
+
+OutputArbiterSnapshot Runtime::output_arbitration() const {
+    if (!impl_) return {};
+    // 冷路径与启停串行，避免读取正在重置的仲裁器；不在逐帧UI调用。
+    std::lock_guard lifecycle_lock(impl_->lifecycle_mutex);
+    if (impl_->output_arbiter) return impl_->output_arbiter->snapshot();
+    std::lock_guard lock(impl_->snapshot_mutex);
+    return impl_->current_snapshot.output_arbitration;
 }

@@ -244,6 +244,9 @@ struct RuntimeSnapshot {
     AutoStopSnapshot auto_stop;
     TriggerSnapshot trigger;
     bool trigger_telemetry_available = false;
+    TriggerExecutionLog trigger_execution_log;
+    OutputArbiterSnapshot output_arbitration;
+    bool output_arbitration_available = false;
     source_context::SourceContextSnapshot source_context;
     RecoilSnapshot recoil;
     bool recoil_telemetry_available = false;
@@ -334,6 +337,8 @@ public:
     bool request_auto_stop(std::uint64_t request_id) noexcept;
     void cancel_auto_stop(std::uint64_t request_id) noexcept;
     RecoilExecutionLog recoil_execution_log() const;
+    TriggerExecutionLog trigger_execution_log() const;
+    OutputArbiterSnapshot output_arbitration() const;
     RuntimeSnapshot snapshot() const noexcept;
     // 诊断预览默认关闭；启用时最多 10 FPS，最长边 512，且只保留最新同帧图像与标注。
     bool set_preview_enabled(bool enabled) noexcept;

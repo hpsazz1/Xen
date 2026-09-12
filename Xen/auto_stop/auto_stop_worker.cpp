@@ -17,14 +17,40 @@ std::uint8_t held_wasd(const InputSnapshot& input) noexcept {
 }
 }
 
-std::unique_lock<std::timed_mutex> AutoStopOutputArbiter::try_enter_aim() noexcept {
+std::unique_lock<std::timed_mutex> AutoStopOutputArbiter::try_enter_aim(OutputArbiterSource source,
+    OutputArbiterRejection* rejection) noexcept {
     std::unique_lock<std::timed_mutex> lock(mutex_, std::defer_lock);
-    if (!faulted_.load(std::memory_order_acquire) && !auxiliary_pending_.load(std::memory_order_acquire) && lock.try_lock()) {
-        if (!faulted_.load(std::memory_order_acquire) && !auxiliary_pending_.load(std::memory_order_acquire)) return lock;
-        lock.unlock();
+    const auto index = static_cast<std::size_t>(source);
+    auto& counts = counters_[index < counters_.size() ? index : 0];
+    OutputArbiterRejection reason = OutputArbiterRejection::NONE;
+    if (faulted_.load(std::memory_order_acquire)) reason = OutputArbiterRejection::OUTPUT_FAULT;
+    else if (auxiliary_pending_.load(std::memory_order_acquire)) reason = OutputArbiterRejection::AUXILIARY_PENDING;
+    else if (!lock.try_lock()) reason = OutputArbiterRejection::LOCK_BUSY;
+    else {
+        if (faulted_.load(std::memory_order_acquire)) reason = OutputArbiterRejection::OUTPUT_FAULT;
+        else if (auxiliary_pending_.load(std::memory_order_acquire)) reason = OutputArbiterRejection::AUXILIARY_PENDING;
+        if (reason != OutputArbiterRejection::NONE) lock.unlock();
     }
-    aim_skips_.fetch_add(1, std::memory_order_relaxed);
+    if (rejection) *rejection = reason;
+    switch (reason) {
+    case OutputArbiterRejection::NONE: counts.acquired.fetch_add(1, std::memory_order_relaxed); break;
+    case OutputArbiterRejection::LOCK_BUSY: counts.lock_busy.fetch_add(1, std::memory_order_relaxed); break;
+    case OutputArbiterRejection::AUXILIARY_PENDING: counts.auxiliary_pending.fetch_add(1, std::memory_order_relaxed); break;
+    case OutputArbiterRejection::OUTPUT_FAULT: counts.output_fault.fetch_add(1, std::memory_order_relaxed); break;
+    }
+    if (source == OutputArbiterSource::AIM && reason != OutputArbiterRejection::NONE)
+        aim_skips_.fetch_add(1, std::memory_order_relaxed);
     return lock;
+}
+
+OutputArbiterSnapshot AutoStopOutputArbiter::snapshot() const noexcept {
+    OutputArbiterSnapshot result;
+    for (std::size_t i = 0; i < counters_.size(); ++i) {
+        const auto& source = counters_[i];
+        result.sources[i] = {source.acquired.load(std::memory_order_relaxed), source.lock_busy.load(std::memory_order_relaxed),
+            source.auxiliary_pending.load(std::memory_order_relaxed), source.output_fault.load(std::memory_order_relaxed)};
+    }
+    return result;
 }
 
 std::unique_lock<std::timed_mutex> AutoStopOutputArbiter::try_enter_cleanup() noexcept {

@@ -111,6 +111,27 @@ int main() {
     try {
         const AutoStopConfig config{true, 5};
         {
+            AutoStopOutputArbiter arbiter;
+            auto owner = arbiter.try_enter_aim();
+            OutputArbiterRejection reason{};
+            bool entered = false;
+            std::thread contender([&] { entered = arbiter.try_enter_aim(OutputArbiterSource::TRIGGER, &reason).owns_lock(); });
+            contender.join();
+            require(!entered && reason == OutputArbiterRejection::LOCK_BUSY, "跨线程争用必须标明锁竞争");
+            owner.unlock();
+            require(arbiter.aim_skips() == 0 && arbiter.snapshot().sources[1].lock_busy == 1,
+                "Trigger拒绝不得污染Aim计数");
+            require(arbiter.try_enter_aim(OutputArbiterSource::RECOIL, &reason).owns_lock() && reason == OutputArbiterRejection::NONE,
+                "Recoil成功取得门应独立计数");
+            arbiter.latch_output_fault();
+            require(!arbiter.try_enter_aim(OutputArbiterSource::RECOIL, &reason).owns_lock() && reason == OutputArbiterRejection::OUTPUT_FAULT,
+                "故障锁存必须保持拒绝并标明原因");
+            const auto stats = arbiter.snapshot();
+            require(stats.sources[0].acquired == 1 && stats.sources[2].acquired == 1 && stats.sources[2].output_fault == 1,
+                "成功与故障按来源保存");
+            require(arbiter.try_enter_cleanup().owns_lock(), "统计改造不能阻断故障后的清理");
+        }
+        {
             auto fake = std::make_shared<Fake>(); auto arbiter = std::make_shared<AutoStopOutputArbiter>();
             AutoStopWorker worker(fake, arbiter, [] { return true; });
             require(worker.start(config, 100), "worker启动失败");
@@ -124,7 +145,10 @@ int main() {
             require(!fake->has_software(), "在途Aim期间不得进入设备");
             aim.unlock();
             wait_for([&] { return fake->has_software(); });
-            require(!arbiter->try_enter_aim().owns_lock(), "制动时Aim不应阻塞或进入");
+            OutputArbiterRejection blocked{};
+            require(!arbiter->try_enter_aim(OutputArbiterSource::AIM, &blocked).owns_lock(), "制动时Aim不应阻塞或进入");
+            require(blocked == OutputArbiterRejection::AUXILIARY_PENDING && arbiter->snapshot().sources[0].auxiliary_pending > 0,
+                "制动独占必须与普通锁竞争区分");
             wait_for([&] { return worker.snapshot().status == AutoStopStatus::ESTIMATED; });
             worker.cancel(999);
             fake->physical(1);
