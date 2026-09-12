@@ -82,6 +82,7 @@ const char* TriggerReasonName(TriggerReason reason) noexcept {
         TRIGGER_REASON(COOLDOWN); TRIGGER_REASON(WAIT_NEW_FRAME); TRIGGER_REASON(STOP_UNVERIFIED);
         TRIGGER_REASON(STOP_EXPIRED); TRIGGER_REASON(COMMAND_PENDING); TRIGGER_REASON(RELEASED);
         TRIGGER_REASON(UNKNOWN_RECEIPT); TRIGGER_REASON(CANCELED); TRIGGER_REASON(COUNTER_EXHAUSTED);
+        TRIGGER_REASON(CONTEXT_CHANGED); TRIGGER_REASON(CONTEXT_UNAVAILABLE);
 #undef TRIGGER_REASON
     }
     return "UNKNOWN";
@@ -149,6 +150,20 @@ TriggerDecision TriggerController::cancel(TriggerReason reason, TriggerTime now)
     return release(reason, now);
 }
 
+std::optional<TriggerDecision> TriggerController::check_context(const TriggerPermit& permit, TriggerTime now) noexcept {
+    const auto previous = state_.context;
+    state_.context = permit.context;
+    const bool changed = previous.required != permit.context.required ||
+        (permit.context.required && (previous.generation != permit.context.generation || previous.valid != permit.context.valid));
+    const bool available = !permit.context.required || (permit.context.valid && permit.context.generation != 0);
+    if (!changed && available) return std::nullopt;
+    auto decision = cancel(available ? TriggerReason::CONTEXT_CHANGED : TriggerReason::CONTEXT_UNAVAILABLE, now);
+    // 变化当次已观察到健康释放时可作为新边沿起点；失效期间的释放不能武装恢复后的上下文。
+    if (available && permit.enabled && permit.healthy && permit.focused && permit.armed &&
+        !permit.physical_left_down && !permit.held) release_seen_ = true;
+    return decision;
+}
+
 bool TriggerController::select_candidate(const TriggerObservation& observation, TriggerTime now) noexcept {
     std::size_t selected = observation.detections.size();
     float best_margin = -1.0f, best_confidence = -1.0f;
@@ -203,6 +218,7 @@ bool TriggerController::select_candidate(const TriggerObservation& observation, 
 TriggerDecision TriggerController::observe(const TriggerObservation& observation, const TriggerPermit& permit, TriggerTime now) noexcept {
     if (now < last_now_) return cancel(TriggerReason::INVALID_OBSERVATION, last_now_);
     last_now_ = now;
+    if (const auto canceled = check_context(permit, now)) return *canceled;
     const bool same_epoch = observation.epoch == state_.observation_epoch;
     if (!observation.valid || observation.epoch == 0 || observation.sequence == 0 ||
         (same_epoch && observation.sequence <= state_.observation_sequence) ||
@@ -235,6 +251,7 @@ TriggerDecision TriggerController::observe(const TriggerObservation& observation
 TriggerDecision TriggerController::tick(const TriggerPermit& permit, TriggerTime now) noexcept {
     if (now < last_now_) return cancel(TriggerReason::INVALID_OBSERVATION, last_now_);
     last_now_ = now;
+    if (const auto canceled = check_context(permit, now)) return *canceled;
     if (!config_valid_) return cancel(TriggerReason::INVALID_CONFIG, now);
     if (!config_.enabled || !permit.enabled) return cancel(TriggerReason::DISABLED, now);
     if (!permit.healthy || !permit.focused || !permit.armed || permit.physical_left_down)

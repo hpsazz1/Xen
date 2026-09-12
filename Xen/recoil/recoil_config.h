@@ -8,12 +8,12 @@ struct RecoilConfig {
     bool enabled = false;
     bool mixed_aim = false;
     int hold_virtual_key = 0;
-    std::string profile_directory = "recoil_profiles";
+    std::string profile_directory = "cache/recoil/profiles";
     std::string game_build, conditions;
     std::string input_path = "kmbox_net";
     double sensitivity = 0;
     std::string fire_mode = "automatic";
-    // 试验引用与目录内活动索引分开，需用户显式选择；不会改写活动版本。
+    // 已校准固定版本覆盖，与活动索引分开。沿用旧INI键名；保存后持续有效，不是一次Run许可。
     bool use_trial = false;
     std::string trial_file;
     // 同一真实时间窗口内Aim和压枪共同消费物理额度，不按worker tick补满。

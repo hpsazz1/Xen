@@ -135,6 +135,10 @@ set(XEN_LEGACY_RUNTIME_PATTERNS
     "opencv_videoio_ffmpeg*_64.dll"
     "Processing.NDI.Lib.x64.dll"
     "Processing.NDI.Lib.Licenses.txt"
+    "msvcp140.dll" "msvcp140_1.dll" "msvcp140_2.dll"
+    "msvcp140_atomic_wait.dll" "msvcp140_codecvt_ids.dll"
+    "vcruntime140.dll" "vcruntime140_1.dll"
+    "concrt140.dll"
     "cudart.lib")
 foreach(runtime_pattern IN LISTS XEN_LEGACY_RUNTIME_PATTERNS)
     file(GLOB legacy_paths LIST_DIRECTORIES FALSE

@@ -5,8 +5,10 @@
 用户持有该组文件时可运行：
 
 ```powershell
-python scripts/import_recoil_profiles.py --source-directory E:/Dev/Xen/Xen/recoil/patterns --output-directory <新的本地候选目录> --reference-sensitivity <明确参考灵敏度>
+python tools/recoil/import_recoil_profiles.py --source-directory <用户持有的CSV目录> --output-directory cache/recoil/profiles --reference-sensitivity <明确参考灵敏度>
 ```
+
+上例从统一程序目录运行。源码工作区使用 `scripts/import_recoil_profiles.py`；工具均从自身位置定位本目录的清单，支持程序路径包含中文/空格，也可从其他工作目录用脚本绝对路径启动。输出目录里的已有版本不会覆盖；再次导入请选择新的目录。只随程序提供清单和转换工具，原CSV需用户自行提供。
 
 转换严格校验清单SHA256。三列按增量X/Y与delay_ms消费，使用旧经验比例2.45/参考灵敏度并反转Y，累计为counts；每行时长为multiple*(delay/sleep_divider-sleep_suber)。保留全部行、不跳过首子步、不随机化，不把该周期当游戏射速。实际单位/输入响应尚未标定，转换不能双重套入Aim counts_per_pixel或DPI系数。
 

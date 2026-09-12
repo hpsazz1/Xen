@@ -111,6 +111,15 @@ bool load_release_environment(ReleaseEnvironment& environment,
         const bool has_backends = read_environment(
             L"XEN_RELEASE_BACKENDS", backends);
         if (!has_root && !has_runtime && !has_backends) {
+            std::array<wchar_t, 32768> executable{};
+            const auto length = GetModuleFileNameW(nullptr, executable.data(),
+                static_cast<DWORD>(executable.size()));
+            if (length == 0 || length >= executable.size()) {
+                error = "无法定位程序数据根目录";
+                return false;
+            }
+            environment.root = std::filesystem::path(
+                std::wstring(executable.data(), length)).parent_path();
             error.clear();
             return true;
         }
@@ -169,7 +178,11 @@ bool load_release_environment(ReleaseEnvironment& environment,
 
 bool apply_release_working_directory(const ReleaseEnvironment& environment,
                                      std::string& error) noexcept {
-    if (!environment.managed) return true;
+    // 必须在线程启动前统一数据根；直接启动也不能继承调用方任意CWD。
+    if (environment.root.empty()) {
+        error = "程序数据根目录未初始化";
+        return false;
+    }
     if (!SetCurrentDirectoryW(environment.root.c_str())) {
         error = "无法切换到发布数据根目录";
         return false;

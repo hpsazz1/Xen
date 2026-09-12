@@ -2,7 +2,11 @@
 import copy
 import importlib.util
 import json
+import hashlib
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -174,6 +178,38 @@ class DatasetTests(unittest.TestCase):
         debug["recoil"]["execution"]["profiles"][0]["points"][1][1] += 0.25
         self.save(name, debug)
         with self.assertRaises(ValueError): MODULE.build_dataset(self.path)
+
+
+class PackagedImporterTests(unittest.TestCase):
+    def test_release_layout_finds_manifest_without_source_tree(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "中文 package"
+            script = root / "tools/recoil/import_recoil_profiles.py"
+            script.parent.mkdir(parents=True)
+            shutil.copy2(Path(__file__).resolve().parents[1] / "scripts/import_recoil_profiles.py", script)
+            raw = b"1,2,10\n"
+            source = root / "synthetic-input"
+            source.mkdir()
+            (source / "fixture.csv").write_bytes(raw)
+            manifest = {"repository": "synthetic-only", "commit": "fixture",
+                        "profiles": [{"file": "fixture.csv", "id": "fixture", "canonical_weapon_id": "fixture",
+                                      "sha256": hashlib.sha256(raw).hexdigest(), "multiple": 1,
+                                      "sleep_divider": 1, "sleep_suber_ms": 0, "legacy_length": 1}]}
+            assets = root / "assets/recoil"
+            assets.mkdir(parents=True)
+            (assets / "legacy_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            output = root / "cache/recoil/profiles"
+            command = [sys.executable, "-B", "-X", "utf8", str(script), "--source-directory", str(source),
+                       "--output-directory", str(output), "--reference-sensitivity", "2.45"]
+            result = subprocess.run(command, cwd=temporary, capture_output=True, text=True, encoding="utf-8", timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            candidate = json.loads((output / "fixture-r1-imported.json").read_text(encoding="utf-8"))
+            self.assertEqual(candidate["points"], [[0.0, 0.0, 0.0], [10.0, 1.0, -2.0]])
+            self.assertEqual(candidate["state"], "IMPORTED")
+            self.assertIsNone(candidate["phase_tolerance_ms"])
+            self.assertFalse(candidate["source"]["redistribution_verified"])
+            repeated = subprocess.run(command, cwd=temporary, capture_output=True, text=True, encoding="utf-8", timeout=10)
+            self.assertNotEqual(repeated.returncode, 0)
 
 
 if __name__ == "__main__":

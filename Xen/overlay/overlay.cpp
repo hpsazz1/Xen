@@ -3096,7 +3096,7 @@ struct Overlay::Impl {
         ImGui::TextWrapped("准星进入任一有效头部或人体内域即可计时；不等待瞄准首选部位。框内域不保证弹道命中。");
         ImGui::BeginDisabled(!can_edit);
         if (begin_form("trigger_form", 150.0f)) {
-            form_row("启用自动扳机", "默认关闭；启用后仍需全局武装、按住绑定键、健康输入、源端焦点与有效图像。仅支持 KMBOX NET。");
+            form_row("启用自动扳机", "默认关闭；启用后仍需全局武装、按住绑定键、健康输入、源端焦点与有效图像。启用GSI时还需有效武器上下文；切枪或失效会取消旧会话，恢复后须松键再按下。仅支持 KMBOX NET。");
             ImGui::BeginDisabled(app_config.mouse.backend != MouseBackend::KMBOX_NET && !trigger.enabled);
             toggle_switch("##trigger_enabled", &trigger.enabled);
             ImGui::EndDisabled();
@@ -3175,6 +3175,8 @@ struct Overlay::Impl {
             case TriggerReason::UNKNOWN_RECEIPT: reason = "设备结果未知，检查释放状态"; break;
             case TriggerReason::CANCELED: reason = "已取消"; break;
             case TriggerReason::COUNTER_EXHAUSTED: reason = "会话序号耗尽，需重新启动"; break;
+            case TriggerReason::CONTEXT_CHANGED: reason = "武器上下文已改变，请松开许可键再按下"; break;
+            case TriggerReason::CONTEXT_UNAVAILABLE: reason = "武器上下文无效，等待恢复后松键再按下"; break;
         }
         ImGui::TextWrapped("扳机会话：%s", reason);
         if (snapshot.trigger.button_may_be_down) ImGui::TextWrapped("软件左键可能仍按下；以释放回执与设备实际状态为准。");

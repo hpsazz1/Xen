@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <sstream>
 
 namespace {
 std::string read_text(const std::filesystem::path& path) {
@@ -49,15 +50,36 @@ int main(int argc, char** argv) {
             if (!std::filesystem::create_directory(result_directory)) {
                 std::cerr << "结果目录已存在；拒绝覆盖或重复消费留出。\n"; return 1;
             }
-            const auto report = recoil_tuner::optimize_profile_recorded(dataset, request, base, [&](const std::vector<recoil_tuner::CurvePoint>& points, std::string& validation_error) {
+            RecoilCandidateReplayReport replay;
+            bool replay_attempted = false;
+            auto report = recoil_tuner::optimize_profile_recorded(dataset, request, base, [&](const std::vector<recoil_tuner::CurvePoint>& points, std::string& validation_error) {
                 auto candidate = base;
                 candidate.revision = revision;
                 candidate.state = RecoilProfileState::SCHEMA_VALID;
+                candidate.phase_tolerance_ms.reset(); candidate.recovery_ms.reset();
+                candidate.calibration.evidence.clear();
                 candidate.points.clear();
                 for (const auto& p : points) candidate.points.push_back({p.time_ms, p.x_counts, p.y_counts});
-                RecoilProfile compiled;
-                return compile_recoil_profile(candidate, {}, compiled, validation_error);
+                replay_attempted = true;
+                return validate_recoil_candidate_execution(candidate, {}, replay, validation_error);
             });
+            if (replay_attempted) {
+                const auto checked = [&](bool value) {
+                    return value ? "通过" : replay.validated && !replay.acknowledged_commands ? "不适用（正常回放无非零意图）" : "未完成";
+                };
+                std::ostringstream summary;
+                summary << "软件回放" << (replay.validated ? "通过" : "未通过")
+                    << "：固定步长=" << replay.step_ms << " ms，另以相位预算=" << replay.phase_budget_ms
+                    << " ms推进边界回放；曲线时长=" << replay.duration_ms << " ms，advance=" << replay.advance_calls
+                    << '/' << replay.advance_limit << "，现有单命令每轴上限=" << replay.command_axis_limit_counts
+                    << " counts，回放最大单轴命令=" << replay.max_abs_command_axis_counts << " counts；正常模拟ACK="
+                    << replay.acknowledged_commands << "条、L1=" << replay.acknowledged_l1_counts << " counts，尾部="
+                    << checked(replay.tail_checked) << "，相位边界=" << checked(replay.phase_edge_checked)
+                    << "，时限=" << checked(replay.deadline_checked) << "，取消=" << checked(replay.cancellation_checked)
+                    << "，UNKNOWN=" << checked(replay.unknown_receipt_checked) << "，NOT_SENT=" << checked(replay.not_sent_checked)
+                    << "。这些是模拟条件与模拟回执，未验证实测相位、Worker累计/滚动预算或物理效果；候选仍未校准。";
+                report.messages.push_back(summary.str());
+            }
             if (!recoil_tuner::save_result(result_directory / "analysis", report, error)) { std::cerr << error << '\n'; return 1; }
             if (report.status == recoil_tuner::Status::CANDIDATE_VALIDATED && report.candidate) {
                 auto candidate = base;

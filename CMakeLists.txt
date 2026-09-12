@@ -387,6 +387,54 @@ if(XEN_ONNXRUNTIME_HAS_TENSORRT)
     endforeach()
 endif()
 
+# 只从当前 VS 的官方 redist 目录部署 Release CRT，不复制 System32 或调试库。
+# 使用 3.18 已有的模块接口；模块无法识别当前 toolset 时明确失败。
+set(XEN_MSVC_REDIST_ROOT "" CACHE PATH "Official Visual C++ x64 CRT redist directory")
+set(XEN_MSVC_RUNTIME_DLLS)
+if(MSVC)
+    set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
+    set(CMAKE_INSTALL_DEBUG_LIBRARIES FALSE)
+    set(CMAKE_INSTALL_DEBUG_LIBRARIES_ONLY FALSE)
+    set(CMAKE_INSTALL_UCRT_LIBRARIES FALSE)
+    set(CMAKE_INSTALL_MFC_LIBRARIES FALSE)
+    set(CMAKE_INSTALL_OPENMP_LIBRARIES FALSE)
+    include(InstallRequiredSystemLibraries)
+    if(NOT XEN_MSVC_REDIST_ROOT)
+        foreach(runtime_file IN LISTS CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS)
+            get_filename_component(runtime_name "${runtime_file}" NAME)
+            if(runtime_name STREQUAL "msvcp140.dll")
+                get_filename_component(XEN_MSVC_REDIST_ROOT "${runtime_file}" DIRECTORY)
+                set(XEN_MSVC_REDIST_ROOT "${XEN_MSVC_REDIST_ROOT}" CACHE PATH
+                    "Official Visual C++ x64 CRT redist directory" FORCE)
+                break()
+            endif()
+        endforeach()
+    endif()
+    file(TO_CMAKE_PATH "${XEN_MSVC_REDIST_ROOT}" XEN_MSVC_REDIST_ROOT)
+    string(TOLOWER "${XEN_MSVC_REDIST_ROOT}" msvc_redist_key)
+    if(NOT IS_DIRECTORY "${XEN_MSVC_REDIST_ROOT}" OR
+       NOT msvc_redist_key MATCHES "/vc/redist/msvc/[^/]+/x64/microsoft\\.vc14[0-9]\\.crt$")
+        message(FATAL_ERROR "Official MSVC x64 CRT redist directory is invalid: ${XEN_MSVC_REDIST_ROOT}")
+    endif()
+    foreach(runtime_name IN ITEMS
+            msvcp140.dll msvcp140_1.dll msvcp140_2.dll
+            msvcp140_atomic_wait.dll msvcp140_codecvt_ids.dll
+            vcruntime140.dll vcruntime140_1.dll concrt140.dll)
+        set(runtime_file "${XEN_MSVC_REDIST_ROOT}/${runtime_name}")
+        if(NOT EXISTS "${runtime_file}" OR IS_DIRECTORY "${runtime_file}")
+            message(FATAL_ERROR "Required official MSVC runtime is missing: ${runtime_file}")
+        endif()
+        list(APPEND XEN_MSVC_RUNTIME_DLLS "${runtime_file}")
+    endforeach()
+    get_filename_component(msvc_instance "${XEN_MSVC_REDIST_ROOT}/../../../../../.." ABSOLUTE)
+    file(GLOB msvc_redist_licenses "${msvc_instance}/Licenses/*/Redist.txt")
+    list(SORT msvc_redist_licenses)
+    if(NOT msvc_redist_licenses)
+        message(FATAL_ERROR "Official MSVC REDIST license evidence is missing: ${msvc_instance}/Licenses")
+    endif()
+    list(GET msvc_redist_licenses 0 XEN_MSVC_REDIST_LICENSE)
+endif()
+
 # 许可证 consumer 只认识稳定 dependency component id。运行时 ID 和 DLL 文件名
 # 分别保留在既有字段/部署报告中，不得混入 components 冒充依赖闭包。
 set(XEN_BUILD_COMPONENT_IDS
@@ -396,6 +444,9 @@ set(XEN_BUILD_COMPONENT_IDS
     opencv
     simpleini
     spdlog)
+if(MSVC)
+    list(APPEND XEN_BUILD_COMPONENT_IDS msvc-runtime)
+endif()
 if(XEN_HAS_NDI)
     list(APPEND XEN_BUILD_COMPONENT_IDS ndi)
 endif()
@@ -440,16 +491,19 @@ function(xen_copy_runtime_files target)
     foreach(runtime_file IN LISTS ARGN)
         set_property(GLOBAL APPEND PROPERTY
             XEN_RUNTIME_DEPLOY_FILES "${runtime_file}")
+        set_property(TARGET ${target} APPEND PROPERTY
+            XEN_RUNTIME_DEPLOY_FILES "${runtime_file}")
     endforeach()
 endfunction()
 
-# 可执行目标按实际能力选择 OPENCV / ORT。Windows 系统 DLL、显卡驱动 DLL
-# 和系统提供的 MSVC 运行库不复制。
+# 可执行目标按实际能力选择 OPENCV / ORT / NDI，CRT 来自官方 redist。
+# Windows 系统 DLL、显卡驱动 DLL 和调试 CRT 不复制。
 function(xen_deploy_runtime_dlls target)
     set(options OPENCV ORT NDI)
     cmake_parse_arguments(DEPLOY "${options}" "" "" ${ARGN})
     set_property(GLOBAL APPEND PROPERTY
         XEN_RUNTIME_DEPLOY_TARGETS "${target}")
+    xen_copy_runtime_files(${target} ${XEN_MSVC_RUNTIME_DLLS})
 
     if(DEPLOY_OPENCV)
         get_filename_component(OPENCV_PLATFORM_DIRECTORY "${OpenCV_DIR}" DIRECTORY)
@@ -582,6 +636,43 @@ function(xen_finalize_runtime_deployment)
     set(runtime_manifest
         "${CMAKE_BINARY_DIR}/xen-runtime-authorized-$<CONFIG>.cmake")
     file(GENERATE OUTPUT "${runtime_manifest}" CONTENT "${manifest_content}")
+
+    # 发布器从本次部署报告取这些目标的真实子集，不将 Provider DLL 带到根/源工具。
+    set(layout_content "{\n  \"schema\": 1,\n  \"configuration\": \"$<CONFIG>\",\n")
+    string(APPEND layout_content
+        "  \"msvc_runtime\": {\"source_directory\": \"${XEN_MSVC_REDIST_ROOT}\", \"license_file\": \"${XEN_MSVC_REDIST_LICENSE}\"},\n  \"groups\": {\n")
+    foreach(group IN ITEMS launcher source)
+        if(group STREQUAL "launcher")
+            set(group_targets xen_launcher)
+        else()
+            set(group_targets xen_source_context xen_clock_source xen_sender
+                xen_capture_evidence xen_auto_stop_capture)
+        endif()
+        set(group_files)
+        foreach(group_target IN LISTS group_targets)
+            get_target_property(target_files ${group_target} XEN_RUNTIME_DEPLOY_FILES)
+            if(target_files)
+                list(APPEND group_files ${target_files})
+            endif()
+        endforeach()
+        list(REMOVE_DUPLICATES group_files)
+        set(group_json "")
+        foreach(group_file IN LISTS group_files)
+            string(REPLACE "\\" "/" group_file "${group_file}")
+            if(NOT group_json STREQUAL "")
+                string(APPEND group_json ", ")
+            endif()
+            string(APPEND group_json "\"${group_file}\"")
+        endforeach()
+        string(APPEND layout_content "    \"${group}\": [${group_json}]")
+        if(group STREQUAL "launcher")
+            string(APPEND layout_content ",")
+        endif()
+        string(APPEND layout_content "\n")
+    endforeach()
+    string(APPEND layout_content "  }\n}\n")
+    file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/$<CONFIG>/xen-release-layout.json"
+        CONTENT "${layout_content}")
 
     # 项目没有重写 RUNTIME_OUTPUT_DIRECTORY；Visual Studio 多配置生成器的
     # 共享目录固定为 <build>/<config>，与 scripts/build.ps1 的验收路径一致。
@@ -827,6 +918,7 @@ target_include_directories(source_context PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(source_context PRIVATE ws2_32 bcrypt user32 Threads::Threads)
 add_executable(xen_source_context Xen/source_context_host/main.cpp)
 target_link_libraries(xen_source_context PRIVATE source_context)
+xen_deploy_runtime_dlls(xen_source_context)
 add_library(weapon STATIC Xen/weapon/weapon.cpp)
 target_include_directories(weapon PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(weapon PUBLIC nlohmann_json::nlohmann_json PRIVATE ws2_32 Threads::Threads)
@@ -957,7 +1049,7 @@ add_executable(xen_app WIN32
     Xen/app/model_catalog.cpp
     Xen/app/xen.rc)
 set_target_properties(xen_app PROPERTIES OUTPUT_NAME Xen)
-add_dependencies(xen_app xen_recoil_calibration)
+add_dependencies(xen_app xen_recoil_calibration xen_recoil_tuner)
 set(XEN_MODEL_TOOLS_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}")
 if(CMAKE_CONFIGURATION_TYPES)
     string(APPEND XEN_MODEL_TOOLS_OUTPUT "/$<CONFIG>")
@@ -965,12 +1057,23 @@ endif()
 # 与现有运行库部署相同：本项目未重写RUNTIME_OUTPUT_DIRECTORY。
 # 不用TARGET_FILE_DIR查询，避免CMake 3.18的隐式反向依赖形成循环。
 add_custom_target(model_workspace_tools
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${XEN_MODEL_TOOLS_OUTPUT}/scripts"
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${XEN_MODEL_TOOLS_OUTPUT}/tools/model-data"
+        "${XEN_MODEL_TOOLS_OUTPUT}/tools/recoil"
+        "${XEN_MODEL_TOOLS_OUTPUT}/assets/recoil"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${PROJECT_SOURCE_DIR}/scripts/model_data_pipeline.py"
         "${PROJECT_SOURCE_DIR}/scripts/model_training_environment.py"
         "${PROJECT_SOURCE_DIR}/scripts/model_training_requirements.txt"
-        "${XEN_MODEL_TOOLS_OUTPUT}/scripts"
+        "${XEN_MODEL_TOOLS_OUTPUT}/tools/model-data"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${PROJECT_SOURCE_DIR}/scripts/import_recoil_profiles.py"
+        "${PROJECT_SOURCE_DIR}/scripts/build_recoil_dataset.py"
+        "${XEN_MODEL_TOOLS_OUTPUT}/tools/recoil"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${PROJECT_SOURCE_DIR}/assets/recoil/legacy_manifest.json"
+        "${PROJECT_SOURCE_DIR}/assets/recoil/README.md"
+        "${XEN_MODEL_TOOLS_OUTPUT}/assets/recoil"
     VERBATIM)
 add_dependencies(xen_app model_workspace_tools)
 target_link_libraries(xen_app PRIVATE
@@ -986,6 +1089,7 @@ add_executable(xen_launcher WIN32
 set_target_properties(xen_launcher PROPERTIES OUTPUT_NAME XenLauncher)
 target_link_libraries(xen_launcher PRIVATE app_release config)
 target_link_libraries(xen_launcher PRIVATE app_launcher)
+xen_deploy_runtime_dlls(xen_launcher)
 
 add_executable(xen_sender
     Xen/sender/main.cpp)
@@ -999,6 +1103,7 @@ add_executable(xen_clock_source
     Xen/clock_source/main.cpp)
 set_target_properties(xen_clock_source PROPERTIES OUTPUT_NAME XenClockSource)
 target_link_libraries(xen_clock_source PRIVATE clock_sync)
+xen_deploy_runtime_dlls(xen_clock_source)
 
 # 证据入口只链接 Capture 链；不链接 Runtime、Aim、Mouse 或 Keyboard，因而
 # 不具备武装或发送真实输入的能力。

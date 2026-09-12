@@ -23,6 +23,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace {
@@ -41,6 +42,13 @@ constexpr std::size_t kMonitorPacketBytes = 20U;
 // 同进程重建控制器不能遗忘未确认释放；不保存凭据到磁盘或日志。
 std::mutex button_debt_mutex;
 std::unordered_set<std::string> button_debt_endpoints;
+
+struct KeyboardCleanupDebt {
+    bool keyboard_dirty = false;
+    std::uint8_t owned_masks = 0;
+};
+std::mutex keyboard_debt_mutex;
+std::unordered_map<std::string, KeyboardCleanupDebt> keyboard_debt_endpoints;
 
 std::mutex kmbox_monitor_packet_observer_mutex;
 std::weak_ptr<mouse::detail::IKmboxMonitorPacketObserver>
@@ -97,14 +105,14 @@ bool parse_uuid(const std::string& text, std::uint32_t& value) noexcept {
 class KmboxNetMouseController final : public IMouseController {
 public:
     explicit KmboxNetMouseController(const MouseConfig& config)
-        : config_(config), button_endpoint_(config.kmbox_ip + ":" +
+        : config_(config), output_endpoint_(config.kmbox_ip + ":" +
               std::to_string(config.kmbox_port) + ":" + config.kmbox_uuid) {
         std::uint32_t canonical_uuid = 0;
         if (parse_uuid(config.kmbox_uuid, canonical_uuid))
-            button_endpoint_ = config.kmbox_ip + ":" + std::to_string(config.kmbox_port) +
+            output_endpoint_ = config.kmbox_ip + ":" + std::to_string(config.kmbox_port) +
                 ":" + std::to_string(canonical_uuid);
         std::lock_guard<std::mutex> lock(button_debt_mutex);
-        button_faulted_ = button_debt_endpoints.contains(button_endpoint_);
+        button_faulted_ = button_debt_endpoints.contains(output_endpoint_);
         button_dirty_ = button_faulted_;
     }
 
@@ -119,13 +127,14 @@ public:
         set_error({});
         {
             std::lock_guard<std::mutex> lock(button_debt_mutex);
-            if (button_debt_endpoints.contains(button_endpoint_)) {
+            if (button_debt_endpoints.contains(output_endpoint_)) {
                 button_dirty_ = true;
                 button_faulted_ = true;
             }
         }
 
         try {
+            restore_keyboard_debt_locked();
             if (!validate_config()) {
                 status_.store(MouseStatus::INVALID_CONFIG,
                               std::memory_order_release);
@@ -197,7 +206,7 @@ public:
                 return false;
             }
 
-            // 上次 ACK 丢失的清理责任跨关闭/重开保留；新连接必须先完成
+            // 上次 ACK 丢失的清理责任跨关闭、重开与 factory 重建保留；新连接必须先完成
             // 清理，才能报告 READY 或接纳新命令。
             if ((keyboard_dirty_ || owned_masks_) &&
                 cleanup_keyboard_locked().disposition != KeyboardDisposition::ACKNOWLEDGED) {
@@ -460,7 +469,7 @@ private:
         // 分配失败时仍保留实例债务并关闭后续 down；不能因记账异常终止清理。
         try {
             std::lock_guard<std::mutex> lock(button_debt_mutex);
-            button_debt_endpoints.insert(button_endpoint_);
+            button_debt_endpoints.insert(output_endpoint_);
         } catch (...) { button_faulted_ = true; }
     }
     ButtonReceipt button_locked(bool down) noexcept {
@@ -492,13 +501,35 @@ private:
                 button_dirty_ = false;
                 button_faulted_ = false;
                 std::lock_guard<std::mutex> lock(button_debt_mutex);
-                button_debt_endpoints.erase(button_endpoint_);
+                button_debt_endpoints.erase(output_endpoint_);
             }
         } else if (button_dirty_ || result.datagram_sent) {
             mark_button_debt_locked(true);
         }
         result.cleanup_required = button_dirty_;
         return result;
+    }
+    void restore_keyboard_debt_locked() {
+        // factory 已持有独占 lease；在 open 时读取，包含对象构造后旧 owner 留下的责任。
+        std::lock_guard<std::mutex> lock(keyboard_debt_mutex);
+        const auto entry = keyboard_debt_endpoints.find(output_endpoint_);
+        const auto debt = entry == keyboard_debt_endpoints.end()
+            ? KeyboardCleanupDebt{} : entry->second;
+        keyboard_dirty_ = debt.keyboard_dirty;
+        owned_masks_ = debt.owned_masks;
+    }
+    bool save_keyboard_debt_locked(KeyboardCleanupDebt debt) noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(keyboard_debt_mutex);
+            if (debt.keyboard_dirty || debt.owned_masks)
+                keyboard_debt_endpoints.insert_or_assign(output_endpoint_, debt);
+            else
+                keyboard_debt_endpoints.erase(output_endpoint_);
+            return true;
+        } catch (...) {
+            set_error("KMBOX WASD 清理责任登记失败");
+            return false;
+        }
     }
     static std::uint8_t wasd_usage(std::uint8_t key) noexcept {
         switch (key) { case 1: return 0x1a; case 2: return 0x04;
@@ -527,24 +558,33 @@ private:
         std::size_t index = 18;
         for (std::uint8_t bit = 1; bit <= 8; bit <<= 1)
             if (mask & bit) packet[index++] = wasd_usage(bit);
+        // 先登记潜在责任；分配失败时拒绝发送，不能让新 owner 遗忘已发出的报告。
+        if (!save_keyboard_debt_locked({true, owned_masks_}))
+            return {KeyboardDisposition::REJECTED};
         auto result = keyboard_packet_locked(packet.data(), packet.size(), command);
         if (result.datagram_sent) keyboard_dirty_ = true;
         if (result.disposition == KeyboardDisposition::ACKNOWLEDGED && mask == 0) keyboard_dirty_ = false;
+        // 已有条目的更新不分配；若记账失败，发送前的保守责任仍保留在端点表中。
+        save_keyboard_debt_locked({keyboard_dirty_, owned_masks_});
         return result;
     }
     KeyboardReceipt mask_locked(std::uint8_t key, bool masked) noexcept {
         const auto usage = wasd_usage(key);
         if (!usage || !config_.allow_send_input || socket_ == INVALID_SOCKET)
             return {KeyboardDisposition::REJECTED};
-        // 只解除本连接可能安装的屏蔽，禁止全局解除屏蔽。
+        // 只解除本端点 owner 可能安装的屏蔽，包括前任遗留责任；禁止全局解除屏蔽。
         if (!masked && !(owned_masks_ & key)) return {KeyboardDisposition::REJECTED};
         const std::uint32_t command = masked ? 0x23234343U : 0x23344343U;
         std::array<std::uint8_t, 16> packet{};
         write_header(packet.data(), command, ++sequence_);
         write_u32_le(packet.data() + 4, static_cast<std::uint32_t>(usage) << 8);
+        if (masked && !save_keyboard_debt_locked(
+                {keyboard_dirty_, static_cast<std::uint8_t>(owned_masks_ | key)}))
+            return {KeyboardDisposition::REJECTED};
         auto result = keyboard_packet_locked(packet.data(), packet.size(), command);
         if (masked && result.datagram_sent) owned_masks_ |= key;
         if (!masked && result.disposition == KeyboardDisposition::ACKNOWLEDGED) owned_masks_ &= ~key;
+        save_keyboard_debt_locked({keyboard_dirty_, owned_masks_});
         return result;
     }
     KeyboardReceipt cleanup_keyboard_locked() noexcept {
@@ -892,7 +932,7 @@ private:
     }
 
     MouseConfig config_;
-    std::string button_endpoint_;
+    std::string output_endpoint_;
     // 仅受 io_mutex_ 保护，绝不从物理 monitor 的 mouse_buttons_ 反推。
     std::uint32_t software_buttons_ = 0;
     bool button_dirty_ = false;

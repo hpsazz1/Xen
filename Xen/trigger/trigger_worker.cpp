@@ -15,6 +15,7 @@ public:
     std::function<std::uint64_t()> next_id;
     std::function<bool(std::uint64_t)> request_stop;
     std::function<void(std::uint64_t)> cancel_stop;
+    std::function<TriggerContext()> context;
     TriggerConfig config;
     TriggerController controller;
     std::atomic<std::shared_ptr<const TriggerObservation>> latest;
@@ -79,6 +80,7 @@ public:
         p.physical_left_down = input.virtual_keys[1];
         p.armed = permission() && !stopping.load();
         p.focused = focused();
+        if (context) p.context = context();
         const auto current = controller.snapshot();
         if (allocate_stop_id && config.require_stop && current.region != TriggerRegion::NONE &&
             current.stop_request_id == 0 && reserved_stop_id == 0 && p.enabled && p.healthy &&
@@ -142,6 +144,7 @@ public:
             receipt.command_id = decision.command_id;
             receipt.action = decision.button_action;
             receipt.status = TriggerReceiptStatus::NOT_SENT;
+            bool context_changed = false;
             event.rejection_reason = "arbiter_unavailable";
             if (rejection == OutputArbiterRejection::LOCK_BUSY) event.rejection_reason = "arbiter_lock_busy";
             else if (rejection == OutputArbiterRejection::AUXILIARY_PENDING) event.rejection_reason = "arbiter_auxiliary_pending";
@@ -152,14 +155,20 @@ public:
                 if (down) {
                     const auto fresh = permit();
                     const auto revalidated_at = TriggerClock::now();
+                    const auto& decided_context = decision.snapshot.context;
+                    const bool context_valid = fresh.context.required == decided_context.required &&
+                        (!fresh.context.required || (fresh.context.valid && decided_context.valid &&
+                            fresh.context.generation != 0 && fresh.context.generation == decided_context.generation));
+                    context_changed = !context_valid;
                     const bool stop_valid = !config.require_stop || (fresh.stop_observed_qualified &&
                         fresh.stop_request_id == decision.snapshot.stop_request_id &&
                         fresh.stop_observation_epoch == decision.snapshot.observation_epoch &&
                         fresh.stop_expires_at > revalidated_at && fresh.stop_release_deadline > revalidated_at);
                     eligible = fresh.enabled && fresh.armed && fresh.healthy && fresh.held && fresh.focused &&
                         !fresh.physical_left_down && !canceled.load() && !stopping.load() &&
-                        stop_valid && observation_still_current(decision, revalidated_at);
-                    event.rejection_reason = !stop_valid ? "stop_unverified" : "permission_or_observation_changed";
+                        context_valid && stop_valid && observation_still_current(decision, revalidated_at);
+                    event.rejection_reason = !context_valid ? "context_changed" :
+                        !stop_valid ? "stop_unverified" : "permission_or_observation_changed";
                 } else event.rejection_reason = "cleanup_deadline_expired";
                 if (eligible) {
                     event.backend_called = true;
@@ -199,6 +208,16 @@ public:
                     std::chrono::duration_cast<std::chrono::nanoseconds>(event.backend_completed_at - event.call_started_at)};
             }
             decision = controller.acknowledge(receipt, event.observed_at);
+            if (context_changed) {
+                reserved_stop_id = 0;
+                auto cancellation = controller.cancel(TriggerReason::CONTEXT_CHANGED, event.observed_at);
+                // NOT_SENT 已清按钮责任，但其返回的急停 CANCEL 仍须执行，不能被新取消覆盖。
+                if (cancellation.stop_action == TriggerStopAction::NONE) {
+                    cancellation.stop_action = decision.stop_action;
+                    cancellation.stop_request_id = decision.stop_request_id;
+                }
+                decision = cancellation;
+            }
             if (!down) {
                 cleanup_due = event.observed_at + std::chrono::milliseconds(2);
                 if (receipt.status == TriggerReceiptStatus::ACKNOWLEDGED) {
@@ -288,12 +307,14 @@ public:
 TriggerWorker::TriggerWorker(std::shared_ptr<IMouseController> mouse,
     std::shared_ptr<AutoStopOutputArbiter> arbiter, std::function<bool()> permission,
     std::function<bool()> focused, std::function<std::uint64_t()> next_stop_id,
-    std::function<bool(std::uint64_t)> request_stop, std::function<void(std::uint64_t)> cancel_stop)
+    std::function<bool(std::uint64_t)> request_stop, std::function<void(std::uint64_t)> cancel_stop,
+    std::function<TriggerContext()> context)
     : impl_(std::make_unique<Impl>()) {
     impl_->mouse = std::move(mouse); impl_->arbiter = std::move(arbiter);
     impl_->permission = std::move(permission); impl_->focused = std::move(focused);
     impl_->next_id = std::move(next_stop_id); impl_->request_stop = std::move(request_stop);
     impl_->cancel_stop = std::move(cancel_stop);
+    impl_->context = std::move(context);
 }
 TriggerWorker::~TriggerWorker() { stop(); }
 bool TriggerWorker::start(const TriggerConfig& config, int cleanup_budget_ms) noexcept {

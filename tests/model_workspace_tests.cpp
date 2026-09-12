@@ -28,6 +28,60 @@ model_workspace::Snapshot wait(model_workspace::Workspace& workspace) {
     }
     return workspace.poll();
 }
+
+void test_tool_paths(const fs::path& test_root, const char* python) {
+    using Action = model_workspace::Action;
+    const auto root = test_root / "original package";
+    model_workspace::Workspace workspace(nullptr);
+    model_workspace::Settings settings;
+    std::string error;
+    expect(workspace.initialize(root, settings, error), "工具路径工作区初始化");
+    const auto bundled_relative = fs::path("tools/model-data/model_data_pipeline.py");
+    expect(fs::u8path(settings.script_path) == root / bundled_relative,
+           "默认工具来自数据根的完整发布资源，不依赖Worker或源码目录");
+    settings.script_path = utf8(root / bundled_relative);
+    settings.python_executable = python;
+    settings.environment_root = utf8(test_root / "existing environment");
+    expect(workspace.execute(Action::SAVE_SETTINGS, settings, false, false, ""),
+           "保存包内工具及显式外部训练环境");
+    const auto relocated = test_root / L"中文 新程序目录";
+    fs::create_directories(relocated / "cache/model-workspace");
+    fs::copy_file(root / "cache/model-workspace/settings.json",
+                  relocated / "cache/model-workspace/settings.json");
+    {
+        model_workspace::Workspace reopened(nullptr);
+        model_workspace::Settings restored;
+        expect(reopened.initialize(relocated, restored, error) &&
+               fs::u8path(restored.script_path) == relocated / bundled_relative,
+               "复制到新程序根后，包内工具不得继续指回旧程序目录");
+        expect(restored.python_executable == settings.python_executable &&
+               restored.environment_root == settings.environment_root &&
+               restored.root_directory == settings.root_directory,
+               "程序根变化不搬移已有解释器、环境或用户数据");
+    }
+    wchar_t executable[32768]{};
+    const auto length = GetModuleFileNameW(nullptr, executable, 32768);
+    expect(length > 0 && length < 32768, "旧默认路径夹具定位程序");
+    settings.script_path = utf8(fs::path(executable).parent_path() /
+                                "scripts/model_data_pipeline.py");
+    workspace.execute(Action::SAVE_SETTINGS, settings, false, false, "");
+    {
+        model_workspace::Workspace reopened(nullptr);
+        model_workspace::Settings restored;
+        expect(reopened.initialize(root, restored, error) &&
+               fs::u8path(restored.script_path) == root / bundled_relative,
+               "识别本程序旧默认scripts路径并迁移到正式工具目录");
+    }
+    settings.script_path = utf8(test_root / "custom/scripts/model_data_pipeline.py");
+    workspace.execute(Action::SAVE_SETTINGS, settings, false, false, "");
+    {
+        model_workspace::Workspace reopened(nullptr);
+        model_workspace::Settings restored;
+        expect(reopened.initialize(root, restored, error) &&
+               restored.script_path == settings.script_path,
+               "同名自定义脚本不能被猜测成默认路径而覆盖");
+    }
+}
 }
 
 int main(int argc, char** argv) {
@@ -37,6 +91,7 @@ int main(int argc, char** argv) {
          std::to_wstring(std::chrono::steady_clock::now().time_since_epoch().count())) /
         L"中文 space & literal";
     fs::create_directories(root);
+    test_tool_paths(root, argv[1]);
     auto collector = std::make_shared<data_collection::Collector>();
     model_workspace::Workspace workspace(collector);
     model_workspace::Settings settings;

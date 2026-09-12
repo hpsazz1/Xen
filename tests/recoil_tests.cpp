@@ -74,5 +74,77 @@ void receipts_and_context(){
     auto expired=input();RecoilController rejected;rejected.advance(expired,time(0));expired.held=true;expired.firing_started_at=time(1);
     expect(rejected.advance(expired,time(22)).snapshot.reason==RecoilReason::LATE,"起始证据过期不追赶");
 }
+void candidate_validation_keeps_production_closed(){
+    RecoilProfile candidate;
+    candidate.id="offline_candidate";candidate.weapon_id="offline_weapon";
+    candidate.state=RecoilProfileState::SCHEMA_VALID;
+    candidate.points={{0,0,0},{10,0.4,-0.6},{20,0.8,-1.2},{30,1.2,-1.8},{40,1.6,-2.4}};
+    const auto before=serialize_recoil_profile(candidate);
+    RecoilCandidateReplayReport report;std::string error;
+    const bool valid=validate_recoil_candidate_execution(candidate,{},report,error);
+    expect(valid,"未校准候选必须通过真实执行器的软件回放入口验证");
+    if(valid){
+        expect(report.terminal.confirmed_x==1&&report.terminal.confirmed_y==-2,"候选回放报告来自实际整数ACK账本");
+        expect(std::abs(report.terminal.discarded_x-0.6)<1e-9&&std::abs(report.terminal.discarded_y+0.4)<1e-9,"候选尾部仅丢弃正负亚count余数");
+    }
+    expect(serialize_recoil_profile(candidate)==before,"软件回放不能补写相位或校准证据");
+    auto production=input();production.profile=std::make_shared<RecoilProfile>(candidate);
+    RecoilController controller;
+    expect(controller.advance(production,time(0)).snapshot.reason==RecoilReason::UNCALIBRATED,"软件验证后生产入口仍拒绝未校准候选");
+    production.held=true;
+    expect(!controller.advance(production,time(1)).has_intent,"软件验证结果不能变成生产开火许可");
 }
-int main(){schema_and_compile();counts_and_phase();receipts_and_context();return failures?1:0;}
+void candidate_execution_rejects_compiler_only_limits(){
+    RecoilProfile candidate;candidate.id="limit_candidate";candidate.weapon_id="offline_weapon";
+    candidate.state=RecoilProfileState::SCHEMA_VALID;
+    candidate.points={{0,0,0},{1,32767.5,0},{40,32767.5,0}};
+    RecoilProfile compiled;RecoilCandidateReplayReport report;std::string error;
+    expect(compile_recoil_profile(candidate,{},compiled,error),"结构合法的超单命令候选能通过旧compiler-only入口");
+    expect(!validate_recoil_candidate_execution(candidate,{},report,error)&&error.find("limit")!=std::string::npos,
+        "候选执行回放必须拒绝超过生产单轴命令上限的实际增量");
+    expect(!report.validated,"执行被拒绝不能留软件验证成功状态");
+    candidate.points[1].x_counts=candidate.points[2].x_counts=32767;
+    expect(validate_recoil_candidate_execution(candidate,{},report,error),"现有单命令上限等号保持可执行");
+    expect(report.max_abs_command_axis_counts==32767&&report.command_axis_limit_counts==32767,
+        "回放记录实际最大命令及现有上限");
+}
+void candidate_replay_checks_faults_and_bounds(){
+    RecoilProfile candidate;candidate.id="replay_candidate";candidate.weapon_id="offline_weapon";
+    candidate.state=RecoilProfileState::SCHEMA_VALID;
+    candidate.points={{0,0,0},{1.00000005,1.25,-2.75}};
+    RecoilCandidateReplayReport report;std::string error;
+    const bool valid=validate_recoil_candidate_execution(candidate,{},report,error);
+    expect(valid,"非整数tick尾部应完整回放结束");
+    if(valid){
+        expect(report.validated&&report.step_ms==1&&report.phase_budget_ms==20,"软件调度条件必须显式报告且不取代实测相位");
+        expect(report.terminal.phase==RecoilPhase::EXHAUSTED&&report.terminal.confirmed_x==1&&report.terminal.confirmed_y==-2,
+            "最后一个可表示tick必须覆盖完整尾部");
+        expect(report.tail_checked&&report.phase_edge_checked&&report.deadline_checked&&report.cancellation_checked&&
+            report.unknown_receipt_checked&&report.not_sent_checked,"非零候选必须实际完成边界和回执故障回放");
+        expect(report.advance_calls>0&&report.advance_calls<=report.advance_limit,"候选回放报告有界实际工作量");
+    }
+    expect(!validate_recoil_candidate_execution(candidate,{0,20},report,error),"零步长拒绝而不是进入无限回放");
+    expect(!validate_recoil_candidate_execution(candidate,{21,20},report,error),"步长不能超过软件相位预算");
+    candidate.points.back().time_ms=40;
+    expect(!validate_recoil_candidate_execution(candidate,{0.0001,20},report,error)&&error.find("工作量")!=std::string::npos&&
+        report.advance_calls==0,"可表示但工作量过大的步长须在循环前拒绝");
+    candidate.points.back().time_ms=60000.01;
+    expect(!validate_recoil_candidate_execution(candidate,{},report,error),"超过既有有限时长的候选拒绝");
+}
+void candidate_large_zero_curve_is_bounded(){
+    RecoilProfile candidate;candidate.id="large_zero_candidate";candidate.weapon_id="offline_weapon";
+    candidate.state=RecoilProfileState::SCHEMA_VALID;
+    for(int i=0;i<100000;++i)candidate.points.push_back({60000.0*i/99999,0,0});
+    RecoilCandidateReplayReport report;std::string error;
+    const bool valid=validate_recoil_candidate_execution(candidate,{},report,error);
+    expect(valid,"schema上界的零曲线在固定工作量内完成");
+    if(valid){
+        expect(report.acknowledged_commands==0&&report.acknowledged_l1_counts==0,"零曲线不能捏造模拟命令");
+        expect(report.tail_checked&&report.deadline_checked&&report.cancellation_checked,"零曲线仍检查尾部时限和取消");
+        expect(!report.unknown_receipt_checked&&!report.not_sent_checked,"零意图候选不能冒称检查了回执故障");
+        expect(report.advance_calls<70000,"大曲线不对每个节点重新遍历整条弹序");
+    }
+}
+}
+int main(){schema_and_compile();counts_and_phase();receipts_and_context();candidate_validation_keeps_production_closed();
+    candidate_execution_rejects_compiler_only_limits();candidate_replay_checks_faults_and_bounds();candidate_large_zero_curve_is_bounded();return failures?1:0;}

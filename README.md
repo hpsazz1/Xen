@@ -68,8 +68,10 @@ cmake --build build --config Release --target xen_app --parallel
   -OpenCvDir "C:\path\to\opencv\build\x64\vc16\lib"
 ```
 
-GPU 或 NDI 构建再按脚本参数传入对应 SDK 根目录。DirectML、OpenVINO 与 NVIDIA 构建必须使用
-不同的 `-BuildDirectory`。
+GPU 或 NDI 构建再按脚本参数传入对应 SDK 根目录。正式脚本按 ORT 发行包默认使用
+`build/nvidia`、`build/directml`、`build/openvino`，也可通过 `-BuildDirectory` 指定独立目录。
+VC CRT 从所用 Visual Studio 的官方 Redist 目录解析；可用 `-MsvcRedistRoot` 明确指定，
+不从系统目录补拷 DLL。
 
 ## 运行
 
@@ -131,6 +133,27 @@ W/A/S/D 对应位值 1/2/4/8。`--plan <计划> --output <新报告> --dry-run` 
 正式多 Provider 包只从根目录 `XenLauncher.exe` 进入。Launcher 负责 manifest 路由、路径安全、
 后端归属和 Worker 存在性；日常启动不会扫描或哈希整包。完整文件集合与 SHA-256 校验只保留在
 新完整发布、跨机复制、运行库拓扑变化或明确供应链审计边界。
+
+发布目录按用途组织，三个 Worker 和必要工具均来自同一提交：
+
+```text
+Xen-unified-<版本>/
+├── XenLauncher.exe、manifest.json、config.ini、Launcher 必需的 VC CRT
+├── runtimes/{nvidia,directml,openvino}/  Worker、校准/优化 CLI、各自 DLL
+├── tools/model-data/                  模型工作区脚本和固定依赖清单
+├── tools/recoil/                      弹道导入与数据集整理脚本
+├── tools/source/                      源端焦点、时钟、发送、画面取证工具及其 DLL
+├── assets/recoil/                     导入清单与说明
+├── models/、logs/、licenses/
+└── cache/                            按用途保存运行与用户数据
+```
+
+运行数据以程序根为基准：统一包使用发布根，开发版使用 `Xen.exe` 所在目录，均不取决于启动时
+工作目录。`cache/runtime` 保存执行报告，`cache/datasets` 保存素材，`cache/model-workspace`
+保存设置与训练作业，`cache/recoil/{profiles,calibration,tuning}` 保存曲线、校准和优化结果。
+这些用户数据不能按“缓存”一概删除。随包训练脚本使用相对工具路径；用户自选脚本、素材、权重和
+已验证 Python 环境保留明确路径。升级时应复核绑定，不能直接搬移 venv 或复制旧 CMake 构建树。
+发布包不包含用户旧弹道 CSV、训练权重或测试 EXE，旧包可保留供回退。
 
 ### 普通界面调参
 
@@ -354,6 +377,8 @@ Provider、线程、复制链和发布变更升级到对应专项门禁；真实
 程序不会自动运行源端工具；游戏持续发送数据也不等于游戏处于前台。该工具只提供焦点事实。
 
 自动扳机与急停复用唯一 KMBOX owner；失焦、取消、帧过期或未知回执停止新动作并处理软件左键释放。
+启用 GSI 时，切枪、来源代际变化或武器上下文失效也会清除旧驻留并释放已持按钮；恢复后需完整松键
+再按下。普通心跳不会反复取消。未启用 GSI 时仍使用手动全局扳机参数，当前不按武器自动调整射击时序。
 释放清理只把实际后端调用计入尝试次数，争锁单独受清理截止时间限制。按钮报告保留后端完成与
 协议 ACK 原始时刻；压枪的软件触发起点仍是命令估计，不能当作游戏逐弹时间。
 Debug 独立保存扳机有界事件历史、压枪拒绝原因及按 Aim/扳机/压枪分类的仲裁累计计数；普通 Log
@@ -369,7 +394,9 @@ GSI 只用于武器、弹药及换弹上下文，不能提供弹道曲线、逐�
 [本地导入说明](assets/recoil/README.md)；输出是待校准候选，不会自动激活。
 在辅助页弹道编辑器中加载候选，常用只调横向/纵向强度；起压偏移和时间伸缩折叠显示。
 也可直接编辑节点、撤销/重做并对比曲线。保存始终生成新版本；完成校准并填写实际证据后，
-可选择独立试验引用或显式发布活动版本，原活动版本支持回退。运行期间不热换曲线。
+可设置“固定版本覆盖”或显式发布活动版本，原活动版本支持回退。固定覆盖保持活动索引不变，
+保存配置后持续有效，需手动关闭；它不具有正式 Run 临时试验的寿命。运行期间不热换曲线。
+新配置的曲线目录为 `cache/recoil/profiles`；旧配置显式填写的目录保留，不自动搬移旧曲线及其证据。
 
 独立压枪模式停止 Aim 的设备位移；混合模式保留 Aim 算法及原命令回执，另记已确认压枪位移。
 两者串行发送，共用真实时间窗口额度，额度不足会停止该段压枪，不积存赶发。
@@ -403,16 +430,20 @@ GSI 只用于武器、弹药及换弹上下文，不能提供弹道曲线、逐�
 新的逐次射击文件使用 `recoil.schema2`，包含会话起点、完整边界、逐命令回执与实际曲线版本。
 数据集仅接收自然结束、完整且已校准的批次；同一采集 Run 不能拆作独立留出。
 未校准候选的原始校准记录不能直接进入优化拟合，命令相位预算也不能冒充已验证相位容差。
+UI 和 CLI 共用生产执行器的软件回放，记录模拟步长、相位预算、命令量化与尾部、取消和异常回执检查。
+回放不会授予校准资格，也未验证 Worker 累计/滚动预算或物理效果；候选仍须真实校准和人工验收。
 
 命令行也可独立分析：
 
 ```powershell
 python -X utf8 scripts/build_recoil_dataset.py <人工测量清单manifest.json> <新的数据集.json>
-build-nvidia/Release/xen_recoil_tuner.exe optimize <数据集.json> <基线profile.json> <新结果目录> <优化代数> <新版本号>
+build/nvidia/Release/xen_recoil_tuner.exe optimize <数据集.json> <基线profile.json> <新结果目录> <优化代数> <新版本号>
 ```
 
 测量清单格式见 `python -X utf8 scripts/build_recoil_dataset.py --help`。脚本从 Debug 提取真实回执及
 曲线身份，只接收用户明确提供的残差、噪声与测量时间；缺记录或未知回执不进入拟合。
+在正式包中，改用 `tools/recoil/build_recoil_dataset.py` 和所选 `runtimes/<provider>/xen_recoil_tuner.exe`，
+并把新结果目录放在 `cache/recoil/tuning` 下；命令不依赖源码目录。
 UI 和 CLI 共用当前用户 `%LOCALAPPDATA%/Xen/recoil-tuner-usage-v1` 用途记录；已用于拟合、
 响应标定或留出分析的数据不能重新作为独立留出。新一轮优化需新的测量资料。
 成功时，新结果目录根部另存可由编辑器加载的 `SCHEMA_VALID` 弹道版本，分析报告位于

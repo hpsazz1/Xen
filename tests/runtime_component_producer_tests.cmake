@@ -82,6 +82,7 @@ set(expected_component_ids
     cuda
     cudnn
     imgui
+    msvc-runtime
     nlohmann-json
     onnxruntime
     opencv
@@ -166,6 +167,9 @@ function(run_root_configure fixture_root build_name result_var output_var)
         "-DFETCHCONTENT_SOURCE_DIR_SIMPLEINI=${XEN_SIMPLEINI_SOURCE_DIR}"
         "-DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=${XEN_NLOHMANN_JSON_SOURCE_DIR}"
         "-DFETCHCONTENT_SOURCE_DIR_IMGUI=${XEN_IMGUI_SOURCE_DIR}")
+    if(ARGC GREATER 4)
+        list(APPEND command "-DXEN_MSVC_REDIST_ROOT=${ARGV4}")
+    endif()
     execute_process(
         COMMAND ${command}
         RESULT_VARIABLE configure_result
@@ -227,6 +231,15 @@ else()
         list(APPEND test_failures "完整配置未生成 Release 运行库授权清单")
     else()
         file(READ "${runtime_manifest}" runtime_manifest_content)
+        foreach(crt_name IN ITEMS
+                msvcp140.dll msvcp140_1.dll msvcp140_2.dll
+                msvcp140_atomic_wait.dll msvcp140_codecvt_ids.dll
+                vcruntime140.dll vcruntime140_1.dll concrt140.dll)
+            string(FIND "${runtime_manifest_content}" "${crt_name}" crt_index)
+            if(crt_index EQUAL -1)
+                list(APPEND test_failures "正式运行库授权缺少 CRT：${crt_name}")
+            endif()
+        endforeach()
         string(FIND "${runtime_manifest_content}"
             "unrelated-helper.dll" unrelated_index)
         if(NOT unrelated_index EQUAL -1)
@@ -241,6 +254,45 @@ else()
                 "未批准的 TensorRT builder resource 进入了正式运行库授权清单")
         endif()
     endif()
+    set(layout_path "${test_root}/build-complete/Release/xen-release-layout.json")
+    if(NOT EXISTS "${layout_path}")
+        list(APPEND test_failures "完整配置未生成发布依赖分组")
+    else()
+        file(READ "${layout_path}" layout_content)
+        foreach(group IN ITEMS launcher source)
+            string(REGEX MATCH
+                "\"${group}\"[ \t\r\n]*:[ \t\r\n]*\\[([^]]*)\\]"
+                group_match "${layout_content}")
+            set(group_content "${CMAKE_MATCH_1}")
+            if(group_match STREQUAL "" OR NOT group_content MATCHES "msvcp140_atomic_wait\\.dll")
+                list(APPEND test_failures "发布分组未包含实际 CRT 闭包：${group}")
+            endif()
+            if(group_content MATCHES "onnxruntime|nvinfer|nvonnxparser|cudnn|cublas|openvino|DirectML")
+                list(APPEND test_failures "Provider 运行库进入了公共发布分组：${group}")
+            endif()
+            if(group STREQUAL "source" AND NOT group_content MATCHES "opencv_world")
+                list(APPEND test_failures "源工具分组没有自身所需的 OpenCV")
+            endif()
+            if(group STREQUAL "launcher" AND group_content MATCHES "opencv|NDI")
+                list(APPEND test_failures "Launcher 分组带入了非 CRT 运行库")
+            endif()
+        endforeach()
+    endif()
+endif()
+
+# 仅生成 configure-only 的 owned 夹具，不将合成 DLL 用于构建或正式组包。
+set(missing_crt_root "${test_root}/missing-crt/VS/VC/Redist/MSVC/14.51/x64/Microsoft.VC145.CRT")
+file(MAKE_DIRECTORY "${missing_crt_root}" "${test_root}/missing-crt/VS/Licenses/2052")
+file(WRITE "${test_root}/missing-crt/VS/Licenses/2052/Redist.txt" "synthetic test evidence\n")
+foreach(crt_name IN ITEMS msvcp140.dll msvcp140_1.dll msvcp140_2.dll
+        msvcp140_codecvt_ids.dll vcruntime140.dll vcruntime140_1.dll concrt140.dll)
+    file(WRITE "${missing_crt_root}/${crt_name}" "configure-only fixture\n")
+endforeach()
+run_root_configure("${complete_fixture}" "build-missing-crt"
+    missing_crt_result missing_crt_output "${missing_crt_root}")
+if(missing_crt_result EQUAL 0 OR NOT missing_crt_output MATCHES
+        "Required official MSVC runtime is missing:.*msvcp140_atomic_wait\\.dll")
+    list(APPEND test_failures "缺少 atomic_wait CRT 时未在配置期失败：${missing_crt_output}")
 endif()
 
 set(missing_fixture "${test_root}/missing-sdk")

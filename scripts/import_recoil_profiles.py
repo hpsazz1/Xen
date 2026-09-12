@@ -57,7 +57,11 @@ def main():
     args = parser.parse_args()
     if not math.isfinite(args.reference_sensitivity) or args.reference_sensitivity <= 0:
         parser.error("reference-sensitivity必须是明确正值；它不代表完成校准")
-    manifest = json.loads((Path(__file__).resolve().parents[1] / "assets/recoil/legacy_manifest.json").read_text(encoding="utf-8-sig"))
+    script_directory = Path(__file__).resolve().parent
+    # 只支持仓库scripts与发布tools/recoil两种明确布局，不依赖调用方CWD或搜索祖先目录。
+    packaged = script_directory.name.casefold() == "recoil" and script_directory.parent.name.casefold() == "tools"
+    data_root = script_directory.parent.parent if packaged else script_directory.parent
+    manifest = json.loads((data_root / "assets/recoil/legacy_manifest.json").read_text(encoding="utf-8-sig"))
     source = args.source_directory.resolve(strict=True)
     outputs = []
     for entry in manifest["profiles"]:

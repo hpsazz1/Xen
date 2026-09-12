@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <vector>
 #include "detector/detector.h"
 
@@ -16,7 +17,7 @@ enum class TriggerReason {
     NONE, DISABLED, INVALID_CONFIG, WAIT_RELEASE, PERMISSION, INVALID_OBSERVATION,
     TIMING_UNAVAILABLE, STALE, NO_CANDIDATE, TARGET_CHANGED, DELAY, COOLDOWN,
     WAIT_NEW_FRAME, STOP_UNVERIFIED, STOP_EXPIRED, COMMAND_PENDING, RELEASED,
-    UNKNOWN_RECEIPT, CANCELED, COUNTER_EXHAUSTED
+    UNKNOWN_RECEIPT, CANCELED, COUNTER_EXHAUSTED, CONTEXT_CHANGED, CONTEXT_UNAVAILABLE
 };
 
 using TriggerClock = std::chrono::steady_clock;
@@ -49,9 +50,17 @@ struct TriggerObservation {
     bool valid = false, timing_valid = false;
 };
 
+// 可选的持续上下文；generation 由来源 owner 在身份/连续性/有效性变化时递增。
+// required=false 保留显式手动模式；上下文不授予开火或观察停稳资格。
+struct TriggerContext {
+    std::uint64_t generation = 0;
+    bool required = false, valid = false;
+};
+
 struct TriggerPermit {
     bool enabled = false, held = false, healthy = false, focused = false, armed = false;
     bool physical_left_down = false;
+    TriggerContext context;
     // Runtime 分配全会话递增的急停 id；仅 REQUEST 消费此值，不能逐帧续租。
     std::uint64_t next_stop_request_id = 0;
     std::uint64_t stop_request_id = 0, stop_observation_epoch = 0;
@@ -69,6 +78,7 @@ struct TriggerSnapshot {
     std::uint64_t command_id = 0, stop_request_id = 0;
     float normalized_margin = 0.0f;
     bool button_may_be_down = false, faulted = false;
+    TriggerContext context;
 };
 
 struct TriggerDecision {
@@ -101,6 +111,7 @@ public:
 private:
     TriggerDecision result(TriggerTime now) const noexcept;
     TriggerDecision release(TriggerReason reason, TriggerTime now) noexcept;
+    std::optional<TriggerDecision> check_context(const TriggerPermit& permit, TriggerTime now) noexcept;
     bool select_candidate(const TriggerObservation& observation, TriggerTime now) noexcept;
     TriggerConfig config_;
     TriggerSnapshot state_;

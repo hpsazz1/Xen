@@ -1,5 +1,5 @@
 ﻿param(
-    [string]$BuildDirectory = (Join-Path $PSScriptRoot "..\build"),
+    [string]$BuildDirectory = "",
     [string]$OnnxRuntimeRoot = $env:ONNXRUNTIME_ROOT,
     [string]$OpenCvDir = $env:OpenCV_DIR,
     [string]$TensorRtRoot = $env:TENSORRT_ROOT,
@@ -9,6 +9,7 @@
     [string]$CudaRoot = $env:CUDA_PATH,
     [string]$DirectMlRoot = $env:DIRECTML_ROOT,
     [string]$NdiSdkRoot = $env:NDI_SDK_DIR,
+    [string]$MsvcRedistRoot = "",
     [string]$ModelPath = "",
     [string]$SegmentationModelPath = "",
     [string]$SegmentationImagePath = "",
@@ -232,6 +233,10 @@ function Assert-RuntimeDeploymentReport {
         "opencv_videoio_ffmpeg*_64.dll",
         "Processing.NDI.Lib.x64.dll",
         "Processing.NDI.Lib.Licenses.txt",
+        "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
+        "msvcp140_atomic_wait.dll", "msvcp140_codecvt_ids.dll",
+        "vcruntime140.dll", "vcruntime140_1.dll",
+        "concrt140.dll",
         "cudart.lib"
     )
     $managedPaths = [System.Collections.Generic.HashSet[string]]::new(
@@ -262,6 +267,18 @@ if ([string]::IsNullOrWhiteSpace($OnnxRuntimeRoot) -or -not $ortHeaderFound) {
     throw "ONNX Runtime SDK 无效：请通过 -OnnxRuntimeRoot 或 ONNXRUNTIME_ROOT 指定解压根目录。"
 }
 $OnnxRuntimeRoot = Resolve-ExistingPath $OnnxRuntimeRoot "ONNX Runtime SDK 目录"
+if ([string]::IsNullOrWhiteSpace($BuildDirectory)) {
+    # 与 CMake 的 Provider 能力识别一致，只读取当前 SDK 的已知布局。
+    $provider = "nvidia"
+    $dmlHeaders = @("include/dml_provider_factory.h", "build/native/include/dml_provider_factory.h")
+    $openVinoProviders = @("lib/onnxruntime_providers_openvino.dll", "runtimes/win-x64/native/onnxruntime_providers_openvino.dll")
+    if (@($dmlHeaders | Where-Object { Test-Path -LiteralPath (Join-Path $OnnxRuntimeRoot $_) -PathType Leaf }).Count) {
+        $provider = "directml"
+    } elseif (@($openVinoProviders | Where-Object { Test-Path -LiteralPath (Join-Path $OnnxRuntimeRoot $_) -PathType Leaf }).Count) {
+        $provider = "openvino"
+    }
+    $BuildDirectory = Join-Path $PSScriptRoot "../build/$provider"
+}
 
 if ([string]::IsNullOrWhiteSpace($OpenCvDir) -or
     -not (Test-Path -LiteralPath (Join-Path $OpenCvDir "OpenCVConfig.cmake"))) {
@@ -333,6 +350,7 @@ $configureArguments = @(
     "-DXEN_CUDA_ROOT=$CudaRoot",
     "-DXEN_DIRECTML_ROOT=$DirectMlRoot",
     "-DXEN_NDI_SDK_ROOT=$NdiSdkRoot",
+    "-DXEN_MSVC_REDIST_ROOT=$MsvcRedistRoot",
     "-DXEN_TEST_MODEL=$ModelPath",
     "-DXEN_TEST_SEGMENTATION_MODEL=$SegmentationModelPath",
     "-DXEN_TEST_SEGMENTATION_IMAGE=$SegmentationImagePath",
@@ -355,6 +373,7 @@ if ($LASTEXITCODE -ne 0) { throw "CMake 配置失败，退出码：$LASTEXITCODE
 $cachePath = Join-Path $BuildDirectory "CMakeCache.txt"
 $resolvedInclude = Get-CMakeCacheValue $cachePath "ONNXRUNTIME_INCLUDE_DIR"
 $resolvedLibrary = Get-CMakeCacheValue $cachePath "ONNXRUNTIME_LIB"
+$resolvedMsvcRedistRoot = Get-CMakeCacheValue $cachePath "XEN_MSVC_REDIST_ROOT"
 Assert-PathWithinRoot $resolvedInclude $OnnxRuntimeRoot "ONNX Runtime 头文件"
 Assert-PathWithinRoot $resolvedLibrary $OnnxRuntimeRoot "ONNX Runtime 导入库"
 if (-not [string]::IsNullOrWhiteSpace($resolvedTensorRtMajor)) {
@@ -385,7 +404,8 @@ $authorizedRuntimeRoots = @(
     $CudnnRoot,
     $CudaRoot,
     $DirectMlRoot,
-    $NdiSdkRoot
+    $NdiSdkRoot,
+    $resolvedMsvcRedistRoot
 ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 Assert-RuntimeDeploymentReport $outputDirectory $authorizedRuntimeRoots
 

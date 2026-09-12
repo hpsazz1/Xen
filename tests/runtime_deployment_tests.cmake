@@ -95,12 +95,14 @@ file(WRITE "${source_a}/onnxruntime.dll" "ort-source-a")
 file(WRITE "${source_a}/nvinfer_10.dll" "tensorrt-source-a")
 file(WRITE "${source_a}/cudnn64_9.dll" "cudnn-source-a")
 file(WRITE "${source_a}/custom_runtime.dll" "tracked-custom-source-a")
+file(WRITE "${source_a}/msvcp140_atomic_wait.dll" "crt-source-a")
 file(WRITE "${manifest_a}"
     "set(XEN_RUNTIME_SOURCES\n"
     "    [==[${source_a}/onnxruntime.dll]==]\n"
     "    [==[${source_a}/nvinfer_10.dll]==]\n"
     "    [==[${source_a}/cudnn64_9.dll]==]\n"
     "    [==[${source_a}/custom_runtime.dll]==]\n"
+    "    [==[${source_a}/msvcp140_atomic_wait.dll]==]\n"
     ")\n")
 
 run_deployment("${manifest_a}" "fixture-a")
@@ -108,6 +110,7 @@ foreach(first_name IN ITEMS
         onnxruntime.dll
         nvinfer_10.dll
         cudnn64_9.dll
+        msvcp140_atomic_wait.dll
         custom_runtime.dll)
     assert_exists("${output_directory}/${first_name}"
         "第一阶段未部署授权运行库")
@@ -123,15 +126,19 @@ file(WRITE "${output_directory}/nvinfer_11.dll" "legacy-tensorrt")
 file(WRITE "${output_directory}/cudnn_legacy.dll" "legacy-cudnn")
 file(WRITE "${output_directory}/cudart.lib" "legacy-import-library")
 file(WRITE "${output_directory}/user.dll" "user-owned-file")
+file(WRITE "${output_directory}/concrt140.dll" "unregistered-crt")
+file(WRITE "${output_directory}/msvcp140_custom.dll" "not-an-authorized-crt-name")
 
 # 第二阶段在同一输出目录清空 NVIDIA SDK，并把 onnxruntime.dll 切换到
 # 另一来源。部署必须移除所有未授权旧项并按 SHA-256 覆盖同名文件。
 file(WRITE "${source_b}/onnxruntime.dll" "ort-source-b-with-different-content")
 file(WRITE "${source_b}/DirectML.dll" "directml-source-b")
+file(WRITE "${source_b}/msvcp140_atomic_wait.dll" "crt-source-b")
 file(WRITE "${manifest_b}"
     "set(XEN_RUNTIME_SOURCES\n"
     "    [==[${source_b}/onnxruntime.dll]==]\n"
     "    [==[${source_b}/DirectML.dll]==]\n"
+    "    [==[${source_b}/msvcp140_atomic_wait.dll]==]\n"
     ")\n")
 
 run_deployment("${manifest_b}" "fixture-b")
@@ -141,12 +148,17 @@ foreach(stale_name IN ITEMS
         cudnn64_9.dll
         cudnn_legacy.dll
         cudart.lib
+        concrt140.dll
         custom_runtime.dll)
     assert_absent("${output_directory}/${stale_name}"
         "第二阶段仍残留未授权运行库")
 endforeach()
 assert_exists("${output_directory}/user.dll"
     "部署清理误删了非 Xen 管理文件")
+assert_exists("${output_directory}/msvcp140_custom.dll"
+    "CRT 清理不应使用通配符扩展文件所有权")
+assert_same_sha256("${output_directory}/msvcp140_atomic_wait.dll"
+    "${source_b}/msvcp140_atomic_wait.dll" "CRT 没有切换到本次显式来源")
 assert_exists("${output_directory}/DirectML.dll"
     "第二阶段未部署新的授权运行库")
 assert_same_sha256(
@@ -169,6 +181,7 @@ foreach(required_text IN ITEMS
         "\"configuration\": \"fixture-b\""
         "\"name\": \"onnxruntime.dll\""
         "\"name\": \"DirectML.dll\""
+        "\"name\": \"msvcp140_atomic_wait.dll\""
         "${source_b}/onnxruntime.dll"
         "${expected_ort_sha256}")
     string(FIND "${report_content}" "${required_text}" required_index)

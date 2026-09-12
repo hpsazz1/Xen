@@ -102,10 +102,16 @@ struct Fixture {
     std::atomic<bool> permitted{true}, focused{true};
     std::atomic<unsigned> requests{0}, cancellations{0}, ids{0};
     std::function<void()> focus_hook;
+    std::atomic<std::uint64_t> context_generation{0};
+    std::atomic<bool> context_required{false}, context_valid{false};
+    std::function<void()> context_hook;
     TriggerWorker worker{mouse, arbiter, [&] { return permitted.load(); }, [&] {
         if (focus_hook) focus_hook(); return focused.load();
     }, [&] { return std::uint64_t(++ids); }, [&](std::uint64_t) { ++requests; return true; },
-        [&](std::uint64_t) { ++cancellations; }};
+        [&](std::uint64_t) { ++cancellations; }, [&] {
+            if (context_hook) context_hook();
+            return TriggerContext{context_generation.load(), context_required.load(), context_valid.load()};
+        }};
     bool start(bool stop=false, int age=50, int cleanup_budget_ms=1000, int press_ms=10) {
         TriggerConfig cfg;
         cfg.enabled=true; cfg.hold_virtual_key=5; cfg.fire_delay_ms=0;
@@ -168,6 +174,64 @@ void final_revalidation() {
     permission.permitted=false; permission.fire();
     expect(until([&] { return permission.worker.snapshot().reason == TriggerReason::PERMISSION; }), "失去许可应拒绝");
     expect(permission.mouse->count(true)==0, "无许可无down"); permission.worker.stop();
+}
+void context_change_at_down_revalidation() {
+    for (const bool invalid : {false, true}) {
+        Fixture f;
+        f.context_required = f.context_valid = true; f.context_generation = 1;
+        std::atomic<bool> change_at_output_gate{true};
+        f.context_hook = [&] {
+            // 通过真实仲裁器的公开计数识别 DOWN 已拿到门、正在二检的边界。
+            const auto gate = f.arbiter->snapshot();
+            if (gate.sources[static_cast<std::size_t>(OutputArbiterSource::TRIGGER)].acquired &&
+                change_at_output_gate.exchange(false)) {
+                f.context_generation = 2;
+                f.context_valid = !invalid;
+            }
+        };
+        expect(f.start(false, 200), "上下文二检回归启动");
+        f.fire();
+        expect(until([&] { return !change_at_output_gate.load(); }), "上下文在 DOWN 拿门后二检时改变");
+        expect(until([&] {
+            for (const auto& event : f.worker.execution_log().events)
+                if (event.button_action == TriggerButtonAction::DOWN && !event.backend_called &&
+                    std::string_view(event.rejection_reason) == "context_changed") return true;
+            return false;
+        }), "DOWN 二检变化必须记为未发出且保留取消原因");
+        expect(f.mouse->count(true) == 0 && f.mouse->count(false) == 0,
+            "新上下文不能放行旧决定，明确未发送不生成伪 UP");
+        f.context_generation = 3; f.context_valid = true;
+        f.worker.publish(observation(2));
+        expect(until([&] { return f.worker.snapshot().reason == TriggerReason::WAIT_RELEASE; }),
+            "连续查询或失效恢复不能消费一次 false 后重新放行旧 held");
+        expect(f.mouse->count(true) == 0, "仍持键的新帧不产生 DOWN");
+        f.mouse->held = false;
+        expect(until([&] { return f.worker.snapshot().reason == TriggerReason::RELEASED; }), "取得新上下文的真实释放边沿");
+        f.mouse->held = true; f.worker.publish(observation(3));
+        expect(until([&] { return f.mouse->count(true) == 1; }),
+            "完成释放再按下后新上下文仍可正常 DOWN");
+        f.worker.stop();
+    }
+}
+void context_change_releases_held_button() {
+    Fixture f;
+    f.context_required = f.context_valid = true; f.context_generation = 1;
+    expect(f.start(false, 200, 1000, 100), "上下文 HELD 回归启动");
+    f.fire();
+    expect(until([&] { return f.worker.firing_signal().confirmed_down; }), "切枪前确实已确认 DOWN");
+    f.context_generation = 2;
+    expect(until([&] {
+        for (const auto& event : f.worker.execution_log().events)
+            if (event.button_action == TriggerButtonAction::UP && event.backend_called &&
+                event.snapshot.reason == TriggerReason::CONTEXT_CHANGED) return true;
+        return false;
+    }), "切枪通过运行清理路径立即归还 HELD，不依赖新图或原 hold 截止");
+    expect(!f.worker.firing_signal().confirmed_down && f.mouse->count(false) == 1,
+        "切枪后的确认开火信号归零并清理一次");
+    f.worker.publish(observation(2));
+    expect(until([&] { return f.worker.snapshot().reason == TriggerReason::WAIT_RELEASE; }) && f.mouse->count(true) == 1,
+        "旧许可键仍持有时不续用新武器开火");
+    f.worker.stop();
 }
 void unverified_stop_and_contention() {
     Fixture f; expect(f.start(true), "急停依赖worker启动"); f.fire();
@@ -352,6 +416,7 @@ void exception_uses_bounded_cleanup() {
 }
 int main() {
     autonomous_cleanup(); unknown_and_late_ack(); final_revalidation(); unverified_stop_and_contention();
+    context_change_at_down_revalidation(); context_change_releases_held_button();
     not_sent_up_receipt_regression();
     running_cleanup_contention(); receipt_time_and_event_history(); event_ring_is_bounded();
     exception_uses_bounded_cleanup();

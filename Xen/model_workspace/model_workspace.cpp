@@ -35,6 +35,13 @@ std::string utf8(const fs::path& path) {
 }
 fs::path path_from(const std::string& value) { return fs::u8path(value); }
 
+const fs::path kBundledToolPath = "tools/model-data/model_data_pipeline.py";
+
+bool same_path(const fs::path& left, const fs::path& right) {
+    return _wcsicmp(left.lexically_normal().c_str(),
+                    right.lexically_normal().c_str()) == 0;
+}
+
 class Handle {
 public:
     Handle() = default;
@@ -181,9 +188,12 @@ const char* operation_for(Action action) {
     }
 }
 
-Json settings_json(const Settings& value) {
+Json settings_json(const Settings& value, const fs::path& data_root) {
+    // 只将本包默认工具保存为相对位置；用户数据、解释器和自定义脚本继续显式绑定。
+    const auto script = same_path(path_from(value.script_path), data_root / kBundledToolPath)
+        ? utf8(kBundledToolPath) : value.script_path;
     return {{"schema_version", 1}, {"root_directory", value.root_directory},
-        {"python_executable", value.python_executable}, {"script_path", value.script_path},
+        {"python_executable", value.python_executable}, {"script_path", script},
         {"base_python_executable", value.base_python_executable},
         {"environment_root", value.environment_root},
         {"class_names", value.class_names}, {"class_schema_confirmed", value.class_schema_confirmed},
@@ -374,8 +384,10 @@ bool Workspace::initialize(const fs::path& data_root, Settings& settings,
         std::array<wchar_t, 32768> executable{};
         const auto size = GetModuleFileNameW(nullptr, executable.data(), executable.size());
         check(size > 0 && size < executable.size(), "无法定位训练工具目录");
-        settings.script_path = utf8(fs::path(executable.data()).parent_path() /
-                                    "scripts" / "model_data_pipeline.py");
+        const auto legacy_script = fs::path(executable.data()).parent_path() /
+                                    "scripts/model_data_pipeline.py";
+        const auto bundled_script = impl_->data_root / kBundledToolPath;
+        settings.script_path = utf8(bundled_script);
         std::array<wchar_t, 32768> python{};
         const auto found = SearchPathW(nullptr, L"python.exe", nullptr,
                                       python.size(), python.data(), nullptr);
@@ -399,6 +411,16 @@ bool Workspace::initialize(const fs::path& data_root, Settings& settings,
             XEN_DATA_SETTING(interval_ms); XEN_DATA_SETTING(exploration_interval_ms);
             XEN_DATA_SETTING(epochs); XEN_DATA_SETTING(image_size); XEN_DATA_SETTING(batch_size);
 #undef XEN_DATA_SETTING
+            const auto saved_script = path_from(settings.script_path);
+            if (!saved_script.empty() && saved_script.is_relative()) {
+                settings.script_path = utf8(checked_path(impl_->data_root / saved_script));
+            }
+            // 仅识别可证明属于当前程序的旧默认位置；其他同名绝对路径保留为自定义。
+            if (same_path(path_from(settings.script_path), legacy_script) ||
+                same_path(path_from(settings.script_path),
+                          impl_->data_root / "scripts/model_data_pipeline.py")) {
+                settings.script_path = utf8(bundled_script);
+            }
         }
         error.clear();
         return true;
@@ -424,7 +446,7 @@ Snapshot Workspace::poll(Settings* settings) noexcept {
                 impl_->view.environment_message = "GPU环境自检通过；结果与依赖记录见当前作业目录。";
                 impl_->view.weights_ready = false;
                 impl_->view.weights_message = "环境已检查，请重新检查PT兼容性。";
-                write_json(impl_->workspace_root / "settings.json", settings_json(*settings));
+                write_json(impl_->workspace_root / "settings.json", settings_json(*settings, impl_->data_root));
             }
             if (impl_->view.job_operation == "pt_check") {
                 check(result.value("ready", false) && result.value("synthetic_compatibility_only", false),
@@ -507,7 +529,7 @@ bool Workspace::execute(Action action, const Settings& settings,
         if (action == Action::NONE) return true;
         if (action == Action::CANCEL_JOB) { impl_->cancel(); return true; }
         if (action == Action::SAVE_SETTINGS) {
-            write_json(impl_->workspace_root / "settings.json", settings_json(settings));
+            write_json(impl_->workspace_root / "settings.json", settings_json(settings, impl_->data_root));
             impl_->view.message = "采集与训练设置已保存。"; return true;
         }
         if (action == Action::OPEN_DATA_DIRECTORY || action == Action::OPEN_JOB_DIRECTORY) {

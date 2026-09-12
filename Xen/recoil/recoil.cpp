@@ -8,6 +8,8 @@
 
 namespace {
 using Json = nlohmann::json;
+constexpr int kCommandAxisLimitCounts = 32767;
+constexpr std::uint64_t kReplayAdvanceLimit = 500000;
 bool finite(double x) { return std::isfinite(x); }
 bool hash(const std::string& value) {
     return value.size()==64 && std::all_of(value.begin(),value.end(),[](char c) {
@@ -179,7 +181,10 @@ const char* RecoilReasonName(RecoilReason r) noexcept {
 }
 RecoilController::RecoilController(std::shared_ptr<const RecoilCalibrationPermit> permit)
     : calibration_permit_(std::move(permit)), calibration_claimed_(calibration_permit_&&calibration_permit_->try_claim_controller()) {}
+RecoilController::RecoilController(OfflineReplayTag,double phase_budget_ms) noexcept
+    : offline_phase_budget_ms_(phase_budget_ms) {}
 double RecoilController::phase_budget_ms() const noexcept {
+    if(offline_phase_budget_ms_>0)return offline_phase_budget_ms_;
     if(calibration_permit_)return calibration_permit_->limits().command_phase_budget_ms;
     return profile_ ? profile_->phase_tolerance_ms.value_or(0) : 0;
 }
@@ -220,6 +225,9 @@ RecoilDecision RecoilController::advance(const RecoilInput& input,RecoilTime now
         if(has_fired_&&!active_)return cancel(RecoilReason::EXHAUSTED,now);
         if(active_&&elapsed(now,started_at_)>=calibration_permit_->limits().max_firing_duration_ms)
             return cancel(RecoilReason::LIMIT,now);
+    } else if(offline_phase_budget_ms_>0) {
+        if(profile_->state!=RecoilProfileState::SCHEMA_VALID || !profile_->calibration.evidence.empty() ||
+            profile_->phase_tolerance_ms || profile_->recovery_ms)return cancel(RecoilReason::UNCALIBRATED,now);
     } else if(!execution_profile(*profile_))return cancel(RecoilReason::UNCALIBRATED,now);
     if(!input.healthy||!input.focused||!input.permission||!input.profile_conditions_match||!weapon_generation_||!device_epoch_)
         return cancel(RecoilReason::CONTEXT,now);
@@ -250,7 +258,7 @@ RecoilDecision RecoilController::advance(const RecoilInput& input,RecoilTime now
     auto sample=sample_recoil_profile(*profile_,elapsed(now,started_at_));
     const double x=sample.x_counts-sampled_.x_counts+state_.remainder_x;
     const double y=sample.y_counts-sampled_.y_counts+state_.remainder_y;
-    if(!finite(x)||!finite(y)||std::abs(x)>32767||std::abs(y)>32767)return cancel(RecoilReason::LIMIT,now);
+    if(!finite(x)||!finite(y)||std::abs(x)>kCommandAxisLimitCounts||std::abs(y)>kCommandAxisLimitCounts)return cancel(RecoilReason::LIMIT,now);
     const int dx=static_cast<int>(x),dy=static_cast<int>(y);
     state_.planned_x+=sample.x_counts-sampled_.x_counts;state_.planned_y+=sample.y_counts-sampled_.y_counts;
     if(!dx&&!dy) {
@@ -298,4 +306,214 @@ RecoilDecision RecoilController::acknowledge(const RecoilReceipt& receipt,Recoil
         cancel(RecoilReason::EXHAUSTED,now);state_.phase=RecoilPhase::EXHAUSTED;
     }
     return result();
+}
+bool validate_recoil_candidate_execution(const RecoilProfile& candidate,
+    const RecoilCandidateReplayOptions& options,RecoilCandidateReplayReport& report,std::string& error) noexcept {
+    report={};
+    try {
+        const auto require=[](bool condition,const char* message) {
+            if(!condition)throw std::runtime_error(message);
+        };
+        report.advance_limit=kReplayAdvanceLimit;
+        report.command_axis_limit_counts=kCommandAxisLimitCounts;
+        require(candidate.state==RecoilProfileState::SCHEMA_VALID && candidate.calibration.evidence.empty() &&
+            !candidate.phase_tolerance_ms && !candidate.recovery_ms,"回放只接受无校准声明的SCHEMA_VALID候选");
+        RecoilProfile compiled;
+        if(!compile_recoil_profile(candidate,{},compiled,error))return false;
+        require(finite(options.step_ms)&&finite(options.phase_budget_ms)&&options.step_ms>0&&
+            options.step_ms<=options.phase_budget_ms&&options.phase_budget_ms<=1000,"软件步长或相位预算无效");
+        using Duration=RecoilClock::duration;
+        using Milliseconds=std::chrono::duration<double,std::milli>;
+        const auto step=std::chrono::duration_cast<Duration>(Milliseconds(options.step_ms));
+        const auto phase=std::chrono::duration_cast<Duration>(Milliseconds(options.phase_budget_ms));
+        const auto tick=Duration{1};
+        require(step>=tick&&phase>=step,"软件步长或相位预算小于时钟粒度");
+        report.step_ms=Milliseconds(step).count();report.phase_budget_ms=Milliseconds(phase).count();
+        report.duration_ms=compiled.points.back().time_ms;
+        const auto end=std::chrono::ceil<Duration>(Milliseconds(report.duration_ms));
+        const auto iterations=[&](Duration stride) {
+            return static_cast<std::uint64_t>((end.count()-1)/stride.count()+1);
+        };
+        // 正常、边缘和固定数量的故障场景共用额度；极小步长在进入循环前拒绝。
+        const auto normal_steps=iterations(step),edge_steps=iterations(phase);
+        require(normal_steps<=(kReplayAdvanceLimit-64)/6 &&
+            edge_steps<=kReplayAdvanceLimit-64-normal_steps*6,"候选回放超过有界工作量");
+        auto profile=std::make_shared<const RecoilProfile>(std::move(compiled));
+        const auto begin=RecoilTime{}+std::chrono::seconds(1);
+        const auto start=begin+tick;
+        const auto input_for=[&] {
+            RecoilInput input;
+            // 这些仅是纯计算夹具，不是设备输入或可外传的校准许可。
+            input.enabled=input.healthy=input.focused=input.permission=input.profile_conditions_match=true;
+            input.weapon_generation=input.device_epoch=1;input.profile=profile;input.firing_started_at=start;
+            return input;
+        };
+        const auto advance=[&](RecoilController& controller,const RecoilInput& input,RecoilTime now) {
+            require(report.advance_calls<kReplayAdvanceLimit,"候选回放超过有界工作量");
+            ++report.advance_calls;return controller.advance(input,now);
+        };
+        const auto arm=[&](RecoilController& controller,RecoilInput& input) {
+            auto released=advance(controller,input,begin);
+            require(!released.has_intent&&released.snapshot.phase==RecoilPhase::READY,"候选回放无法建立释放边沿");
+            input.held=true;
+            auto started=advance(controller,input,start);
+            require(!started.has_intent&&started.snapshot.phase==RecoilPhase::FIRING&&started.snapshot.session_id==1,
+                "候选回放无法建立唯一弹序");
+        };
+        const auto near=[](double actual,double expected) {
+            return finite(actual)&&finite(expected)&&std::abs(actual-expected)<=1e-9*(1+std::abs(expected));
+        };
+        const auto ensure_running=[&](const RecoilDecision& decision) {
+            if(decision.snapshot.faulted || (decision.snapshot.phase!=RecoilPhase::FIRING&&
+                decision.snapshot.phase!=RecoilPhase::PENDING&&decision.snapshot.phase!=RecoilPhase::EXHAUSTED))
+                throw std::runtime_error(std::string("软件回放被生产执行器拒绝：")+RecoilReasonName(decision.snapshot.reason));
+        };
+        const auto check_intent=[&](const RecoilDecision& decision,const RecoilSnapshot& before,RecoilTime now) {
+            const auto& intent=decision.intent;
+            const auto axis=std::max(std::abs(static_cast<std::int64_t>(intent.dx_counts)),
+                std::abs(static_cast<std::int64_t>(intent.dy_counts)));
+            require(axis>0&&axis<=kCommandAxisLimitCounts,"回放命令超出生产单轴范围");
+            require(decision.snapshot.pending && decision.snapshot.confirmed_x==before.confirmed_x&&
+                decision.snapshot.confirmed_y==before.confirmed_y,"回放在ACK前提前记入成功量");
+            require(intent.session_id==1&&intent.profile_revision==profile->revision&&intent.weapon_generation==1&&
+                intent.device_epoch==1&&intent.planned_at==now&&intent.expires_at>now,"回放意图身份或时限无效");
+            report.max_abs_command_axis_counts=std::max(report.max_abs_command_axis_counts,static_cast<int>(axis));
+        };
+        const auto acknowledge=[&](RecoilController& controller,const RecoilDecision& decision,
+            const RecoilSnapshot& before,RecoilTime now,bool primary) {
+            const auto& intent=decision.intent;
+            const RecoilReceipt receipt{intent.command_id,RecoilReceiptStatus::ACKNOWLEDGED,now};
+            auto done=controller.acknowledge(receipt,now);
+            require(!done.snapshot.pending&&!done.snapshot.faulted&&
+                done.snapshot.confirmed_x==before.confirmed_x+intent.dx_counts&&
+                done.snapshot.confirmed_y==before.confirmed_y+intent.dy_counts,"回放ACK未按实际整数命令记账");
+            require(done.snapshot.unknown_x==0&&done.snapshot.unknown_y==0,"正常回放出现未知执行量");
+            auto repeated=controller.acknowledge(receipt,now);
+            require(repeated.snapshot.confirmed_x==done.snapshot.confirmed_x&&
+                repeated.snapshot.confirmed_y==done.snapshot.confirmed_y,"重复ACK重复记账");
+            if(primary) {
+                ++report.acknowledged_commands;
+                report.acknowledged_l1_counts+=static_cast<std::uint64_t>(std::abs(static_cast<std::int64_t>(intent.dx_counts)))+
+                    static_cast<std::uint64_t>(std::abs(static_cast<std::int64_t>(intent.dy_counts)));
+            }
+        };
+        const auto run_schedule=[&](Duration stride,bool primary) {
+            RecoilController controller(RecoilController::OfflineReplayTag{},report.phase_budget_ms);
+            auto input=input_for();arm(controller,input);
+            for(auto offset=std::min(stride,end);;offset=std::min(offset+stride,end)) {
+                const auto now=start+offset;
+                const auto before=controller.snapshot();
+                auto decision=advance(controller,input,now);ensure_running(decision);
+                if(decision.has_intent) {
+                    check_intent(decision,before,now);acknowledge(controller,decision,before,now,primary);
+                }
+                if(offset==end)break;
+            }
+            const auto terminal=controller.snapshot();
+            require(terminal.phase==RecoilPhase::EXHAUSTED&&!terminal.pending&&!terminal.faulted,"候选尾部未结束唯一弹序");
+            const auto& tail=profile->points.back();
+            require(near(terminal.planned_x,tail.x_counts)&&near(terminal.planned_y,tail.y_counts)&&
+                near(terminal.confirmed_x+terminal.discarded_x,terminal.planned_x)&&
+                near(terminal.confirmed_y+terminal.discarded_y,terminal.planned_y),"候选量化或尾部账本不守恒");
+            require(std::abs(terminal.discarded_x)<1&&std::abs(terminal.discarded_y)<1&&
+                terminal.remainder_x==0&&terminal.remainder_y==0,"候选结束时遗留或丢弃整count");
+            const auto held=advance(controller,input,start+end+phase);
+            require(!held.has_intent&&held.snapshot.session_id==1&&held.snapshot.confirmed_x==terminal.confirmed_x&&
+                held.snapshot.confirmed_y==terminal.confirmed_y,"候选耗尽后长按复活或重复尾部");
+            if(primary)report.terminal=terminal;
+        };
+        run_schedule(step,true);run_schedule(phase,false);
+        report.phase_edge_checked=report.tail_checked=true;
+        {
+            RecoilController edge(RecoilController::OfflineReplayTag{},report.phase_budget_ms);
+            auto input=input_for();arm(edge,input);
+            ensure_running(advance(edge,input,start+phase));
+            RecoilController late(RecoilController::OfflineReplayTag{},report.phase_budget_ms);
+            input=input_for();arm(late,input);
+            const auto rejected=advance(late,input,start+phase+tick);
+            require(!rejected.has_intent&&rejected.snapshot.reason==RecoilReason::LATE,
+                "超过软件相位时限一个tick仍生成意图");
+            require(!advance(late,input,start+phase+tick+tick).has_intent,"迟到取消后仍追赶补发");
+        }
+        if(!report.acknowledged_commands) {
+            // 零意图曲线仍验证取消；没有待确认命令时不捏造回执故障覆盖。
+            RecoilController controller(RecoilController::OfflineReplayTag{},report.phase_budget_ms);
+            auto input=input_for();arm(controller,input);
+            controller.cancel(RecoilReason::CANCELED,start);
+            require(!advance(controller,input,start+tick).has_intent&&controller.snapshot().session_id==1,
+                "零意图曲线取消后仍重新开始");
+            report.cancellation_checked=true;
+        } else {
+            enum class Probe { CANCELED, UNKNOWN, NOT_SENT, ACK_AT_LIMIT, ACK_LATE };
+            // 每个场景最多重放一次到首个非零意图，共五次；不按节点重复回放。
+            for(const auto probe : {Probe::CANCELED,Probe::UNKNOWN,Probe::NOT_SENT,Probe::ACK_AT_LIMIT,Probe::ACK_LATE}) {
+                RecoilController controller(RecoilController::OfflineReplayTag{},report.phase_budget_ms);
+                auto input=input_for();arm(controller,input);
+                bool found=false;
+                for(auto offset=std::min(step,end);;offset=std::min(offset+step,end)) {
+                    const auto now=start+offset;
+                    const auto before=controller.snapshot();
+                    auto decision=advance(controller,input,now);ensure_running(decision);
+                    if(decision.has_intent) {
+                        found=true;check_intent(decision,before,now);
+                        const auto& intent=decision.intent;
+                        const auto pending=advance(controller,input,now);
+                        require(!pending.has_intent&&pending.snapshot.pending&&pending.snapshot.command_id==intent.command_id,
+                            "未决意图产生重复发送");
+                        const auto foreign=controller.acknowledge({intent.command_id+1,RecoilReceiptStatus::ACKNOWLEDGED,now},now);
+                        require(foreign.snapshot.pending&&foreign.snapshot.confirmed_x==before.confirmed_x&&
+                            foreign.snapshot.confirmed_y==before.confirmed_y,"其他命令ACK污染当前意图");
+                        if(probe==Probe::CANCELED)controller.cancel(RecoilReason::CANCELED,now);
+                        const auto completed=(probe==Probe::ACK_AT_LIMIT)?intent.expires_at:
+                            (probe==Probe::ACK_LATE||probe==Probe::CANCELED)?intent.expires_at+tick:now;
+                        const auto status=probe==Probe::UNKNOWN?RecoilReceiptStatus::UNKNOWN:
+                            probe==Probe::NOT_SENT?RecoilReceiptStatus::NOT_SENT:RecoilReceiptStatus::ACKNOWLEDGED;
+                        const auto done=controller.acknowledge({intent.command_id,status,completed},completed);
+                        require(!done.snapshot.pending,"回执后意图仍未决");
+                        if(probe==Probe::UNKNOWN) {
+                            require(done.snapshot.faulted&&done.snapshot.reason==RecoilReason::UNKNOWN_RECEIPT&&
+                                done.snapshot.confirmed_x==before.confirmed_x&&done.snapshot.confirmed_y==before.confirmed_y&&
+                                done.snapshot.unknown_x==intent.dx_counts&&done.snapshot.unknown_y==intent.dy_counts,
+                                "UNKNOWN回执被记成成功或没有锁存故障");
+                            input.held=false;advance(controller,input,completed+tick);
+                            input.held=true;
+                            require(!advance(controller,input,completed+tick+tick).has_intent&&controller.snapshot().faulted,
+                                "UNKNOWN故障被新的按键边沿清除");
+                            report.unknown_receipt_checked=true;
+                        } else if(probe==Probe::NOT_SENT) {
+                            require(!done.snapshot.faulted&&done.snapshot.reason==RecoilReason::NOT_SENT&&
+                                done.snapshot.confirmed_x==before.confirmed_x&&done.snapshot.confirmed_y==before.confirmed_y&&
+                                done.snapshot.unknown_x==0&&done.snapshot.unknown_y==0,
+                                "NOT_SENT回执污染成功量或未知量");
+                            require(!advance(controller,input,completed+tick).has_intent,"NOT_SENT后仍补发旧意图");
+                            report.not_sent_checked=true;
+                        } else {
+                            require(!done.snapshot.faulted&&done.snapshot.confirmed_x==before.confirmed_x+intent.dx_counts&&
+                                done.snapshot.confirmed_y==before.confirmed_y+intent.dy_counts&&
+                                done.snapshot.unknown_x==0&&done.snapshot.unknown_y==0,"ACK边界丢失已确认整数命令");
+                            if(probe==Probe::ACK_AT_LIMIT) {
+                                require(done.snapshot.reason!=RecoilReason::LATE,"恰好到期的ACK被错误拒绝");
+                            } else {
+                                require(done.snapshot.reason==(probe==Probe::CANCELED?RecoilReason::CANCELED:RecoilReason::LATE),
+                                    "取消或过期ACK没有保持终止原因");
+                                const auto held=advance(controller,input,completed+tick);
+                                require(!held.has_intent&&held.snapshot.session_id==1&&
+                                    held.snapshot.confirmed_x==done.snapshot.confirmed_x&&held.snapshot.confirmed_y==done.snapshot.confirmed_y,
+                                    "取消或迟到ACK复活旧弹序");
+                                if(probe==Probe::CANCELED)report.cancellation_checked=true;
+                            }
+                        }
+                        break;
+                    }
+                    if(offset==end)break;
+                }
+                require(found,"故障回放无法重现正常弹序的首条意图");
+            }
+        }
+        report.deadline_checked=true;
+        report.validated=true;error.clear();return true;
+    } catch(const std::exception& exception) {
+        try {error=exception.what();}catch(...){}
+    } catch(...) {try {error="候选执行回放异常";}catch(...){}}
+    return false;
 }

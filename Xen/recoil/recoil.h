@@ -89,6 +89,26 @@ struct RecoilReceipt {
     RecoilReceiptStatus status = RecoilReceiptStatus::UNKNOWN;
     RecoilTime completed_at{};
 };
+// 固定的软件调度条件，不是实测相位或物理许可，不写回候选profile。
+struct RecoilCandidateReplayOptions {
+    double step_ms = 1, phase_budget_ms = 20;
+};
+struct RecoilCandidateReplayReport {
+    bool validated = false;
+    double step_ms = 0, phase_budget_ms = 0, duration_ms = 0;
+    std::uint64_t advance_calls = 0, advance_limit = 0;
+    // ACK统计与terminal只来自固定步长的正常回放；故障注入不混入成功量。
+    std::uint64_t acknowledged_commands = 0, acknowledged_l1_counts = 0;
+    int max_abs_command_axis_counts = 0, command_axis_limit_counts = 0;
+    RecoilSnapshot terminal;
+    bool phase_edge_checked = false, tail_checked = false, deadline_checked = false;
+    bool cancellation_checked = false, unknown_receipt_checked = false, not_sent_checked = false;
+};
+// 仅接受无校准声明的SCHEMA_VALID候选。内部复用真实Controller与模拟ACK；
+// 不返回Controller/Permit，不连接Worker，不验证Worker累计或滚动预算。
+bool validate_recoil_candidate_execution(const RecoilProfile& candidate,
+    const RecoilCandidateReplayOptions& options, RecoilCandidateReplayReport& report,
+    std::string& error) noexcept;
 // 单线程纯计算；没有设备、线程或隐式全局时钟。每次只有一个未决意图。
 class RecoilCalibrationPermit;
 class RecoilController {
@@ -104,7 +124,12 @@ public:
     RecoilDecision cancel(RecoilReason reason, RecoilTime now) noexcept;
     RecoilSnapshot snapshot() const noexcept { return state_; }
 private:
+    struct OfflineReplayTag {};
+    RecoilController(OfflineReplayTag, double phase_budget_ms) noexcept;
+    friend bool validate_recoil_candidate_execution(const RecoilProfile&,
+        const RecoilCandidateReplayOptions&, RecoilCandidateReplayReport&, std::string&) noexcept;
     double phase_budget_ms() const noexcept;
+    double offline_phase_budget_ms_ = 0;
     std::shared_ptr<const RecoilCalibrationPermit> calibration_permit_;
     bool calibration_claimed_ = false;
     RecoilDecision result() const noexcept;

@@ -78,6 +78,29 @@ void test_release_environment() {
     SetEnvironmentVariableW(L"XEN_RELEASE_BACKENDS", nullptr);
 }
 
+void test_unmanaged_data_root_is_independent_of_caller_directory() {
+    TemporaryDirectory unrelated;
+    const auto original_directory = std::filesystem::current_path();
+    struct RestoreDirectory {
+        std::filesystem::path path;
+        ~RestoreDirectory() { SetCurrentDirectoryW(path.c_str()); }
+    } restore{original_directory};
+    expect(SetCurrentDirectoryW(unrelated.path().c_str()) != 0,
+           "测试必须先切到与程序无关的工作目录");
+    wchar_t executable[32768]{};
+    const auto length = GetModuleFileNameW(nullptr, executable, 32768);
+    expect(length > 0 && length < 32768, "测试能够定位实际可执行文件");
+    const auto expected_root = std::filesystem::path(executable).parent_path();
+    app::detail::ReleaseEnvironment environment;
+    std::string error;
+    expect(app::detail::load_release_environment(environment, error) &&
+               !environment.managed && environment.root == expected_root,
+           "直接启动时数据根必须来自程序目录，不能来自调用者工作目录: " + error);
+    expect(app::detail::apply_release_working_directory(environment, error) &&
+               std::filesystem::current_path() == expected_root,
+           "配置、日志及相对输出必须与模型/工作区使用同一程序根: " + error);
+}
+
 void test_manifest_validation() {
     TemporaryDirectory temporary;
     const auto root = temporary.path();
@@ -142,6 +165,7 @@ void test_manifest_validation() {
 int main() {
     test_backend_ownership();
     test_release_environment();
+    test_unmanaged_data_root_is_independent_of_caller_directory();
     test_manifest_validation();
     if (failures != 0) {
         std::cerr << "发布契约测试失败数: " << failures << '\n';

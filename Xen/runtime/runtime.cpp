@@ -17,6 +17,8 @@
 #include <cmath>
 #include <cstddef>
 #include <deque>
+#include <filesystem>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -350,7 +352,29 @@ struct Runtime::Impl {
                     auto stop = auto_stop_worker.load();
                     return stop && stop->request(id);
                 },
-                [this](std::uint64_t id) { if (auto stop = auto_stop_worker.load()) stop->cancel(id); });
+                [this](std::uint64_t id) { if (auto stop = auto_stop_worker.load()) stop->cancel(id); },
+                [this, previous_weapon = std::string{}, previous_epoch = std::uint64_t{0},
+                    generation = std::uint64_t{0}, previous_valid = false, exhausted = false]() mutable {
+                    if (!config.gsi.enabled) return TriggerContext{};
+                    if (exhausted) return TriggerContext{generation, true, false};
+                    const auto weapon = gsi_receiver.snapshot();
+                    const bool valid = weapon.valid && weapon.identity_match && !weapon.canonical_id.empty() &&
+                        weapon.source_epoch != 0 && weapon.state == weapon::WeaponState::ACTIVE &&
+                        weapon.ammo_clip && *weapon.ammo_clip > 0 && weapon.valid_until > TriggerClock::now();
+                    // revision/timestamp 的正常心跳不改变会话；身份、连续性或有效性变化持续增代。
+                    if (generation == 0 || weapon.canonical_id != previous_weapon ||
+                        weapon.source_epoch != previous_epoch || valid != previous_valid) {
+                        if (generation == std::numeric_limits<std::uint64_t>::max()) {
+                            exhausted = true;
+                            return TriggerContext{generation, true, false};
+                        }
+                        previous_weapon = weapon.canonical_id;
+                        previous_epoch = weapon.source_epoch;
+                        previous_valid = valid;
+                        ++generation;
+                    }
+                    return TriggerContext{generation, true, valid};
+                });
             if (!worker->start(trigger_config)) { set_error("自动扳机启动失败或设备不支持左键"); return false; }
             trigger_worker.store(std::move(worker));
         }
@@ -359,7 +383,7 @@ struct Runtime::Impl {
             motion_ledger->reset(config.aim.max_counts_per_frame, config.recoil.budget_window_ms, RecoilClock::now());
             recoil_profiles.clear(); recoil_observation_ns.store(0);
             { std::lock_guard lock(snapshot_mutex); recoil_profile_statuses.clear(); }
-            RecoilStore store(config.recoil.profile_directory);
+            RecoilStore store(std::filesystem::u8path(config.recoil.profile_directory));
             std::vector<RecoilStoredProfile> profiles;
             std::string error;
             if (!store.list(profiles, error)) { set_error("弹道目录读取失败：" + error); return false; }
