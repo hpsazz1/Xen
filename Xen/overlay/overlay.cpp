@@ -82,6 +82,8 @@ using MetricHistory =
 enum class WorkspacePage {
     OVERVIEW,
     DETECTION,
+    COLLECTION,
+    TRAINING,
     AIM,
     INPUT,
     SETTINGS,
@@ -307,7 +309,9 @@ void apply_window_theme(HWND window, UiTheme theme) noexcept {
 const char* page_title(WorkspacePage page) noexcept {
     switch (page) {
         case WorkspacePage::OVERVIEW: return "概览";
-        case WorkspacePage::DETECTION: return "检测与采集";
+        case WorkspacePage::DETECTION: return "检测与画面来源";
+        case WorkspacePage::COLLECTION: return "采集";
+        case WorkspacePage::TRAINING: return "训练";
         case WorkspacePage::AIM: return "瞄准控制";
         case WorkspacePage::INPUT: return "输入安全";
         case WorkspacePage::SETTINGS: return "偏好设置";
@@ -319,6 +323,8 @@ const char* page_context(WorkspacePage page) noexcept {
     switch (page) {
         case WorkspacePage::OVERVIEW: return "P0 / 本地闭环";
         case WorkspacePage::DETECTION: return "模型与画面";
+        case WorkspacePage::COLLECTION: return "按需保存训练素材";
+        case WorkspacePage::TRAINING: return "审核、训练与候选模型";
         case WorkspacePage::AIM: return "追踪与控制";
         case WorkspacePage::INPUT: return "输出与急停";
         case WorkspacePage::SETTINGS: return "运行与窗口";
@@ -1566,6 +1572,12 @@ struct Overlay::Impl {
             "检测", WorkspacePage::DETECTION,
             "配置模型、推理后端、采集来源与检测阈值，并查看同帧 ROI 检测预览。");
         nav_item(
+            "采集", WorkspacePage::COLLECTION,
+            "按需保存原图与预标注素材；需要先启动 CPU 画面 Runtime，不会自动启动检测或物理输出。");
+        nav_item(
+            "训练", WorkspacePage::TRAINING,
+            "检查素材、生成预标注、外部审核、导出数据集、离线训练和评估候选模型。");
+        nav_item(
             "瞄准", WorkspacePage::AIM,
             "配置轨迹确认、目标切换、瞄点位置和相对鼠标移动控制参数。");
         nav_item(
@@ -1712,7 +1724,9 @@ struct Overlay::Impl {
             show_log_panel ? "最近日志" : page_title(active_page));
         ImGui::PopFont();
 
-        if (!show_log_panel && active_page != WorkspacePage::OVERVIEW) {
+        if (!show_log_panel && active_page != WorkspacePage::OVERVIEW &&
+            active_page != WorkspacePage::COLLECTION &&
+            active_page != WorkspacePage::TRAINING) {
             const float button_width = 96.0f;
             ImGui::SetCursorPos(ImVec2(
                 ImGui::GetWindowWidth() - button_width - 22.0f, 12.0f));
@@ -3482,12 +3496,161 @@ struct Overlay::Impl {
         end_config_panel();
     }
 
+    void workspace_button(const char* label, const char* help,
+                          model_workspace::Action action, bool enabled,
+                          OverlayActions& actions) {
+        ImGui::BeginDisabled(!enabled);
+        if (ImGui::Button(label)) actions.workspace_action = action;
+        show_help_tooltip(help);
+        ImGui::EndDisabled();
+    }
+
+    void workspace_status(const model_workspace::Snapshot& workspace) {
+        render_notice("workspace_notice", workspace.message, kAccentStrong, kAccentSoft);
+        render_notice("collection_error", workspace.collection.error, kDanger, kDangerSoft);
+        ImGui::TextWrapped("作业：%s / %s", workspace.job_operation.c_str(), workspace.job_state.c_str());
+        ImGui::TextWrapped("%s", workspace.job_message.c_str());
+        ImGui::TextWrapped("作业目录：%s", workspace.job_directory.c_str());
+        ImGui::TextWrapped("候选模型：%s", workspace.candidate_path.c_str());
+    }
+
+    void render_collection(const RuntimeSnapshot& runtime,
+                           model_workspace::Settings& settings,
+                           const model_workspace::Snapshot& workspace,
+                           OverlayActions& actions) {
+        using Action = model_workspace::Action;
+        const auto& collection = workspace.collection;
+        const bool cpu_running = runtime.state == RuntimeState::RUNNING &&
+            runtime.detector_reload_state != DetectorReloadState::LOADING &&
+            !runtime.d3d11_cuda_interop && !runtime.d3d11_directml_interop;
+        const bool idle = !collection.active && !workspace.job_running;
+        ImGui::TextWrapped("只在需要时保存原图。先在检测页配置 CPU 画面来源并启动 Runtime，再核对类别语义。未检测到人物的图片仍需审核，不能直接作为负样本。");
+        ImGui::Spacing();
+        workspace_button("开始采集", "开始新的素材会话。必须已运行 CPU 画面 Runtime、模型未在重载、核对类别且没有后台作业；不会启动 Runtime。采集期间保持类别与模型代一致。", Action::START_COLLECTION,
+            idle && cpu_running && settings.class_schema_confirmed, actions);
+        ImGui::SameLine();
+        workspace_button(collection.paused ? "继续采集" : "暂停采集", "暂停时不接收新素材；继续使用当前会话和已有预算。", collection.paused ? Action::RESUME_COLLECTION : Action::PAUSE_COLLECTION,
+            collection.active && !workspace.job_running && (collection.paused ? cpu_running : true), actions);
+        ImGui::SameLine();
+        workspace_button("结束采集", "结束当前素材会话并完成已排队写入；不停止 Runtime。", Action::STOP_COLLECTION, collection.active, actions);
+        workspace_button("标记下一帧", "请求保存下一张有效 CPU 帧；不发送键鼠输入，仍受磁盘和队列预算约束。", Action::MARK_SAMPLE,
+            collection.active && !collection.paused && cpu_running, actions);
+        ImGui::SameLine();
+        workspace_button("打开数据目录", "打开配置的原始素材根目录，查看采集会话与图片。后台作业和导出结果请使用训练页的打开当前作业。", Action::OPEN_DATA_DIRECTORY, !settings.root_directory.empty(), actions);
+        ImGui::TextWrapped("状态：%s%s", collection.active ? "采集中" : "未采集", collection.paused ? "（已暂停）" : "");
+        ImGui::Text("保存 %llu   排队 %llu   丢弃 %llu   去重 %llu",
+            static_cast<unsigned long long>(collection.saved), static_cast<unsigned long long>(collection.queued),
+            static_cast<unsigned long long>(collection.dropped), static_cast<unsigned long long>(collection.duplicates));
+        ImGui::Text("已写入 %.2f MiB", static_cast<double>(collection.bytes) / (1024.0 * 1024.0));
+        const auto session_utf8 = collection.session_directory.u8string();
+        ImGui::TextWrapped("当前会话：%s", reinterpret_cast<const char*>(session_utf8.c_str()));
+        ImGui::Separator();
+        ImGui::BeginDisabled(!idle);
+        if (begin_form("collection_settings", 160.0f)) {
+            form_row("数据根目录", "本地素材和作业目录；结束采集及后台作业后可修改。路径可含中文和空格。");
+            ImGui::InputText("##collection_root", &settings.root_directory);
+            form_row("类别名称 / ID 顺序", "按原模型 class_id 从 0 开始填写，用英文逗号分隔。必须保留全部类别语义与顺序；不要将现有多类模型改成单类。");
+            if (ImGui::InputText("##collection_classes", &settings.class_names)) settings.class_schema_confirmed = false;
+            form_row("类别语义已核对", "对照原训练配置或模型说明确认每个 ID 的名称后勾选。只知道 person/head 的分组不足以确认全部类别语义。");
+            ImGui::BeginDisabled(settings.schema_model_sha256.empty());
+            ImGui::Checkbox("##collection_schema_confirmed", &settings.class_schema_confirmed);
+            ImGui::EndDisabled();
+            form_row("最多样本 / 张", "每个采集会话的保存预算；达到预算后停止接收新样本，避免一直采集。");
+            ImGui::InputInt("##collection_max_samples", &settings.max_samples);
+            form_row("磁盘预算 / MiB", "每个会话的写入预算；1 MiB 为 1048576 字节。预算不足时不继续写入新样本。");
+            ImGui::InputInt("##collection_max_disk", &settings.max_disk_mib);
+            form_row("候选间隔 / ms", "按需检查候选画面的最小时间间隔；近重复画面仍会被过滤，不代表定时必存。");
+            ImGui::InputInt("##collection_interval", &settings.interval_ms);
+            form_row("探索间隔 / ms", "为模型完全漏检的画面保留有限探索机会；无框图片仍是待审核样本，不能自动确认负样本。");
+            ImGui::InputInt("##collection_exploration", &settings.exploration_interval_ms);
+            ImGui::EndTable();
+        }
+        ImGui::EndDisabled();
+        workspace_button("保存采集与训练设置", "将本页及训练页设置单独保存到模型工作区配置，不写入 Runtime 的 config.ini。", Action::SAVE_SETTINGS, idle, actions);
+        workspace_status(workspace);
+    }
+
+    void render_training(const RuntimeSnapshot& runtime,
+                         model_workspace::Settings& settings,
+                         const model_workspace::Snapshot& workspace,
+                         OverlayActions& actions) {
+        using Action = model_workspace::Action;
+        const bool idle = !workspace.job_running && !workspace.collection.active;
+        const bool stopped = runtime.state == RuntimeState::STOPPED;
+        ImGui::TextWrapped("流程：检查素材 → 自动预标注 → CVAT / 外部审核 → 导入标签 → 导出数据集 → 训练 → 评估候选。未审核、失败、未知样本不能作为空标签训练。");
+        ImGui::BeginDisabled(!idle);
+        if (begin_form("training_tools", 156.0f)) {
+            form_row("Python 可执行文件", "填写已安装训练依赖的 python.exe 完整路径；工具不会替你安装依赖。点击检查素材可查看明确错误。");
+            ImGui::InputText("##training_python", &settings.python_executable);
+            form_row("工具脚本", "填写仓库提供的模型数据流程 Python 脚本完整路径；后台作业通过该脚本执行，并在作业目录记录状态。");
+            ImGui::InputText("##training_script", &settings.script_path);
+            form_row("数据根目录", "与采集页共享的素材根目录；检查与预标注从这里读取素材。");
+            ImGui::InputText("##training_root", &settings.root_directory);
+            form_row("可训练权重 / .pt", "填写类别兼容且来源明确的 PyTorch .pt 权重，只用于训练初始化；现有 ONNX 不能当作 .pt 恢复训练。");
+            ImGui::InputText("##training_weights", &settings.weights_path);
+            form_row("数据集目录", "填写导出的版本目录，目录内必须包含 data.yaml、dataset.json 和 dataset_identity.json；不要填写 YAML 文件本身。训练和评估校验已冻结的分组划分。");
+            ImGui::InputText("##training_dataset", &settings.dataset_path);
+            form_row("评估 / 预标注模型", "填写用于预标注或评估的 .onnx / .pt 完整路径；类别顺序必须兼容。检查素材可读取 ONNX metadata；只有评估通过兼容检查的 ONNX 可导入候选。");
+            ImGui::InputText("##training_model", &settings.model_path);
+            form_row("预标注结果 / JSON", "自动预标注成功后回填 prelabels.json；导出审核包使用该文件。可清空以采用采集时的原始预测框，已有人工审核标签优先。");
+            ImGui::InputText("##training_prelabels", &settings.prelabels_path);
+            form_row("审核清单 / JSON", "填写外部审核完成的 review.json 路径。顶层填写 reviewer；逐图 state 设为 VERIFIED_POSITIVE、VERIFIED_NEGATIVE 或 EXCLUDED。补全所有框；缺失标签不能当作负样本。");
+            ImGui::InputText("##training_review", &settings.review_manifest);
+            ImGui::EndTable();
+        }
+        ImGui::EndDisabled();
+        if (ImGui::CollapsingHeader("1. 数据准备与审核", ImGuiTreeNodeFlags_DefaultOpen)) {
+            workspace_button("检查素材", "停止 Runtime 后检查素材并读取待评估模型的 ONNX metadata，帮助核对原始类别语义；无需先勾选类别确认。结果见作业目录的检查报告。", Action::INSPECT_DATA, idle && stopped, actions);
+            ImGui::SameLine();
+            workspace_button("自动预标注", "用评估 / 预标注模型字段中的 ONNX 或 .pt 生成待审核框；结果回填预标注结果路径，导出审核包继续使用。模型结果不直接成为已确认训练标签。", Action::PRELABEL, idle && stopped, actions);
+            workspace_button("导出审核包", "导出图片与预标注，在 CVAT / 外部编辑器审核整张图的所有目标，将 YOLO 标签放回对应路径。review.json 顶层填写 reviewer，逐图 state 设 VERIFIED_POSITIVE / VERIFIED_NEGATIVE / EXCLUDED；缺失标签不能确认为负样本。", Action::EXPORT_REVIEW, idle && stopped, actions);
+            ImGui::SameLine();
+            workspace_button("导入审核标签", "读取审核清单路径中的 review.json 和对应标签；必须填写 reviewer 与逐图明确状态。未知、失败、缺失标签不视为空标注。", Action::IMPORT_LABELS, idle && stopped && !settings.review_manifest.empty(), actions);
+            workspace_button("导出训练数据集", "只导出已审核正样本和显式确认的负样本，按会话分组留出验证数据；采集期间禁止导出。完成后把生成的版本目录填入数据集目录。", Action::EXPORT_DATASET, idle && stopped, actions);
+        }
+        if (ImGui::CollapsingHeader("2. 离线训练", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::BeginDisabled(!idle);
+            if (begin_form("training_parameters", 156.0f)) {
+                form_row("恢复未完成训练", "勾选后权重须为本工具未完成作业的 last.pt，数据版本、总轮数和输入尺寸保持原值；恢复优化器及epoch到新目录，保留原作业。更换数据请取消勾选，作为新的微调实验。");
+                ImGui::Checkbox("##training_resume", &settings.resume_training);
+                form_row("训练轮数", "完整遍历训练集的最大轮数；建议先用小规模已审核数据验证流程，再比较固定评估集。");
+                ImGui::InputInt("##training_epochs", &settings.epochs);
+                form_row("输入尺寸 / px", "训练输入边长，须与候选模型导出和 Runtime 输入契约相容；修改后需重新评估延迟与准确率。");
+                ImGui::InputInt("##training_imgsz", &settings.image_size);
+                form_row("批量大小 / 张", "一次训练迭代的图像数量；显存不足时减小并重新开始，不会自动修改正在执行的作业。");
+                ImGui::InputInt("##training_batch", &settings.batch_size);
+                form_row("训练设备", "填写 GPU 编号（例如 0）或 cpu。训练需先停止 Runtime，避免占用检测资源。");
+                ImGui::InputText("##training_device", &settings.device);
+                ImGui::EndTable();
+            }
+            ImGui::EndDisabled();
+            workspace_button("开始训练", "使用已填写的 .pt 和数据集版本目录启动离线训练；必须停止 Runtime、结束采集且没有其他作业。不会自动替换生产模型。", Action::TRAIN,
+                idle && stopped && !settings.weights_path.empty() && !settings.dataset_path.empty(), actions);
+            ImGui::SameLine();
+            workspace_button("取消后台作业", "请求终止当前后台作业；保留作业状态和已有产物用于排查，不把取消结果视为成功。", Action::CANCEL_JOB, workspace.job_running, actions);
+        }
+        if (ImGui::CollapsingHeader("3. 评估与候选模型", ImGuiTreeNodeFlags_DefaultOpen)) {
+            workspace_button("评估模型", "在固定验证数据上评估待评估模型；读取精确率、召回及误报报告，不能仅凭训练损失认定提升。", Action::EVALUATE,
+                idle && stopped && !settings.model_path.empty() && !settings.dataset_path.empty(), actions);
+            ImGui::SameLine();
+            workspace_button("导入候选模型", "校验并登记评估后的候选模型；不自动重载 Runtime，不表示真实闭环验收通过。", Action::IMPORT_CANDIDATE,
+                idle && stopped && workspace.job_operation == "evaluate" && workspace.job_state == "SUCCEEDED", actions);
+            workspace_button("打开数据目录", "打开原始素材根目录查看采集会话和图片；此目录与后台作业目录不同。", Action::OPEN_DATA_DIRECTORY, !settings.root_directory.empty(), actions);
+            ImGui::SameLine();
+            workspace_button("打开当前作业", "打开下方显示的作业目录，查看 process.log、status.json、检查报告及本次导出产物；失败时也可打开排查。", Action::OPEN_JOB_DIRECTORY, !workspace.job_directory.empty(), actions);
+        }
+        workspace_button("保存采集与训练设置", "将采集和训练输入保存到独立工作区配置；与页面顶部保存 Runtime INI 的按钮相互独立。", Action::SAVE_SETTINGS, idle, actions);
+        workspace_status(workspace);
+    }
+
     void render_workspace(
             const RuntimeSnapshot& snapshot,
             const std::shared_ptr<const RuntimePreviewFrame>& preview,
             const OverlayModelCatalog& model_catalog,
             const OverlayBackendCatalog& backend_catalog,
             AppConfig& app_config,
+            model_workspace::Settings& workspace_settings,
+            const model_workspace::Snapshot& workspace_snapshot,
             const std::string& app_message,
             OverlayActions& actions) {
         const bool can_edit = editable(snapshot);
@@ -3533,6 +3696,12 @@ struct Overlay::Impl {
                     break;
                 case WorkspacePage::AIM:
                     render_aim_config(app_config, can_edit);
+                    break;
+                case WorkspacePage::COLLECTION:
+                    render_collection(snapshot, workspace_settings, workspace_snapshot, actions);
+                    break;
+                case WorkspacePage::TRAINING:
+                    render_training(snapshot, workspace_settings, workspace_snapshot, actions);
                     break;
                 case WorkspacePage::INPUT:
                     render_input_config(
@@ -3674,6 +3843,8 @@ bool Overlay::render(
         const OverlayModelCatalog& model_catalog,
         const OverlayBackendCatalog& backend_catalog,
         AppConfig& config,
+        model_workspace::Settings& workspace_settings,
+        const model_workspace::Snapshot& workspace_snapshot,
         const std::string& app_message,
         OverlayActions& actions) noexcept {
     if (!impl_ || !impl_->initialized || impl_->present_boundary.failed()) {
@@ -3731,7 +3902,7 @@ bool Overlay::render(
         impl_->render_global_bar(snapshot, actions);
         impl_->render_workspace(
             snapshot, preview, model_catalog, backend_catalog,
-            config, app_message, actions);
+            config, workspace_settings, workspace_snapshot, app_message, actions);
         const bool detection_page_active =
             impl_->active_page == WorkspacePage::DETECTION;
         const bool preview_enabled =

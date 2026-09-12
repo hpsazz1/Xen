@@ -15,6 +15,8 @@
 #include "detector/detector.h"
 #include "mouse/mouse.h"
 
+namespace data_collection { class Collector; }
+
 enum class RuntimeState {
     STOPPED,
     STARTING,
@@ -314,6 +316,8 @@ public:
     bool start(const AppConfig& config,
                std::shared_ptr<IMouseController> input_device) noexcept;
     void stop() noexcept;
+    // 仅在停止且没有后台线程时接入；采集器不拥有输出设备。
+    bool set_data_collector(std::shared_ptr<data_collection::Collector> collector) noexcept;
     // 仅在 RUNNING 状态接受请求。候选模型异步加载，失败不替换旧模型。
     bool reload_detector(const DetectorConfig& config) noexcept;
     bool post_intent(const RuntimeIntent& intent) noexcept;

@@ -7,8 +7,10 @@
 
 #include "config/config.h"
 #include "runtime/runtime.h"
+#include "model_workspace/model_workspace.h"
 
 struct OverlayActions {
+    model_workspace::Action workspace_action = model_workspace::Action::NONE;
     bool start_requested = false;
     bool stop_requested = false;
     bool reload_detector_requested = false;
@@ -46,6 +48,8 @@ public:
                 const OverlayModelCatalog& model_catalog,
                 const OverlayBackendCatalog& backend_catalog,
                 AppConfig& config,
+                model_workspace::Settings& workspace_settings,
+                const model_workspace::Snapshot& workspace_snapshot,
                 const std::string& app_message,
                 OverlayActions& actions) noexcept;
     const std::string& last_error() const noexcept;

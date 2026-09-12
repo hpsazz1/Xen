@@ -1,0 +1,8 @@
+# 独立训练环境；不会由 Xen 自动安装。Ultralytics 受 AGPL-3.0/Enterprise 许可约束。
+# 固定到已核对 exporter/trainer API 的版本，不跟随最新 NMS 语义。
+ultralytics==8.3.203
+torch==2.8.0
+torchvision==0.23.0
+onnx==1.19.0
+onnxruntime==1.22.1
+Pillow==11.3.0

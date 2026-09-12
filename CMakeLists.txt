@@ -845,13 +845,26 @@ add_library(app_startup STATIC
     Xen/app/startup.cpp)
 target_include_directories(app_startup PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 
+add_library(data_collection STATIC
+    Xen/data_collection/data_collection.cpp)
+target_include_directories(data_collection PUBLIC
+    ${PROJECT_SOURCE_DIR}/Xen ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(data_collection PUBLIC ${OpenCV_LIBS}
+    PRIVATE nlohmann_json::nlohmann_json bcrypt Threads::Threads log)
+
+add_library(model_workspace STATIC
+    Xen/model_workspace/model_workspace.cpp)
+target_include_directories(model_workspace PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(model_workspace PUBLIC data_collection
+    PRIVATE nlohmann_json::nlohmann_json bcrypt shell32 log)
+
 add_library(runtime STATIC
     Xen/runtime/runtime.cpp
     Xen/runtime/runtime_queue.cpp
     Xen/runtime/camera_motion.cpp)
 target_include_directories(runtime PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(runtime
-    PUBLIC detector capture aim aim_landmark mouse keyboard config log
+    PUBLIC detector capture aim aim_landmark mouse keyboard config log data_collection
     PRIVATE Threads::Threads)
 
 add_library(app_input STATIC
@@ -899,7 +912,7 @@ add_library(overlay STATIC
     Xen/overlay/overlay.cpp)
 target_include_directories(overlay PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(overlay
-    PUBLIC runtime config
+    PUBLIC runtime config model_workspace
     PRIVATE imgui d3d11 dxgi dwmapi)
 
 add_executable(xen_app WIN32
@@ -907,6 +920,20 @@ add_executable(xen_app WIN32
     Xen/app/model_catalog.cpp
     Xen/app/xen.rc)
 set_target_properties(xen_app PROPERTIES OUTPUT_NAME Xen)
+set(XEN_MODEL_TOOLS_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}")
+if(CMAKE_CONFIGURATION_TYPES)
+    string(APPEND XEN_MODEL_TOOLS_OUTPUT "/$<CONFIG>")
+endif()
+# 与现有运行库部署相同：本项目未重写RUNTIME_OUTPUT_DIRECTORY。
+# 不用TARGET_FILE_DIR查询，避免CMake 3.18的隐式反向依赖形成循环。
+add_custom_target(model_workspace_tools
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${XEN_MODEL_TOOLS_OUTPUT}/scripts"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${PROJECT_SOURCE_DIR}/scripts/model_data_pipeline.py"
+        "${PROJECT_SOURCE_DIR}/scripts/model_training_requirements.txt"
+        "${XEN_MODEL_TOOLS_OUTPUT}/scripts"
+    VERBATIM)
+add_dependencies(xen_app model_workspace_tools)
 target_link_libraries(xen_app PRIVATE
     overlay app_input app_startup runtime xen_debug config crash log app_release)
 if(WIN32)
@@ -1394,6 +1421,30 @@ if(BUILD_TESTING)
     target_link_libraries(input_safety_tests PRIVATE app_input)
     xen_deploy_runtime_dlls(input_safety_tests OPENCV ORT NDI)
     add_test(NAME input_safety_tests COMMAND input_safety_tests)
+
+    add_executable(data_collection_tests tests/data_collection_tests.cpp)
+    target_link_libraries(data_collection_tests PRIVATE data_collection nlohmann_json::nlohmann_json)
+    xen_deploy_runtime_dlls(data_collection_tests OPENCV)
+    add_test(NAME data_collection_tests COMMAND data_collection_tests)
+
+    add_executable(model_workspace_tests tests/model_workspace_tests.cpp)
+    target_link_libraries(model_workspace_tests PRIVATE model_workspace nlohmann_json::nlohmann_json)
+    xen_deploy_runtime_dlls(model_workspace_tests OPENCV)
+    add_test(NAME model_workspace_tests COMMAND model_workspace_tests
+        "${XEN_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/model_workspace_worker_fixture.py")
+    add_test(NAME model_data_pipeline_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+        "${PROJECT_SOURCE_DIR}/tests/model_data_pipeline_tests.py")
+    add_test(NAME model_data_integration_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+        "${PROJECT_SOURCE_DIR}/tests/model_data_integration_tests.py"
+        "$<TARGET_FILE:data_collection_tests>"
+        "${PROJECT_SOURCE_DIR}/scripts/model_data_pipeline.py")
+
+    # 独立窗口验收host不创建Runtime或任何设备；仅显式运行时保存自身窗口。
+    add_executable(model_workspace_ui_preview tests/model_workspace_ui_preview.cpp)
+    target_link_libraries(model_workspace_ui_preview PRIVATE overlay imgui ${OpenCV_LIBS} log)
+    xen_deploy_runtime_dlls(model_workspace_ui_preview OPENCV ORT NDI)
 
     # Overlay Present 系统 seam 与标量 helper 均不创建 Win32/D3D11 窗口，
     # 测试只注入 HRESULT，也不链接 ImGui。
