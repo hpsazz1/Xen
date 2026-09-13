@@ -312,7 +312,7 @@ MouseConfig config_for(int port) {
     return config;
 }
 void test_packets_and_owned_cleanup() {
-    FakeKmboxDevice device(std::vector<AckMode>(9, AckMode::VALID));
+    FakeKmboxDevice device(std::vector<AckMode>(10, AckMode::VALID));
     auto mouse = create_test_mouse(config_for(device.port()));
     expect(mouse && mouse->open() && mouse->output_owner_exclusive(), "工厂独占所有者打开本机回环连接");
     expect(mouse->supports_wasd_keyboard(), "KMBOX 支持键盘能力");
@@ -330,8 +330,8 @@ void test_packets_and_owned_cleanup() {
     mouse->close();
     device.finish();
     const auto packets = device.packets();
-    expect(packets.size() == 9, "握手、监听、两份报告、两次屏蔽、释放和两次解除屏蔽");
-    if (packets.size() != 9) return;
+    expect(packets.size() == 10, "握手、监听、两份报告、两次屏蔽、释放、两次解除屏蔽和零报告刷新");
+    if (packets.size() != 10) return;
     expect(packets[2].size() == 28 && read_u32_le(packets[2].data()+12) == 0x123c2c2f &&
         packets[2][16] == 0 && packets[2][17] == 0 && packets[2][18] == 0x1a && packets[2][19] == 0x04,
         "官方 12 字节键盘载荷包含 HID W、A");
@@ -343,6 +343,9 @@ void test_packets_and_owned_cleanup() {
     for (std::size_t i = 7; i < 9; ++i)
         expect(read_u32_le(packets[i].data()+12) == 0x23344343 && read_u32_le(packets[i].data()+4) != 0,
                "关闭只解除本连接的 usage 屏蔽，禁止 unmask_all");
+    expect(read_u32_le(packets[9].data()+12) == 0x123c2c2fU &&
+        std::all_of(packets[9].begin()+16, packets[9].end(), [](auto value) { return value == 0; }),
+        "解除屏蔽后刷新必须是全零软件报告，不合成任何物理持键");
 }
 void test_all_combinations_and_disabled_output() {
     FakeKmboxDevice device(std::vector<AckMode>(19, AckMode::VALID));
@@ -396,7 +399,7 @@ void test_reopen_reconciles_unknown_debt() {
     // 因此必须在监听/READY 前拒绝打开；第三次打开完成恢复。
     FakeKmboxDevice device({AckMode::VALID,AckMode::VALID,AckMode::VALID,AckMode::VALID,
         AckMode::NONE,AckMode::VALID,AckMode::VALID,AckMode::NONE,
-        AckMode::VALID,AckMode::VALID,AckMode::VALID,AckMode::VALID,AckMode::VALID});
+        AckMode::VALID,AckMode::VALID,AckMode::VALID,AckMode::VALID,AckMode::VALID,AckMode::VALID});
     auto mouse = create_test_mouse(config_for(device.port()));
     expect(mouse->open(), "重开测试连接成功");
     mouse->set_wasd_keyboard(1);
@@ -406,20 +409,98 @@ void test_reopen_reconciles_unknown_debt() {
     expect(mouse->open(), "后续重连先清理软件键和屏蔽再进入 READY");
     mouse->close(); device.finish();
     const auto packets = device.packets();
-    expect(packets.size() == 13, "重连清理的数据包数量符合预期");
-    if (packets.size() == 13) {
+    expect(packets.size() == 14, "重连清理和解除屏蔽后刷新的数据包数量符合预期");
+    if (packets.size() == 14) {
         expect(read_u32_le(packets[5].data()+12) == kMonitorCommand,
             "软件键释放失败不得解除物理 W 屏蔽");
         expect(read_u32_le(packets[8].data()+12) == kConnectCommand &&
             read_u32_le(packets[9].data()+12) == 0x123c2c2f &&
             read_u32_le(packets[10].data()+12) == 0x23344343 &&
-            read_u32_le(packets[11].data()+12) == kMonitorCommand,
-            "新连接先释放再解除本连接屏蔽，最后启动监听");
+            read_u32_le(packets[11].data()+12) == 0x123c2c2f &&
+            std::all_of(packets[11].begin()+16, packets[11].end(), [](auto value) { return value == 0; }) &&
+            read_u32_le(packets[12].data()+12) == kMonitorCommand,
+            "新连接先释放、解除本连接屏蔽并零报告刷新，最后启动监听");
+    }
+}
+void test_cleanup_refreshes_only_empty_software_report() {
+    for (const bool still_held : {true, false}) {
+        FakeKmboxDevice device(std::vector<AckMode>(8, AckMode::VALID));
+        auto mouse = create_test_mouse(config_for(device.port()));
+        expect(mouse && mouse->open(), "物理持键归还协议测试连接成功");
+        if (!mouse) continue;
+        device.send_monitor(0, {0x1a, 0x14}); // 物理W和非WASD的Q
+        InputSnapshot input;
+        const auto wait_input = [&](bool held) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+            do {
+                mouse->poll_input(input);
+                if (input.state_valid && input.virtual_keys['W'] == held && input.virtual_keys['Q']) return true;
+                std::this_thread::yield();
+            } while (std::chrono::steady_clock::now() < deadline);
+            return false;
+        };
+        expect(wait_input(true), "先接收真实输入快照中的W与Q");
+        expect(mouse->set_wasd_mask(1, true).disposition == KeyboardDisposition::ACKNOWLEDGED &&
+            mouse->set_wasd_keyboard(4).disposition == KeyboardDisposition::ACKNOWLEDGED, "只屏蔽物理W并软件反向S");
+        if (!still_held) { device.send_monitor(0, {0x14}); expect(wait_input(false), "取消前物理W已释放"); }
+        expect(mouse->cleanup_wasd_keyboard().disposition == KeyboardDisposition::ACKNOWLEDGED, "清理候选所有步骤收到ACK");
+        const auto packets = device.packets();
+        expect(packets.size() == 7, "cleanup必须包含软件0、逐键unmask、最后软件0刷新三个步骤");
+        if (packets.size() == 7) {
+            const auto empty_report = [&](std::size_t index) {
+                return packets[index].size() == 28 && read_u32_le(packets[index].data()+12) == 0x123c2c2fU &&
+                    std::all_of(packets[index].begin()+16, packets[index].end(), [](auto value) { return value == 0; });
+            };
+            expect(empty_report(4) && read_u32_le(packets[5].data()+12) == 0x23344343U &&
+                read_u32_le(packets[5].data()+4) == 0x1a00U && empty_report(6),
+                "只解除本owner的W，最后刷新不复制W或Q为软件DOWN");
+        }
+        mouse->poll_input(input);
+        expect(input.virtual_keys['W'] == still_held && input.virtual_keys['Q'],
+            "清理不改写物理快照，不恢复已经释放的W或干涉Q");
+        mouse->close(); device.finish();
+    }
+}
+void test_last_refresh_debt_survives_retry_and_recreation() {
+    for (const bool recreate : {false, true}) {
+        std::vector<AckMode> responses(recreate ? 13 : 9, AckMode::VALID);
+        responses[6] = AckMode::NONE; // 最后刷新已发送但未确认
+        if (recreate) responses[7] = AckMode::NONE; // 销毁时重试仍未确认
+        FakeKmboxDevice device(std::move(responses));
+        auto config = config_for(device.port());
+        auto mouse = create_test_mouse(config);
+        expect(mouse && mouse->open(), "刷新债务测试连接成功");
+        if (!mouse) continue;
+        expect(mouse->set_wasd_mask(1, true).disposition == KeyboardDisposition::ACKNOWLEDGED &&
+            mouse->set_wasd_keyboard(4).disposition == KeyboardDisposition::ACKNOWLEDGED, "建立W屏蔽与反向S报告");
+        expect(mouse->cleanup_wasd_keyboard().disposition == KeyboardDisposition::APPLICATION_UNKNOWN,
+            "unmask已ACK但最后零报告未ACK仍是清理未知");
+        if (recreate) {
+            mouse.reset();
+            mouse = create_test_mouse(config);
+            expect(mouse && mouse->open(), "新owner必须先完成继承的零报告刷新才进入READY");
+        } else {
+            expect(mouse->cleanup_wasd_keyboard().disposition == KeyboardDisposition::ACKNOWLEDGED,
+                "相同owner下一次cleanup应再次发送未确认刷新");
+            const auto count = device.packets().size();
+            expect(mouse->cleanup_wasd_keyboard().disposition == KeyboardDisposition::ACKNOWLEDGED &&
+                device.packets().size() == count, "刷新ACK之后清债，空cleanup不再发送");
+        }
+        mouse->close(); device.finish();
+        const auto packets = device.packets();
+        expect(packets.size() == (recreate ? 13U : 9U), "刷新责任重试的数据包数量准确");
+        const auto empty_report = [&](std::size_t index) {
+            return index < packets.size() && packets[index].size() == 28 &&
+                read_u32_le(packets[index].data()+12) == 0x123c2c2fU &&
+                std::all_of(packets[index].begin()+16, packets[index].end(), [](auto value) { return value == 0; });
+        };
+        expect(empty_report(6) && empty_report(7), "失败与重试均只发送全零软件报告");
+        if (recreate) expect(empty_report(10), "跨owner恢复只刷新零报告，不重复已ACK的W解除屏蔽");
     }
 }
 void test_factory_recreation_reconciles_endpoint_keyboard_debt() {
     // 只丢软件键释放的 ACK，握手和监听仍正常；遗忘债务的旧实现会错误进入 READY。
-    std::vector<AckMode> responses(20, AckMode::VALID);
+    std::vector<AckMode> responses(22, AckMode::VALID);
     responses[12] = AckMode::NONE;
     FakeKmboxDevice device(std::move(responses), 2);
     auto config = config_for(device.port());
@@ -454,8 +535,8 @@ void test_factory_recreation_reconciles_endpoint_keyboard_debt() {
     device.finish();
 
     const auto packets = device.packets();
-    expect(packets.size() == 20, "跨 factory 清理和恢复的数据包数量符合协议边界");
-    if (packets.size() != 20) return;
+    expect(packets.size() == 22, "跨 factory 清理和恢复包含未确认刷新责任的数据包数量");
+    if (packets.size() != 22) return;
     const auto command = [&](std::size_t index) {
         return read_u32_le(packets[index].data() + 12U);
     };
@@ -471,10 +552,10 @@ void test_factory_recreation_reconciles_endpoint_keyboard_debt() {
         command(11) == 0x23344343U && read_u32_le(packets[11].data() + 4U) == 0x1a00U &&
         command(12) == 0x23344343U && read_u32_le(packets[12].data() + 4U) == 0x0700U,
         "软件键明确释放后只解除继承的 W、D，禁止 unmask_all 或触碰 A、S");
-    expect(command(13) == kConnectCommand && command(14) == 0x23344343U &&
-        read_u32_le(packets[14].data() + 4U) == 0x0700U && command(15) == kMonitorCommand,
-        "部分清理跨销毁只保留未确认的 D，不重复软件键和 W 清理");
-    expect(command(17) == kConnectCommand && command(18) == kMonitorCommand,
+    expect(command(13) == kConnectCommand && is_release(14) && command(15) == 0x23344343U &&
+        read_u32_le(packets[15].data() + 4U) == 0x0700U && is_release(16) && command(17) == kMonitorCommand,
+        "部分清理跨销毁保留未确认D与零报告刷新责任，不再次解除已确认W");
+    expect(command(19) == kConnectCommand && command(20) == kMonitorCommand,
         "全部清理 ACK 后删除端点债务，再次重建直接握手和监听");
 }
 void test_event_journal() {
@@ -531,6 +612,8 @@ int main() {
     WSADATA data{};
     if (WSAStartup(MAKEWORD(2,2), &data) != 0) return 2;
     test_packets_and_owned_cleanup();
+    test_cleanup_refreshes_only_empty_software_report();
+    test_last_refresh_debt_survives_retry_and_recreation();
     test_all_combinations_and_disabled_output();
     test_ack_loss_cleanup();
     test_reopen_reconciles_unknown_debt();

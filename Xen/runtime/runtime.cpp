@@ -326,7 +326,7 @@ struct Runtime::Impl {
                 }
                 auto_stop_worker.store(std::move(worker));
             }
-            LOG_INFO("auto_stop", "自动急停由允许键和有效目标独立触发；要求源机焦点，估算不授予开火");
+            LOG_INFO("auto_stop", "自动急停由允许键和准星进入人物完整范围触发；要求源机焦点，估算不授予开火");
         }
         if ((config.auto_stop.enabled || config.trigger.enabled || config.recoil.enabled) && config.source_context.enabled) {
                 auto context_config = config.source_context;
@@ -849,10 +849,11 @@ struct Runtime::Impl {
                 }
                 aim_frame = std::move(prepared.frame);
                 if (auto stop = auto_stop_worker.load()) {
-                    // 独立急停按配置目标类别识别，不要求准星命中或 Aim hold。
+                    // 使用同一画面的实际准星控制中心判断完整人物范围，不依赖 Trigger 开关。
                     AutoStopBlockReason reason;
                     const auto deadline = runtime::detail::auto_stop_target_deadline(
-                        aim_frame.detections, config.aim, frame->timing, std::chrono::steady_clock::now(), &reason);
+                        aim_frame.detections, config.aim, frame->timing, std::chrono::steady_clock::now(),
+                        aim_frame.control_center_x, aim_frame.control_center_y, &reason);
                     stop->publish_target(deadline, reason);
                 }
                 profile.background_motion_ms = prepared.background_motion_ms;

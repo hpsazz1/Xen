@@ -25,7 +25,7 @@ enum class AutoStopBlockReason {
     NONE, SOURCE_FOCUS, RELEASE_REQUIRED, INPUT_UNAVAILABLE, INPUT_HISTORY,
     ACTIVATION_NOT_HELD, SAFETY_PERMISSION, PAUSED, MOTION_UNAVAILABLE,
     CONTINUOUS_REQUEST_CONSUMED, NO_TARGET, SOURCE_TIMING_INVALID,
-    SOURCE_UNCERTAINTY, TARGET_STALE, OUTPUT_FAULT
+    SOURCE_UNCERTAINTY, TARGET_STALE, OUTPUT_FAULT, CROSSHAIR_OUTSIDE_TARGET
 };
 inline const char* AutoStopBlockReasonName(AutoStopBlockReason reason) noexcept {
     switch (reason) {
@@ -44,6 +44,7 @@ inline const char* AutoStopBlockReasonName(AutoStopBlockReason reason) noexcept 
     case AutoStopBlockReason::SOURCE_UNCERTAINTY: return "源时钟不确定度超界";
     case AutoStopBlockReason::TARGET_STALE: return "目标帧已超过50ms有效期";
     case AutoStopBlockReason::OUTPUT_FAULT: return "设备输出故障";
+    case AutoStopBlockReason::CROSSHAIR_OUTSIDE_TARGET: return "准星未进入人物范围";
     }
     return "未知阻断原因";
 }

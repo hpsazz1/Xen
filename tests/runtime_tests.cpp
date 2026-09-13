@@ -642,8 +642,24 @@ int main() {
         timing.source_time_at = now - std::chrono::milliseconds(10);
         timing.source_clock_uncertainty_ms = 5;
         std::array<Detection, 1> detections{{{100, 100, 110, 110, 0.5f, 2}}};
-        const auto valid = [&] { return runtime::detail::auto_stop_target_deadline(detections, config, timing, now); };
-        expect(valid() == now + std::chrono::milliseconds(35), "配置类别边缘目标应独立急停，不要求准星中心且扣除不确定度");
+        float center_x = 105, center_y = 105;
+        const auto valid = [&] { return runtime::detail::auto_stop_target_deadline(detections, config, timing, now, center_x, center_y); };
+        expect(valid() == now + std::chrono::milliseconds(35), "准星在人物框内且源帧新鲜时可急停，期限扣除不确定度");
+        center_x = 99;
+        expect(valid() == std::chrono::steady_clock::time_point{}, "人物可见但准星在框外不能急停");
+        center_x = 105; center_y = 111;
+        expect(valid() == std::chrono::steady_clock::time_point{}, "准星纵向离开人物范围必须撤销急停目标");
+        center_y = 105; center_x = std::numeric_limits<float>::quiet_NaN();
+        expect(valid() == std::chrono::steady_clock::time_point{}, "无效准星位置不能产生急停许可");
+        center_x = 100; center_y = 110;
+        expect(valid() != std::chrono::steady_clock::time_point{}, "完整人物检测框边界包含在急停范围，不使用扳机缩小内域");
+        center_x = 105; center_y = 105;
+        AutoStopBlockReason reason = AutoStopBlockReason::NONE;
+        runtime::detail::auto_stop_target_deadline(detections, config, timing, now, 99, 105, &reason);
+        expect(reason == AutoStopBlockReason::CROSSHAIR_OUTSIDE_TARGET, "框外等待理由必须区别于没有识别目标");
+        std::array<Detection, 2> multiple{{{0, 0, 20, 20, 0.9f, 2}, detections[0]}};
+        expect(runtime::detail::auto_stop_target_deadline(multiple, config, timing, now, center_x, center_y) !=
+            std::chrono::steady_clock::time_point{}, "首个人物不包含准星时仍检查后续人物");
         detections[0].class_id = 3;
         expect(valid() != std::chrono::steady_clock::time_point{}, "配置头部类别应独立可用");
         detections[0].class_id = 0;

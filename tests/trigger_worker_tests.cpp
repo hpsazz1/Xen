@@ -365,7 +365,10 @@ void receipt_time_and_event_history() {
     for(int mode=1;mode<=6;++mode) {
         Fixture f; f.mouse->timing_mode=mode;
         expect(f.start(false,200), "异常时间fixture启动"); f.fire();
-        expect(until([&] { return f.mouse->count(false)>=1; }), "异常按钮回执需要UP");
+        // fake 在 UP 调用入口计数；Worker 完成回执链后才发布 fault 快照。
+        // 必须等待两个完成事实，不能把“已进入设备调用”当成快照已发布。
+        expect(until([&] { return f.mouse->count(false)>=1 && f.worker.snapshot().faulted; }),
+            "异常按钮回执需要UP及已发布的故障快照");
         expect(f.worker.snapshot().faulted && !f.worker.firing_signal().confirmed_down,
             "缺失倒退未来回执不可产生有效开火信号");
         bool rejected=false;

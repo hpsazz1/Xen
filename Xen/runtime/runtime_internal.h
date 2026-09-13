@@ -30,6 +30,7 @@ inline const char* auto_stop_startup_error(const AutoStopConfig& stop,
 inline std::chrono::steady_clock::time_point auto_stop_target_deadline(
         std::span<const Detection> detections, const AimConfig& config,
         const FrameTiming& timing, std::chrono::steady_clock::time_point now,
+        float center_x, float center_y,
         AutoStopBlockReason* reason = nullptr) noexcept {
     const auto blocked = [&](AutoStopBlockReason value) {
         if (reason) *reason = value;
@@ -44,6 +45,7 @@ inline std::chrono::steady_clock::time_point auto_stop_target_deadline(
     const auto deadline = timing.source_time_at + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
         std::chrono::duration<double, std::milli>(kObservationAgeMs - uncertainty));
     if (deadline <= now) return blocked(AutoStopBlockReason::TARGET_STALE);
+    bool target_found = false;
     for (const auto& detection : detections) {
         const auto contains = [&](const std::vector<int>& ids) {
             return std::find(ids.begin(), ids.end(), detection.class_id) != ids.end();
@@ -53,11 +55,17 @@ inline std::chrono::steady_clock::time_point auto_stop_target_deadline(
             std::isfinite(detection.y1) && std::isfinite(detection.y2) &&
             detection.x2 > detection.x1 && detection.y2 > detection.y1 &&
             (contains(config.person_class_ids) || contains(config.head_class_ids))) {
-            if (reason) *reason = AutoStopBlockReason::NONE;
-            return deadline;
+            target_found = true;
+            // 检测框与控制中心都位于当前 ROI 坐标系；完整框包含边界，不套用扳机内域比例。
+            if (std::isfinite(center_x) && std::isfinite(center_y) &&
+                center_x >= detection.x1 && center_x <= detection.x2 &&
+                center_y >= detection.y1 && center_y <= detection.y2) {
+                if (reason) *reason = AutoStopBlockReason::NONE;
+                return deadline;
+            }
         }
     }
-    return blocked(AutoStopBlockReason::NO_TARGET);
+    return blocked(target_found ? AutoStopBlockReason::CROSSHAIR_OUTSIDE_TARGET : AutoStopBlockReason::NO_TARGET);
 }
 
 // 同一生产入口维护 observation 时间基准及连续性；不重新判定 Capture 的映射质量。

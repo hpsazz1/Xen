@@ -3003,8 +3003,8 @@ struct Overlay::Impl {
         ImGui::TextWrapped("停止运行后可编辑并保存参数；下次启动生效。");
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         begin_config_panel("auto_stop_panel", "自动急停", 300.0f);
-        ImGui::TextWrapped("按住快捷键且检测到目标后自动制动；无需开启自动扳机，也无需准星进入目标框。");
-        ImGui::TextWrapped("需要有效源端焦点与新鲜图像；松键、失去目标或失焦会取消。本次制动到期不会因持续按住而反复续期。");
+        ImGui::TextWrapped("按住快捷键且准星进入人物完整检测范围时制动；无需开启自动扳机，不使用扳机缩小区域。");
+        ImGui::TextWrapped("需要有效源端焦点与新鲜图像；松键、准星离开人物范围或失焦会取消并归还原物理方向键。持续按住不会延长本次制动期限。");
         ImGui::TextWrapped("面向单方向及相邻双键移动；自动急停与物理输出安全急停相互独立。");
         ImGui::BeginDisabled(!can_edit);
         const auto key_active = current_virtual_key_state();
@@ -3017,7 +3017,7 @@ struct Overlay::Impl {
             ImGui::EndDisabled();
             const int key = app_config.auto_stop.activation_virtual_key;
             render_hotkey_row("允许键（按住）", "##auto_stop_activation_key",
-                "按住并检测到配置目标时触发制动，可与自动扳机共用；禁止 WASD，不能与运行启停、瞄准输出或安全急停重复。支持本机及已连接后端的按键，Esc 清空。",
+                "按住且准星进入配置人物范围时触发制动，可与自动扳机共用；禁止 WASD，不能与运行启停、瞄准输出或安全急停重复。支持本机及已连接后端的按键，Esc 清空。",
                 HotkeyBindingTarget::AUTO_STOP,
                 key == 0 ? std::vector<int>{} : std::vector<int>{key}, key_active);
             render_hotkey_row("释放急停按键", "##auto_stop_release_keys",

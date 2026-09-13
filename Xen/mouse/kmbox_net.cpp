@@ -594,11 +594,21 @@ private:
             // 软件键释放尚未确认时，不恢复物理键直通。
             if (result.disposition != KeyboardDisposition::ACKNOWLEDGED) return result;
         }
+        const bool refresh_after_unmask = owned_masks_ != 0;
+        if (refresh_after_unmask) {
+            // unmask只改屏蔽配置；最后用零软件报告请求设备重新处理物理直通。
+            // 先保存刷新责任，避免最后刷新丢ACK后mask已清导致重试遗忘。
+            keyboard_dirty_ = true;
+            if (!save_keyboard_debt_locked({true, owned_masks_}))
+                return {KeyboardDisposition::REJECTED};
+        }
         for (std::uint8_t bit = 1; bit <= 8; bit <<= 1) {
             if (!(owned_masks_ & bit)) continue;
             auto step = mask_locked(bit, false);
             if (step.disposition != KeyboardDisposition::ACKNOWLEDGED) result = step;
         }
+        if (refresh_after_unmask && result.disposition == KeyboardDisposition::ACKNOWLEDGED)
+            return keyboard_locked(0);
         return result;
     }
     void publish_wasd_locked(bool valid, std::int64_t timestamp) noexcept {
