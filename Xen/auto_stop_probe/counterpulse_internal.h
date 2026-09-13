@@ -35,13 +35,14 @@ inline CounterpulsePlan parse_counterpulse_plan(const Json& input) {
     p.late_tolerance_ms = input.value("late_tolerance_ms", p.late_tolerance_ms);
     const int direction = input.value("direction", static_cast<int>(p.direction));
     if ((p.baseline != "counter" && p.baseline != "stationary" && p.baseline != "no_counter") ||
-        (p.shots != 7 && p.shots != 8) || p.shot_interval_ms != 280 ||
+        (p.shots != 7 && p.shots != 8) || p.shot_interval_ms < 280 || p.shot_interval_ms > 600 ||
+        (p.shots - 1) * p.shot_interval_ms > 3600 ||
         (direction != 2 && direction != 8) || p.move_ms < 1 || p.move_ms > 250 ||
         p.counter_hold_ms < 1 || p.counter_hold_ms > 200 || p.shot_hold_ms < 1 || p.shot_hold_ms > 20 ||
         p.late_tolerance_ms > 10 ||
         (p.baseline != "stationary" && p.shot_hold_ms + p.move_ms +
             (p.baseline == "counter" ? p.counter_hold_ms : 0) >= p.shot_interval_ms))
-        throw std::runtime_error("反冲计划越界或280毫秒预算不足");
+        throw std::runtime_error("反冲计划越界、总时长超限或射击间隔预算不足");
     p.direction = static_cast<std::uint8_t>(direction);
     return p;
 }
@@ -90,7 +91,8 @@ inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan
     WasdEventCursor cursor;
     std::uint64_t epoch = 0, last_sequence = 0;
     auto last_clock = clock.now();
-    const auto run_deadline = last_clock + std::chrono::seconds(3);
+    const auto run_deadline = last_clock + std::chrono::milliseconds(
+        std::max(3000, (p.shots - 1) * p.shot_interval_ms + 300));
     auto check = [&]() -> bool {
         if (!failure.empty()) return false;
         const auto current = clock.now();

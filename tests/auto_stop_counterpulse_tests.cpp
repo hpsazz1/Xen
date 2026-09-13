@@ -1,5 +1,6 @@
 #include "auto_stop_probe/counterpulse_internal.h"
 #include <iostream>
+#include <utility>
 
 namespace {
 using namespace auto_stop_probe_detail;
@@ -72,6 +73,41 @@ void successful_and_baselines() {
     const auto report = execute_counterpulse(mouse, p, {}, mouse.clock());
     require(report["success"] && mouse.downs == 7 && mouse.keyboards[1] == 8 && mouse.keyboards[3] == 2, "七发和D方向应使用对向A");
 }
+void configurable_stationary_intervals() {
+    for (const auto [shots, interval] : {std::pair{7, 600}, std::pair{8, 500}}) {
+        Fake mouse; CounterpulsePlan p;
+        p.baseline = "stationary"; p.shots = shots; p.shot_interval_ms = interval;
+        const auto parsed = parse_counterpulse_plan(counterpulse_plan_json(p));
+        require(parsed.shots == shots && parsed.shot_interval_ms == interval, "较慢静止基线必须保留指定发数和间隔");
+        const auto report = execute_counterpulse(mouse, p, {}, mouse.clock());
+        require(report["success"] && report["shot_down_attempts"] == shots && mouse.downs == shots,
+            "较慢基线必须完整执行规定枪次，不能被旧三秒期限截断");
+        require(!mouse.left && !mouse.held && mouse.cleanup_calls == 1, "较慢基线结束仍须按键归零并清理");
+        require(mouse.keyboards.size() == 1 && mouse.keyboards.front() == 0,
+            "静止组仅初始化软件零，不得产生任何WASD移动");
+        std::vector<std::int64_t> submitted, planned;
+        int previous_index = 0;
+        for (const auto& command : report["commands"]) {
+            if (command["kind"] != "left_button" || command["value"] != 1) continue;
+            submitted.push_back(command["submit_ns"]);
+            planned.push_back(command["planned_ns"]);
+            require(command["shot_index"] == ++previous_index, "枪次索引必须逐次唯一且不补射");
+            require(submitted.back() == planned.back(), "确定性fake提交必须遵守目标时刻");
+        }
+        require(submitted.size() == static_cast<std::size_t>(shots), "命令证据必须记录每一发且仅记录规定发数");
+        for (std::size_t i = 1; i < submitted.size(); ++i) {
+            require(submitted[i] - submitted[i-1] == static_cast<std::int64_t>(interval)*1000000,
+                "实际提交间隔必须等于用户指定值");
+            require(planned[i] - planned[i-1] == static_cast<std::int64_t>(interval)*1000000,
+                "目标时间轴必须采用用户指定间隔");
+        }
+        require(submitted.back() - submitted.front() == static_cast<std::int64_t>((shots-1)*interval)*1000000,
+            "整组首末枪跨度必须与计划一致");
+    }
+    require(parse_counterpulse_plan(Json::object()).shot_interval_ms == 280, "未指定间隔时兼容旧计划280ms");
+    require(parse_counterpulse_plan(Json{{"shots", 8}, {"shot_interval_ms", 514}}).shot_interval_ms == 514,
+        "八发3598ms跨度边界应接受");
+}
 void failures_stop_and_cleanup() {
     CounterpulsePlan p;
     { Fake m; m.unknown_down = 2; const auto r = execute_counterpulse(m, p, {}, m.clock());
@@ -97,9 +133,9 @@ void failures_stop_and_cleanup() {
     { Fake m; auto clock = m.clock(); clock.sleep_until = [&m](auto) { m.time -= std::chrono::milliseconds(1); };
       const auto r = execute_counterpulse(m, p, {}, clock);
       require(!r["success"].get<bool>() && !m.left && !m.held, "时钟倒退必须取消"); }
-    { Fake m; auto clock = m.clock(); clock.sleep_until = [&m](auto) { m.time += std::chrono::seconds(4); };
+    { Fake m; auto clock = m.clock(); clock.sleep_until = [&m](auto) { m.time += std::chrono::seconds(10); };
       const auto r = execute_counterpulse(m, p, {}, clock);
-      require(r["failure"] == "RUN_DEADLINE_EXCEEDED" && !m.left && !m.held, "全组超过三秒必须取消"); }
+      require(r["failure"] == "RUN_DEADLINE_EXCEEDED" && !m.left && !m.held, "全组超过硬期限必须取消并清理"); }
     { Fake m; m.exclusive = false; const auto r = execute_counterpulse(m, p, {}, m.clock());
       require(!r["success"].get<bool>() && m.downs == 0 && m.cleanup_calls == 0, "独占不足不得接触设备"); }
     { Fake m; const auto r = execute_counterpulse(m, p, [] { return "FOCUS_LOST"; }, m.clock());
@@ -110,14 +146,17 @@ void failures_stop_and_cleanup() {
 }
 void invalid_plans() {
     for (const auto& json : {Json{{"shots", 9}}, Json{{"direction", 258}}, Json{{"late_tolerance_ms", 11}},
-        Json{{"shot_interval_ms", 279}}, Json{{"move_ms", 250}, {"counter_hold_ms", 100}}, Json{{"shots", 7.5}}}) {
+        Json{{"shot_interval_ms", 279}}, Json{{"shots", 7}, {"shot_interval_ms", 601}},
+        Json{{"shots", 8}, {"shot_interval_ms", 600}}, Json{{"shots", 8}, {"shot_interval_ms", 515}},
+        Json{{"shots", 7}, {"shot_interval_ms", 500.5}},
+        Json{{"move_ms", 250}, {"counter_hold_ms", 100}}, Json{{"shots", 7.5}}}) {
         bool rejected = false; try { parse_counterpulse_plan(json); } catch (...) { rejected = true; }
         require(rejected, "非法计划应拒绝");
     }
 }
 }
 int main() {
-    try { successful_and_baselines(); failures_stop_and_cleanup(); invalid_plans(); }
+    try { successful_and_baselines(); configurable_stationary_intervals(); failures_stop_and_cleanup(); invalid_plans(); }
     catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
     std::cout << "反冲纯fake专项通过：时序、基线、预算、取消、未知ACK、清理及参数拒绝\n";
 }

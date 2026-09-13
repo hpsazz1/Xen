@@ -66,6 +66,16 @@ def main():
                 assert rejected.returncode != 0 and not diagnostic.exists()
             assert task['status'] == 'PREPARED_NOT_LAUNCHED'
             assert plan['counter_hold_ms'] == 30 and plan['shot_interval_ms'] == 280
+            slow = root / 'slow-stationary'
+            invoke('-Mode', 'Prepare', '-RunDirectory', slow, '-Executable', args.executable,
+                '-ConfigPath', config, '-Baseline', 'stationary', '-Shots', 7, '-ShotIntervalMs', 600, ok=True)
+            slow_plan = json.loads((slow / 'plan.json').read_text(encoding='utf-8-sig'))
+            assert slow_plan['shots'] == 7 and slow_plan['shot_interval_ms'] == 600
+            assert '600ms' in (slow / 'TASK.md').read_text(encoding='utf-8-sig')
+            overflow = root / 'overflow'
+            invoke('-Mode', 'Prepare', '-RunDirectory', overflow, '-Executable', args.executable,
+                '-ConfigPath', config, '-Shots', 8, '-ShotIntervalMs', 600)
+            assert not overflow.exists()
             text = (run / 'TASK.md').read_text(encoding='utf-8-sig')
             assert text.count('-Mode Launch') == 1 and '-AllowPhysicalOutput' in text
             invoke('-Mode', 'Prepare', '-RunDirectory', run, '-Executable', args.executable, '-ConfigPath', config)

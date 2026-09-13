@@ -54,7 +54,7 @@ struct Evidence {
         capture = create_capture(config);
         if (!capture || !capture->open()) throw std::runtime_error("采集源不可用");
         opened_ns = ns(Clock::now());
-        frames.reserve(300);
+        frames.reserve(350);
         thread = std::jthread([this](std::stop_token stop) {
             std::size_t bytes = 0;
             try {
@@ -65,9 +65,9 @@ struct Evidence {
                     last_status.store(static_cast<int>(status));
                     if (status == CaptureStatus::FRAME) {
                         const auto size = frame.bgr.total() * frame.bgr.elemSize();
-                        // 在首帧就证明最坏3秒动作及前后滚可容纳，避免开枪后才发现容量必然不足。
-                        if (frame.bgr.empty() || size > (128ULL * 1024 * 1024) / 227 ||
-                            frames.size() >= 300 || size > 128ULL * 1024 * 1024 - bytes) {
+                        // 慢单发组仍有界；首帧核对全部350帧容量，128MiB字节上限不变。
+                        if (frame.bgr.empty() || size > (128ULL * 1024 * 1024) / 350 ||
+                            frames.size() >= 350 || size > 128ULL * 1024 * 1024 - bytes) {
                             failure_code.store(1); failed.store(true); break;
                         }
                         frames.push_back({frame.bgr.clone(), frame.timing, ns(Clock::now())});
@@ -305,7 +305,8 @@ int main(int argc, char** argv) {
         // 输出已清理后再编码落盘；失败结果保留，不把图像缺失当作可重射。
         progress("SAVE_EVIDENCE");
         write_json(output / "result.json", report);
-        const auto post_end = Clock::now() + std::chrono::milliseconds(300);
+        // 慢单发也保留末枪完整候选观察窗，与离线分析的shot_interval_ms一致。
+        const auto post_end = Clock::now() + std::chrono::milliseconds(std::max(300, plan.shot_interval_ms));
         while (Clock::now() < post_end && cancel().empty()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
         const auto post_failure = cancel();
         const bool post_complete = Clock::now() >= post_end && post_failure.empty();
