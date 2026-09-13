@@ -65,6 +65,7 @@ def main():
                     capture_output=True, timeout=10)
                 assert rejected.returncode != 0 and not diagnostic.exists()
             assert task['status'] == 'PREPARED_NOT_LAUNCHED'
+            assert plan['capture_enabled'] is True
             assert plan['counter_hold_ms'] == 30 and plan['shot_interval_ms'] == 280
             slow = root / 'slow-stationary'
             invoke('-Mode', 'Prepare', '-RunDirectory', slow, '-Executable', args.executable,
@@ -162,6 +163,28 @@ def main():
             (long_run / 'task.json').write_text(json.dumps(legacy_task), encoding='utf-8')
             invoke(*reusable_args, ok=True)
             assert json.loads((long_run / 'task.json').read_text(encoding='utf-8-sig'))['schema_version'] == 2
+            action_args = ('-Mode', 'Prepare', '-RunDirectory', long_run, '-Executable', args.executable,
+                           '-ConfigPath', config, '-ReuseRunDirectory', '-Shots', 20,
+                           '-ShotIntervalMs', 0, '-MoveMs', 500, '-CounterHoldMs', 15, '-NoCapture')
+            invoke(*action_args, '-ShotAfterReleaseMs', 5, ok=True)
+            action_plan = json.loads((long_run / 'plan.json').read_text(encoding='utf-8-sig'))
+            assert action_plan['capture_enabled'] is False
+            assert action_plan['shot_interval_ms'] == 0 and action_plan['move_ms'] == 500
+            assert action_plan['counter_hold_ms'] == 15 and action_plan['shot_after_release_ms'] == 5
+            action_task = (long_run / 'TASK.md').read_text(encoding='utf-8-sig')
+            assert '不采集图像，以人工观察判断' in action_task and '图像逐帧保存' not in action_task
+            assert '不设最小枪间隔' in action_task and '500ms' in action_task
+            assert '间隔0ms' not in action_task and '枪间至少0ms' not in action_task
+            diagnostic = root / 'disabled-capture-must-not-exist'
+            rejected = subprocess.run([str(Path(args.executable).resolve()), '--capture-check',
+                '--plan', str(long_run / 'plan.json'), '--config', str(config), '--output', str(diagnostic)],
+                capture_output=True, timeout=10)
+            assert rejected.returncode != 0 and not diagnostic.exists(), '关闭采集的计划不可进入采集诊断'
+            valid_action_plan = (long_run / 'plan.json').read_bytes()
+            invoke(*action_args, '-ShotAfterReleaseMs', 5, '-Baseline', 'stationary')
+            assert (long_run / 'plan.json').read_bytes() == valid_action_plan
+            invoke(*action_args, '-ShotAfterReleaseMs', 0)
+            assert (long_run / 'plan.json').read_bytes() == valid_action_plan
             overflow = root / 'overflow'
             invoke('-Mode', 'Prepare', '-RunDirectory', overflow, '-Executable', args.executable,
                 '-ConfigPath', config, '-Shots', 21, '-ShotIntervalMs', 650)

@@ -27,9 +27,12 @@ Capture → Detector → Aim → Runtime SafetyGate → Mouse
 [`scripts/invoke_auto_stop_counterpulse.ps1`](scripts/invoke_auto_stop_counterpulse.ps1)：Prepare只生成一次性计划，
 用户前台Launch后执行单组7至20发、280至650ms间隔，支持静止/无反向/固定反向时长比较。先停止生产Runtime；
 源焦点、全松和设备独占不足时拒绝，End/Ctrl+C或人工方向/鼠标按钮输入取消，不自动重试。
-捕获沿用配置的CPU图像源，射前检查1000帧/384MiB容量（建议320 ROI）；帧与命令分开记录，ACK不代表停稳。
+`-NoCapture` 关闭图像采集、截图及断帧检查，由用户人工观察；仍记录命令与实际参数。
+启用捕获时沿用配置的CPU图像源，射前检查1000帧/384MiB容量（建议320 ROI）；ACK不代表停稳。
 移动组枪间隔是恢复下限；`-ShotAfterReleaseMs 5` 表示最后方向键释放ACK后5ms计划单发，
-未指定时兼容原移动松键固定观察窗。各动作迟到单独检查；20发650ms首末至少12.35秒，
+未指定时兼容原移动松键固定观察窗。该模式下 `-ShotIntervalMs 0` 不设最小枪间隔，
+上一枪左键释放完成后立即开始下一次移动；`-MoveMs 500` 支持500ms移动。各动作迟到单独检查。
+启用图像时，20发650ms首末至少12.35秒，
 弹着点会陆续消失，须连续观察或查看逐帧证据。
 日常调参可用 Prepare 的 `-ReuseRunDirectory` 更新同目录计划并清理上次结果；运行中拒绝更新。
 更新后沿用该目录TASK中的前台Launch命令，仅比较试验另建目录；不自动重复射击。

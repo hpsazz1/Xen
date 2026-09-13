@@ -194,6 +194,7 @@ int main(int argc, char** argv) {
             if (capture_check || allowed || !confirmation.empty() || !output.empty() || !config_path.empty()) throw std::runtime_error("dry-run不接受输出授权或配置");
             std::cout << "计划有效；未连接设备或采集，未产生任何输入。\n"; return 0;
         }
+        if (capture_check && !plan.capture_enabled) throw std::runtime_error("计划已禁用采集");
         if (capture_check && (allowed || !confirmation.empty())) throw std::runtime_error("纯采集检查拒绝物理授权");
         if ((!capture_check && (!allowed || confirmation != "AUTO_STOP_COUNTERPULSE")) || config_path.empty() || output.empty())
             throw std::runtime_error("缺少真实输入双授权");
@@ -280,8 +281,13 @@ int main(int argc, char** argv) {
         }
         progress("EVENT_SUBSCRIPTION");
         if (!resources.mouse->set_wasd_event_subscription(true)) throw std::runtime_error("原始输入事件不可用");
-        progress("CAPTURE_OPEN");
-        Evidence evidence(config.capture);
+        std::unique_ptr<Evidence> evidence;
+        if (plan.capture_enabled) {
+            progress("CAPTURE_OPEN");
+            evidence = std::make_unique<Evidence>(config.capture);
+        } else {
+            capture_diagnostic = {{"enabled", false}, {"reason", "DISABLED_BY_PLAN"}};
+        }
         auto cancel = [&]() -> std::string {
             if (stopped.load() || std::filesystem::exists(output / "STOP")) return "USER_STOP";
             const auto focus = resources.focus.snapshot();
@@ -294,34 +300,36 @@ int main(int argc, char** argv) {
                 if (permission["flags"]["monitor_invalid"].get<bool>()) return "MONITOR_INVALID";
                 if (permission["flags"]["physical_keys_held"].get<bool>()) return "PHYSICAL_INPUT";
             }
-            if (evidence.failed.load()) {
-                if (cancellation_context.empty()) cancellation_context = evidence.snapshot();
+            if (evidence && evidence->failed.load()) {
+                if (cancellation_context.empty()) cancellation_context = evidence->snapshot();
                 return "CAPTURE_FAILED";
             }
-            if (evidence.latest_ns.load() != 0 && ns(Clock::now()) - evidence.latest_ns.load() > 100000000) {
-                if (cancellation_context.empty()) cancellation_context = evidence.snapshot();
+            if (evidence && evidence->latest_ns.load() != 0 && ns(Clock::now()) - evidence->latest_ns.load() > 100000000) {
+                if (cancellation_context.empty()) cancellation_context = evidence->snapshot();
                 return "CAPTURE_STALE";
             }
             return {};
         };
-        CounterpulsePrerollGate preroll(evidence.opened_ns);
-        std::string previous_phase;
-        while (true) {
-            const auto pre_failure = cancel();
-            const auto decision = evidence.evaluate(preroll, !pre_failure.empty());
-            const std::string phase = pre_failure.empty() ? decision.reason : pre_failure;
-            if (phase != previous_phase) {
-                capture_diagnostic = evidence.snapshot();
-                progress(phase.c_str());
-                previous_phase = phase;
+        if (evidence) {
+            CounterpulsePrerollGate preroll(evidence->opened_ns);
+            std::string previous_phase;
+            while (true) {
+                const auto pre_failure = cancel();
+                const auto decision = evidence->evaluate(preroll, !pre_failure.empty());
+                const std::string phase = pre_failure.empty() ? decision.reason : pre_failure;
+                if (phase != previous_phase) {
+                    capture_diagnostic = evidence->snapshot();
+                    progress(phase.c_str());
+                    previous_phase = phase;
+                }
+                if (!pre_failure.empty() || decision.state == PrerollState::FAILED) {
+                    capture_diagnostic = evidence->snapshot();
+                    failure_reason = pre_failure.empty() ? decision.reason : pre_failure;
+                    throw std::runtime_error("射前证据或焦点无效");
+                }
+                if (decision.state == PrerollState::READY) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
-            if (!pre_failure.empty() || decision.state == PrerollState::FAILED) {
-                capture_diagnostic = evidence.snapshot();
-                failure_reason = pre_failure.empty() ? decision.reason : pre_failure;
-                throw std::runtime_error("射前证据或焦点无效");
-            }
-            if (decision.state == PrerollState::READY) break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         progress("EXECUTION");
         execution_entered = true;
@@ -330,24 +338,30 @@ int main(int argc, char** argv) {
         cleanup_finished.store(true);
         report["command_timeout_ms"] = config.mouse.kmbox_command_timeout_ms;
         report["cancellation_context"] = cancellation_context;
-        // 输出已清理后再编码落盘；失败结果保留，不把图像缺失当作可重射。
-        progress("SAVE_EVIDENCE");
-        write_json(output / "result.json", report);
-        // 慢单发也保留末枪完整候选观察窗，与离线分析的shot_interval_ms一致。
-        const auto post_end = Clock::now() + std::chrono::milliseconds(std::max(300, plan.shot_interval_ms));
-        while (Clock::now() < post_end && cancel().empty()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        const auto post_failure = cancel();
-        const bool post_complete = Clock::now() >= post_end && post_failure.empty();
-        evidence.save(output / "frames");
-        report["capture_frames"] = evidence.count.load();
-        report["post_roll_failure"] = post_failure;
-        report["last_frame_received_ns"] = evidence.latest_ns.load();
-        report["capture_complete"] = !evidence.failed.load() && post_complete;
-        report["cancellation_context"] = cancellation_context;
+        report["capture_enabled"] = plan.capture_enabled;
+        report["capture_complete"] = false;
+        report["capture_frames"] = 0;
         report["scene_settled"] = nullptr;
+        // 无采集模式只保存命令结果；不创建采集源，不等待图像或执行图像门禁。
+        progress(evidence ? "SAVE_EVIDENCE" : "SAVE_RESULT");
         write_json(output / "result.json", report);
-        std::cout << "组结束，命令与图像已保存；尚无停稳/推荐时间结论。\n";
-        return report.value("success", false) && report.value("capture_complete", false) ? 0 : 2;
+        if (evidence) {
+            const auto post_end = Clock::now() + std::chrono::milliseconds(std::max(300, plan.cycle_budget_ms()));
+            while (Clock::now() < post_end && cancel().empty()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            const auto post_failure = cancel();
+            const bool post_complete = Clock::now() >= post_end && post_failure.empty();
+            evidence->save(output / "frames");
+            report["capture_frames"] = evidence->count.load();
+            report["post_roll_failure"] = post_failure;
+            report["last_frame_received_ns"] = evidence->latest_ns.load();
+            report["capture_complete"] = !evidence->failed.load() && post_complete;
+            report["cancellation_context"] = cancellation_context;
+        } else {
+            report["capture_status"] = "DISABLED_BY_PLAN";
+        }
+        write_json(output / "result.json", report);
+        std::cout << "组结束，执行结果已保存；停稳效果由人工观察判断。\n";
+        return report.value("success", false) && (!plan.capture_enabled || report.value("capture_complete", false)) ? 0 : 2;
     } catch (...) {
         if (created) {
             try { write_json(output / "failure.json", {{"success", false},

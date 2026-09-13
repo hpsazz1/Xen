@@ -3,13 +3,14 @@ param(
     [Parameter(Mandatory)][ValidateSet('Prepare', 'Launch')][string]$Mode,
     [Parameter(Mandatory)][string]$RunDirectory,
     [switch]$ReuseRunDirectory,
+    [switch]$NoCapture,
     [string]$Executable,
     [string]$ConfigPath,
     [ValidateSet('stationary', 'no_counter', 'counter')][string]$Baseline = 'counter',
     [ValidateRange(7, 20)][int]$Shots = 8,
-    [ValidateRange(280, 650)][int]$ShotIntervalMs = 280,
+    [ValidateScript({ $_ -eq 0 -or ($_ -ge 280 -and $_ -le 650) })][int]$ShotIntervalMs = 280,
     [ValidateSet('A', 'D')][string]$Direction = 'A',
-    [ValidateRange(1, 250)][int]$MoveMs = 120,
+    [ValidateRange(1, 500)][int]$MoveMs = 120,
     [ValidateRange(1, 200)][int]$CounterHoldMs = 30,
     [ValidateRange(1, 200)][int]$BrakeWindowMs = 60,
     [ValidateRange(0, 20)][int]$ShotAfterReleaseMs = 0,
@@ -199,7 +200,7 @@ try {
         $binary = (Resolve-Path -LiteralPath $Executable).Path
         $config = (Resolve-Path -LiteralPath $ConfigPath).Path
         if (-not [IO.File]::Exists($binary) -or -not [IO.File]::Exists($config)) { throw '需要有效文件。' }
-        $plan = [ordered]@{ baseline = $Baseline; shots = $Shots; shot_interval_ms = $ShotIntervalMs;
+        $plan = [ordered]@{ capture_enabled = [bool](-not $NoCapture); baseline = $Baseline; shots = $Shots; shot_interval_ms = $ShotIntervalMs;
             move_ms = $MoveMs; counter_hold_ms = $CounterHoldMs; brake_window_ms = $BrakeWindowMs; shot_after_release_ms = $ShotAfterReleaseMs; shot_hold_ms = $ShotHoldMs;
             late_tolerance_ms = $LateToleranceMs; direction = $(if ($Direction -eq 'A') { 2 } else { 8 }) }
         if (-not $exists) { $null = New-Item -ItemType Directory -Path $runPath }
@@ -233,9 +234,12 @@ try {
         if ($Baseline -ne 'stationary') {
             $action = if ($Baseline -eq 'no_counter') { '仅松键，不按反向键' } else { "反向轻点$($CounterHoldMs)ms（ACK计时）" }
             $timing = if ($ShotAfterReleaseMs -gt 0) { "最后方向键UP ACK后$($ShotAfterReleaseMs)ms计划开枪" } else { "移动UP ACK后$($BrakeWindowMs)ms计划开枪" }
-            $behavior = "首枪原地，随后每次按$Direction 移动$($MoveMs)ms，$action；$timing。枪间至少$($ShotIntervalMs)ms，ACK耗时计入实际枪间隔；松键后开枪迟到超过$($LateToleranceMs)ms则拒绝该组。固定瞄准，不人为按方向或射击键。"
+            $recovery = if ($ShotIntervalMs -eq 0) { "按动作完成接续，不设最小枪间隔" } else { "枪间至少$($ShotIntervalMs)ms，ACK耗时计入实际枪间隔" }
+            $behavior = "首枪原地，随后每次按$Direction 移动$($MoveMs)ms，$action；$timing。$recovery；松键后开枪迟到超过$($LateToleranceMs)ms则拒绝该组。固定瞄准，不人为按方向或射击键。"
         }
-        $markdown = "# 反向轻点人工Run`n`n状态：PREPARED_NOT_LAUNCHED。仅用户在当前前台执行一次；会发送真实开火输入。`n`n$behavior`n`n请先确认测试场景、源焦点、独占设备和紫色弹着点显示；End或人工输入取消。`n`n``````powershell`n$launch`n```````n`n一组$Shots 发；长组前面的弹着点可能消失，请连续观察，图像逐帧保存。间隔$($ShotIntervalMs)ms；该间隔仅为候选，结果不代表已经稳定。结果目录：result。`n`n参数探索可通过Prepare -ReuseRunDirectory复用本目录；验证新计划后替换参数并清理上次result和CONSUMED。每次Prepare后仍须用户手动运行本TASK中的同一Launch命令，不会自动重试。开始正式对比时另建目录。迁移旧目录后仅使用本TASK中的新入口。`n"
+        $cadence = if ($ShotIntervalMs -eq 0) { "动作完成后接续下一次移动；实际枪间隔由移动、反向轻点、松键后等待和命令耗时决定" } else { "最小射击间隔$($ShotIntervalMs)ms；该间隔仅为候选" }
+        $observation = if ($NoCapture) { '不采集图像，以人工观察判断；长组前面的弹着点可能消失，请连续观察' } else { '长组前面的弹着点可能消失，请连续观察，图像逐帧保存' }
+        $markdown = "# 反向轻点人工Run`n`n状态：PREPARED_NOT_LAUNCHED。仅用户在当前前台执行一次；会发送真实开火输入。`n`n$behavior`n`n请先确认测试场景、源焦点、独占设备和紫色弹着点显示；End或人工输入取消。`n`n``````powershell`n$launch`n```````n`n一组$Shots 发；$observation。$cadence；结果不代表已经稳定。结果目录：result。`n`n参数探索可通过Prepare -ReuseRunDirectory复用本目录；验证新计划后替换参数并清理上次result和CONSUMED。每次Prepare后仍须用户手动运行本TASK中的同一Launch命令，不会自动重试。开始正式对比时另建目录。迁移旧目录后仅使用本TASK中的新入口。`n"
         [IO.File]::WriteAllText((Join-Path $runPath 'TASK.md'), $markdown, (New-Object Text.UTF8Encoding($false)))
         Write-Output 'PREPARED_NOT_LAUNCHED；未发送设备输入。'
     } else {
