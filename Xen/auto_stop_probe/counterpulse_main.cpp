@@ -14,6 +14,7 @@
 #include <opencv2/imgcodecs.hpp>
 #include "config/config.h"
 #include "auto_stop_probe/counterpulse_internal.h"
+#include "auto_stop_probe/readiness_internal.h"
 #include "source_context/source_context.h"
 
 namespace {
@@ -113,6 +114,14 @@ int main(int argc, char** argv) {
     SetConsoleOutputCP(CP_UTF8);
     std::filesystem::path output;
     bool created = false;
+    std::string stage = "VALIDATION";
+    std::string failure_reason;
+    Json readiness = {{"reason", "NOT_CHECKED"}};
+    bool execution_entered = false;
+    auto progress = [&](const char* next) {
+        stage = next;
+        if (created) write_json(output / "startup.json", {{"stage", stage}, {"readiness", readiness}});
+    };
     try {
         std::string config_path, plan_path, confirmation;
         bool dry = false, allowed = false;
@@ -160,26 +169,41 @@ int main(int argc, char** argv) {
         write_json(output / "plan.json", document);
         if (!SetConsoleCtrlHandler(control, TRUE)) throw std::runtime_error("无法注册取消处理");
         Resources resources;
+        progress("SOURCE_START");
         if (!resources.focus.start(source_config)) throw std::runtime_error("源焦点服务不可用");
+        progress("DEVICE_OPEN");
         config.mouse.allow_send_input = true;
         resources.mouse = MouseDeviceFactory::create(config.mouse);
         if (!resources.mouse || !resources.mouse->open() || !resources.mouse->output_owner_exclusive())
             throw std::runtime_error("设备独占不可用，请停止生产Runtime");
         const auto ready_deadline = Clock::now() + std::chrono::seconds(15);
         std::uint64_t focus_session = 0;
+        CounterpulseReadinessAccumulator readiness_gate;
+        auto next_status = Clock::now();
+        progress("READINESS");
         std::cout << "等待源程序聚焦和键鼠全松，最多15秒；就绪后自动执行一组，End/Ctrl+C停止。\n";
         while (Clock::now() < ready_deadline && !stopped.load()) {
             const auto focus = resources.focus.snapshot();
             InputSnapshot physical;
-            const bool valid = resources.mouse->poll_input(physical) && physical.state_valid && physical.status == InputMonitorStatus::READY;
-            if (valid && physical.virtual_keys[0x23]) stopped.store(true);
-            bool released = valid;
-            for (int key : {0x57, 0x41, 0x53, 0x44, 1, 2, 4, 5, 6}) if (physical.virtual_keys[key]) released = false;
-            if (focus.available && focus.focused && released) { focus_session = focus.session_id; break; }
+            const bool polled = resources.mouse->poll_input(physical);
+            readiness = readiness_gate.update(focus, physical, polled,
+                stopped.load() || std::filesystem::exists(output / "STOP"), ns(Clock::now()));
+            if (Clock::now() >= next_status || readiness["ready"].get<bool>()) {
+                progress("READINESS");
+                next_status = Clock::now() + std::chrono::milliseconds(250);
+            }
+            if (readiness["flags"]["cancelled"].get<bool>()) { stopped.store(true); break; }
+            if (readiness["ready"].get<bool>()) { focus_session = focus.session_id; break; }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-        if (focus_session == 0 || stopped.load()) throw std::runtime_error("未就绪或已取消");
+        if (focus_session == 0 || stopped.load()) {
+            failure_reason = stopped.load() ? "USER_CANCELLED" : "READINESS_TIMEOUT";
+            progress("READINESS");
+            throw std::runtime_error("未就绪或已取消");
+        }
+        progress("EVENT_SUBSCRIPTION");
         if (!resources.mouse->set_wasd_event_subscription(true)) throw std::runtime_error("原始输入事件不可用");
+        progress("CAPTURE_OPEN");
         Evidence evidence(config.capture);
         auto cancel = [&]() -> std::string {
             if (stopped.load() || std::filesystem::exists(output / "STOP")) return "USER_STOP";
@@ -189,14 +213,18 @@ int main(int argc, char** argv) {
             if (evidence.latest_ns.load() != 0 && ns(Clock::now()) - evidence.latest_ns.load() > 100000000) return "CAPTURE_STALE";
             return {};
         };
+        progress("PREROLL");
         const auto pre_roll_end = Clock::now() + std::chrono::milliseconds(300);
         while (Clock::now() < pre_roll_end && cancel().empty()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
         if (evidence.count.load() < 3 || !cancel().empty()) throw std::runtime_error("射前证据或焦点无效");
+        progress("EXECUTION");
+        execution_entered = true;
         auto report = execute_counterpulse(*resources.mouse, plan, cancel, {}, true);
         resources.mouse->close();
         cleanup_finished.store(true);
         report["command_timeout_ms"] = config.mouse.kmbox_command_timeout_ms;
         // 输出已清理后再编码落盘；失败结果保留，不把图像缺失当作可重射。
+        progress("SAVE_EVIDENCE");
         write_json(output / "result.json", report);
         const auto post_end = Clock::now() + std::chrono::milliseconds(300);
         while (Clock::now() < post_end && cancel().empty()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -213,7 +241,9 @@ int main(int argc, char** argv) {
         return report.value("success", false) && report.value("capture_complete", false) ? 0 : 2;
     } catch (...) {
         if (created) {
-            try { write_json(output / "failure.json", {{"success", false}, {"reason", "VALIDATION_OR_EXECUTION_FAILED"}}); } catch (...) {}
+            try { write_json(output / "failure.json", {{"success", false},
+                {"reason", failure_reason.empty() ? stage + "_FAILED" : failure_reason},
+                {"stage", stage}, {"readiness", readiness}, {"execution_entered", execution_entered}}); } catch (...) {}
         }
         // 不打印可能包含设备凭据或配置内容的异常。
         std::cerr << "启动/执行失败，检查双授权、计划、源焦点、全松和输出目录；不自动重试。\n";

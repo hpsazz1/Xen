@@ -16,6 +16,15 @@ def main():
     script = Path(__file__).resolve().parents[1] / 'scripts' / 'invoke_auto_stop_counterpulse.ps1'
     shell = shutil.which('pwsh') or shutil.which('powershell')
     assert shell, '需要PowerShell执行入口回归'
+    # 子程序切换代码页后，父Shell不能继续用缓存的GBK写UTF-8控制台。
+    legacy = shutil.which('powershell.exe')
+    if legacy:
+        command = "[Console]::OutputEncoding=[Text.Encoding]::GetEncoding(936); & '" + str(script).replace("'", "''") + "' -Mode Launch -RunDirectory 'C:/missing-counterpulse-regression'"
+        encoded = subprocess.run([legacy, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command],
+                                 capture_output=True, timeout=20)
+        assert encoded.returncode != 0
+        decoded = encoded.stderr.decode('utf-8', errors='strict')
+        assert 'COUNTERPULSE' in decoded
     syntax = "$tokens=$null;$errors=$null;[System.Management.Automation.Language.Parser]::ParseFile('" + str(script).replace("'", "''") + "',[ref]$tokens,[ref]$errors)>$null;if($errors.Count){exit 1}"
     subprocess.run([shell, '-NoProfile', '-Command', syntax], check=True, timeout=20)
 

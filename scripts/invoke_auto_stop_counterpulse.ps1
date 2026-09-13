@@ -19,6 +19,36 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$utf8 = New-Object Text.UTF8Encoding($false)
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
+$script:FailureCode = 'ENTRY_VALIDATION_FAILED'
+function Show-Startup([string]$Directory, [string]$Previous) {
+    $path = Join-Path $Directory 'startup.json'
+    if (-not (Test-Path -LiteralPath $path)) { return $Previous }
+    try {
+        $state = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+        $phase = [string]$state.stage
+        $reason = if ($state.PSObject.Properties.Name -contains 'readiness') { [string]$state.readiness.reason } else { '' }
+        if ($phase -notmatch '^[A-Z_]{1,40}$' -or ($reason -and $reason -notmatch '^[A-Z_]{1,60}$')) { return $Previous }
+        $current = $phase + ':' + $reason
+        if ($current -ne $Previous) {
+            $hints = @{
+                SOURCE_NOT_FOCUSED = '请将测试游戏切到前台'
+                SOURCE_UNAVAILABLE = '源焦点服务暂无有效报告'
+                MONITOR_WAITING = '尚未收到首个键态报告，请单独轻按松开Shift，不按方向键或鼠标'
+                MONITOR_INVALID = '键态报告无效'
+                MONITOR_POLL_FAILED = '读取键态失败'
+                PHYSICAL_KEYS_HELD = '请松开WASD和鼠标按钮'
+                STABILIZING = '正在确认连续就绪'
+                READY = '已就绪，即将自动执行本组'
+            }
+            $hint = if ($phase -eq 'READINESS' -and $hints.ContainsKey($reason)) { ' ' + $hints[$reason] } else { '' }
+            [Console]::WriteLine('[COUNTERPULSE] ' + $current + $hint)
+        }
+        return $current
+    } catch { return $Previous }
+}
 function Get-Digest([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash }
 function Quote-PS([string]$Value) { "'" + $Value.Replace("'", "''") + "'" }
 function Write-Json([string]$Path, $Value) {
@@ -58,7 +88,12 @@ function Invoke-Probe([string]$Binary, [string[]]$Arguments, [bool]$Physical) {
             $stdout = $child.StandardOutput.ReadToEndAsync()
             $stderr = $child.StandardError.ReadToEndAsync()
             $timeoutMs = if ($Physical) { 60000 } else { 30000 }
-            if (-not $child.WaitForExit($timeoutMs)) {
+            $until = [DateTime]::UtcNow.AddMilliseconds($timeoutMs)
+            $previous = ''
+            while (-not $child.WaitForExit(100) -and [DateTime]::UtcNow -lt $until) {
+                if ($Physical) { $previous = Show-Startup (Join-Path $runPath 'result') $previous }
+            }
+            if (-not $child.HasExited) {
                 if ($Physical) {
                     # 只向本次Run写取消请求，不另开设备发送补偿命令。
                     try {
@@ -79,7 +114,20 @@ function Invoke-Probe([string]$Binary, [string[]]$Arguments, [bool]$Physical) {
             }
             $null = $stdout.GetAwaiter().GetResult()
             $null = $stderr.GetAwaiter().GetResult()
-            if ($child.ExitCode -ne 0) { throw '探针未通过；请检查计划或本次结果。' }
+            if ($child.ExitCode -ne 0) {
+                $script:FailureCode = 'PROBE_FAILED'
+                if ($Physical) {
+                    $previous = Show-Startup (Join-Path $runPath 'result') $previous
+                    $failurePath = Join-Path $runPath 'result/failure.json'
+                    if (Test-Path -LiteralPath $failurePath) {
+                        try {
+                            $failure = Get-Content -LiteralPath $failurePath -Raw -Encoding UTF8 | ConvertFrom-Json
+                            if ([string]$failure.reason -match '^[A-Z_]{1,60}$') { $script:FailureCode = [string]$failure.reason }
+                        } catch {}
+                    }
+                }
+                throw '探针未通过；请检查计划或本次结果。'
+            }
         } finally { $child.Dispose() }
     } finally {
         $info.EnvironmentVariables.Remove('XEN_SOURCE_CONTEXT_TOKEN')
@@ -132,12 +180,14 @@ try {
         # CreateNew原子抢占；失败或取消也不自动重试此Run。
         $marker = [IO.File]::Open((Join-Path $runPath 'CONSUMED'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
         $marker.Dispose()
+        [Console]::WriteLine('请将游戏切到前台并松开移动键和鼠标按钮；等待首个键态报告时可单独轻按松开Shift，不按方向键或鼠标；人物须事先静止并固定瞄准。下方实时显示就绪阶段。')
         Invoke-Probe $task.executable @('--config', $task.config, '--plan', $planPath, '--output', $output,
             '--allow-physical-output', '--confirm', 'AUTO_STOP_COUNTERPULSE') $true
         Write-Output '本次有界Run结束；请回收result及人工观察，不能自动认定停稳。'
     }
 } catch {
     # 不输出异常对象或路径内容，尤其不泄漏解密或配置解析异常。
-    [Console]::Error.WriteLine('反向轻点入口拒绝或执行失败；未自动重试。请核对授权、绑定、路径与本次结果。')
+    [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
+    [Console]::Error.WriteLine('[COUNTERPULSE_FAILED] ' + $script:FailureCode + '：未自动重试，请查看上方阶段及本次报告。')
     exit 1
 }
