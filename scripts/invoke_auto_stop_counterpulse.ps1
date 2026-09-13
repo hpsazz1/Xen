@@ -2,6 +2,7 @@
 param(
     [Parameter(Mandatory)][ValidateSet('Prepare', 'Launch')][string]$Mode,
     [Parameter(Mandatory)][string]$RunDirectory,
+    [switch]$ReuseRunDirectory,
     [string]$Executable,
     [string]$ConfigPath,
     [ValidateSet('stationary', 'no_counter', 'counter')][string]$Baseline = 'counter',
@@ -11,6 +12,7 @@ param(
     [ValidateRange(1, 250)][int]$MoveMs = 120,
     [ValidateRange(1, 200)][int]$CounterHoldMs = 30,
     [ValidateRange(1, 200)][int]$BrakeWindowMs = 60,
+    [ValidateRange(0, 20)][int]$ShotAfterReleaseMs = 0,
     [ValidateRange(1, 20)][int]$ShotHoldMs = 5,
     [ValidateRange(0, 10)][int]$LateToleranceMs = 5,
     [switch]$AllowPhysicalOutput,
@@ -55,6 +57,42 @@ function Get-Digest([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm
 function Quote-PS([string]$Value) { "'" + $Value.Replace("'", "''") + "'" }
 function Write-Json([string]$Path, $Value) {
     [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding($false)))
+}
+# 复用只清理本工具目录内的结果；先拒绝整条路径及结果树的重解析点。
+function Assert-PlainPath([string]$Path) {
+    for ($item = [IO.Path]::GetFullPath($Path); $item; $item = [IO.Path]::GetDirectoryName($item)) {
+        if ((Test-Path -LiteralPath $item) -and
+            (([IO.File]::GetAttributes($item) -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw '路径含重解析点。' }
+    }
+}
+function Assert-ResultTree([string]$Root) {
+    Assert-PlainPath $Root
+    if (-not (Test-Path -LiteralPath $Root)) { return }
+    if (-not [IO.Directory]::Exists($Root)) { throw '结果路径不是目录。' }
+    $pending = New-Object 'Collections.Generic.Stack[string]'
+    $pending.Push($Root)
+    while ($pending.Count -gt 0) {
+        foreach ($item in [IO.Directory]::EnumerateFileSystemEntries($pending.Pop())) {
+            $attrs = [IO.File]::GetAttributes($item)
+            if (($attrs -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw '结果树含重解析点。' }
+            if (($attrs -band [IO.FileAttributes]::Directory) -ne 0) { $pending.Push($item) }
+        }
+    }
+}
+function Assert-OwnedRun($Existing) {
+    if ($Existing.schema_version -notin @(1, 2) -or $Existing.status -ne 'PREPARED_NOT_LAUNCHED' -or
+        $Existing.plan -cne $planPath -or $Existing.run_id -cne [IO.Path]::GetFileName($runPath)) { throw '不是本工具绑定目录。' }
+    if ($Existing.schema_version -eq 2 -and ($Existing.owner -cne 'XEN_AUTO_STOP_COUNTERPULSE' -or
+        $Existing.run_directory -cne $runPath)) { throw '目录所有权无效。' }
+    if ([IO.Path]::GetFileName($Existing.script) -notmatch '^invoke_auto_stop_counterpulse(-r[0-9]+)?\.ps1$') { throw '原入口身份无效。' }
+    foreach ($name in @('executable', 'config', 'plan', 'script')) {
+        Assert-PlainPath $Existing.$name
+        if ((Get-Digest $Existing.$name) -cne $Existing.($name + '_sha256')) { throw '原目录绑定已变化。' }
+    }
+    # 旧 schema 的入口没有共享锁；迁移前还须排除仍运行的绑定探针。
+    foreach ($process in @(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($Existing.executable)) -ErrorAction SilentlyContinue)) {
+        if (-not $process.Path -or $process.Path -ieq $Existing.executable) { throw '绑定探针仍运行。' }
+    }
 }
 function Invoke-Probe([string]$Binary, [string[]]$Arguments, [bool]$Physical) {
     $info = New-Object Diagnostics.ProcessStartInfo
@@ -143,25 +181,45 @@ function Invoke-Probe([string]$Binary, [string[]]$Arguments, [bool]$Physical) {
     }
 }
 
+$runLock = $null
+$candidatePlan = $null
 try {
     $runPath = [IO.Path]::GetFullPath($RunDirectory)
     $scriptPath = [IO.Path]::GetFullPath($PSCommandPath)
     $planPath = Join-Path $runPath 'plan.json'
     $taskPath = Join-Path $runPath 'task.json'
+    Assert-PlainPath $runPath
+    if ($Mode -eq 'Launch' -and $ReuseRunDirectory) { throw '复用仅适用于Prepare。' }
     if ($Mode -eq 'Prepare') {
         if ($PSBoundParameters.ContainsKey('AllowPhysicalOutput') -or $PSBoundParameters.ContainsKey('Confirm')) { throw 'Prepare禁止混入物理授权参数。' }
         if (-not $Executable -or -not $ConfigPath) { throw 'Prepare需要Executable和ConfigPath。' }
-        if (Test-Path -LiteralPath $runPath) { throw 'Run目录已存在，拒绝覆盖。' }
+        $exists = Test-Path -LiteralPath $runPath
+        if ($exists -and -not $ReuseRunDirectory) { throw 'Run目录已存在，拒绝覆盖。' }
+        if ($exists -and -not [IO.File]::Exists($taskPath)) { throw '已有目录不属于本工具。' }
         $binary = (Resolve-Path -LiteralPath $Executable).Path
         $config = (Resolve-Path -LiteralPath $ConfigPath).Path
         if (-not [IO.File]::Exists($binary) -or -not [IO.File]::Exists($config)) { throw '需要有效文件。' }
         $plan = [ordered]@{ baseline = $Baseline; shots = $Shots; shot_interval_ms = $ShotIntervalMs;
-            move_ms = $MoveMs; counter_hold_ms = $CounterHoldMs; brake_window_ms = $BrakeWindowMs; shot_hold_ms = $ShotHoldMs;
+            move_ms = $MoveMs; counter_hold_ms = $CounterHoldMs; brake_window_ms = $BrakeWindowMs; shot_after_release_ms = $ShotAfterReleaseMs; shot_hold_ms = $ShotHoldMs;
             late_tolerance_ms = $LateToleranceMs; direction = $(if ($Direction -eq 'A') { 2 } else { 8 }) }
-        $null = New-Item -ItemType Directory -Path $runPath
-        Write-Json $planPath $plan
-        Invoke-Probe $binary @('--plan', $planPath, '--dry-run') $false
-        $task = [ordered]@{ schema_version = 1; status = 'PREPARED_NOT_LAUNCHED'; run_id = [IO.Path]::GetFileName($runPath);
+        if (-not $exists) { $null = New-Item -ItemType Directory -Path $runPath }
+        $lockPath = Join-Path $runPath '.counterpulse.lock'
+        Assert-PlainPath $lockPath
+        $runLock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        foreach ($leaf in @('task.json', 'plan.json', 'TASK.md', 'CONSUMED')) { Assert-PlainPath (Join-Path $runPath $leaf) }
+        if ($exists) { Assert-OwnedRun (Get-Content -LiteralPath $taskPath -Raw -Encoding UTF8 | ConvertFrom-Json) }
+        $resultPath = Join-Path $runPath 'result'
+        Assert-ResultTree $resultPath
+        $candidatePlan = Join-Path $runPath ('plan.' + [Guid]::NewGuid().ToString('N') + '.candidate.json')
+        Write-Json $candidatePlan $plan
+        Invoke-Probe $binary @('--plan', $candidatePlan, '--dry-run') $false
+        # 所有验证通过之后才移除上组结果，并重新武装用户前台的一次性命令。
+        if (Test-Path -LiteralPath $resultPath) { Remove-Item -LiteralPath $resultPath -Recurse -Force }
+        $consumed = Join-Path $runPath 'CONSUMED'
+        if (Test-Path -LiteralPath $consumed) { Remove-Item -LiteralPath $consumed -Force }
+        Move-Item -LiteralPath $candidatePlan -Destination $planPath -Force
+        $candidatePlan = $null
+        $task = [ordered]@{ schema_version = 2; owner = 'XEN_AUTO_STOP_COUNTERPULSE'; run_directory = $runPath; status = 'PREPARED_NOT_LAUNCHED'; run_id = [IO.Path]::GetFileName($runPath);
             executable = $binary; config = $config; plan = $planPath; script = $scriptPath;
             executable_sha256 = (Get-Digest $binary); config_sha256 = (Get-Digest $config);
             plan_sha256 = (Get-Digest $planPath); script_sha256 = (Get-Digest $scriptPath) }
@@ -174,18 +232,24 @@ try {
         $behavior = if ($Baseline -eq 'stationary') { '原地静止基线，不发送A/D移动；人物须事先静止并固定瞄准。' } else { '移动与急停测试；会发送A/D移动。' }
         if ($Baseline -ne 'stationary') {
             $action = if ($Baseline -eq 'no_counter') { '仅松键，不按反向键' } else { "反向轻点$($CounterHoldMs)ms（ACK计时）" }
-            $behavior = "首枪原地，随后每次按$Direction 移动$($MoveMs)ms，$action；移动UP ACK后$($BrakeWindowMs)ms计划开枪。枪间至少$($ShotIntervalMs)ms，ACK耗时计入实际枪间隔；松键后开枪迟到超过$($LateToleranceMs)ms则拒绝该组。固定瞄准，不人为按方向或射击键。"
+            $timing = if ($ShotAfterReleaseMs -gt 0) { "最后方向键UP ACK后$($ShotAfterReleaseMs)ms计划开枪" } else { "移动UP ACK后$($BrakeWindowMs)ms计划开枪" }
+            $behavior = "首枪原地，随后每次按$Direction 移动$($MoveMs)ms，$action；$timing。枪间至少$($ShotIntervalMs)ms，ACK耗时计入实际枪间隔；松键后开枪迟到超过$($LateToleranceMs)ms则拒绝该组。固定瞄准，不人为按方向或射击键。"
         }
-        $markdown = "# 反向轻点人工Run`n`n状态：PREPARED_NOT_LAUNCHED。仅用户在当前前台执行一次；会发送真实开火输入。`n`n$behavior`n`n请先确认测试场景、源焦点、独占设备和紫色弹着点显示；End或人工输入取消。`n`n``````powershell`n$launch`n```````n`n一组$Shots 发；长组前面的弹着点可能消失，请连续观察，图像逐帧保存。间隔$($ShotIntervalMs)ms；该间隔仅为候选，结果不代表已经稳定。结果目录：result。`n"
+        $markdown = "# 反向轻点人工Run`n`n状态：PREPARED_NOT_LAUNCHED。仅用户在当前前台执行一次；会发送真实开火输入。`n`n$behavior`n`n请先确认测试场景、源焦点、独占设备和紫色弹着点显示；End或人工输入取消。`n`n``````powershell`n$launch`n```````n`n一组$Shots 发；长组前面的弹着点可能消失，请连续观察，图像逐帧保存。间隔$($ShotIntervalMs)ms；该间隔仅为候选，结果不代表已经稳定。结果目录：result。`n`n参数探索可通过Prepare -ReuseRunDirectory复用本目录；验证新计划后替换参数并清理上次result和CONSUMED。每次Prepare后仍须用户手动运行本TASK中的同一Launch命令，不会自动重试。开始正式对比时另建目录。迁移旧目录后仅使用本TASK中的新入口。`n"
         [IO.File]::WriteAllText((Join-Path $runPath 'TASK.md'), $markdown, (New-Object Text.UTF8Encoding($false)))
         Write-Output 'PREPARED_NOT_LAUNCHED；未发送设备输入。'
     } else {
         if (-not $AllowPhysicalOutput -or $Confirm -cne 'AUTO_STOP_COUNTERPULSE') { throw '缺少本轮物理输出授权参数。' }
         if ((Get-Process -Id $PID).SessionId -eq 0 -or $env:SSH_CONNECTION -or $env:SSH_CLIENT) { throw 'Launch仅允许用户本机交互会话。' }
-        $task = Get-Content -LiteralPath $taskPath -Raw | ConvertFrom-Json
-        if ($task.schema_version -ne 1 -or $task.status -ne 'PREPARED_NOT_LAUNCHED' -or
+        $lockPath = Join-Path $runPath '.counterpulse.lock'
+        Assert-PlainPath $lockPath
+        $runLock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        $task = Get-Content -LiteralPath $taskPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($task.schema_version -notin @(1, 2) -or $task.status -ne 'PREPARED_NOT_LAUNCHED' -or
             $task.plan -cne $planPath -or $task.script -cne $scriptPath) { throw 'Run绑定无效。' }
+        if ($task.schema_version -eq 2 -and ($task.owner -cne 'XEN_AUTO_STOP_COUNTERPULSE' -or $task.run_directory -cne $runPath)) { throw 'Run所有权无效。' }
         foreach ($name in @('executable', 'config', 'plan', 'script')) {
+            Assert-PlainPath $task.$name
             if ((Get-Digest $task.$name) -cne $task.($name + '_sha256')) { throw 'Run绑定文件已变化，必须新建Run。' }
         }
         $output = Join-Path $runPath 'result'
@@ -203,4 +267,7 @@ try {
     [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
     [Console]::Error.WriteLine('[COUNTERPULSE_FAILED] ' + $script:FailureCode + '：未自动重试，请查看上方阶段及本次报告。')
     exit 1
+} finally {
+    if ($candidatePlan -and [IO.File]::Exists($candidatePlan)) { Remove-Item -LiteralPath $candidatePlan -Force }
+    if ($null -ne $runLock) { $runLock.Dispose() }
 }

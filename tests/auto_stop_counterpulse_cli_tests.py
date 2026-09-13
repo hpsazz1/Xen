@@ -90,6 +90,78 @@ def main():
                 '-ConfigPath', config, '-Shots', 20, '-ShotIntervalMs', 650, '-CounterHoldMs', 25, ok=True)
             long_plan = json.loads((long_run / 'plan.json').read_text(encoding='utf-8-sig'))
             assert long_plan['shots'] == 20 and long_plan['counter_hold_ms'] == 25
+            # 复用只 Prepare，不触发任何设备。验证失败时上组证据必须完整保留。
+            reusable_args = ('-Mode', 'Prepare', '-RunDirectory', long_run, '-Executable', args.executable,
+                             '-ConfigPath', config, '-ReuseRunDirectory', '-Shots', 20,
+                             '-ShotIntervalMs', 650, '-CounterHoldMs', 15, '-ShotAfterReleaseMs', 5)
+            result_dir = long_run / 'result'
+            result_dir.mkdir()
+            (result_dir / 'result.json').write_text('previous-result', encoding='utf-8')
+            (long_run / 'CONSUMED').write_text('consumed', encoding='utf-8')
+            old_plan = (long_run / 'plan.json').read_bytes()
+            old_task = (long_run / 'task.json').read_bytes()
+            # 旧固定窗口模式下反向保持不小于窗口，必须在清理前由 dry-run 拒绝。
+            invoke(*reusable_args[:-2], '-BrakeWindowMs', 10, '-ShotAfterReleaseMs', 0)
+            assert (long_run / 'plan.json').read_bytes() == old_plan
+            assert (long_run / 'task.json').read_bytes() == old_task
+            assert (result_dir / 'result.json').read_text() == 'previous-result'
+            assert (long_run / 'CONSUMED').exists()
+            assert not list(long_run.glob('*.candidate.json'))
+            if os.name == 'nt':
+                import ctypes
+                from ctypes import wintypes
+                kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+                kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                               wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+                kernel.CreateFileW.restype = wintypes.HANDLE
+                kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+                handle = kernel.CreateFileW(str(long_run / '.counterpulse.lock'), 0xC0000000, 0, None, 3, 0, None)
+                assert handle != ctypes.c_void_p(-1).value
+                try:
+                    invoke(*reusable_args)
+                    assert (long_run / 'plan.json').read_bytes() == old_plan
+                    assert (result_dir / 'result.json').exists()
+                finally:
+                    kernel.CloseHandle(handle)
+            if os.name == 'nt':
+                external = root / 'external-evidence'
+                external.mkdir()
+                (external / 'keep.txt').write_text('external', encoding='utf-8')
+                junction = result_dir / 'linked'
+                escaped_link = str(junction).replace("'", "''")
+                escaped_target = str(external).replace("'", "''")
+                subprocess.run([shell, '-NoProfile', '-Command',
+                    "New-Item -ItemType Junction -Path '" + escaped_link + "' -Target '" + escaped_target + "' | Out-Null"],
+                    check=True, capture_output=True, timeout=20)
+                try:
+                    invoke(*reusable_args)
+                    assert (external / 'keep.txt').read_text() == 'external'
+                    assert (long_run / 'plan.json').read_bytes() == old_plan
+                    assert (result_dir / 'result.json').exists()
+                finally:
+                    # 仅删除这个已核对的目录链接，不递归或遍历链接目标。
+                    os.rmdir(junction)
+            invoke(*reusable_args, ok=True)
+            assert not result_dir.exists() and not (long_run / 'CONSUMED').exists()
+            updated = json.loads((long_run / 'plan.json').read_text(encoding='utf-8-sig'))
+            assert updated['counter_hold_ms'] == 15 and updated['shot_after_release_ms'] == 5
+            assert '最后方向键UP ACK后5ms' in (long_run / 'TASK.md').read_text(encoding='utf-8-sig')
+            assert 'ReuseRunDirectory' in (long_run / 'TASK.md').read_text(encoding='utf-8-sig')
+            invoke(*reusable_args, ok=True)
+            foreign = root / 'foreign'
+            foreign.mkdir()
+            (foreign / 'keep.txt').write_text('keep', encoding='utf-8')
+            invoke('-Mode', 'Prepare', '-RunDirectory', foreign, '-Executable', args.executable,
+                   '-ConfigPath', config, '-ReuseRunDirectory')
+            assert list(foreign.iterdir()) == [foreign / 'keep.txt']
+            # schema 1 的已绑定目录可显式迁移；迁移仍要求原文件哈希匹配。
+            legacy_task = json.loads((long_run / 'task.json').read_text(encoding='utf-8-sig'))
+            legacy_task['schema_version'] = 1
+            legacy_task.pop('owner')
+            legacy_task.pop('run_directory')
+            (long_run / 'task.json').write_text(json.dumps(legacy_task), encoding='utf-8')
+            invoke(*reusable_args, ok=True)
+            assert json.loads((long_run / 'task.json').read_text(encoding='utf-8-sig'))['schema_version'] == 2
             overflow = root / 'overflow'
             invoke('-Mode', 'Prepare', '-RunDirectory', overflow, '-Executable', args.executable,
                 '-ConfigPath', config, '-Shots', 21, '-ShotIntervalMs', 650)

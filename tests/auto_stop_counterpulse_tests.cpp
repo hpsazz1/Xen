@@ -158,6 +158,57 @@ void matched_brake_window() {
       else require(r["failure"] == "SHOT_DEADLINE_MISSED" && m.downs == 1 && !m.held && !m.left,
           "松键后射击迟到超过5ms仍须拒绝第二发并清理"); }
 }
+void shot_after_direction_release() {
+    for (const auto* mode : {"counter", "no_counter"}) for (int hold : {15, 25, 35, 80})
+        for (int latency : {1, 3}) {
+        Fake m; m.latency_ms = latency;
+        const auto p = parse_counterpulse_plan(Json{{"baseline", mode}, {"shots", 20},
+            {"shot_interval_ms", 650}, {"counter_hold_ms", hold}, {"shot_after_release_ms", 5}});
+        const auto r = execute_counterpulse(m, p, {}, m.clock());
+        require(r["success"] && m.downs == 20 && !m.left && !m.held, "释放后单发应完成二十发并清理");
+        require(r["timing_model"] == "DIRECTION_UP_ACK_DELAY", "新时序必须区别固定移动松键窗");
+        std::int64_t previous_shot = 0;
+        for (int shot = 1; shot <= 20; ++shot) {
+            std::int64_t last_key_up = 0, fired = 0, fire_ack = 0, fire_up = 0;
+            std::int64_t reverse_down_ack = 0, reverse_up_submit = 0;
+            for (const auto& c : r["commands"]) {
+                if (c["shot_index"] != shot) continue;
+                if (c["kind"] == "wasd" && c["value"] != 0 && c["value"] != p.direction)
+                    reverse_down_ack = c["ack_received_ns"];
+                if (c["kind"] == "wasd" && c["value"] == 0) {
+                    last_key_up = c["ack_received_ns"];
+                    if (reverse_down_ack) reverse_up_submit = c["submit_ns"];
+                }
+                if (c["kind"] == "left_button" && c["value"] == 1) {
+                    fired = c["submit_ns"]; fire_ack = c["ack_received_ns"];
+                }
+                if (c["kind"] == "left_button" && c["value"] == 0) fire_up = c["submit_ns"];
+            }
+            require(fire_up - fire_ack == 5000000, "单发左键ACK后保持5ms再松开");
+            if (shot > 1) {
+                if (p.baseline == "counter") require(reverse_up_submit - reverse_down_ack == hold * 1000000LL,
+                    "每个候选h必须实际用于反向DOWN ACK至UP提交，不能只改变报告值");
+                require(last_key_up && fired - last_key_up == 5000000,
+                    "无论反向保持多长，必须在最后方向键UP ACK后5ms开枪");
+                require(fired - previous_shot >= 650000000, "恢复等待应在移动前，枪间不能短于650ms");
+                require(r["cycles"][shot - 2]["shot_anchor_ack_ns"] == last_key_up, "报告必须绑定真正的射击锚点");
+            }
+            previous_shot = fired;
+        }
+    }
+    { Fake m; const auto p = parse_counterpulse_plan(Json{{"shots", 7}, {"shot_interval_ms", 650},
+          {"counter_hold_ms", 15}, {"shot_after_release_ms", 5}});
+      auto clock = m.clock(); bool injected = false;
+      clock.sleep_until = [&](auto target) {
+          m.time = std::max(m.time, target);
+          if (!injected && target >= Clock::time_point(std::chrono::seconds(10)) + std::chrono::milliseconds(656)) {
+              m.time += std::chrono::milliseconds(6); injected = true;
+          }
+      };
+      const auto r = execute_counterpulse(m, p, {}, clock);
+      require(r["failure"] == "SHOT_DEADLINE_MISSED" && m.downs == 1 && !m.left && !m.held,
+          "释放后5ms的新射击目标迟到超过5ms仍须取消，不自动补射"); }
+}
 void failures_stop_and_cleanup() {
     CounterpulsePlan p;
     { Fake m; m.unknown_down = 2; const auto r = execute_counterpulse(m, p, {}, m.clock());
@@ -196,6 +247,8 @@ void failures_stop_and_cleanup() {
 }
 void invalid_plans() {
     for (const auto& json : {Json{{"shots", 21}}, Json{{"direction", 258}}, Json{{"late_tolerance_ms", 11}},
+        Json{{"shot_after_release_ms", 21}}, Json{{"shot_after_release_ms", -1}},
+        Json{{"shot_after_release_ms", 5}, {"move_ms", 250}, {"counter_hold_ms", 200}},
         Json{{"brake_window_ms", 0}}, Json{{"counter_hold_ms", 60}},
         Json{{"shot_interval_ms", 279}}, Json{{"shots", 7}, {"shot_interval_ms", 651}},
         Json{{"shots", 6}},
@@ -207,7 +260,7 @@ void invalid_plans() {
 }
 }
 int main() {
-    try { matched_brake_window(); successful_and_baselines(); configurable_stationary_intervals(); failures_stop_and_cleanup(); invalid_plans(); }
+    try { shot_after_direction_release(); matched_brake_window(); successful_and_baselines(); configurable_stationary_intervals(); failures_stop_and_cleanup(); invalid_plans(); }
     catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
     std::cout << "反冲纯fake专项通过：时序、基线、预算、取消、未知ACK、清理及参数拒绝\n";
 }
