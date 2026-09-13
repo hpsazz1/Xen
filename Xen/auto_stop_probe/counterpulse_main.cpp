@@ -9,12 +9,14 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <set>
 #include <thread>
 #include <opencv2/imgcodecs.hpp>
 #include "config/config.h"
 #include "auto_stop_probe/counterpulse_internal.h"
 #include "auto_stop_probe/readiness_internal.h"
+#include "auto_stop_probe/preroll_internal.h"
 #include "source_context/source_context.h"
 
 namespace {
@@ -40,12 +42,18 @@ struct Evidence {
     std::atomic<bool> failed{false};
     std::atomic<int> count{0};
     std::atomic<std::int64_t> latest_ns{0};
+    std::atomic<std::int64_t> first_ns{0};
+    std::atomic<int> last_status{static_cast<int>(CaptureStatus::CLOSED)};
+    std::atomic<int> failure_code{0};
+    std::int64_t opened_ns = 0;
+    mutable std::mutex observation_mutex;
     CaptureBackend backend;
     explicit Evidence(CaptureConfig config) : backend(config.backend) {
         config.enable_d3d11_cuda_interop = false;
         config.enable_d3d11_directml_interop = false;
         capture = create_capture(config);
         if (!capture || !capture->open()) throw std::runtime_error("采集源不可用");
+        opened_ns = ns(Clock::now());
         frames.reserve(300);
         thread = std::jthread([this](std::stop_token stop) {
             std::size_t bytes = 0;
@@ -54,21 +62,26 @@ struct Evidence {
                     const auto began = Clock::now();
                     CapturedFrame frame;
                     const auto status = capture->grab(frame);
+                    last_status.store(static_cast<int>(status));
                     if (status == CaptureStatus::FRAME) {
                         const auto size = frame.bgr.total() * frame.bgr.elemSize();
                         // 在首帧就证明最坏3秒动作及前后滚可容纳，避免开枪后才发现容量必然不足。
                         if (frame.bgr.empty() || size > (128ULL * 1024 * 1024) / 227 ||
                             frames.size() >= 300 || size > 128ULL * 1024 * 1024 - bytes) {
-                            failed.store(true); break;
+                            failure_code.store(1); failed.store(true); break;
                         }
                         frames.push_back({frame.bgr.clone(), frame.timing, ns(Clock::now())});
                         bytes += size;
-                        latest_ns.store(ns(Clock::now()));
-                        count.store(static_cast<int>(frames.size()));
-                    } else if (status != CaptureStatus::NO_FRAME) { failed.store(true); break; }
+                        {
+                            std::lock_guard lock(observation_mutex);
+                            latest_ns.store(ns(Clock::now()));
+                            if (first_ns.load() == 0) first_ns.store(latest_ns.load());
+                            count.store(static_cast<int>(frames.size()));
+                        }
+                    } else if (status != CaptureStatus::NO_FRAME) { failure_code.store(2); failed.store(true); break; }
                     std::this_thread::sleep_until(began + std::chrono::milliseconds(16));
                 }
-            } catch (...) { failed.store(true); }
+            } catch (...) { failure_code.store(3); failed.store(true); }
         });
     }
     void finish() {
@@ -76,6 +89,19 @@ struct Evidence {
         if (capture) capture->close();
     }
     ~Evidence() { finish(); }
+    Json snapshot() const {
+        std::lock_guard lock(observation_mutex);
+        const auto first = first_ns.load();
+        const auto latest = latest_ns.load();
+        return {{"frames", count.load()}, {"failed", failed.load()}, {"failure_code", failure_code.load()},
+            {"last_status", CaptureStatusName(static_cast<CaptureStatus>(last_status.load()))},
+            {"first_frame_delay_ns", first ? Json(first - opened_ns) : Json(nullptr)},
+            {"last_frame_age_ns", latest ? Json(ns(Clock::now()) - latest) : Json(nullptr)}};
+    }
+    PrerollDecision evaluate(CounterpulsePrerollGate& gate, bool cancelled) const {
+        std::lock_guard lock(observation_mutex);
+        return gate.evaluate(ns(Clock::now()), first_ns.load(), latest_ns.load(), count.load(), failed.load(), cancelled);
+    }
     void save(const std::filesystem::path& directory) {
         finish();
         std::filesystem::create_directory(directory);
@@ -117,24 +143,27 @@ int main(int argc, char** argv) {
     std::string stage = "VALIDATION";
     std::string failure_reason;
     Json readiness = {{"reason", "NOT_CHECKED"}};
+    Json capture_diagnostic = Json::object();
     bool execution_entered = false;
     auto progress = [&](const char* next) {
         stage = next;
-        if (created) write_json(output / "startup.json", {{"stage", stage}, {"readiness", readiness}});
+        if (created) write_json(output / "startup.json", {{"stage", stage}, {"readiness", readiness}, {"capture", capture_diagnostic}});
     };
     try {
         std::string config_path, plan_path, confirmation;
-        bool dry = false, allowed = false;
+        bool dry = false, allowed = false, capture_check = false;
         std::set<std::string> seen;
         if (argc == 2 && std::string(argv[1]) == "--help") {
             std::cout << "单组7/8发反向时长测试：--plan JSON --dry-run；真实运行另需--config INI --output NEW_DIR "
-                         "--allow-physical-output --confirm AUTO_STOP_COUNTERPULSE。需源焦点、全松与独占设备，End/Ctrl+C取消。\n";
+                         "--allow-physical-output --confirm AUTO_STOP_COUNTERPULSE。需源焦点、全松与独占设备，End/Ctrl+C取消。\n"
+                         "纯采集诊断：--plan JSON --config INI --output NEW_DIR --capture-check；不连接键鼠，拒绝物理授权。\n";
             return 0;
         }
         for (int i = 1; i < argc; ++i) {
             const std::string option = argv[i];
             if (!seen.insert(option).second) throw std::runtime_error("参数重复");
             if (option == "--dry-run") dry = true;
+            else if (option == "--capture-check") capture_check = true;
             else if (option == "--allow-physical-output") allowed = true;
             else if (i + 1 < argc && option == "--plan") plan_path = argv[++i];
             else if (i + 1 < argc && option == "--config") config_path = argv[++i];
@@ -147,14 +176,41 @@ int main(int argc, char** argv) {
         const auto document = Json::parse(input);
         const auto plan = parse_counterpulse_plan(document);
         if (dry) {
-            if (allowed || !confirmation.empty() || !output.empty() || !config_path.empty()) throw std::runtime_error("dry-run不接受输出授权或配置");
+            if (capture_check || allowed || !confirmation.empty() || !output.empty() || !config_path.empty()) throw std::runtime_error("dry-run不接受输出授权或配置");
             std::cout << "计划有效；未连接设备或采集，未产生任何输入。\n"; return 0;
         }
-        if (!allowed || confirmation != "AUTO_STOP_COUNTERPULSE" || config_path.empty() || output.empty())
+        if (capture_check && (allowed || !confirmation.empty())) throw std::runtime_error("纯采集检查拒绝物理授权");
+        if ((!capture_check && (!allowed || confirmation != "AUTO_STOP_COUNTERPULSE")) || config_path.empty() || output.empty())
             throw std::runtime_error("缺少真实输入双授权");
         AppConfig config;
         std::string error;
         if (!load_app_config(config_path, config, error)) throw std::runtime_error("配置不可用");
+        if (capture_check) {
+            // 诊断只接收图像，不创建Mouse或SourceContext；与物理入口共用Evidence。
+            if (!std::filesystem::create_directory(output)) throw std::runtime_error("需要新诊断目录");
+            created = true;
+            progress("CAPTURE_CHECK");
+            Evidence evidence(config.capture);
+            CounterpulsePrerollGate gate(evidence.opened_ns);
+            Json samples = Json::array();
+            auto next_sample = Clock::now();
+            PrerollDecision decision{PrerollState::WAIT, "WAIT_FIRST_FRAME"};
+            while (true) {
+                decision = evidence.evaluate(gate, std::filesystem::exists(output / "STOP"));
+                if (Clock::now() >= next_sample || decision.state != PrerollState::WAIT) {
+                    auto sample = evidence.snapshot(); sample["reason"] = decision.reason;
+                    samples.push_back(sample);
+                    next_sample = Clock::now() + std::chrono::milliseconds(100);
+                }
+                if (decision.state != PrerollState::WAIT) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            capture_diagnostic = evidence.snapshot();
+            evidence.finish();
+            write_json(output / "capture-check.json", {{"capture", capture_diagnostic}, {"samples", samples},
+                {"reason", decision.reason}, {"success", decision.state == PrerollState::READY}, {"physical_output", false}});
+            return decision.state == PrerollState::READY ? 0 : 2;
+        }
         if (config.mouse.backend != MouseBackend::KMBOX_NET ||
             config.mouse.kmbox_connect_timeout_ms > 2000) throw std::runtime_error("设备或命令超时不适用");
         config.mouse.kmbox_command_timeout_ms = std::min(config.mouse.kmbox_command_timeout_ms, 100);
@@ -209,14 +265,37 @@ int main(int argc, char** argv) {
             if (stopped.load() || std::filesystem::exists(output / "STOP")) return "USER_STOP";
             const auto focus = resources.focus.snapshot();
             if (!focus.available || !focus.focused || focus.session_id != focus_session) return "SOURCE_FOCUS";
+            if (!cleanup_finished.load()) {
+                InputSnapshot physical;
+                const bool polled = resources.mouse->poll_input(physical);
+                const auto permission = evaluate_counterpulse_readiness(focus, physical, polled, false);
+                if (permission["flags"]["cancelled"].get<bool>()) { stopped.store(true); return "USER_STOP"; }
+                if (permission["flags"]["monitor_invalid"].get<bool>()) return "MONITOR_INVALID";
+                if (permission["flags"]["physical_keys_held"].get<bool>()) return "PHYSICAL_INPUT";
+            }
             if (evidence.failed.load()) return "CAPTURE_FAILED";
             if (evidence.latest_ns.load() != 0 && ns(Clock::now()) - evidence.latest_ns.load() > 100000000) return "CAPTURE_STALE";
             return {};
         };
-        progress("PREROLL");
-        const auto pre_roll_end = Clock::now() + std::chrono::milliseconds(300);
-        while (Clock::now() < pre_roll_end && cancel().empty()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        if (evidence.count.load() < 3 || !cancel().empty()) throw std::runtime_error("射前证据或焦点无效");
+        CounterpulsePrerollGate preroll(evidence.opened_ns);
+        std::string previous_phase;
+        while (true) {
+            const auto pre_failure = cancel();
+            const auto decision = evidence.evaluate(preroll, !pre_failure.empty());
+            const std::string phase = pre_failure.empty() ? decision.reason : pre_failure;
+            if (phase != previous_phase) {
+                capture_diagnostic = evidence.snapshot();
+                progress(phase.c_str());
+                previous_phase = phase;
+            }
+            if (!pre_failure.empty() || decision.state == PrerollState::FAILED) {
+                capture_diagnostic = evidence.snapshot();
+                failure_reason = pre_failure.empty() ? decision.reason : pre_failure;
+                throw std::runtime_error("射前证据或焦点无效");
+            }
+            if (decision.state == PrerollState::READY) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
         progress("EXECUTION");
         execution_entered = true;
         auto report = execute_counterpulse(*resources.mouse, plan, cancel, {}, true);
@@ -243,7 +322,8 @@ int main(int argc, char** argv) {
         if (created) {
             try { write_json(output / "failure.json", {{"success", false},
                 {"reason", failure_reason.empty() ? stage + "_FAILED" : failure_reason},
-                {"stage", stage}, {"readiness", readiness}, {"execution_entered", execution_entered}}); } catch (...) {}
+                {"stage", stage}, {"readiness", readiness}, {"capture", capture_diagnostic},
+                {"execution_entered", execution_entered}}); } catch (...) {}
         }
         // 不打印可能包含设备凭据或配置内容的异常。
         std::cerr << "启动/执行失败，检查双授权、计划、源焦点、全松和输出目录；不自动重试。\n";

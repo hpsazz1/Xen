@@ -57,6 +57,13 @@ def main():
             assert not (run / 'config.ini').exists()
             task = json.loads((run / 'task.json').read_text(encoding='utf-8-sig'))
             plan = json.loads((run / 'plan.json').read_text(encoding='utf-8-sig'))
+            # 纯采集模式不允许混入物理授权；拒绝发生在加载配置与设备之前。
+            for extra in [('--allow-physical-output',), ('--confirm', 'AUTO_STOP_COUNTERPULSE'), ('--dry-run',)]:
+                diagnostic = root / 'capture-must-not-exist'
+                rejected = subprocess.run([str(Path(args.executable).resolve()), '--capture-check',
+                    '--plan', str(run / 'plan.json'), '--config', str(config), '--output', str(diagnostic), *extra],
+                    capture_output=True, timeout=10)
+                assert rejected.returncode != 0 and not diagnostic.exists()
             assert task['status'] == 'PREPARED_NOT_LAUNCHED'
             assert plan['counter_hold_ms'] == 30 and plan['shot_interval_ms'] == 280
             text = (run / 'TASK.md').read_text(encoding='utf-8-sig')
