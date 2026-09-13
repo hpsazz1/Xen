@@ -1,0 +1,222 @@
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <Windows.h>
+#ifdef ERROR
+#undef ERROR
+#endif
+#include <atomic>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <set>
+#include <thread>
+#include <opencv2/imgcodecs.hpp>
+#include "config/config.h"
+#include "auto_stop_probe/counterpulse_internal.h"
+#include "source_context/source_context.h"
+
+namespace {
+using namespace auto_stop_probe_detail;
+std::atomic<bool> stopped{false};
+std::atomic<bool> cleanup_finished{false};
+BOOL WINAPI control(DWORD event) {
+    if (event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT || event == CTRL_CLOSE_EVENT) {
+        stopped.store(true);
+        if (event == CTRL_CLOSE_EVENT) {
+            const auto until = Clock::now() + std::chrono::seconds(4);
+            while (!cleanup_finished.load() && Clock::now() < until) Sleep(10);
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
+struct Evidence {
+    struct Frame { cv::Mat pixels; FrameTiming timing; std::int64_t received_ns; };
+    std::unique_ptr<ICapture> capture;
+    std::vector<Frame> frames;
+    std::jthread thread;
+    std::atomic<bool> failed{false};
+    std::atomic<int> count{0};
+    std::atomic<std::int64_t> latest_ns{0};
+    CaptureBackend backend;
+    explicit Evidence(CaptureConfig config) : backend(config.backend) {
+        config.enable_d3d11_cuda_interop = false;
+        config.enable_d3d11_directml_interop = false;
+        capture = create_capture(config);
+        if (!capture || !capture->open()) throw std::runtime_error("采集源不可用");
+        frames.reserve(300);
+        thread = std::jthread([this](std::stop_token stop) {
+            std::size_t bytes = 0;
+            try {
+                while (!stop.stop_requested()) {
+                    const auto began = Clock::now();
+                    CapturedFrame frame;
+                    const auto status = capture->grab(frame);
+                    if (status == CaptureStatus::FRAME) {
+                        const auto size = frame.bgr.total() * frame.bgr.elemSize();
+                        // 在首帧就证明最坏3秒动作及前后滚可容纳，避免开枪后才发现容量必然不足。
+                        if (frame.bgr.empty() || size > (128ULL * 1024 * 1024) / 227 ||
+                            frames.size() >= 300 || size > 128ULL * 1024 * 1024 - bytes) {
+                            failed.store(true); break;
+                        }
+                        frames.push_back({frame.bgr.clone(), frame.timing, ns(Clock::now())});
+                        bytes += size;
+                        latest_ns.store(ns(Clock::now()));
+                        count.store(static_cast<int>(frames.size()));
+                    } else if (status != CaptureStatus::NO_FRAME) { failed.store(true); break; }
+                    std::this_thread::sleep_until(began + std::chrono::milliseconds(16));
+                }
+            } catch (...) { failed.store(true); }
+        });
+    }
+    void finish() {
+        if (thread.joinable()) { thread.request_stop(); thread.join(); }
+        if (capture) capture->close();
+    }
+    ~Evidence() { finish(); }
+    void save(const std::filesystem::path& directory) {
+        finish();
+        std::filesystem::create_directory(directory);
+        std::ofstream csv(directory / "frames.csv");
+        csv.exceptions(std::ios::badbit | std::ios::failbit);
+        csv << "status,error,png,captured_at_ns,receive_ns,source_time_at_ns,source_time_valid,source_clock_uncertainty_ms,time_basis\n";
+        for (std::size_t i = 0; i < frames.size(); ++i) {
+            const auto& frame = frames[i];
+            const auto file = "frame_" + std::to_string(i) + ".png";
+            if (!cv::imwrite((directory / file).string(), frame.pixels)) throw std::runtime_error("帧保存失败");
+            // captured_at保持Capture原语义，映射源时刻另列，不能暗中冒充曝光时间。
+            csv << "FRAME,," << file << ',' << ns(frame.timing.captured_at) << ',' << frame.received_ns << ','
+                << ns(frame.timing.source_time_at) << ',' << frame.timing.source_time_timing_valid << ','
+                << frame.timing.source_clock_uncertainty_ms << ',' << CaptureBackendName(backend) << '\n';
+        }
+    }
+};
+struct Resources {
+    std::unique_ptr<IMouseController> mouse;
+    source_context::SourceContextClient focus;
+    ~Resources() { focus.stop(); if (mouse) mouse->close(); cleanup_finished.store(true); }
+};
+void write_json(const std::filesystem::path& path, const Json& report) {
+    auto temporary = path; temporary += ".writing";
+    {
+        std::ofstream file(temporary); file.exceptions(std::ios::badbit | std::ios::failbit);
+        file << report.dump(2) << '\n';
+        file.flush();
+    }
+    if (!MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        throw std::runtime_error("报告原子保存失败");
+}
+}
+
+int main(int argc, char** argv) {
+    SetConsoleOutputCP(CP_UTF8);
+    std::filesystem::path output;
+    bool created = false;
+    try {
+        std::string config_path, plan_path, confirmation;
+        bool dry = false, allowed = false;
+        std::set<std::string> seen;
+        if (argc == 2 && std::string(argv[1]) == "--help") {
+            std::cout << "单组7/8发反向时长测试：--plan JSON --dry-run；真实运行另需--config INI --output NEW_DIR "
+                         "--allow-physical-output --confirm AUTO_STOP_COUNTERPULSE。需源焦点、全松与独占设备，End/Ctrl+C取消。\n";
+            return 0;
+        }
+        for (int i = 1; i < argc; ++i) {
+            const std::string option = argv[i];
+            if (!seen.insert(option).second) throw std::runtime_error("参数重复");
+            if (option == "--dry-run") dry = true;
+            else if (option == "--allow-physical-output") allowed = true;
+            else if (i + 1 < argc && option == "--plan") plan_path = argv[++i];
+            else if (i + 1 < argc && option == "--config") config_path = argv[++i];
+            else if (i + 1 < argc && option == "--output") output = argv[++i];
+            else if (i + 1 < argc && option == "--confirm") confirmation = argv[++i];
+            else throw std::runtime_error("无效参数");
+        }
+        std::ifstream input(plan_path);
+        if (!input || std::filesystem::file_size(plan_path) > 16384) throw std::runtime_error("计划不可读或过大");
+        const auto document = Json::parse(input);
+        const auto plan = parse_counterpulse_plan(document);
+        if (dry) {
+            if (allowed || !confirmation.empty() || !output.empty() || !config_path.empty()) throw std::runtime_error("dry-run不接受输出授权或配置");
+            std::cout << "计划有效；未连接设备或采集，未产生任何输入。\n"; return 0;
+        }
+        if (!allowed || confirmation != "AUTO_STOP_COUNTERPULSE" || config_path.empty() || output.empty())
+            throw std::runtime_error("缺少真实输入双授权");
+        AppConfig config;
+        std::string error;
+        if (!load_app_config(config_path, config, error)) throw std::runtime_error("配置不可用");
+        if (config.mouse.backend != MouseBackend::KMBOX_NET ||
+            config.mouse.kmbox_connect_timeout_ms > 2000) throw std::runtime_error("设备或命令超时不适用");
+        config.mouse.kmbox_command_timeout_ms = std::min(config.mouse.kmbox_command_timeout_ms, 100);
+        // 凭据仅进内存，既有生产配置的启用状态不被写回。
+        auto source_config = config.source_context;
+        source_config.enabled = true;
+        if (const char* token = std::getenv("XEN_SOURCE_CONTEXT_TOKEN")) source_config.token = token;
+        if (source_config.token.empty() || source_config.host.empty() || source_config.port == 0)
+            throw std::runtime_error("缺少源焦点配置或进程环境凭据");
+        if (!std::filesystem::create_directory(output)) throw std::runtime_error("需要不存在的输出目录");
+        created = true;
+        write_json(output / "plan.json", document);
+        if (!SetConsoleCtrlHandler(control, TRUE)) throw std::runtime_error("无法注册取消处理");
+        Resources resources;
+        if (!resources.focus.start(source_config)) throw std::runtime_error("源焦点服务不可用");
+        config.mouse.allow_send_input = true;
+        resources.mouse = MouseDeviceFactory::create(config.mouse);
+        if (!resources.mouse || !resources.mouse->open() || !resources.mouse->output_owner_exclusive())
+            throw std::runtime_error("设备独占不可用，请停止生产Runtime");
+        const auto ready_deadline = Clock::now() + std::chrono::seconds(15);
+        std::uint64_t focus_session = 0;
+        std::cout << "等待源程序聚焦和键鼠全松，最多15秒；就绪后自动执行一组，End/Ctrl+C停止。\n";
+        while (Clock::now() < ready_deadline && !stopped.load()) {
+            const auto focus = resources.focus.snapshot();
+            InputSnapshot physical;
+            const bool valid = resources.mouse->poll_input(physical) && physical.state_valid && physical.status == InputMonitorStatus::READY;
+            if (valid && physical.virtual_keys[0x23]) stopped.store(true);
+            bool released = valid;
+            for (int key : {0x57, 0x41, 0x53, 0x44, 1, 2, 4, 5, 6}) if (physical.virtual_keys[key]) released = false;
+            if (focus.available && focus.focused && released) { focus_session = focus.session_id; break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (focus_session == 0 || stopped.load()) throw std::runtime_error("未就绪或已取消");
+        if (!resources.mouse->set_wasd_event_subscription(true)) throw std::runtime_error("原始输入事件不可用");
+        Evidence evidence(config.capture);
+        auto cancel = [&]() -> std::string {
+            if (stopped.load() || std::filesystem::exists(output / "STOP")) return "USER_STOP";
+            const auto focus = resources.focus.snapshot();
+            if (!focus.available || !focus.focused || focus.session_id != focus_session) return "SOURCE_FOCUS";
+            if (evidence.failed.load()) return "CAPTURE_FAILED";
+            if (evidence.latest_ns.load() != 0 && ns(Clock::now()) - evidence.latest_ns.load() > 100000000) return "CAPTURE_STALE";
+            return {};
+        };
+        const auto pre_roll_end = Clock::now() + std::chrono::milliseconds(300);
+        while (Clock::now() < pre_roll_end && cancel().empty()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        if (evidence.count.load() < 3 || !cancel().empty()) throw std::runtime_error("射前证据或焦点无效");
+        auto report = execute_counterpulse(*resources.mouse, plan, cancel, {}, true);
+        resources.mouse->close();
+        cleanup_finished.store(true);
+        report["command_timeout_ms"] = config.mouse.kmbox_command_timeout_ms;
+        // 输出已清理后再编码落盘；失败结果保留，不把图像缺失当作可重射。
+        write_json(output / "result.json", report);
+        const auto post_end = Clock::now() + std::chrono::milliseconds(300);
+        while (Clock::now() < post_end && cancel().empty()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        const auto post_failure = cancel();
+        const bool post_complete = Clock::now() >= post_end && post_failure.empty();
+        evidence.save(output / "frames");
+        report["capture_frames"] = evidence.count.load();
+        report["post_roll_failure"] = post_failure;
+        report["last_frame_received_ns"] = evidence.latest_ns.load();
+        report["capture_complete"] = !evidence.failed.load() && post_complete;
+        report["scene_settled"] = nullptr;
+        write_json(output / "result.json", report);
+        std::cout << "组结束，命令与图像已保存；尚无停稳/推荐时间结论。\n";
+        return report.value("success", false) && report.value("capture_complete", false) ? 0 : 2;
+    } catch (...) {
+        if (created) {
+            try { write_json(output / "failure.json", {{"success", false}, {"reason", "VALIDATION_OR_EXECUTION_FAILED"}}); } catch (...) {}
+        }
+        // 不打印可能包含设备凭据或配置内容的异常。
+        std::cerr << "启动/执行失败，检查双授权、计划、源焦点、全松和输出目录；不自动重试。\n";
+        return 1;
+    }
+}

@@ -1141,6 +1141,14 @@ add_executable(auto_stop_probe Xen/auto_stop_probe/main.cpp)
 target_include_directories(auto_stop_probe PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(auto_stop_probe PRIVATE config mouse nlohmann_json::nlohmann_json)
 
+# 单组反向脉冲点射标定：与生产Runtime互斥，显式前台双授权。
+add_executable(auto_stop_counterpulse Xen/auto_stop_probe/counterpulse_main.cpp)
+target_include_directories(auto_stop_counterpulse PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(auto_stop_counterpulse PRIVATE config mouse capture source_context nlohmann_json::nlohmann_json)
+if(WIN32)
+    xen_deploy_runtime_dlls(auto_stop_counterpulse OPENCV NDI)
+endif()
+
 # 本机 HUD 观测入口只连接 DXGI，不具备任何输入能力。
 add_executable(xen_auto_stop_capture Xen/auto_stop_capture/main.cpp)
 set_target_properties(xen_auto_stop_capture PROPERTIES OUTPUT_NAME XenAutoStopCapture)
@@ -1600,6 +1608,13 @@ if(BUILD_TESTING)
     target_include_directories(auto_stop_probe_tests PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
     target_link_libraries(auto_stop_probe_tests PRIVATE mouse nlohmann_json::nlohmann_json)
     add_test(NAME auto_stop_probe_tests COMMAND auto_stop_probe_tests)
+    add_executable(auto_stop_counterpulse_tests tests/auto_stop_counterpulse_tests.cpp)
+    target_include_directories(auto_stop_counterpulse_tests PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
+    target_link_libraries(auto_stop_counterpulse_tests PRIVATE mouse nlohmann_json::nlohmann_json)
+    add_test(NAME auto_stop_counterpulse_tests COMMAND auto_stop_counterpulse_tests)
+    add_test(NAME auto_stop_counterpulse_cli_tests COMMAND "${XEN_PYTHON_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/tests/auto_stop_counterpulse_cli_tests.py" --executable "$<TARGET_FILE:auto_stop_counterpulse>")
+    add_test(NAME auto_stop_impacts_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/auto_stop_impacts_tests.py")
     add_test(NAME auto_stop_hud_analysis_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/tests/auto_stop_hud_analysis_tests.py")
