@@ -651,7 +651,7 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"aim", "enable_delay_compensation"},
         {"aim", "enable_prediction"},
         {"auto_stop", "enabled"},
-        {"trigger", "enabled"}, {"trigger", "require_stop"},
+        {"trigger", "enabled"}, {"trigger", "fire_enabled"}, {"trigger", "require_stop"},
         {"source_context", "enabled"}, {"gsi", "enabled"},
         {"recoil", "enabled"}, {"recoil", "mixed_aim"}, {"recoil", "use_trial"},
         {"mouse", "allow_send_input"},
@@ -1077,6 +1077,7 @@ bool load_app_config(const std::string& path,
         candidate.trigger = TriggerConfig{};
         candidate.trigger.general_class_ids = parse_int_list(ini.GetValue("trigger", "general_class_ids"), {});
         candidate.trigger.enabled = ini.GetBoolValue("trigger", "enabled", false);
+        candidate.trigger.fire_enabled = ini.GetBoolValue("trigger", "fire_enabled", true);
         candidate.trigger.require_stop = ini.GetBoolValue("trigger", "require_stop", false);
         candidate.trigger.hold_virtual_key = static_cast<int>(ini.GetLongValue("trigger", "hold_virtual_key", candidate.trigger.hold_virtual_key));
         candidate.trigger.fire_delay_ms = static_cast<int>(ini.GetLongValue("trigger", "fire_delay_ms", candidate.trigger.fire_delay_ms));
@@ -1558,6 +1559,7 @@ bool save_app_config(const std::string& path,
         ini.SetLongValue("source_context", "ttl_ms", config.source_context.ttl_ms);
         ini.SetValue("trigger", "general_class_ids", format_int_list(config.trigger.general_class_ids).c_str());
         ini.SetBoolValue("trigger", "enabled", config.trigger.enabled);
+        ini.SetBoolValue("trigger", "fire_enabled", config.trigger.fire_enabled);
         ini.SetBoolValue("trigger", "require_stop", config.trigger.require_stop);
         ini.SetLongValue("trigger", "hold_virtual_key", config.trigger.hold_virtual_key);
         ini.SetLongValue("trigger", "fire_delay_ms", config.trigger.fire_delay_ms);

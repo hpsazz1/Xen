@@ -225,7 +225,40 @@ void weapon_context_invalidity_and_held_cleanup() {
 }
 }
 
+void fire_disabled_preserves_qualification_and_stop() {
+    auto cfg = config(); cfg.fire_enabled = false; cfg.fire_delay_ms = 0;
+    TriggerController c; arm(c, cfg);
+    auto d = c.observe(frame(1), permit(), at(1));
+    expect(d.button_action == TriggerButtonAction::NONE && d.snapshot.reason == TriggerReason::FIRE_DISABLED &&
+        d.snapshot.region == TriggerRegion::BODY && !d.snapshot.button_may_be_down && d.command_id == 0,
+        "关闭开枪仍保留候选资格且不生成DOWN或按钮债务");
+    expect(c.tick(permit(), at(2)).button_action == TriggerButtonAction::NONE, "调试等待不延迟补发DOWN");
+    cfg.require_stop = true;
+    TriggerController stopped; arm(stopped, cfg);
+    auto p = permit(); p.next_stop_request_id = 41;
+    d = stopped.observe(frame(1), p, at(1));
+    expect(d.stop_action == TriggerStopAction::REQUEST && d.stop_request_id == 41 &&
+        d.button_action == TriggerButtonAction::NONE, "关闭开枪仍请求急停");
+    p.stop_request_id = 41; p.stop_observation_epoch = 1; p.stop_observed_qualified = true;
+    p.stop_expires_at = p.stop_release_deadline = at(40);
+    d = stopped.tick(p, at(2));
+    expect(d.button_action == TriggerButtonAction::NONE && d.snapshot.reason == TriggerReason::FIRE_DISABLED,
+        "即使停稳资格齐全关闭开枪仍无DOWN");
+    d = stopped.tick(permit(false), at(3));
+    expect(d.stop_action == TriggerStopAction::CANCEL && d.stop_request_id == 41,
+        "调试模式松键仍取消急停");
+    TriggerController active; auto enabled = cfg; enabled.require_stop = false; enabled.fire_enabled = true;
+    arm(active, enabled);
+    auto down = active.observe(frame(1), permit(), at(1)); ack(active, down, 2);
+    expect(!active.configure(cfg), "切为不开枪不能绕过既有按钮债务");
+    auto up = active.cancel(TriggerReason::CANCELED, at(3));
+    expect(up.button_action == TriggerButtonAction::UP, "关闭前仍生成真实UP清理决策");
+    ack(active, up, 4);
+    expect(active.configure(cfg), "UP明确确认后才能应用不开枪配置");
+}
+
 int main() {
+    fire_disabled_preserves_qualification_and_stop();
     geometry_and_timing(); association(); permissions_and_receipts(); stop_and_automatic();
     weapon_context_cancels_qualification(); weapon_context_invalidity_and_held_cleanup();
     auto bad = config(); bad.person_class_ids.push_back(1);

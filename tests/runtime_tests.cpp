@@ -5,6 +5,7 @@
 #include <chrono>
 #include <iostream>
 #include <memory>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -620,6 +621,42 @@ void test_runtime_preview_held_slots_and_reset() {
 } // namespace
 
 int main() {
+    {
+        AimConfig config;
+        config.person_class_ids = {2}; config.head_class_ids = {3}; config.high_confidence = 0.5f;
+        const auto now = std::chrono::steady_clock::now();
+        FrameTiming timing;
+        timing.source_time_timing_valid = true;
+        timing.source_time_at = now - std::chrono::milliseconds(10);
+        timing.source_clock_uncertainty_ms = 5;
+        std::array<Detection, 1> detections{{{100, 100, 110, 110, 0.5f, 2}}};
+        const auto valid = [&] { return runtime::detail::auto_stop_target_deadline(detections, config, timing, now); };
+        expect(valid() == now + std::chrono::milliseconds(35), "配置类别边缘目标应独立急停，不要求准星中心且扣除不确定度");
+        detections[0].class_id = 3;
+        expect(valid() != std::chrono::steady_clock::time_point{}, "配置头部类别应独立可用");
+        detections[0].class_id = 0;
+        expect(valid() == std::chrono::steady_clock::time_point{}, "非配置类别不可触发");
+        detections[0].class_id = 2; detections[0].confidence = 0.49f;
+        expect(valid() == std::chrono::steady_clock::time_point{}, "低于配置置信度不可触发");
+        detections[0].confidence = std::numeric_limits<float>::quiet_NaN();
+        expect(valid() == std::chrono::steady_clock::time_point{}, "NaN置信度不可触发");
+        detections[0].confidence = 0.5f; detections[0].x2 = 100;
+        expect(valid() == std::chrono::steady_clock::time_point{}, "退化框不可触发");
+        detections[0].x2 = std::numeric_limits<float>::infinity();
+        expect(valid() == std::chrono::steady_clock::time_point{}, "无限坐标不可触发");
+        detections[0].x2 = 110;
+        timing.source_time_at = now - std::chrono::milliseconds(45);
+        expect(valid() == std::chrono::steady_clock::time_point{}, "到期期限等于当前时刻不可触发");
+        timing.source_time_at = now + std::chrono::milliseconds(1);
+        expect(valid() == std::chrono::steady_clock::time_point{}, "未来的源时间不可触发");
+        timing.source_time_at = now;
+        timing.source_clock_uncertainty_ms = -1;
+        expect(valid() == std::chrono::steady_clock::time_point{}, "负不确定度不可触发");
+        timing.source_clock_uncertainty_ms = 50;
+        expect(valid() == std::chrono::steady_clock::time_point{}, "不确定度占满期限不可触发");
+        timing.source_clock_uncertainty_ms = 0; timing.source_time_timing_valid = false;
+        expect(valid() == std::chrono::steady_clock::time_point{}, "无源时钟有效事实不可触发");
+    }
     test_processed_frame_timing_evidence_preserves_raw_identity();
     test_latest_frame_queue();
     test_malformed_capture_frame_is_not_counted_as_published();

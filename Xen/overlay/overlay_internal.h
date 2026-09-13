@@ -102,6 +102,8 @@ struct HotkeyCaptureResult {
 struct HotkeyCaptureState {
     bool active = false;
     std::array<bool, 256> previous_key_active{};
+    std::array<bool, 256> previous_device_key_active{};
+    bool device_baseline_valid = false;
 };
 
 // GetKeyNameText 的 lParam 使用 bit 16..23 保存扫描码，并用 bit 24 区分
@@ -115,19 +117,25 @@ inline std::uint32_t make_key_name_lparam(
 
 inline void begin_hotkey_capture(
         HotkeyCaptureState& state,
-        const std::array<bool, 256>& key_active) noexcept {
+        const std::array<bool, 256>& key_active,
+        const std::array<bool, 256>* device_keys = nullptr) noexcept {
     state.active = true;
     // 捕获开始时记录按钮点击等现有按下态，只接受后续新的上升沿。
     state.previous_key_active = key_active;
+    state.device_baseline_valid = device_keys != nullptr;
+    state.previous_device_key_active = device_keys ? *device_keys : std::array<bool, 256>{};
 }
 
 inline HotkeyCaptureResult update_hotkey_capture(
         HotkeyCaptureState& state,
-        const std::array<bool, 256>& key_active) noexcept {
+        const std::array<bool, 256>& key_active,
+        const std::array<bool, 256>* device_keys = nullptr) noexcept {
     if (!state.active) return {};
     const auto pressed = [&](int virtual_key) {
         const std::size_t index = static_cast<std::size_t>(virtual_key);
-        return key_active[index] && !state.previous_key_active[index];
+        return (key_active[index] && !state.previous_key_active[index]) ||
+            (device_keys && state.device_baseline_valid && (*device_keys)[index] &&
+                !state.previous_device_key_active[index]);
     };
     if (pressed(0x1B)) { // VK_ESCAPE
         state = {};
@@ -139,6 +147,9 @@ inline HotkeyCaptureResult update_hotkey_capture(
         return {HotkeyCaptureResultType::ASSIGNED, virtual_key};
     }
     state.previous_key_active = key_active;
+    // 故障或来源恢复首帧只建立基线，不能把缓存按住态伪造成新按下。
+    state.device_baseline_valid = device_keys != nullptr;
+    state.previous_device_key_active = device_keys ? *device_keys : std::array<bool, 256>{};
     return {};
 }
 

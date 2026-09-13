@@ -83,6 +83,7 @@ const char* TriggerReasonName(TriggerReason reason) noexcept {
         TRIGGER_REASON(STOP_EXPIRED); TRIGGER_REASON(COMMAND_PENDING); TRIGGER_REASON(RELEASED);
         TRIGGER_REASON(UNKNOWN_RECEIPT); TRIGGER_REASON(CANCELED); TRIGGER_REASON(COUNTER_EXHAUSTED);
         TRIGGER_REASON(CONTEXT_CHANGED); TRIGGER_REASON(CONTEXT_UNAVAILABLE);
+        TRIGGER_REASON(FIRE_DISABLED);
 #undef TRIGGER_REASON
     }
     return "UNKNOWN";
@@ -308,6 +309,12 @@ TriggerDecision TriggerController::tick(const TriggerPermit& permit, TriggerTime
     if (now < cooldown_until_) { state_.phase = TriggerPhase::COOLDOWN; state_.reason = TriggerReason::COOLDOWN; return result(now); }
     if (state_.observation_epoch == last_down_epoch_ && state_.observation_sequence <= last_down_sequence_) {
         state_.reason = TriggerReason::WAIT_NEW_FRAME; return result(now);
+    }
+    // 保留候选与急停调试；不开枪不产生命令、按钮债务或伪造回执。
+    if (!config_.fire_enabled) {
+        state_.phase = TriggerPhase::QUALIFYING;
+        state_.reason = TriggerReason::FIRE_DISABLED;
+        return result(now);
     }
     if (next_command_id_ == std::numeric_limits<std::uint64_t>::max()) {
         state_.faulted = true; state_.phase = TriggerPhase::FAULT; state_.reason = TriggerReason::COUNTER_EXHAUSTED; return result(now);

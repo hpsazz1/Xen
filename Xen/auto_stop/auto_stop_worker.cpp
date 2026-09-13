@@ -66,6 +66,10 @@ public:
     std::shared_ptr<IMouseController> mouse;
     std::shared_ptr<AutoStopOutputArbiter> arbiter;
     std::function<bool()> allowed;
+    std::function<std::uint64_t()> allocate_request;
+    std::function<bool()> focused;
+    Clock::time_point target_until{};
+    std::uint64_t target_generation = 0;
     AutoStopConfig config;
     int command_timeout_ms = 300;
     mutable std::mutex mutex;
@@ -90,6 +94,16 @@ public:
                 !paused.load(std::memory_order_acquire) && !stopping.load(std::memory_order_acquire);
         } catch (...) { return false; }
     }
+    bool target_permission(std::uint64_t generation = UINT64_MAX) noexcept {
+        try {
+            const bool source_focused = focused && focused();
+            std::lock_guard<std::mutex> lock(mutex);
+            state.source_focused = source_focused;
+            state.target_available = Clock::now() < target_until;
+            return source_focused && state.target_available &&
+                (generation == UINT64_MAX || generation == target_generation);
+        } catch (...) { return false; }
+    }
     void receipt(const KeyboardReceipt& result, std::int64_t started) {
         if (result.disposition != KeyboardDisposition::ACKNOWLEDGED ||
             (!result.datagram_sent && result.protocol_ack_received_at == Clock::time_point{})) return;
@@ -106,7 +120,8 @@ public:
         InputSnapshot input;
         std::uint64_t active_id = 0, active_generation = 0;
         std::uint8_t software_mask = 0, original_mask = 0;
-        bool debt = false, estimated = false;
+        bool debt = false, estimated = false, independent = false, target_consumed = false;
+        std::uint64_t active_target_generation = 0;
         Clock::time_point lease_end;
         auto release_reservation = [&]() {
             if (output.owns_lock()) output.unlock();
@@ -168,6 +183,7 @@ public:
             if (fault || force_fault || !clean_ok) { fault = true; state.status = AutoStopStatus::FAULT; }
             else state.status = paused.load() ? AutoStopStatus::PAUSED : AutoStopStatus::CANCELED;
             active_id = 0;
+            independent = false;
             estimated = false;
             if (!retain_release) { history.reset(); intent = {}; }
         };
@@ -184,6 +200,13 @@ public:
                 }
                 bool latched_fault;
                 { std::lock_guard<std::mutex> lock(mutex); latched_fault = fault; }
+                const bool target_ready = allocate_request && target_permission();
+                const bool target_eligible = target_ready && input_ok && permission(input);
+                std::uint64_t current_target_generation;
+                { std::lock_guard<std::mutex> lock(mutex); current_target_generation = target_generation; }
+                if (!target_eligible) target_consumed = false;
+                if (active_id && independent && (!target_eligible || active_target_generation != current_target_generation))
+                    cancel_active(false, "target_or_focus_revoked");
                 if (active_id && (!input_ok || !events_ok || !intent.history_valid || !permission(input) ||
                     held_wasd(input) != original_mask || active_generation != cancel_generation.load() || Clock::now() >= lease_end)) {
                     const char* reason = !input_ok ? "input_invalid" : !events_ok ? "input_gap" :
@@ -201,6 +224,23 @@ public:
                     std::uint64_t requested = 0;
                     {
                         std::lock_guard<std::mutex> lock(mutex);
+                        // 连续目标与按住会话只消费一次，观察刷新不生成新租期。
+                        if (!pending_id && !target_consumed && target_eligible && events_ok &&
+                            intent.history_valid && intent.held_mask != 0 && !intent.conflicting &&
+                            state.status == AutoStopStatus::READY) {
+                            const auto id = allocate_request();
+                            if (id > last_request_id) {
+                                pending_id = last_request_id = id;
+                                submitted_at = Clock::now();
+                                submitted_generation = cancel_generation.load();
+                                state.request_id = id;
+                                ++state.requests;
+                                state.status = AutoStopStatus::BRAKING;
+                                independent = true;
+                                active_target_generation = target_generation;
+                                target_consumed = true;
+                            }
+                        }
                         requested = pending_id;
                         if (requested) {
                             pending_id = 0;
@@ -213,6 +253,7 @@ public:
                         original_mask = intent.held_mask;
                         estimated = false;
                         if (!input_ok || !events_ok || !intent.history_valid || !permission(input) ||
+                            (independent && !target_permission(active_target_generation)) ||
                             active_generation != cancel_generation.load() || Clock::now() >= lease_end) {
                             cancel_active(false, "request_not_eligible");
                         } else {
@@ -223,7 +264,8 @@ public:
                                 publish(AutoStopStatus::BRAKING);
                                 LOG_DEBUG("auto_stop", "开始请求{}，物理方向mask={}", active_id, original_mask);
                                 for (std::uint8_t key = 1; key <= 8; key <<= 1) if (original_mask & key) {
-                                    if (!mouse->poll_input(input) || !permission(input) || held_wasd(input) != original_mask ||
+                                    if (!mouse->poll_input(input) || !permission(input) ||
+                                        (independent && !target_permission(active_target_generation)) || held_wasd(input) != original_mask ||
                                         active_generation != cancel_generation.load() || Clock::now() >= lease_end) { cancel_active(false, "permission_changed_before_mask"); break; }
                                     const auto started = now_ns();
                                     const auto result = mouse->set_wasd_mask(key, true);
@@ -243,7 +285,8 @@ public:
                     const auto decision = controller.tick(now_ns());
                     if (decision.phase == AutoStopPhase::INVALID || decision.phase == AutoStopPhase::CANCELLED) cancel_active(false, "controller_canceled");
                     else if (decision.phase == AutoStopPhase::WAITING_ACK) {
-                        if (!mouse->poll_input(input) || !permission(input) || held_wasd(input) != original_mask ||
+                        if (!mouse->poll_input(input) || !permission(input) ||
+                            (independent && !target_permission(active_target_generation)) || held_wasd(input) != original_mask ||
                             active_generation != cancel_generation.load() || Clock::now() >= lease_end) cancel_active(false, "permission_changed_before_report");
                         else {
                             const auto started = now_ns();
@@ -290,8 +333,21 @@ public:
 };
 
 AutoStopWorker::AutoStopWorker(std::shared_ptr<IMouseController> mouse,
-        std::shared_ptr<AutoStopOutputArbiter> arbiter, std::function<bool()> permission)
-    : impl_(std::make_unique<Impl>(std::move(mouse), std::move(arbiter), std::move(permission))) {}
+        std::shared_ptr<AutoStopOutputArbiter> arbiter, std::function<bool()> permission,
+        std::function<std::uint64_t()> allocate_request, std::function<bool()> focused)
+    : impl_(std::make_unique<Impl>(std::move(mouse), std::move(arbiter), std::move(permission))) {
+    impl_->allocate_request = std::move(allocate_request);
+    impl_->focused = std::move(focused);
+}
+void AutoStopWorker::publish_target(std::chrono::steady_clock::time_point valid_until) noexcept {
+    if (!impl_) return;
+    try {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        if (valid_until == Clock::time_point{}) ++impl_->target_generation;
+        impl_->target_until = valid_until;
+        impl_->wake.notify_all();
+    } catch (...) {}
+}
 AutoStopWorker::~AutoStopWorker() { stop(); }
 bool AutoStopWorker::start(const AutoStopConfig& config, int command_timeout_ms) noexcept {
     if (!impl_) return false;
@@ -300,6 +356,7 @@ bool AutoStopWorker::start(const AutoStopConfig& config, int command_timeout_ms)
         if (impl_->running || impl_->thread.joinable() || impl_->fault) return false;
         impl_->config = config;
         impl_->state = {};
+        impl_->state.independent_trigger_enabled = static_cast<bool>(impl_->allocate_request);
         if (!config.enabled) return true;
         if (!impl_->mouse || !impl_->arbiter || impl_->arbiter->faulted_.load() || !impl_->mouse->output_owner_exclusive() ||
             !impl_->mouse->supports_wasd_keyboard() || command_timeout_ms < 1 || command_timeout_ms > 1000) return false;

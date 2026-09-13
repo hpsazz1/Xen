@@ -372,7 +372,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             : nullptr;
         const bool overlay_rendered = overlay.render(
             snapshot, preview, model_catalog, backend_catalog,
-            config, workspace_settings, model_workspace.poll(&workspace_settings), app_message, actions);
+            config, workspace_settings, model_workspace.poll(&workspace_settings), app_message, actions, &keyboard_poll);
         if (!startup_boundary.observe_overlay_render(
                 overlay_rendered,
                 overlay.last_error())) {

@@ -52,7 +52,8 @@ public:
                 model_workspace::Settings& workspace_settings,
                 const model_workspace::Snapshot& workspace_snapshot,
                 const std::string& app_message,
-                OverlayActions& actions) noexcept;
+                OverlayActions& actions,
+                const KeyboardPollResult* keyboard_poll = nullptr) noexcept;
     const std::string& last_error() const noexcept;
     void shutdown() noexcept;
 

@@ -112,9 +112,10 @@ struct Fixture {
             if (context_hook) context_hook();
             return TriggerContext{context_generation.load(), context_required.load(), context_valid.load()};
         }};
-    bool start(bool stop=false, int age=50, int cleanup_budget_ms=1000, int press_ms=10) {
+    bool start(bool stop=false, int age=50, int cleanup_budget_ms=1000, int press_ms=10, bool fire_enabled=true) {
         TriggerConfig cfg;
         cfg.enabled=true; cfg.hold_virtual_key=5; cfg.fire_delay_ms=0;
+        cfg.fire_enabled = fire_enabled;
         cfg.max_observation_age_ms=age; cfg.require_stop=stop;
         cfg.press_duration_ms=press_ms; cfg.shot_interval_ms=120;
         if (!worker.start(cfg, cleanup_budget_ms)) return false;
@@ -123,6 +124,21 @@ struct Fixture {
     }
     void fire() { mouse->held=true; worker.publish(observation()); }
 };
+void fire_disabled_no_output_or_receipt() {
+    Fixture f; expect(f.start(false, 200, 1000, 10, false), "不开枪调试启动"); f.fire();
+    expect(until([&] { return f.worker.snapshot().reason == TriggerReason::FIRE_DISABLED; }), "快照明确不开枪原因");
+    f.worker.stop();
+    expect(f.mouse->count(true) == 0 && f.mouse->count(false) == 0 && !f.worker.firing_signal().confirmed_down,
+        "关闭开枪不调用设备且不伪造firing信号");
+    for (const auto& event : f.worker.execution_log().events)
+        expect(!event.backend_called && event.receipt_status != TriggerReceiptStatus::ACKNOWLEDGED,
+            "关闭开枪不伪造ACK事件");
+    Fixture stop; expect(stop.start(true, 200, 1000, 10, false), "急停联调启动"); stop.fire();
+    expect(until([&] { return stop.requests.load() == 1; }), "不开枪仍调用急停请求");
+    stop.worker.stop();
+    expect(stop.cancellations == 1 && stop.mouse->count(true) == 0 && !stop.worker.firing_signal().confirmed_down,
+        "调试结束取消急停且从未确认发枪");
+}
 void autonomous_cleanup() {
     Fixture f; expect(f.start(), "worker启动及释放边沿"); f.fire();
     expect(until([&] { return f.mouse->count(false)==1; }), "无下一图像仍应按deadline释放");
@@ -415,6 +431,7 @@ void exception_uses_bounded_cleanup() {
 
 }
 int main() {
+    fire_disabled_no_output_or_receipt();
     autonomous_cleanup(); unknown_and_late_ack(); final_revalidation(); unverified_stop_and_contention();
     context_change_at_down_revalidation(); context_change_releases_held_button();
     not_sent_up_receipt_regression();

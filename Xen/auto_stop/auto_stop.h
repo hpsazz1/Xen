@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <array>
 
-// 移动制动配置独立于 Aim；允许键只授予许可，不代表武装或开火请求。
+// 移动制动配置独立于 Aim；允许键与有效目标可发起制动，不代表武装或开火请求。
 struct AutoStopConfig {
     bool enabled = false;
     int activation_virtual_key = 0;
@@ -31,6 +31,9 @@ struct AutoStopSnapshot {
     std::int64_t max_release_overshoot_ns = 0, max_ack_wait_ns = 0, max_arbiter_wait_ns = 0;
     bool cleanup_unknown = false;
     bool telemetry_available = false;
+    bool independent_trigger_enabled = false;
+    bool target_available = false;
+    bool source_focused = false;
     std::uint64_t acknowledged_commands = 0, cleanup_attempts = 0, cleanup_failures = 0, release_commands = 0;
     std::uint64_t arbiter_wait_samples = 0;
 };

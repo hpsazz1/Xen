@@ -129,6 +129,10 @@ KeyboardPollResult KeyboardListener::poll() noexcept {
             impl_->input_healthy = false;
         }
         result.new_input_fact = new_input_fact;
+        if (impl_->input_healthy) {
+            result.capture_virtual_keys = snapshot.virtual_keys;
+            result.capture_state_valid = true;
+        }
         publish_state();
     } catch (...) {
         impl_->status = KeyboardStatus::FAILURE;

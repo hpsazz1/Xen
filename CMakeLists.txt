@@ -1691,6 +1691,10 @@ if(BUILD_TESTING)
     target_link_libraries(overlay_tests PRIVATE recoil)
     add_test(NAME overlay_tests COMMAND overlay_tests)
 
+    add_executable(hotkey_device_capture_tests tests/hotkey_device_capture_tests.cpp)
+    target_link_libraries(hotkey_device_capture_tests PRIVATE keyboard)
+    add_test(NAME hotkey_device_capture_tests COMMAND hotkey_device_capture_tests)
+
     # 只初始化 Overlay；没有设备/Runtime 实例，供实际窗口布局复核。
     add_executable(auxiliary_ui_preview tests/auxiliary_ui_preview.cpp)
     target_link_libraries(auxiliary_ui_preview PRIVATE overlay)
@@ -2031,6 +2035,9 @@ if(BUILD_TESTING)
         -PublishScript "${PROJECT_SOURCE_DIR}/scripts/publish_release_bundle.ps1"
         -GitExecutable "${GIT_EXECUTABLE}"
         -TestRoot "${CMAKE_BINARY_DIR}/release-bundle-tests")
+    xen_add_windows_powershell_test(publish_worker_update_tests
+        "${PROJECT_SOURCE_DIR}/scripts/test_publish_worker_update.ps1"
+        -TestRoot "${CMAKE_BINARY_DIR}/worker-update-tests")
     xen_add_windows_powershell_test(aim_analysis_import_scope_tests
         "${PROJECT_SOURCE_DIR}/tests/aim_analysis_import_scope_tests.ps1"
         -ScriptsRoot "${PROJECT_SOURCE_DIR}/scripts")

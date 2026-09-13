@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -18,6 +19,29 @@
 #include "runtime/runtime.h"
 
 namespace runtime::detail {
+
+inline std::chrono::steady_clock::time_point auto_stop_target_deadline(
+        std::span<const Detection> detections, const AimConfig& config,
+        const FrameTiming& timing, std::chrono::steady_clock::time_point now) noexcept {
+    constexpr double kObservationAgeMs = 50.0;
+    const double uncertainty = timing.source_clock_uncertainty_ms;
+    if (!timing.source_time_timing_valid || !std::isfinite(uncertainty) || uncertainty < 0.0 ||
+        uncertainty >= kObservationAgeMs || timing.source_time_at > now) return {};
+    const auto deadline = timing.source_time_at + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double, std::milli>(kObservationAgeMs - uncertainty));
+    if (deadline <= now) return {};
+    for (const auto& detection : detections) {
+        const auto contains = [&](const std::vector<int>& ids) {
+            return std::find(ids.begin(), ids.end(), detection.class_id) != ids.end();
+        };
+        if (std::isfinite(detection.confidence) && detection.confidence >= config.high_confidence &&
+            std::isfinite(detection.x1) && std::isfinite(detection.x2) &&
+            std::isfinite(detection.y1) && std::isfinite(detection.y2) &&
+            detection.x2 > detection.x1 && detection.y2 > detection.y1 &&
+            (contains(config.person_class_ids) || contains(config.head_class_ids))) return deadline;
+    }
+    return {};
+}
 
 // 同一生产入口维护 observation 时间基准及连续性；不重新判定 Capture 的映射质量。
 class RuntimeObservationClock {

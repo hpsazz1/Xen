@@ -215,6 +215,8 @@ int wmain(int argc, wchar_t** argv) {
         config.ui.open_detached_preview_on_start = false;
         config.mouse.allow_send_input = false;
         config.mouse.backend = MouseBackend::KMBOX_NET;
+        config.mouse.kmbox_ip = "127.0.0.1";
+        config.mouse.kmbox_uuid = "00000000";
         config.trigger.require_stop = true;
         for (int index = 2; index < argc; ++index) {
             const std::wstring_view argument(argv[index]);
@@ -259,6 +261,8 @@ int wmain(int argc, wchar_t** argv) {
         workspace.environment_message = "示例状态：尚未检查环境，未安装任何依赖。";
         workspace.weights_message = "示例状态：尚未确认权重来源，未读取 PT。";
         OverlayActions actions;
+        KeyboardPollResult capture_input;
+        capture_input.capture_state_valid = true;
         UiInput input;
         ImGuiContextHook hook;
         hook.Type = ImGuiContextHookType_NewFramePre;
@@ -282,7 +286,7 @@ int wmain(int argc, wchar_t** argv) {
         auto frame = [&] {
             require(overlay.pump_messages(), "窗口意外关闭");
             require(overlay.render(runtime, {}, {}, {}, config, settings, workspace,
-                                   "无设备 UI 验收", actions), "Overlay 渲染失败");
+                                   "无设备 UI 验收", actions, &capture_input), "Overlay 渲染失败");
             require(!actions.start_requested && actions.runtime_intents.empty() &&
                     !actions.stop_requested && !actions.reload_detector_requested && !actions.refresh_models_requested &&
                     !actions.save_config_requested && !actions.log_level_changed && !actions.preview_enabled &&
@@ -300,10 +304,10 @@ int wmain(int argc, wchar_t** argv) {
             input.down = false; frame();
             input.position = {400,40}; frame(); frame();
         };
-        select_page(2);
+        select_page(4);
         require_page_table("collection_settings");
         save_window(capture, output / "collection.png");
-        select_page(3);
+        select_page(5);
         require_page_table("training_environment");
         save_window(capture, output / "training-top.png");
         input.position = ImVec2(static_cast<float>(config.ui.width - 150),
@@ -311,7 +315,7 @@ int wmain(int argc, wchar_t** argv) {
         input.wheel = -20.0f;
         frame(); frame(); frame();
         save_window(capture, output / "training-bottom.png");
-        select_page(5);
+        select_page(3);
         auto* content = preview_window("content");
         ImGui::SetScrollY(content, 0); frame(); frame();
         require_page_table("auto_stop_form");
@@ -345,6 +349,17 @@ int wmain(int argc, wchar_t** argv) {
             focus_item(label, content);
             input.down = true; frame(); input.down = false; frame(); frame();
         };
+        // 只注入后端快照与本进程点击，不调用Windows或真实设备输入。
+        for (int key : {5, 6}) {
+            focus_item("##auto_stop_activation_key", preview_window("auto_stop_panel"), "auto_stop_form");
+            input.down = true; frame(); input.down = false; frame();
+            capture_input.capture_virtual_keys[key] = true; frame();
+            require(config.auto_stop.activation_virtual_key == key,
+                "真实Overlay捕获按钮必须接收后端侧键快照");
+            capture_input.capture_virtual_keys[key] = false; frame();
+        }
+        ImGui::SetScrollY(content, 0); frame(); frame();
+        save_window(capture, output / "auxiliary-side-button.png");
         focus_item("暂停本次会话", preview_window("auto_stop_panel"));
         require_tooltip(capture, "预计完成不代表停稳或允许开火");
         save_window(capture, output / "auxiliary-stop-help.png");
@@ -393,6 +408,14 @@ int wmain(int argc, wchar_t** argv) {
         { std::ifstream file(fixture_path, std::ios::binary); const std::string after{
               std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
           require(after == fixture_text, "UI预览修改了磁盘曲线"); }
+        select_page(6);
+        content = preview_window("content");
+        ImGui::SetScrollY(content, 0); frame(); frame();
+        require_page_table("mouse_form");
+        require_page_table("keyboard_form");
+        save_window(capture, output / "settings-input.png");
+        ImGui::SetScrollY(content, content->ScrollMax.y); frame(); frame();
+        save_window(capture, output / "settings-preferences.png");
         std::ofstream result(output / "ui-preview-result.txt", std::ios::binary);
         result << "状态：STOPPED；业务动作：0；真实输入：0\n"
                << "窗口：" << config.ui.width << 'x' << config.ui.height

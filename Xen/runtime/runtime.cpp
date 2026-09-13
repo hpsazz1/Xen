@@ -303,6 +303,18 @@ struct Runtime::Impl {
                         return config.mouse.allow_send_input &&
                             !stop_requested.load(std::memory_order_acquire) &&
                             safety_gate.can_dispatch_auxiliary();
+                    },
+                    [this] {
+                        auto previous = stop_request_watermark.load();
+                        do { if (previous == UINT64_MAX) return std::uint64_t{0}; }
+                        while (!stop_request_watermark.compare_exchange_weak(previous, previous + 1));
+                        return previous + 1;
+                    },
+                    [this, previous_session = std::uint64_t{0}]() mutable {
+                        const auto source = source_context_client.snapshot();
+                        if (!source.available || !source.focused) { previous_session = 0; return false; }
+                        if (source.session_id != previous_session) { previous_session = source.session_id; return false; }
+                        return true;
                     });
                 if (!worker->start(config.auto_stop, config.mouse.kmbox_command_timeout_ms)) {
                     set_error("启动自动急停调度失败");
@@ -310,9 +322,9 @@ struct Runtime::Impl {
                 }
                 auto_stop_worker.store(std::move(worker));
             }
-            LOG_INFO("auto_stop", "自动急停已接入请求接口；允许键不生成请求，预测不授予开火");
+            LOG_INFO("auto_stop", "自动急停由允许键和有效目标独立触发；要求源机焦点，估算不授予开火");
         }
-        if ((config.trigger.enabled || config.recoil.enabled) && config.source_context.enabled) {
+        if ((config.auto_stop.enabled || config.trigger.enabled || config.recoil.enabled) && config.source_context.enabled) {
                 auto context_config = config.source_context;
                 char* token = nullptr; std::size_t token_size = 0;
                 if (_dupenv_s(&token, &token_size, "XEN_SOURCE_CONTEXT_TOKEN") == 0 && token) {
@@ -810,6 +822,7 @@ struct Runtime::Impl {
                 frame_detector_generation = active_detector_generation;
             }
             if (profile.detector.status != DetectionStatus::SUCCESS) {
+                if (auto stop = auto_stop_worker.load()) stop->publish_target({});
                 if (auto trigger = trigger_worker.load()) trigger->publish(std::make_shared<TriggerObservation>());
                 recoil_observation_ns.store(0);
                 if (config.recoil.mixed_aim) if (auto recoil = recoil_worker.load()) recoil->cancel();
@@ -826,10 +839,16 @@ struct Runtime::Impl {
                     *frame, std::move(detections), observation_clock,
                     camera_motion, safety_gate.can_dispatch());
                 if (prepared.reset_aim) {
+                    if (auto stop = auto_stop_worker.load()) stop->publish_target({});
                     if (auto recoil = recoil_worker.load()) recoil->cancel();
                     aim->reset();
                 }
                 aim_frame = std::move(prepared.frame);
+                if (auto stop = auto_stop_worker.load()) {
+                    // 独立急停按配置目标类别识别，不要求准星命中或 Aim hold。
+                    stop->publish_target(runtime::detail::auto_stop_target_deadline(
+                        aim_frame.detections, config.aim, frame->timing, std::chrono::steady_clock::now()));
+                }
                 profile.background_motion_ms = prepared.background_motion_ms;
                 profile.control_timing_valid = true;
                 profile.capture_to_control_ms =

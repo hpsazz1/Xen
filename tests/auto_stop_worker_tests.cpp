@@ -28,7 +28,7 @@ public:
         input = {}; input.status = healthy ? InputMonitorStatus::READY : InputMonitorStatus::FAILURE;
         input.state_valid = healthy;
         input.sequence = sequence;
-        input.virtual_keys[5] = true;
+        input.virtual_keys[5] = activation;
         input.virtual_keys[0x23] = end;
         input.virtual_keys['W'] = (held & 1) != 0;
         input.virtual_keys['A'] = (held & 2) != 0;
@@ -93,7 +93,7 @@ public:
     std::vector<int> software, masks;
     std::uint64_t sequence = 0;
     std::uint8_t held = 0, installed_masks = 0, current_software = 0;
-    bool healthy = true, subscribed = false, gap = false, cleanup_fails = false, end = false;
+    bool healthy = true, subscribed = false, gap = false, cleanup_fails = false, end = false, activation = true;
     std::size_t software_fail_at = 0, mask_fail_at = 0;
     int cleanups = 0, cleanup_checks = 0, subscriptions = 0;
     std::atomic<int> closes{0};
@@ -110,6 +110,101 @@ void ready(AutoStopWorker& worker, const std::shared_ptr<Fake>& fake) {
 int main() {
     try {
         const AutoStopConfig config{true, 5};
+        {
+            auto fake = std::make_shared<Fake>();
+            std::atomic<std::uint64_t> id{0};
+            AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+                [&] { return ++id; }, [] { return true; });
+            require(worker.start(config), "独立目标急停应启动");
+            ready(worker, fake);
+            require(worker.snapshot().requests == 0, "只有允许键没有目标不得请求急停");
+            worker.publish_target(Clock::now() + std::chrono::seconds(1));
+            wait_for([&] { return fake->has_software(); });
+            require(worker.snapshot().requests == 1, "目标和允许键应独立触发急停，不依赖Trigger");
+            worker.publish_target({});
+            wait_for([&] { return fake->released(); });
+            require(!worker.snapshot().fire_permitted, "独立急停不得授予开火资格");
+            worker.stop();
+        }
+        for (const bool explicit_first : {true, false}) {
+            auto fake = std::make_shared<Fake>();
+            std::atomic<std::uint64_t> watermark{0}, allocations{0}, focus_reads{0};
+            AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+                [&] { ++allocations; return ++watermark; },
+                [&] { ++focus_reads; return true; });
+            require(worker.start(config), "混合请求归属测试启动");
+            ready(worker, fake);
+            std::uint64_t accepted_id = 0, rejected_id = 0;
+            if (explicit_first) {
+                accepted_id = ++watermark;
+                require(worker.request(accepted_id), "显式先到必须占有唯一请求槽");
+                wait_for([&] { return worker.snapshot().status == AutoStopStatus::ESTIMATED; });
+                worker.publish_target(Clock::now() + std::chrono::seconds(1));
+                wait_for([&] { return worker.snapshot().target_available; });
+                require(allocations.load() == 0, "显式请求在途时独立目标不能分配第二个请求");
+                rejected_id = ++watermark;
+                require(!worker.request(rejected_id), "占用期间第二个显式请求必须拒绝");
+            } else {
+                worker.publish_target(Clock::now() + std::chrono::seconds(1));
+                wait_for([&] { return worker.snapshot().status == AutoStopStatus::ESTIMATED; });
+                accepted_id = worker.snapshot().request_id;
+                rejected_id = ++watermark;
+                require(allocations.load() == 1 && !worker.request(rejected_id),
+                    "独立先到只分配一次，后到显式请求必须拒绝");
+            }
+            require(worker.snapshot().requests == 1 && worker.snapshot().request_id == accepted_id,
+                "混合调用方只能有一个已接收请求且归属不变");
+            worker.cancel(rejected_id);
+            const auto next_focus_reads = focus_reads.load() + 2;
+            wait_for([&] { return focus_reads.load() >= next_focus_reads; });
+            require(worker.snapshot().canceled == 0 && worker.snapshot().request_id == accepted_id,
+                "未取得请求槽的调用方取消不得清理已接收owner");
+            worker.cancel(accepted_id);
+            wait_for([&] { return fake->released() && worker.snapshot().canceled == 1; });
+            require(worker.snapshot().requests == 1, "正确owner取消只能清理原请求，不生成替代请求");
+            worker.stop();
+        }
+        for (int reason = 0; reason < 6; ++reason) {
+            auto fake = std::make_shared<Fake>();
+            std::atomic<std::uint64_t> id{0};
+            std::atomic<bool> focused{true}, permitted{true};
+            AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [&] { return permitted.load(); },
+                [&] { return ++id; }, [&] { return focused.load(); });
+            require(worker.start(config), "取消矩阵启动");
+            ready(worker, fake);
+            worker.publish_target(Clock::now() + std::chrono::seconds(1));
+            wait_for([&] { return fake->has_software(); });
+            if (reason == 0) worker.publish_target({});
+            if (reason == 1) worker.publish_target(Clock::now() + std::chrono::milliseconds(10));
+            if (reason == 2) focused.store(false);
+            if (reason == 3) { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
+            if (reason == 4) permitted.store(false);
+            if (reason == 5) { worker.publish_target({}); worker.publish_target(Clock::now() + std::chrono::seconds(1)); }
+            wait_for([&] { return fake->released() && worker.snapshot().canceled != 0; });
+            require(!worker.snapshot().fire_permitted, "目标/旧帧/失焦/松键/安全撤销均不能授予开火");
+            worker.stop();
+        }
+        {
+            auto fake = std::make_shared<Fake>();
+            std::atomic<std::uint64_t> id{0};
+            AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+                [&] { return ++id; }, [] { return true; });
+            require(worker.start(config), "不可续租测试启动");
+            ready(worker, fake);
+            worker.publish_target(Clock::now() + std::chrono::seconds(1));
+            wait_for([&] { return fake->has_software(); });
+            worker.cancel(99);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            require(worker.snapshot().canceled == 0, "其他owner的id不得取消独立请求");
+            const auto until = Clock::now() + std::chrono::milliseconds(650);
+            while (Clock::now() < until) {
+                worker.publish_target(Clock::now() + std::chrono::seconds(1));
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            require(fake->released() && worker.snapshot().requests == 1 && worker.snapshot().canceled == 1,
+                "连续刷新目标不得续500ms租期或生成第二个请求");
+            worker.stop();
+        }
         {
             AutoStopOutputArbiter arbiter;
             auto owner = arbiter.try_enter_aim();

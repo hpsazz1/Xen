@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <chrono>
 #include "auto_stop/auto_stop.h"
 #include "mouse/mouse.h"
 
@@ -45,20 +46,24 @@ public:
     // 许可回调应只读取原子安全状态，不能要求Aim hold或持有Runtime生命周期锁。
     AutoStopWorker(std::shared_ptr<IMouseController> mouse,
         std::shared_ptr<AutoStopOutputArbiter> arbiter,
-        std::function<bool()> output_permission);
+        std::function<bool()> output_permission,
+        std::function<std::uint64_t()> allocate_request = {},
+        std::function<bool()> focused = {});
     ~AutoStopWorker();
     AutoStopWorker(const AutoStopWorker&) = delete;
     AutoStopWorker& operator=(const AutoStopWorker&) = delete;
 
     bool start(const AutoStopConfig& config, int command_timeout_ms = 300) noexcept;
     void stop() noexcept;
-    // 请求只由自动扳机等调用方显式提交；允许键本身绝不生成请求。
+    // 保留显式请求入口；独立目标模式与调用方共用互斥请求槽，取消按 id 隔离。
     // 每个新id在500ms时触发取消，不能续期；归还另受在途ACK与清理耗时约束。
     bool request(std::uint64_t request_id) noexcept;
     void cancel() noexcept;
     void cancel(std::uint64_t request_id) noexcept;
     void set_paused(bool paused) noexcept;
     AutoStopSnapshot snapshot() const noexcept;
+    // 检测线程发布不可变目标事实；无目标/失败发布零期限，旧帧不能自行续期。
+    void publish_target(std::chrono::steady_clock::time_point valid_until) noexcept;
 private:
     class Impl;
     std::unique_ptr<Impl> impl_;

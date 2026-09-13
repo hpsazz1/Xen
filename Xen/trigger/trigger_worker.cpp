@@ -164,10 +164,10 @@ public:
                         fresh.stop_request_id == decision.snapshot.stop_request_id &&
                         fresh.stop_observation_epoch == decision.snapshot.observation_epoch &&
                         fresh.stop_expires_at > revalidated_at && fresh.stop_release_deadline > revalidated_at);
-                    eligible = fresh.enabled && fresh.armed && fresh.healthy && fresh.held && fresh.focused &&
+                    eligible = config.fire_enabled && fresh.enabled && fresh.armed && fresh.healthy && fresh.held && fresh.focused &&
                         !fresh.physical_left_down && !canceled.load() && !stopping.load() &&
                         context_valid && stop_valid && observation_still_current(decision, revalidated_at);
-                    event.rejection_reason = !context_valid ? "context_changed" :
+                    event.rejection_reason = !config.fire_enabled ? "fire_disabled" : !context_valid ? "context_changed" :
                         !stop_valid ? "stop_unverified" : "permission_or_observation_changed";
                 } else event.rejection_reason = "cleanup_deadline_expired";
                 if (eligible) {

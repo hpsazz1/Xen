@@ -17,7 +17,7 @@ enum class TriggerReason {
     NONE, DISABLED, INVALID_CONFIG, WAIT_RELEASE, PERMISSION, INVALID_OBSERVATION,
     TIMING_UNAVAILABLE, STALE, NO_CANDIDATE, TARGET_CHANGED, DELAY, COOLDOWN,
     WAIT_NEW_FRAME, STOP_UNVERIFIED, STOP_EXPIRED, COMMAND_PENDING, RELEASED,
-    UNKNOWN_RECEIPT, CANCELED, COUNTER_EXHAUSTED, CONTEXT_CHANGED, CONTEXT_UNAVAILABLE
+    UNKNOWN_RECEIPT, CANCELED, COUNTER_EXHAUSTED, CONTEXT_CHANGED, CONTEXT_UNAVAILABLE, FIRE_DISABLED
 };
 
 using TriggerClock = std::chrono::steady_clock;
@@ -25,6 +25,7 @@ using TriggerTime = TriggerClock::time_point;
 
 struct TriggerConfig {
     bool enabled = false;
+    bool fire_enabled = true;
     int hold_virtual_key = 0;
     float head_width_percent = 60.0f, head_height_percent = 60.0f;
     float body_width_percent = 50.0f, body_height_percent = 60.0f;

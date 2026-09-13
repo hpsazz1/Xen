@@ -59,6 +59,9 @@ struct KeyboardPollResult {
     bool input_healthy = false;
     bool new_input_fact = false;
     std::uint64_t sequence = 0;
+    // 仅供配置捕获读取；有效性沿用完整后端输入健康，不产生输出许可。
+    std::array<bool, 256> capture_virtual_keys{};
+    bool capture_state_valid = false;
 };
 
 class KeyboardListener {

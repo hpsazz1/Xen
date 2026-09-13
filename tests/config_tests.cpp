@@ -684,6 +684,7 @@ void test_trigger_and_source_context_config() {
     if (directory.empty()) return;
     const auto path = directory / "config.ini";
     config.trigger.enabled = true;
+    config.trigger.fire_enabled = false;
     config.trigger.hold_virtual_key = config.keyboard.aim_hold_virtual_keys.front();
     config.trigger.head_width_percent = 73.0f;
     config.trigger.head_height_percent = 61.0f;
@@ -708,7 +709,7 @@ void test_trigger_and_source_context_config() {
     expect(save_app_config(path.string(), config, error), "扳机与源端配置应原子保存");
     AppConfig loaded;
     expect(load_app_config(path.string(), loaded, error), "扳机与源端配置应加载");
-    expect(loaded.trigger.enabled && loaded.trigger.hold_virtual_key == config.trigger.hold_virtual_key &&
+    expect(loaded.trigger.enabled && !loaded.trigger.fire_enabled && loaded.trigger.hold_virtual_key == config.trigger.hold_virtual_key &&
         loaded.trigger.head_width_percent == 73.0f && loaded.trigger.head_height_percent == 61.0f &&
         loaded.trigger.body_width_percent == 42.0f && loaded.trigger.body_height_percent == 58.0f &&
         loaded.trigger.general_width_percent == 33.0f && loaded.trigger.general_height_percent == 44.0f &&
@@ -744,11 +745,14 @@ void test_trigger_and_source_context_config() {
         candidate.trigger.require_stop = true;
         expect(!validate_app_config(candidate, error), "强依赖急停不能在急停关闭时启用");
         candidate.auto_stop.enabled = true;
-        candidate.auto_stop.activation_virtual_key = 0x76;
-        candidate.trigger.hold_virtual_key = 0x76;
-        expect(validate_app_config(candidate, error), "扳机可与独立急停许可同键");
-        expect(save_app_config(path.string(), candidate, error) && load_app_config(path.string(), loaded, error) &&
-            loaded.trigger.require_stop, "急停依赖必须往返保留");
+        for (int key : {0x76, 5, 6}) {
+            candidate.auto_stop.activation_virtual_key = key;
+            candidate.trigger.hold_virtual_key = key;
+            expect(validate_app_config(candidate, error), "扳机可与独立急停许可同键，包括鼠标侧键");
+            expect(save_app_config(path.string(), candidate, error) && load_app_config(path.string(), loaded, error) &&
+                loaded.trigger.require_stop && loaded.auto_stop.activation_virtual_key == key &&
+                loaded.trigger.hold_virtual_key == key, "急停依赖和共享键必须往返保留");
+        }
     }
     for (int variant = 0; variant < 7; ++variant) {
         auto candidate = config;
@@ -764,10 +768,10 @@ void test_trigger_and_source_context_config() {
         expect(!validate_app_config(candidate, error), "几何、时间、模式与源端缺项均应拒绝");
     }
     expect(write_file_bytes(path, "[detector]\nmodel_path=model.onnx\n"), "写入无新节的旧配置");
-    expect(load_app_config(path.string(), loaded, error) && !loaded.trigger.enabled &&
+    expect(load_app_config(path.string(), loaded, error) && !loaded.trigger.enabled && loaded.trigger.fire_enabled &&
         loaded.trigger.hold_virtual_key == 0 && !loaded.source_context.enabled && loaded.source_context.token.empty(),
         "旧配置必须清除调用方遗留的启用和绑定状态");
-    for (const char* text : {"[trigger]\nenabled=perhaps\n", "[trigger]\nfire_delay_ms=1.5\n",
+    for (const char* text : {"[trigger]\nenabled=perhaps\n", "[trigger]\nfire_enabled=perhaps\n", "[trigger]\nfire_delay_ms=1.5\n",
             "[trigger]\nfire_mode=999999999999999999999\n", "[trigger]\nhead_width_percent=nan\n",
             "[source_context]\nport=65536\n", "[source_context]\nttl_ms=1.5\n"}) {
         expect(write_file_bytes(path, text), "写入畸形配置夹具");

@@ -87,7 +87,6 @@ enum class WorkspacePage {
     TRAINING,
     AIM,
     AUXILIARY,
-    INPUT,
     SETTINGS,
 };
 
@@ -319,8 +318,7 @@ const char* page_title(WorkspacePage page) noexcept {
         case WorkspacePage::TRAINING: return "训练";
         case WorkspacePage::AIM: return "瞄准控制";
         case WorkspacePage::AUXILIARY: return "辅助";
-        case WorkspacePage::INPUT: return "输入安全";
-        case WorkspacePage::SETTINGS: return "偏好设置";
+        case WorkspacePage::SETTINGS: return "设置";
     }
     return "概览";
 }
@@ -333,8 +331,7 @@ const char* page_context(WorkspacePage page) noexcept {
         case WorkspacePage::TRAINING: return "审核、训练与候选模型";
         case WorkspacePage::AIM: return "追踪与控制";
         case WorkspacePage::AUXILIARY: return "移动与辅助";
-        case WorkspacePage::INPUT: return "输出与急停";
-        case WorkspacePage::SETTINGS: return "运行与窗口";
+        case WorkspacePage::SETTINGS: return "输入安全、运行与窗口";
     }
     return "P0 / 本地闭环";
 }
@@ -713,6 +710,8 @@ struct Overlay::Impl {
     RecoilPanel recoil_panel;
     int trigger_general_class = 0;
     overlay::detail::HotkeyCaptureState hotkey_capture_state;
+    std::array<bool, 256> capture_device_keys{};
+    bool capture_device_valid = false;
     std::string hotkey_capture_message;
 
     static LRESULT CALLBACK window_proc(
@@ -1581,23 +1580,20 @@ struct Overlay::Impl {
             "检测", WorkspacePage::DETECTION,
             "配置模型、推理后端、采集来源与检测阈值，并查看同帧 ROI 检测预览。");
         nav_item(
-            "采集", WorkspacePage::COLLECTION,
-            "按需保存原图与预标注素材；需要先启动 CPU 画面 Runtime，不会自动启动检测或物理输出。");
-        nav_item(
-            "训练", WorkspacePage::TRAINING,
-            "检查素材、生成预标注、外部审核、导出数据集、离线训练和评估候选模型。");
-        nav_item(
             "瞄准", WorkspacePage::AIM,
             "配置轨迹确认、目标切换、瞄点位置和相对鼠标移动控制参数。");
         nav_item(
             "辅助", WorkspacePage::AUXILIARY,
             "配置自动急停与本次会话暂停状态。");
         nav_item(
-            "输入", WorkspacePage::INPUT,
-            "配置物理鼠标后端、安全门和全局快捷键，并在急停后执行受控复位。");
+            "采集", WorkspacePage::COLLECTION,
+            "按需保存原图与预标注素材；需要先启动 CPU 画面 Runtime，不会自动启动检测或物理输出。");
+        nav_item(
+            "训练", WorkspacePage::TRAINING,
+            "检查素材、生成预标注、外部审核、导出数据集、离线训练和评估候选模型。");
         nav_item(
             "设置", WorkspacePage::SETTINGS,
-            "配置统计窗口、控制台尺寸、主题和垂直同步；不改变推理热路径。");
+            "配置键鼠后端、按键绑定、物理输出安全门、日志、统计和窗口偏好。");
 
         const float footer_y = ImGui::GetWindowHeight() - 72.0f;
         if (ImGui::GetCursorPosY() < footer_y) {
@@ -3006,7 +3002,8 @@ struct Overlay::Impl {
         ImGui::TextWrapped("停止运行后可编辑并保存参数；下次启动生效。");
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         begin_config_panel("auto_stop_panel", "自动急停", 300.0f);
-        ImGui::TextWrapped("由自动扳机接口请求制动；开启开关或按住允许键都不会单独触发急停。");
+        ImGui::TextWrapped("按住快捷键且检测到目标后自动制动；无需开启自动扳机，也无需准星进入目标框。");
+        ImGui::TextWrapped("需要有效源端焦点与新鲜图像；松键、失去目标或失焦会取消。本次制动到期不会因持续按住而反复续期。");
         ImGui::TextWrapped("面向单方向及相邻双键移动；自动急停与物理输出安全急停相互独立。");
         ImGui::BeginDisabled(!can_edit);
         const auto key_active = current_virtual_key_state();
@@ -3019,7 +3016,7 @@ struct Overlay::Impl {
             ImGui::EndDisabled();
             const int key = app_config.auto_stop.activation_virtual_key;
             render_hotkey_row("允许键（按住）", "##auto_stop_activation_key",
-                "仅授予制动许可，仍需自动扳机接口请求；禁止 WASD，不能与运行启停、瞄准输出或安全急停重复。Esc 清空。",
+                "按住并检测到配置目标时触发制动，可与自动扳机共用；禁止 WASD，不能与运行启停、瞄准输出或安全急停重复。支持本机及已连接后端的按键，Esc 清空。",
                 HotkeyBindingTarget::AUTO_STOP,
                 key == 0 ? std::vector<int>{} : std::vector<int>{key}, key_active);
             ImGui::EndTable();
@@ -3069,6 +3066,12 @@ struct Overlay::Impl {
             ImGui::TextWrapped("本次会话暂无制动执行记录。");
         }
         ImGui::TextWrapped("预计完成仅表示制动计划结束，不代表实测停稳或允许开火。");
+        if (snapshot.auto_stop.independent_trigger_enabled) {
+            if (!snapshot.auto_stop.source_focused)
+                ImGui::TextWrapped("等待源机焦点：请检查下方源状态桥接与源机前台游戏。");
+            if (!snapshot.auto_stop.target_available)
+                ImGui::TextWrapped("等待新鲜目标：需要有效源时钟及50毫秒内的配置目标检测。");
+        }
         end_config_panel();
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         render_trigger_config(snapshot, app_config, can_edit, key_active);
@@ -3100,8 +3103,10 @@ struct Overlay::Impl {
             ImGui::BeginDisabled(app_config.mouse.backend != MouseBackend::KMBOX_NET && !trigger.enabled);
             toggle_switch("##trigger_enabled", &trigger.enabled);
             ImGui::EndDisabled();
+            form_row("允许开枪", "关闭后保留目标检测、资格判断和急停联动调试，不发送自动扳机左键按下；不会阻止你手动开枪。停止运行后修改，下次启动生效。");
+            toggle_switch("##trigger_fire_enabled", &trigger.fire_enabled);
             render_hotkey_row("开火许可（按住）", "##trigger_hold_key",
-                "可以与瞄准键共用；禁止左键、WASD、安全急停和运行启停键。恢复或重新启动后须先松开再按下。Esc 清空。",
+                "可以与瞄准键或自动急停快捷键共用；禁止左键、WASD、安全急停和运行启停键。恢复或重新启动后须先松开再按下。Esc 清空。",
                 HotkeyBindingTarget::TRIGGER,
                 trigger.hold_virtual_key == 0 ? std::vector<int>{} : std::vector<int>{trigger.hold_virtual_key}, key_active);
             form_row("头部内域宽 / %", "检测头框中心椭圆的宽占比；只影响扳机准星命中判断，不改变瞄准点。");
@@ -3153,10 +3158,12 @@ struct Overlay::Impl {
         }
         ImGui::EndDisabled();
         if (trigger.require_stop) ImGui::TextWrapped("联动要求急停允许键也有效；预计完成仍会等待停稳证据，不会静默降级。");
+        if (!trigger.fire_enabled) ImGui::TextWrapped("开枪已关闭：仅调试检测与联动，不发送自动扳机按下。");
         const char* reason = "待命";
         switch (snapshot.trigger.reason) {
             case TriggerReason::NONE: reason = "当前条件满足"; break;
             case TriggerReason::DISABLED: reason = "已关闭"; break;
+            case TriggerReason::FIRE_DISABLED: reason = "条件满足，开枪开关已关闭"; break;
             case TriggerReason::INVALID_CONFIG: reason = "配置无效"; break;
             case TriggerReason::WAIT_RELEASE: reason = "请先松开许可键再按下"; break;
             case TriggerReason::PERMISSION: reason = "输入、焦点或武装许可未满足"; break;
@@ -3573,7 +3580,8 @@ struct Overlay::Impl {
         hotkey_binding_target = target;
         hotkey_capture_message.clear();
         overlay::detail::begin_hotkey_capture(
-            hotkey_capture_state, key_active);
+            hotkey_capture_state, key_active,
+            capture_device_valid ? &capture_device_keys : nullptr);
     }
 
     void render_hotkey_row(
@@ -3609,7 +3617,8 @@ struct Overlay::Impl {
             const std::array<bool, 256>& key_active) {
         const bool capture_was_active = hotkey_capture_state.active;
         const auto capture_result = overlay::detail::update_hotkey_capture(
-            hotkey_capture_state, key_active);
+            hotkey_capture_state, key_active,
+            capture_device_valid ? &capture_device_keys : nullptr);
         if (capture_was_active) actions.hotkey_capture_consumed = true;
         if (capture_result.type !=
                 overlay::detail::HotkeyCaptureResultType::NONE) {
@@ -4018,7 +4027,7 @@ struct Overlay::Impl {
         const WorkspacePage capture_page =
             (hotkey_binding_target == HotkeyBindingTarget::AUTO_STOP || hotkey_binding_target == HotkeyBindingTarget::TRIGGER ||
              hotkey_binding_target == HotkeyBindingTarget::RECOIL)
-                ? WorkspacePage::AUXILIARY : WorkspacePage::INPUT;
+                ? WorkspacePage::AUXILIARY : WorkspacePage::SETTINGS;
         if (hotkey_capture_state.active &&
             (active_page != capture_page || !can_edit || show_log_panel)) {
             hotkey_capture_state = {};
@@ -4065,11 +4074,10 @@ struct Overlay::Impl {
                 case WorkspacePage::TRAINING:
                     render_training(snapshot, workspace_settings, workspace_snapshot, actions);
                     break;
-                case WorkspacePage::INPUT:
+                case WorkspacePage::SETTINGS:
                     render_input_config(
                         snapshot, app_config, can_edit, actions);
-                    break;
-                case WorkspacePage::SETTINGS:
+                    ImGui::Dummy(ImVec2(0.0f, 12.0f));
                     render_settings(app_config, can_edit, actions);
                     break;
             }
@@ -4208,12 +4216,15 @@ bool Overlay::render(
         model_workspace::Settings& workspace_settings,
         const model_workspace::Snapshot& workspace_snapshot,
         const std::string& app_message,
-        OverlayActions& actions) noexcept {
+        OverlayActions& actions,
+        const KeyboardPollResult* keyboard_poll) noexcept {
     if (!impl_ || !impl_->initialized || impl_->present_boundary.failed()) {
         return false;
     }
     try {
         actions = {};
+        impl_->capture_device_valid = keyboard_poll && keyboard_poll->capture_state_valid;
+        if (impl_->capture_device_valid) impl_->capture_device_keys = keyboard_poll->capture_virtual_keys;
         impl_->update_metric_history(snapshot);
         if (impl_->person_class_ids != config.aim.person_class_ids ||
             impl_->head_class_ids != config.aim.head_class_ids) {
