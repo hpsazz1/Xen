@@ -169,7 +169,7 @@ int main(int argc, char** argv) {
         bool dry = false, allowed = false, capture_check = false;
         std::set<std::string> seen;
         if (argc == 2 && std::string(argv[1]) == "--help") {
-            std::cout << "单组7至20发反向时长测试：--plan JSON --dry-run；真实运行另需--config INI --output NEW_DIR "
+            std::cout << "单组1至30发反向时长测试：--plan JSON --dry-run；真实运行另需--config INI --output NEW_DIR "
                          "--allow-physical-output --confirm AUTO_STOP_COUNTERPULSE。需源焦点、全松与独占设备，End/Ctrl+C取消。\n"
                          "纯采集诊断：--plan JSON --config INI --output NEW_DIR --capture-check；不连接键鼠，拒绝物理授权。\n";
             return 0;

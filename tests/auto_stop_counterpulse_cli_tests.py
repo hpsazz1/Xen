@@ -67,6 +67,8 @@ def main():
                 assert rejected.returncode != 0 and not diagnostic.exists()
             assert task['status'] == 'PREPARED_NOT_LAUNCHED'
             assert plan['capture_enabled'] is True
+            assert plan['fire_delay_ms'] == 0
+            assert plan['counter_delay_ms'] == 0
             assert plan['counter_hold_ms'] == 30 and plan['shot_interval_ms'] == 280
             slow = root / 'slow-stationary'
             invoke('-Mode', 'Prepare', '-RunDirectory', slow, '-Executable', args.executable,
@@ -188,8 +190,24 @@ def main():
             assert (long_run / 'plan.json').read_bytes() == valid_action_plan
             overflow = root / 'overflow'
             invoke('-Mode', 'Prepare', '-RunDirectory', overflow, '-Executable', args.executable,
-                '-ConfigPath', config, '-Shots', 21, '-ShotIntervalMs', 650)
+                '-ConfigPath', config, '-Shots', 31, '-ShotIntervalMs', 650)
             assert not overflow.exists()
+            single = root / 'single-shot'
+            invoke('-Mode', 'Prepare', '-RunDirectory', single, '-Executable', args.executable,
+                '-ConfigPath', config, '-Shots', 1, '-ShotIntervalMs', 0, '-FireDelayMs', 300,
+                '-MoveMs', 300, '-CounterDelayMs', 50, '-CounterHoldMs', 5, '-ShotAfterReleaseMs', 0, '-NoCapture', ok=True)
+            assert json.loads((single / 'plan.json').read_text())['shots'] == 1
+            single_task = (single / 'TASK.md').read_text(encoding='utf-8-sig')
+            assert '上一枪左键UP ACK后开始300ms间隔' in single_task and '较晚者' in single_task
+            assert 'UP ACK后等待50ms' in single_task and '反向轻点5ms' in single_task
+            assert 'UP ACK后立即计划开枪' in single_task
+            for index, extra in enumerate([('-Baseline', 'stationary', '-ShotIntervalMs', 0, '-ShotAfterReleaseMs', 5),
+                          ('-ShotIntervalMs', 650, '-ShotAfterReleaseMs', 5),
+                          ('-Baseline', 'no_counter', '-ShotIntervalMs', 0, '-ShotAfterReleaseMs', 0, '-CounterDelayMs', 50)]):
+                incompatible = root / ('incompatible-fire-delay-' + str(index))
+                invoke('-Mode', 'Prepare', '-RunDirectory', incompatible, '-Executable', args.executable,
+                    '-ConfigPath', config, '-FireDelayMs', 300, '-NoCapture', *extra)
+                assert not (incompatible / 'task.json').exists()
             text = (run / 'TASK.md').read_text(encoding='utf-8-sig')
             assert text.count('-Mode Launch') == 1 and '-AllowPhysicalOutput' in text
             invoke('-Mode', 'Prepare', '-RunDirectory', run, '-Executable', args.executable, '-ConfigPath', config)
@@ -242,8 +260,8 @@ def main():
             harness.write_bytes(source.encode('utf-8-sig'))
             repeat_run = root / 'repeatable'
             invoke('-Mode', 'Prepare', '-RunDirectory', repeat_run, '-Executable', args.executable,
-                '-ConfigPath', config, '-Repeatable', '-MoveMs', 300, '-CounterHoldMs', 50,
-                '-ShotAfterReleaseMs', 5, '-ShotIntervalMs', 0, '-Shots', 20, '-NoCapture', entry=harness, ok=True)
+                '-ConfigPath', config, '-Repeatable', '-MoveMs', 300, '-CounterDelayMs', 50, '-CounterHoldMs', 5,
+                '-ShotAfterReleaseMs', 0, '-ShotIntervalMs', 0, '-FireDelayMs', 300, '-Shots', 20, '-NoCapture', entry=harness, ok=True)
             repeat_task = json.loads((repeat_run / 'task.json').read_text())
             assert repeat_task['schema_version'] == 3 and repeat_task['repeatable'] is True
             launch = ('-Mode', 'Launch', '-RunDirectory', repeat_run,
@@ -252,16 +270,21 @@ def main():
             repeat_plan = json.loads((repeat_run / 'plan.json').read_text())
             repeat_plan['move_ms'] = 200
             repeat_plan['counter_hold_ms'] = 40
+            repeat_plan['counter_delay_ms'] = 60
+            repeat_plan['fire_delay_ms'] = 700
+            repeat_plan['shots'] = 30
             (repeat_run / 'plan.json').write_text(json.dumps(repeat_plan), encoding='utf-8')
             (repeat_run / 'edit-during-mock').write_text('edit', encoding='utf-8')
             invoke(*launch, entry=harness, ok=True)
             executed = json.loads((repeat_run / 'result' / 'plan.json').read_text())
             assert executed['move_ms'] == 200 and executed['counter_hold_ms'] == 40
+            assert executed['fire_delay_ms'] == 700 and executed['shots'] == 30
+            assert executed['counter_delay_ms'] == 60 and executed['shot_after_release_ms'] == 0
             assert json.loads((repeat_run / 'plan.json').read_text())['move_ms'] == 123
             assert (repeat_run / 'execution-plan.json').read_bytes() == (repeat_run / 'result' / 'plan.json').read_bytes()
             assert (repeat_run / 'mock-calls').read_text().splitlines() == ['once', 'once']
             previous = (repeat_run / 'result' / 'plan.json').read_bytes()
-            for invalid in ['{"move_ms":0}', ' ' * 16385]:
+            for invalid in ['{"move_ms":0}', '{"shots":0}', '{"fire_delay_ms":2001}', '{"counter_delay_ms":201}', ' ' * 16385]:
                 (repeat_run / 'plan.json').write_text(invalid, encoding='utf-8')
                 rejected = invoke(*launch, entry=harness)
                 assert b'PLAN_VALIDATION_FAILED' in rejected.stderr

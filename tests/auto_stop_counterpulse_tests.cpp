@@ -9,7 +9,7 @@ class Fake final : public IMouseController {
 public:
     Clock::time_point time{std::chrono::seconds(10)};
     int latency_ms = 1, downs = 0, unknown_down = 0, keyboard_calls = 0, cleanup_calls = 0;
-    int physical_at_ms = -1;
+    int physical_at_ms = -1, unknown_keyboard_call = -1;
     bool healthy = true, exclusive = true, left = false;
     bool events_available = false, event_gap = false;
     int epoch_change_at_ms = -1;
@@ -44,7 +44,10 @@ public:
         r.backend_completed_at = r.protocol_ack_received_at = time; return r;
     }
     KeyboardReceipt set_wasd_keyboard(std::uint8_t value) noexcept override {
-        held = value; ++keyboard_calls; keyboards.push_back(value); return keyboard_ack();
+        held = value; ++keyboard_calls; keyboards.push_back(value);
+        auto r = keyboard_ack();
+        if (keyboard_calls == unknown_keyboard_call) r.disposition = KeyboardDisposition::APPLICATION_UNKNOWN;
+        return r;
     }
     KeyboardReceipt cleanup_wasd_keyboard() noexcept override { ++cleanup_calls; held = 0; return keyboard_ack(); }
     KeyboardReceipt keyboard_ack() noexcept {
@@ -246,6 +249,83 @@ void immediate_movement_cycles() {
         }
     }
 }
+void delayed_reverse_tap_then_fire() {
+    const auto p = parse_counterpulse_plan(Json{{"shots", 20}, {"capture_enabled", false}, {"shot_interval_ms", 0},
+        {"fire_delay_ms", 300}, {"move_ms", 300}, {"counter_delay_ms", 50},
+        {"counter_hold_ms", 5}, {"shot_after_release_ms", 0}});
+    Fake m; const auto r = execute_counterpulse(m, p, {}, m.clock());
+    require(r["success"] && m.downs == 20 && !m.held && !m.left, "松A等50ms轻点D并立即开枪应完整执行");
+    for (int shot = 2; shot <= 20; ++shot) {
+        std::int64_t a_up = 0, d_down_ack = 0, d_up_ack = 0;
+        int state = 0;
+        for (const auto& c : r["commands"]) {
+            if (c["shot_index"] != shot) continue;
+            const auto submit = c["submit_ns"].get<std::int64_t>();
+            if (c["kind"] == "wasd") {
+                if (c["value"] == 2) state = 2;
+                else if (c["value"] == 8) {
+                    require(state == 0 && submit - a_up == 50000000, "50ms是A释放到D按下的间隔，不能当D保持时长");
+                    d_down_ack = c["ack_received_ns"]; state = 8;
+                } else if (state == 2) { a_up = c["ack_received_ns"]; state = 0; }
+                else {
+                    require(submit - d_down_ack == 5000000, "D仅轻点5ms，不保持50ms");
+                    d_up_ack = c["ack_received_ns"]; state = 0;
+                }
+            } else if (c["value"] == 1) require(state == 0 && submit == d_up_ack,
+                "D释放确认后立即开枪，不附加旧5ms或60ms等待");
+        }
+    }
+    { Fake late; auto clock = late.clock(); bool injected = false;
+      clock.sleep_until = [&](auto target) {
+          late.time = std::max(late.time, target);
+          if (!injected && target >= Clock::time_point(std::chrono::seconds(10)) + std::chrono::milliseconds(361)) {
+              late.time += std::chrono::milliseconds(6); injected = true;
+          }
+      };
+      const auto stopped = execute_counterpulse(late, p, {}, clock);
+      require(stopped["failure"] == "COMMAND_DEADLINE_MISSED" && late.downs == 1 && !late.held && !late.left,
+          "松A后50ms等待迟到超过5ms时停止并归零");
+      require(std::find(late.keyboards.begin(), late.keyboards.end(), 8) == late.keyboards.end(),
+          "等待超期不能重设计划时刻继续发送D"); }
+}
+void fire_delay_while_moving() {
+    for (const int count : {1, 3, 20, 30}) for (const int delay : {100, 300, 600}) {
+        const auto p = parse_counterpulse_plan(Json{{"shots", count}, {"capture_enabled", false},
+            {"shot_interval_ms", 0}, {"fire_delay_ms", delay}, {"move_ms", 300},
+            {"counter_hold_ms", 50}, {"shot_after_release_ms", 5}});
+        Fake m; const auto r = execute_counterpulse(m, p, {}, m.clock());
+        require(r["success"] && m.downs == count && !m.held && !m.left, "配置子弹数和并行射击间隔必须生效且完成清理");
+        std::int64_t shot_up_ack = 0, shot_up_return = 0, move_ack = 0, move_up_ack = 0, reverse_up_ack = 0;
+        int state = 0;
+        for (const auto& c : r["commands"]) {
+            if (c["shot_index"] == 0) continue;
+            const auto submitted = c["submit_ns"].get<std::int64_t>();
+            if (c["kind"] == "left_button") {
+                if (c["value"] == 0) { shot_up_ack = c["ack_received_ns"]; shot_up_return = c["returned_ns"]; }
+                else if (c["shot_index"] != 1) require(state == 0 && submitted - reverse_up_ack == 5000000,
+                    "下一枪必须在所有方向键松开后，且反向UP ACK后5ms");
+            } else if (c["value"] == 2) {
+                require(state == 0 && submitted == shot_up_return, "单发左键UP完成后立刻开始A，不空等射击间隔");
+                state = 2; move_ack = c["ack_received_ns"];
+            } else if (c["value"] == 8) {
+                require(state == 0 && move_up_ack && submitted >= move_up_ack, "按D之前必须已松A并收到ACK");
+                state = 8;
+            } else if (state == 2) {
+                require(submitted == std::max(move_ack + 300000000, shot_up_ack + delay * 1000000LL),
+                    "A一直保持到移动时长与射击间隔均满足；两者并行不串加");
+                move_up_ack = c["ack_received_ns"]; state = 0;
+            } else { reverse_up_ack = c["ack_received_ns"]; state = 0; }
+        }
+        require(r["cycles"].size() == static_cast<std::size_t>(count - 1), "周期数量应与配置子弹数一致");
+    }
+    { Fake m; m.unknown_keyboard_call = 3;
+      const auto p = parse_counterpulse_plan(Json{{"shots", 3}, {"capture_enabled", false}, {"shot_interval_ms", 0},
+          {"fire_delay_ms", 300}, {"move_ms", 300}, {"counter_hold_ms", 50}, {"shot_after_release_ms", 5}});
+      const auto r = execute_counterpulse(m, p, {}, m.clock());
+      require(r["failure"] == "COMMAND_NOT_ACKNOWLEDGED" && m.downs == 1 && !m.held && !m.left,
+          "A释放ACK未知时立即清理，不能继续反向或开枪");
+      require(std::find(m.keyboards.begin(), m.keyboards.end(), 8) == m.keyboards.end(), "A释放未确认绝不发送D"); }
+}
 void failures_stop_and_cleanup() {
     CounterpulsePlan p;
     { Fake m; m.unknown_down = 2; const auto r = execute_counterpulse(m, p, {}, m.clock());
@@ -283,15 +363,17 @@ void failures_stop_and_cleanup() {
       require(r["failure"] == "EXECUTION_EXCEPTION" && !m.left && !m.held && m.cleanup_calls == 1, "异常也必须归零"); }
 }
 void invalid_plans() {
-    for (const auto& json : {Json{{"shot_interval_ms", 0}},
+    for (const auto& json : {Json{{"counter_delay_ms", 201}}, Json{{"baseline", "stationary"}, {"counter_delay_ms", 50}}, Json{{"fire_delay_ms", 300}}, Json{{"fire_delay_ms", 2001}},
+        Json{{"capture_enabled", false}, {"shots", 30}, {"shot_interval_ms", 0}, {"fire_delay_ms", 2000}, {"shot_after_release_ms", 5}},
+        Json{{"shots", 30}, {"shot_interval_ms", 650}}, Json{{"shot_interval_ms", 0}},
         Json{{"baseline", "stationary"}, {"shot_interval_ms", 0}, {"shot_after_release_ms", 5}},
         Json{{"shot_interval_ms", 0}, {"move_ms", 500}, {"counter_hold_ms", 200}, {"shot_after_release_ms", 5}},
-        Json{{"move_ms", 501}}, Json{{"capture_enabled", 0}}, Json{{"shots", 21}}, Json{{"direction", 258}}, Json{{"late_tolerance_ms", 11}},
+        Json{{"move_ms", 501}}, Json{{"capture_enabled", 0}}, Json{{"shots", 31}}, Json{{"direction", 258}}, Json{{"late_tolerance_ms", 11}},
         Json{{"shot_after_release_ms", 21}}, Json{{"shot_after_release_ms", -1}},
         Json{{"shot_after_release_ms", 5}, {"move_ms", 250}, {"counter_hold_ms", 200}},
         Json{{"brake_window_ms", 0}}, Json{{"counter_hold_ms", 60}},
         Json{{"shot_interval_ms", 279}}, Json{{"shots", 7}, {"shot_interval_ms", 651}},
-        Json{{"shots", 6}},
+        Json{{"shots", 0}},
         Json{{"shots", 7}, {"shot_interval_ms", 500.5}},
         Json{{"move_ms", 250}, {"counter_hold_ms", 100}}, Json{{"shots", 7.5}}}) {
         bool rejected = false; try { parse_counterpulse_plan(json); } catch (...) { rejected = true; }
@@ -300,7 +382,7 @@ void invalid_plans() {
 }
 }
 int main() {
-    try { immediate_movement_cycles(); shot_after_direction_release(); matched_brake_window(); successful_and_baselines(); configurable_stationary_intervals(); failures_stop_and_cleanup(); invalid_plans(); }
+    try { delayed_reverse_tap_then_fire(); fire_delay_while_moving(); immediate_movement_cycles(); shot_after_direction_release(); matched_brake_window(); successful_and_baselines(); configurable_stationary_intervals(); failures_stop_and_cleanup(); invalid_plans(); }
     catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
     std::cout << "反冲纯fake专项通过：时序、基线、预算、取消、未知ACK、清理及参数拒绝\n";
 }
