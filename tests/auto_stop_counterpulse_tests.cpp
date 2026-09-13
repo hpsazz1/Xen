@@ -136,7 +136,10 @@ void matched_brake_window() {
     { Fake m; CounterpulsePlan p; p.counter_hold_ms = 59;
       const auto r = execute_counterpulse(m, p, {}, m.clock());
       require(r["failure"] == "ACTION_BUDGET_EXCEEDED" && m.downs == 1 && !m.held && !m.left,
-          "反向UP ACK越过观察deadline应取消而非顺延射击"); }
+          "反向UP ACK越过观察deadline应取消而非顺延射击");
+      require(r["failure_context"]["site"] == "REVERSE_FINISHED" &&
+          r["failure_context"]["observed_ns"].get<std::int64_t>() > r["failure_context"]["limit_ns"].get<std::int64_t>(),
+          "报告须保留反向完成超窗的决策现场"); }
     { Fake m; m.latency_ms = 3; CounterpulsePlan p; p.baseline = "no_counter";
       const auto r = execute_counterpulse(m, p, {}, m.clock());
       require(r["failure"] == "ACTION_BUDGET_EXCEEDED" && m.downs == 1,
@@ -151,7 +154,8 @@ void matched_brake_window() {
       };
       const auto r = execute_counterpulse(m, p, {}, clock);
       require(r["failure"] == "ACTION_BUDGET_EXCEEDED" && m.downs == 1 && !m.held && !m.left,
-          "即使相对射击deadline只迟4ms，实际恢复超过655ms仍必须拒绝"); }
+          "即使相对射击deadline只迟4ms，实际恢复超过655ms仍必须拒绝");
+      require(r["failure_context"]["site"] == "SHOT_SUBMIT_ENVELOPE", "应区别提交上界与反向完成超窗"); }
 }
 void failures_stop_and_cleanup() {
     CounterpulsePlan p;

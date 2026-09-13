@@ -45,6 +45,9 @@ struct Evidence {
     std::atomic<std::int64_t> first_ns{0};
     std::atomic<int> last_status{static_cast<int>(CaptureStatus::CLOSED)};
     std::atomic<int> failure_code{0};
+    std::atomic<int> capture_phase{0}; // 0等待，1抓帧，2复制/发布
+    std::atomic<std::int64_t> grab_started_ns{0}, grab_returned_ns{0};
+    std::atomic<int> no_frame_count{0};
     std::int64_t opened_ns = 0;
     mutable std::mutex observation_mutex;
     CaptureBackend backend;
@@ -61,9 +64,13 @@ struct Evidence {
                 while (!stop.stop_requested()) {
                     const auto began = Clock::now();
                     CapturedFrame frame;
+                    capture_phase.store(1);
+                    grab_started_ns.store(ns(Clock::now()));
                     const auto status = capture->grab(frame);
+                    grab_returned_ns.store(ns(Clock::now()));
                     last_status.store(static_cast<int>(status));
                     if (status == CaptureStatus::FRAME) {
+                        capture_phase.store(2);
                         const auto size = frame.bgr.total() * frame.bgr.elemSize();
                         // 慢单发组仍有界；首帧核对全部350帧容量，128MiB字节上限不变。
                         if (frame.bgr.empty() || size > (128ULL * 1024 * 1024) / 350 ||
@@ -79,6 +86,8 @@ struct Evidence {
                             count.store(static_cast<int>(frames.size()));
                         }
                     } else if (status != CaptureStatus::NO_FRAME) { failure_code.store(2); failed.store(true); break; }
+                    else no_frame_count.fetch_add(1);
+                    capture_phase.store(0);
                     std::this_thread::sleep_until(began + std::chrono::milliseconds(16));
                 }
             } catch (...) { failure_code.store(3); failed.store(true); }
@@ -94,6 +103,9 @@ struct Evidence {
         const auto first = first_ns.load();
         const auto latest = latest_ns.load();
         return {{"frames", count.load()}, {"failed", failed.load()}, {"failure_code", failure_code.load()},
+            {"observed_at_ns", ns(Clock::now())}, {"last_frame_received_ns", latest},
+            {"capture_phase", capture_phase.load()}, {"grab_started_ns", grab_started_ns.load()},
+            {"grab_returned_ns", grab_returned_ns.load()}, {"no_frame_count", no_frame_count.load()},
             {"last_status", CaptureStatusName(static_cast<CaptureStatus>(last_status.load()))},
             {"first_frame_delay_ns", first ? Json(first - opened_ns) : Json(nullptr)},
             {"last_frame_age_ns", latest ? Json(ns(Clock::now()) - latest) : Json(nullptr)}};
@@ -144,6 +156,7 @@ int main(int argc, char** argv) {
     std::string failure_reason;
     Json readiness = {{"reason", "NOT_CHECKED"}};
     Json capture_diagnostic = Json::object();
+    Json cancellation_context = Json::object();
     bool execution_entered = false;
     auto progress = [&](const char* next) {
         stage = next;
@@ -194,21 +207,26 @@ int main(int argc, char** argv) {
             CounterpulsePrerollGate gate(evidence.opened_ns);
             Json samples = Json::array();
             auto next_sample = Clock::now();
+            auto observation_end = Clock::time_point{};
             PrerollDecision decision{PrerollState::WAIT, "WAIT_FIRST_FRAME"};
             while (true) {
                 decision = evidence.evaluate(gate, std::filesystem::exists(output / "STOP"));
-                if (Clock::now() >= next_sample || decision.state != PrerollState::WAIT) {
+                if (decision.state == PrerollState::READY && observation_end == Clock::time_point{})
+                    observation_end = Clock::now() + std::chrono::milliseconds(4800);
+                const bool complete = observation_end != Clock::time_point{} && Clock::now() >= observation_end;
+                if (Clock::now() >= next_sample || decision.state == PrerollState::FAILED || complete) {
                     auto sample = evidence.snapshot(); sample["reason"] = decision.reason;
                     samples.push_back(sample);
                     next_sample = Clock::now() + std::chrono::milliseconds(100);
                 }
-                if (decision.state != PrerollState::WAIT) break;
+                if (decision.state == PrerollState::FAILED || complete) break;
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
             capture_diagnostic = evidence.snapshot();
             evidence.finish();
             write_json(output / "capture-check.json", {{"capture", capture_diagnostic}, {"samples", samples},
-                {"reason", decision.reason}, {"success", decision.state == PrerollState::READY}, {"physical_output", false}});
+                {"reason", decision.reason}, {"observation_ms", 4800},
+                {"success", decision.state == PrerollState::READY}, {"physical_output", false}});
             return decision.state == PrerollState::READY ? 0 : 2;
         }
         if (config.mouse.backend != MouseBackend::KMBOX_NET ||
@@ -273,8 +291,14 @@ int main(int argc, char** argv) {
                 if (permission["flags"]["monitor_invalid"].get<bool>()) return "MONITOR_INVALID";
                 if (permission["flags"]["physical_keys_held"].get<bool>()) return "PHYSICAL_INPUT";
             }
-            if (evidence.failed.load()) return "CAPTURE_FAILED";
-            if (evidence.latest_ns.load() != 0 && ns(Clock::now()) - evidence.latest_ns.load() > 100000000) return "CAPTURE_STALE";
+            if (evidence.failed.load()) {
+                if (cancellation_context.empty()) cancellation_context = evidence.snapshot();
+                return "CAPTURE_FAILED";
+            }
+            if (evidence.latest_ns.load() != 0 && ns(Clock::now()) - evidence.latest_ns.load() > 100000000) {
+                if (cancellation_context.empty()) cancellation_context = evidence.snapshot();
+                return "CAPTURE_STALE";
+            }
             return {};
         };
         CounterpulsePrerollGate preroll(evidence.opened_ns);
@@ -302,6 +326,7 @@ int main(int argc, char** argv) {
         resources.mouse->close();
         cleanup_finished.store(true);
         report["command_timeout_ms"] = config.mouse.kmbox_command_timeout_ms;
+        report["cancellation_context"] = cancellation_context;
         // 输出已清理后再编码落盘；失败结果保留，不把图像缺失当作可重射。
         progress("SAVE_EVIDENCE");
         write_json(output / "result.json", report);
@@ -315,6 +340,7 @@ int main(int argc, char** argv) {
         report["post_roll_failure"] = post_failure;
         report["last_frame_received_ns"] = evidence.latest_ns.load();
         report["capture_complete"] = !evidence.failed.load() && post_complete;
+        report["cancellation_context"] = cancellation_context;
         report["scene_settled"] = nullptr;
         write_json(output / "result.json", report);
         std::cout << "组结束，命令与图像已保存；尚无停稳/推荐时间结论。\n";

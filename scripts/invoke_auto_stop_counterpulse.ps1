@@ -121,10 +121,16 @@ function Invoke-Probe([string]$Binary, [string[]]$Arguments, [bool]$Physical) {
                 if ($Physical) {
                     $previous = Show-Startup (Join-Path $runPath 'result') $previous
                     $failurePath = Join-Path $runPath 'result/failure.json'
+                    if (-not (Test-Path -LiteralPath $failurePath)) { $failurePath = Join-Path $runPath 'result/result.json' }
                     if (Test-Path -LiteralPath $failurePath) {
                         try {
                             $failure = Get-Content -LiteralPath $failurePath -Raw -Encoding UTF8 | ConvertFrom-Json
-                            if ([string]$failure.reason -match '^[A-Z_]{1,60}$') { $script:FailureCode = [string]$failure.reason }
+                            foreach ($field in @('reason', 'failure', 'post_roll_failure')) {
+                                if ($failure.PSObject.Properties.Name -contains $field -and [string]$failure.$field -match '^[A-Z_]{1,60}$') {
+                                    $script:FailureCode = [string]$failure.$field
+                                    break
+                                }
+                            }
                         } catch {}
                     }
                 }

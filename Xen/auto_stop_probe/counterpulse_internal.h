@@ -145,11 +145,16 @@ inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan
     Clock::time_point next_shot_deadline{};
     Clock::time_point last_shot_submit{};
     Clock::time_point shot_recovery_limit{};
+    auto budget_failure = [&](const char* site, int shot, Clock::time_point observed, Clock::time_point limit) {
+        failure = "ACTION_BUDGET_EXCEEDED";
+        report["failure_context"] = {{"site", site}, {"shot_index", shot},
+            {"observed_ns", ns(observed)}, {"limit_ns", ns(limit)}};
+    };
     auto command = [&](bool button, int value, int shot, Clock::time_point planned) -> bool {
         if (!check()) return false;
         const auto submit = clock.now();
         if (button && value && shot > 1 && p.baseline != "stationary" && submit > shot_recovery_limit) {
-            failure = "ACTION_BUDGET_EXCEEDED"; return false;
+            budget_failure("SHOT_SUBMIT_ENVELOPE", shot, submit, shot_recovery_limit); return false;
         }
         const bool late = submit > planned + std::chrono::milliseconds(p.late_tolerance_ms);
         if (value && late) {
@@ -158,7 +163,7 @@ inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan
         if (!button && value) {
             const int remaining_hold = value == p.direction ? p.move_ms + p.brake_window_ms : p.counter_hold_ms;
             if (submit + std::chrono::milliseconds(remaining_hold) > next_shot_deadline) {
-                failure = "ACTION_BUDGET_EXCEEDED"; return false;
+                budget_failure("REMAINING_HOLD", shot, submit + std::chrono::milliseconds(remaining_hold), next_shot_deadline); return false;
             }
         }
         Json entry{{"kind", button ? "left_button" : "wasd"}, {"value", value}, {"shot_index", shot},
@@ -221,7 +226,7 @@ inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan
                 const auto move_up_ack = ack;
                 deadline = move_up_ack + std::chrono::milliseconds(p.brake_window_ms);
                 // ACK耗时不是调度迟到；过大时拒绝该组，不能扩大已认可的枪间恢复窗口。
-                if (deadline > next_shot_deadline) { failure = "ACTION_BUDGET_EXCEEDED"; break; }
+                if (deadline > next_shot_deadline) { budget_failure("PLANNED_SHOT_ENVELOPE", shot + 1, deadline, next_shot_deadline); break; }
                 next_shot_deadline = deadline;
                 report["cycles"].push_back({{"shot_index", shot + 1}, {"move_up_ack_ns", ns(move_up_ack)},
                     {"shot_deadline_ns", ns(deadline)}, {"minimum_shot_ns", ns(earliest)},
@@ -232,7 +237,8 @@ inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan
                     if (!wait(counter_release) || !command(false, 0, shot + 1, counter_release)) break;
                 }
                 // 动作已超出下一枪计划时取消；绝不压缩动作或补射。
-                if (clock.now() > deadline) failure = "ACTION_BUDGET_EXCEEDED";
+                const auto finished = clock.now();
+                if (finished > deadline) budget_failure("REVERSE_FINISHED", shot + 1, finished, deadline);
             }
         }
     } catch (const std::exception&) { failure = "EXECUTION_EXCEPTION"; }
