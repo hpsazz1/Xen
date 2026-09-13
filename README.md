@@ -393,6 +393,9 @@ Provider、线程、复制链和发布变更升级到对应专项门禁；真实
 --port <端口> --process <游戏可执行文件名> --ttl-ms 200`，主程序辅助页填写对应地址、端口和进程名。
 两端认证使用环境变量 `XEN_SOURCE_CONTEXT_TOKEN`（至少 32 字节），不写入 INI、命令行或报告。
 程序不会自动运行源端工具；游戏持续发送数据也不等于游戏处于前台。该工具只提供焦点事实。
+部署工具 `scripts/install_source_context_credential.ps1` 从标准输入安装受 ACL 限制的 DPAPI 密文；
+`scripts/start_source_context_session.ps1` 仅向子进程环境传入认证，支持源服务、用户启动 Launcher 与只读 Probe。
+已配对的辅机包使用 `Start-Xen.cmd` 启动，避免直接打开 Launcher 时缺少认证环境；主机源服务须在游戏所在交互会话运行。
 
 自动扳机与急停复用唯一 KMBOX owner；失焦、取消、帧过期或未知回执停止新动作并处理软件左键释放。
 启用 GSI 时，切枪、来源代际变化或武器上下文失效也会清除旧驻留并释放已持按钮；恢复后需完整松键
