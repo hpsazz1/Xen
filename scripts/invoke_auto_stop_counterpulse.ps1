@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory)][ValidateSet('Prepare', 'Launch')][string]$Mode,
     [Parameter(Mandatory)][string]$RunDirectory,
