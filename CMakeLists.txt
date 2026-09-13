@@ -2037,6 +2037,7 @@ if(BUILD_TESTING)
         -TestRoot "${CMAKE_BINARY_DIR}/release-bundle-tests")
     xen_add_windows_powershell_test(publish_worker_update_tests
         "${PROJECT_SOURCE_DIR}/scripts/test_publish_worker_update.ps1"
+        -ManifestValidator "$<TARGET_FILE:release_contract_tests>"
         -TestRoot "${CMAKE_BINARY_DIR}/worker-update-tests")
     xen_add_windows_powershell_test(aim_analysis_import_scope_tests
         "${PROJECT_SOURCE_DIR}/tests/aim_analysis_import_scope_tests.ps1"

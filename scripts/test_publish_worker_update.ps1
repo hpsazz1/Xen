@@ -1,4 +1,4 @@
-﻿param([string]$TestRoot = (Join-Path $PSScriptRoot '..\cache\worker-update-tests'))
+﻿param([string]$TestRoot = (Join-Path $PSScriptRoot '..\cache\worker-update-tests'), [string]$ManifestValidator = '')
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'path_safety.psm1') -Force
@@ -19,6 +19,18 @@ function Assert-UpdateReject([hashtable]$Parameters, [string]$Message) {
     try { & $publisher @Parameters } catch { $rejected = $true }
     Assert-UpdateTest $rejected $Message
     Assert-UpdateTest (-not (Test-Path -LiteralPath $Parameters.OutputDirectory)) "$Message 未产生正式目录"
+}
+function Assert-ProductionManifest([string]$PackagePath) {
+    $document = Get-Content -LiteralPath (Join-Path $PackagePath 'manifest.json') -Raw | ConvertFrom-Json
+    Assert-UpdateTest (@($document.PSObject.Properties.Name).Count -eq 5) '生产 manifest 顶层严格五字段'
+    foreach ($record in $document.files) {
+        $actualHash = (Get-FileHash -LiteralPath (Join-Path $PackagePath $record.path) -Algorithm SHA256).Hash
+        Assert-UpdateTest ($actualHash -ieq $record.sha256) "最终清单哈希 $($record.path)"
+    }
+    if ($ManifestValidator) {
+        & $ManifestValidator --validate-package $PackagePath
+        Assert-UpdateTest ($LASTEXITCODE -eq 0) '生产 load_release_manifest 接受发布包'
+    }
 }
 try {
     $sourceRoot = Join-Path $runRoot 'source'
@@ -42,7 +54,8 @@ try {
     foreach ($runtime in @('nvidia', 'directml', 'openvino')) {
         $relative = "runtimes/$runtime/Xen.exe"
         Write-UpdateFixture (Join-Path $baseRoot $relative) "old-$runtime-worker"
-        $routes += [ordered]@{ id = $runtime; executable = $relative; backends = @($runtime) }
+        $backends = if ($runtime -eq 'nvidia') { @('cpu', 'cuda', 'tensorrt') } else { @($runtime) }
+        $routes += [ordered]@{ id = $runtime; executable = $relative; backends = @($backends) }
     }
     Write-UpdateFixture (Join-Path $baseRoot 'config.ini') '[fixture]'
     Write-UpdateFixture (Join-Path $baseRoot 'cache/model-workspace/settings.json') '{}'
@@ -63,17 +76,18 @@ try {
     $parameters = @{ BasePackagePath = $baseRoot; BuildDirectory = $buildRoot; Runtime = 'nvidia'
         RepositoryRoot = $sourceRoot; GitExecutable = $git; OutputDirectory = (Join-Path $runRoot 'updated') }
     & $publisher @parameters
+    Assert-ProductionManifest $parameters.OutputDirectory
     $published = Get-Content -LiteralPath (Join-Path $parameters.OutputDirectory 'manifest.json') -Raw | ConvertFrom-Json
+    $evidenceRelative = 'tools/acceptance/WORKER-UPDATE.json'
+    $evidence = Get-Content -LiteralPath (Join-Path $parameters.OutputDirectory $evidenceRelative) -Raw | ConvertFrom-Json
     Assert-UpdateTest ($published.git_commit -ceq $commit) '候选提交绑定新 Worker'
-    Assert-UpdateTest ($published.worker_update.base_package.git_commit -ceq ('a' * 40)) '保留基包提交'
-    Assert-UpdateTest ($published.worker_update.base_package.manifest_sha256 -ieq $baseHash) '保留基包清单身份'
-    Assert-UpdateTest (-not $published.worker_update.inherited_payload_hashes_verified) '不虚称继承文件已全量哈希'
+    Assert-UpdateTest ($evidence.base_package.git_commit -ceq ('a' * 40)) '保留基包提交'
+    Assert-UpdateTest ($evidence.base_package.manifest_sha256 -ieq $baseHash) '保留基包清单身份'
+    Assert-UpdateTest (-not $evidence.inherited_payload_hashes_verified) '不虚称继承文件已全量哈希'
     Assert-UpdateTest (-not (Test-Path -LiteralPath (Join-Path $parameters.OutputDirectory 'cache/user-data/keep.txt'))) '不复制用户可变数据'
     Assert-UpdateTest ((Get-FileHash -LiteralPath $baseManifestPath -Algorithm SHA256).Hash -ceq $baseHash) '基包不变'
     foreach ($record in $published.files) {
-        $actualHash = (Get-FileHash -LiteralPath (Join-Path $parameters.OutputDirectory $record.path) -Algorithm SHA256).Hash
-        Assert-UpdateTest ($actualHash -ieq $record.sha256) "最终清单哈希 $($record.path)"
-        if ($record.path -ne 'runtimes/nvidia/Xen.exe') {
+        if ($record.path -notin @('runtimes/nvidia/Xen.exe', $evidenceRelative)) {
             $oldRecord = @($records | Where-Object { $_.path -ceq $record.path })[0]
             Assert-UpdateTest (($record | ConvertTo-Json -Compress) -ceq ($oldRecord | ConvertTo-Json -Compress)) "继承记录原样保留 $($record.path)"
         }
@@ -81,6 +95,21 @@ try {
     $existingRejected = $false
     try { & $publisher @parameters } catch { $existingRejected = $true }
     Assert-UpdateTest $existingRejected '已有正式目标拒绝覆盖'
+    $repeatParameters = $parameters.Clone()
+    $repeatParameters.BasePackagePath = $parameters.OutputDirectory
+    $repeatParameters.OutputDirectory = Join-Path $runRoot 'repeated-update'
+    & $publisher @repeatParameters
+    Assert-ProductionManifest $repeatParameters.OutputDirectory
+    $repeatManifest = Get-Content -LiteralPath (Join-Path $repeatParameters.OutputDirectory 'manifest.json') -Raw | ConvertFrom-Json
+    Assert-UpdateTest (@($repeatManifest.files | Where-Object { $_.path -ceq $evidenceRelative }).Count -eq 1) '重复更新来源载荷无重复记录'
+    $legacy = $baseJson | ConvertFrom-Json
+    $legacy | Add-Member NoteProperty worker_update $evidence
+    Write-UpdateFixture $baseManifestPath ($legacy | ConvertTo-Json -Depth 20)
+    $legacyParameters = $parameters.Clone()
+    $legacyParameters.OutputDirectory = Join-Path $runRoot 'legacy-recovered'
+    & $publisher @legacyParameters
+    Assert-ProductionManifest $legacyParameters.OutputDirectory
+    Write-UpdateFixture $baseManifestPath $baseJson
     $parameters.OutputDirectory = Join-Path $runRoot 'dirty'
     Write-UpdateFixture (Join-Path $sourceRoot 'untracked.txt') 'dirty'
     Assert-UpdateReject $parameters '脏源码拒绝'
@@ -94,6 +123,13 @@ try {
     Assert-UpdateReject $parameters '错误构建源码根拒绝'
     $identity.source_root = $sourceRoot
     Write-UpdateFixture $identityPath ($identity | ConvertTo-Json)
+    $unknownField = $baseJson | ConvertFrom-Json
+    $unknownField | Add-Member NoteProperty unrelated_metadata @{}
+    Write-UpdateFixture $baseManifestPath ($unknownField | ConvertTo-Json -Depth 20)
+    Assert-UpdateReject $parameters '非 worker_update 的额外顶层字段拒绝'
+    $unknownField | Add-Member NoteProperty worker_update $evidence
+    Write-UpdateFixture $baseManifestPath ($unknownField | ConvertTo-Json -Depth 20)
+    Assert-UpdateReject $parameters '超过六个顶层字段拒绝'
     foreach ($unsafe in @('../outside.txt', 'runtimes/nvidia/Xen.exe:stream', 'cache/CON', 'cache/trailing.', 'cache//empty')) {
         $bad = $baseJson | ConvertFrom-Json
         $bad.files[0].path = $unsafe
@@ -118,6 +154,7 @@ try {
     $parameters.PackageNotesPath = $notes
     $parameters.ManualAcceptancePath = $manual
     & $publisher @parameters
+    Assert-ProductionManifest $parameters.OutputDirectory
     Assert-UpdateTest ((Get-FileHash -LiteralPath (Join-Path $parameters.OutputDirectory 'config.ini')).Hash -ceq (Get-FileHash -LiteralPath $config).Hash) '显式配置替换'
     foreach ($pair in @(@('tools/acceptance/PACKAGE-NOTES.md', $notes), @('tools/acceptance/MANUAL-ACCEPTANCE.md', $manual))) {
         $copyHash = (Get-FileHash -LiteralPath (Join-Path $parameters.OutputDirectory $pair[0])).Hash

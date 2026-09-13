@@ -85,6 +85,16 @@ $workerLength = (Get-Item -LiteralPath $workerPath).Length
 $manifestPath = Resolve-UpdateFile (Join-Path $baseRoot 'manifest.json')
 $baseManifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $manifest = Read-UpdateJson $manifestPath
+$manifestFields = @($manifest.PSObject.Properties.Name)
+$requiredFields = @('schema', 'product', 'git_commit', 'runtimes', 'files')
+if (@($requiredFields | Where-Object { $_ -cnotin $manifestFields }).Count -ne 0 -or
+    @($manifestFields | Where-Object { $_ -cnotin $requiredFields -and $_ -cne 'worker_update' }).Count -ne 0 -or
+    $manifestFields.Count -notin @(5, 6)) {
+    throw '基包 manifest 顶层只允许五个正式字段及旧版 worker_update。'
+}
+if ($manifestFields -ccontains 'worker_update') {
+    $manifest.PSObject.Properties.Remove('worker_update')
+}
 if ($manifest.schema -ne 1 -or $manifest.product -cne 'Xen' -or
     $manifest.git_commit -notmatch '^[0-9a-fA-F]{40}$' -or
     @($manifest.runtimes).Count -ne 3 -or @($manifest.files).Count -eq 0) {
@@ -176,7 +186,7 @@ try {
         path = $baseRoot; git_commit = [string]$manifest.git_commit; manifest_sha256 = $baseManifestHash
     }
     $manifest.git_commit = $commit.ToLowerInvariant()
-    $manifest | Add-Member -Force NoteProperty worker_update ([ordered]@{
+    $updateEvidence = [ordered]@{
         schema = 1; base_package = $baseIdentity
         inherited_files_identity = 'base_package.manifest_sha256'
         updated_components = @([ordered]@{
@@ -186,7 +196,21 @@ try {
         overridden_files = @($overrides.Keys | Sort-Object)
         inherited_payload_hashes_verified = $false
         next_validation = 'transfer_release_bundle.ps1 完整跨机清单校验'
-    })
+    }
+    # 来源证据属于独立载荷；生产 Launcher 的 manifest 顶层严格固定为五字段。
+    $evidenceRelative = 'tools/acceptance/WORKER-UPDATE.json'
+    $evidencePath = Resolve-UpdatePayload $incoming $evidenceRelative
+    New-Item -ItemType Directory -Path (Split-Path -Parent $evidencePath) -Force | Out-Null
+    $updateEvidence | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $evidencePath -Encoding UTF8
+    $evidenceRecord = [pscustomobject][ordered]@{
+        path = $evidenceRelative; runtime = ''
+        size = [long](Get-Item -LiteralPath $evidencePath).Length
+        sha256 = (Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        source = "publish_worker_update.ps1@$commit"
+    }
+    $manifest.files = @($manifest.files | Where-Object {
+        ([string]$_.path).Replace('\', '/') -ine $evidenceRelative
+    }) + @($evidenceRecord)
     $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $incoming 'manifest.json') -Encoding UTF8
     $null = Read-UpdateJson (Join-Path $incoming 'manifest.json')
     $null = Resolve-XenDirectChildPath $outputParent $incomingName '改名前暂存目录'

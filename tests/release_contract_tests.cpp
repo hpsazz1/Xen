@@ -162,7 +162,21 @@ void test_manifest_validation() {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    // 发布工具直接复用Launcher生产解析/路由校验，绝不启动Worker或设备。
+    if (argc == 3 && std::string(argv[1]) == "--validate-package") {
+        const auto root = std::filesystem::u8path(argv[2]);
+        app::detail::ReleaseManifest manifest;
+        std::string error;
+        if (!app::detail::load_release_manifest(root / "manifest.json", manifest, error) ||
+            !app::detail::validate_release_manifest(root, manifest, error)) {
+            std::cerr << error << '\n';
+            return 1;
+        }
+        std::cout << "Launcher发布清单契约通过\n";
+        return 0;
+    }
+    if (argc != 1) return 2;
     test_backend_ownership();
     test_release_environment();
     test_unmanaged_data_root_is_independent_of_caller_directory();
