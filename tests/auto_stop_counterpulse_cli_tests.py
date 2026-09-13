@@ -72,6 +72,11 @@ def main():
             slow_plan = json.loads((slow / 'plan.json').read_text(encoding='utf-8-sig'))
             assert slow_plan['shots'] == 7 and slow_plan['shot_interval_ms'] == 600
             assert '600ms' in (slow / 'TASK.md').read_text(encoding='utf-8-sig')
+            slower = root / 'slower-stationary'
+            invoke('-Mode', 'Prepare', '-RunDirectory', slower, '-Executable', args.executable,
+                '-ConfigPath', config, '-Baseline', 'stationary', '-Shots', 7, '-ShotIntervalMs', 650, ok=True)
+            assert json.loads((slower / 'plan.json').read_text(encoding='utf-8-sig'))['shot_interval_ms'] == 650
+            assert '650ms' in (slower / 'TASK.md').read_text(encoding='utf-8-sig')
             overflow = root / 'overflow'
             invoke('-Mode', 'Prepare', '-RunDirectory', overflow, '-Executable', args.executable,
                 '-ConfigPath', config, '-Shots', 8, '-ShotIntervalMs', 600)

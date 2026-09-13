@@ -6,7 +6,7 @@ param(
     [string]$ConfigPath,
     [ValidateSet('stationary', 'no_counter', 'counter')][string]$Baseline = 'counter',
     [ValidateSet(7, 8)][int]$Shots = 8,
-    [ValidateRange(280, 600)][int]$ShotIntervalMs = 280,
+    [ValidateRange(280, 650)][int]$ShotIntervalMs = 280,
     [ValidateSet('A', 'D')][string]$Direction = 'A',
     [ValidateRange(1, 250)][int]$MoveMs = 120,
     [ValidateRange(1, 200)][int]$CounterHoldMs = 30,
@@ -148,7 +148,7 @@ try {
         $binary = (Resolve-Path -LiteralPath $Executable).Path
         $config = (Resolve-Path -LiteralPath $ConfigPath).Path
         if (-not [IO.File]::Exists($binary) -or -not [IO.File]::Exists($config)) { throw '需要有效文件。' }
-        if (($Shots - 1) * $ShotIntervalMs -gt 3600) { throw '首末枪跨度不能超过3600ms；600ms间隔请用7发。' }
+        if (($Shots - 1) * $ShotIntervalMs -gt 3900) { throw '首末枪跨度不能超过3900ms；600/650ms间隔请用7发。' }
         $plan = [ordered]@{ baseline = $Baseline; shots = $Shots; shot_interval_ms = $ShotIntervalMs;
             move_ms = $MoveMs; counter_hold_ms = $CounterHoldMs; shot_hold_ms = $ShotHoldMs;
             late_tolerance_ms = $LateToleranceMs; direction = $(if ($Direction -eq 'A') { 2 } else { 8 }) }

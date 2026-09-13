@@ -35,8 +35,8 @@ inline CounterpulsePlan parse_counterpulse_plan(const Json& input) {
     p.late_tolerance_ms = input.value("late_tolerance_ms", p.late_tolerance_ms);
     const int direction = input.value("direction", static_cast<int>(p.direction));
     if ((p.baseline != "counter" && p.baseline != "stationary" && p.baseline != "no_counter") ||
-        (p.shots != 7 && p.shots != 8) || p.shot_interval_ms < 280 || p.shot_interval_ms > 600 ||
-        (p.shots - 1) * p.shot_interval_ms > 3600 ||
+        (p.shots != 7 && p.shots != 8) || p.shot_interval_ms < 280 || p.shot_interval_ms > 650 ||
+        (p.shots - 1) * p.shot_interval_ms > 3900 ||
         (direction != 2 && direction != 8) || p.move_ms < 1 || p.move_ms > 250 ||
         p.counter_hold_ms < 1 || p.counter_hold_ms > 200 || p.shot_hold_ms < 1 || p.shot_hold_ms > 20 ||
         p.late_tolerance_ms > 10 ||

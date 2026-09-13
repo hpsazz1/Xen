@@ -74,7 +74,7 @@ void successful_and_baselines() {
     require(report["success"] && mouse.downs == 7 && mouse.keyboards[1] == 8 && mouse.keyboards[3] == 2, "七发和D方向应使用对向A");
 }
 void configurable_stationary_intervals() {
-    for (const auto [shots, interval] : {std::pair{7, 600}, std::pair{8, 500}}) {
+    for (const auto [shots, interval] : {std::pair{7, 600}, std::pair{7, 650}, std::pair{8, 500}}) {
         Fake mouse; CounterpulsePlan p;
         p.baseline = "stationary"; p.shots = shots; p.shot_interval_ms = interval;
         const auto parsed = parse_counterpulse_plan(counterpulse_plan_json(p));
@@ -107,6 +107,8 @@ void configurable_stationary_intervals() {
     require(parse_counterpulse_plan(Json::object()).shot_interval_ms == 280, "未指定间隔时兼容旧计划280ms");
     require(parse_counterpulse_plan(Json{{"shots", 8}, {"shot_interval_ms", 514}}).shot_interval_ms == 514,
         "八发3598ms跨度边界应接受");
+    require(parse_counterpulse_plan(Json{{"shots", 8}, {"shot_interval_ms", 557}}).shot_interval_ms == 557,
+        "八发3899ms跨度应接受");
 }
 void failures_stop_and_cleanup() {
     CounterpulsePlan p;
@@ -146,8 +148,8 @@ void failures_stop_and_cleanup() {
 }
 void invalid_plans() {
     for (const auto& json : {Json{{"shots", 9}}, Json{{"direction", 258}}, Json{{"late_tolerance_ms", 11}},
-        Json{{"shot_interval_ms", 279}}, Json{{"shots", 7}, {"shot_interval_ms", 601}},
-        Json{{"shots", 8}, {"shot_interval_ms", 600}}, Json{{"shots", 8}, {"shot_interval_ms", 515}},
+        Json{{"shot_interval_ms", 279}}, Json{{"shots", 7}, {"shot_interval_ms", 651}},
+        Json{{"shots", 8}, {"shot_interval_ms", 600}}, Json{{"shots", 8}, {"shot_interval_ms", 558}},
         Json{{"shots", 7}, {"shot_interval_ms", 500.5}},
         Json{{"move_ms", 250}, {"counter_hold_ms", 100}}, Json{{"shots", 7.5}}}) {
         bool rejected = false; try { parse_counterpulse_plan(json); } catch (...) { rejected = true; }
