@@ -10,6 +10,7 @@ param(
     [ValidateSet('A', 'D')][string]$Direction = 'A',
     [ValidateRange(1, 250)][int]$MoveMs = 120,
     [ValidateRange(1, 200)][int]$CounterHoldMs = 30,
+    [ValidateRange(1, 200)][int]$BrakeWindowMs = 60,
     [ValidateRange(1, 20)][int]$ShotHoldMs = 5,
     [ValidateRange(0, 10)][int]$LateToleranceMs = 5,
     [switch]$AllowPhysicalOutput,
@@ -150,7 +151,7 @@ try {
         if (-not [IO.File]::Exists($binary) -or -not [IO.File]::Exists($config)) { throw '需要有效文件。' }
         if (($Shots - 1) * $ShotIntervalMs -gt 3900) { throw '首末枪跨度不能超过3900ms；600/650ms间隔请用7发。' }
         $plan = [ordered]@{ baseline = $Baseline; shots = $Shots; shot_interval_ms = $ShotIntervalMs;
-            move_ms = $MoveMs; counter_hold_ms = $CounterHoldMs; shot_hold_ms = $ShotHoldMs;
+            move_ms = $MoveMs; counter_hold_ms = $CounterHoldMs; brake_window_ms = $BrakeWindowMs; shot_hold_ms = $ShotHoldMs;
             late_tolerance_ms = $LateToleranceMs; direction = $(if ($Direction -eq 'A') { 2 } else { 8 }) }
         $null = New-Item -ItemType Directory -Path $runPath
         Write-Json $planPath $plan
@@ -166,6 +167,10 @@ try {
             $launch += ' -CredentialDirectory ' + (Quote-PS ([IO.Path]::GetFullPath($CredentialDirectory))) + ' -Scope ' + $Scope
         }
         $behavior = if ($Baseline -eq 'stationary') { '原地静止基线，不发送A/D移动；人物须事先静止并固定瞄准。' } else { '移动与急停测试；会发送A/D移动。' }
+        if ($Baseline -ne 'stationary') {
+            $action = if ($Baseline -eq 'no_counter') { '仅松键，不按反向键' } else { "反向轻点$($CounterHoldMs)ms（ACK计时）" }
+            $behavior = "首枪原地，随后每次按$Direction 移动$($MoveMs)ms，$action；移动UP ACK后$($BrakeWindowMs)ms计划开枪。枪间至少$($ShotIntervalMs)ms，超过$($ShotIntervalMs + $LateToleranceMs)ms则拒绝该组。固定瞄准，不人为按方向或射击键。"
+        }
         $markdown = "# 反向轻点人工Run`n`n状态：PREPARED_NOT_LAUNCHED。仅用户在当前前台执行一次；会发送真实开火输入。`n`n$behavior`n`n请先确认测试场景、源焦点、独占设备和紫色弹着点显示；End或人工输入取消。`n`n``````powershell`n$launch`n```````n`n一组$Shots 发，间隔$($ShotIntervalMs)ms；该间隔仅为候选，结果不代表已经稳定。结果目录：result。`n"
         [IO.File]::WriteAllText((Join-Path $runPath 'TASK.md'), $markdown, (New-Object Text.UTF8Encoding($false)))
         Write-Output 'PREPARED_NOT_LAUNCHED；未发送设备输入。'

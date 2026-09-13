@@ -77,6 +77,14 @@ def main():
                 '-ConfigPath', config, '-Baseline', 'stationary', '-Shots', 7, '-ShotIntervalMs', 650, ok=True)
             assert json.loads((slower / 'plan.json').read_text(encoding='utf-8-sig'))['shot_interval_ms'] == 650
             assert '650ms' in (slower / 'TASK.md').read_text(encoding='utf-8-sig')
+            movement = root / 'matched-no-counter'
+            invoke('-Mode', 'Prepare', '-RunDirectory', movement, '-Executable', args.executable,
+                '-ConfigPath', config, '-Baseline', 'no_counter', '-Shots', 7, '-ShotIntervalMs', 650,
+                '-BrakeWindowMs', 60, ok=True)
+            movement_plan = json.loads((movement / 'plan.json').read_text(encoding='utf-8-sig'))
+            assert movement_plan['baseline'] == 'no_counter' and movement_plan['brake_window_ms'] == 60
+            movement_task = (movement / 'TASK.md').read_text(encoding='utf-8-sig')
+            assert '60ms' in movement_task and '655ms' in movement_task
             overflow = root / 'overflow'
             invoke('-Mode', 'Prepare', '-RunDirectory', overflow, '-Executable', args.executable,
                 '-ConfigPath', config, '-Shots', 8, '-ShotIntervalMs', 600)

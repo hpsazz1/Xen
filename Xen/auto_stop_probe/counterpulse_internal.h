@@ -10,6 +10,7 @@ struct CounterpulsePlan {
     int shot_interval_ms = 280;
     int move_ms = 120;
     int counter_hold_ms = 30;
+    int brake_window_ms = 60;
     int shot_hold_ms = 5;
     int late_tolerance_ms = 5;
     std::uint8_t direction = 2;
@@ -18,7 +19,7 @@ struct CounterpulsePlan {
 inline CounterpulsePlan parse_counterpulse_plan(const Json& input) {
     if (!input.is_object()) throw std::runtime_error("反冲计划必须为对象");
     const std::vector<std::string> fields{"baseline", "shots", "shot_interval_ms", "move_ms",
-        "counter_hold_ms", "shot_hold_ms", "late_tolerance_ms", "direction"};
+        "counter_hold_ms", "brake_window_ms", "shot_hold_ms", "late_tolerance_ms", "direction"};
     for (const auto& [key, value] : input.items()) {
         if (std::find(fields.begin(), fields.end(), key) == fields.end())
             throw std::runtime_error("反冲计划存在未知字段");
@@ -31,6 +32,7 @@ inline CounterpulsePlan parse_counterpulse_plan(const Json& input) {
     p.shot_interval_ms = input.value("shot_interval_ms", p.shot_interval_ms);
     p.move_ms = input.value("move_ms", p.move_ms);
     p.counter_hold_ms = input.value("counter_hold_ms", p.counter_hold_ms);
+    p.brake_window_ms = input.value("brake_window_ms", p.brake_window_ms);
     p.shot_hold_ms = input.value("shot_hold_ms", p.shot_hold_ms);
     p.late_tolerance_ms = input.value("late_tolerance_ms", p.late_tolerance_ms);
     const int direction = input.value("direction", static_cast<int>(p.direction));
@@ -39,9 +41,11 @@ inline CounterpulsePlan parse_counterpulse_plan(const Json& input) {
         (p.shots - 1) * p.shot_interval_ms > 3900 ||
         (direction != 2 && direction != 8) || p.move_ms < 1 || p.move_ms > 250 ||
         p.counter_hold_ms < 1 || p.counter_hold_ms > 200 || p.shot_hold_ms < 1 || p.shot_hold_ms > 20 ||
+        p.brake_window_ms < 1 || p.brake_window_ms > 200 ||
+        (p.baseline == "counter" && p.counter_hold_ms >= p.brake_window_ms) ||
         p.late_tolerance_ms > 10 ||
         (p.baseline != "stationary" && p.shot_hold_ms + p.move_ms +
-            (p.baseline == "counter" ? p.counter_hold_ms : 0) >= p.shot_interval_ms))
+            p.brake_window_ms >= p.shot_interval_ms))
         throw std::runtime_error("反冲计划越界、总时长超限或射击间隔预算不足");
     p.direction = static_cast<std::uint8_t>(direction);
     return p;
@@ -49,7 +53,7 @@ inline CounterpulsePlan parse_counterpulse_plan(const Json& input) {
 
 inline Json counterpulse_plan_json(const CounterpulsePlan& p) {
     return {{"baseline", p.baseline}, {"shots", p.shots}, {"shot_interval_ms", p.shot_interval_ms},
-        {"move_ms", p.move_ms}, {"counter_hold_ms", p.counter_hold_ms}, {"shot_hold_ms", p.shot_hold_ms},
+        {"move_ms", p.move_ms}, {"counter_hold_ms", p.counter_hold_ms}, {"brake_window_ms", p.brake_window_ms}, {"shot_hold_ms", p.shot_hold_ms},
         {"late_tolerance_ms", p.late_tolerance_ms}, {"direction", p.direction}};
 }
 
@@ -80,7 +84,8 @@ private:
 inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan& proposed,
     const std::function<std::string()>& external_cancel = {}, CounterpulseClock clock = {}, bool require_event_history = false) {
     const auto p = parse_counterpulse_plan(counterpulse_plan_json(proposed));
-    Json report{{"schema_version", 1}, {"input_source", "TEST_SCRIPT"}, {"plan", counterpulse_plan_json(p)},
+    Json report{{"schema_version", 2}, {"input_source", "TEST_SCRIPT"}, {"plan", counterpulse_plan_json(p)},
+        {"timing_model", "MOVE_UP_ACK_FIXED_WINDOW"}, {"cycles", Json::array()},
         {"commands", Json::array()}, {"success", false}, {"settled", nullptr},
         {"physical_effect_observed", false}, {"shot_down_attempts", 0}};
     if (!mouse.output_owner_exclusive() || !mouse.supports_wasd_keyboard() || !mouse.supports_left_button()) {
@@ -138,15 +143,20 @@ inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan
     };
     Clock::time_point ack{};
     Clock::time_point next_shot_deadline{};
+    Clock::time_point last_shot_submit{};
+    Clock::time_point shot_recovery_limit{};
     auto command = [&](bool button, int value, int shot, Clock::time_point planned) -> bool {
         if (!check()) return false;
         const auto submit = clock.now();
+        if (button && value && shot > 1 && p.baseline != "stationary" && submit > shot_recovery_limit) {
+            failure = "ACTION_BUDGET_EXCEEDED"; return false;
+        }
         const bool late = submit > planned + std::chrono::milliseconds(p.late_tolerance_ms);
         if (value && late) {
             failure = button ? "SHOT_DEADLINE_MISSED" : "COMMAND_DEADLINE_MISSED"; return false;
         }
         if (!button && value) {
-            const int remaining_hold = value == p.direction ? p.move_ms + (p.baseline == "counter" ? p.counter_hold_ms : 0) : p.counter_hold_ms;
+            const int remaining_hold = value == p.direction ? p.move_ms + p.brake_window_ms : p.counter_hold_ms;
             if (submit + std::chrono::milliseconds(remaining_hold) > next_shot_deadline) {
                 failure = "ACTION_BUDGET_EXCEEDED"; return false;
             }
@@ -157,6 +167,7 @@ inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan
         Clock::time_point completed;
         if (button) {
             if (value) {
+                last_shot_submit = submit;
                 const int attempts = report["shot_down_attempts"].get<int>();
                 if (attempts >= p.shots) { failure = "SHOT_BUDGET_EXHAUSTED"; return false; }
                 report["shot_down_attempts"] = attempts + 1;
@@ -187,25 +198,41 @@ inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan
         const auto start = clock.now();
         if (command(true, 0, 0, start) && command(false, 0, 0, clock.now())) {
             const auto first = clock.now();
+            auto deadline = first;
             for (int shot = 1; shot <= p.shots && failure.empty(); ++shot) {
-                const auto deadline = first + std::chrono::milliseconds((shot - 1) * p.shot_interval_ms);
                 if (!wait(deadline)) break;
                 if (clock.now() > deadline + std::chrono::milliseconds(p.late_tolerance_ms)) { failure = "SHOT_DEADLINE_MISSED"; break; }
                 if (!command(true, 1, shot, deadline)) break;
                 const auto button_release = ack + std::chrono::milliseconds(p.shot_hold_ms);
                 if (!wait(button_release) || !command(true, 0, shot, button_release)) break;
-                if (shot == p.shots || p.baseline == "stationary") continue;
-                next_shot_deadline = deadline + std::chrono::milliseconds(p.shot_interval_ms);
-                if (!command(false, p.direction, shot + 1, clock.now())) break;
+                if (shot == p.shots) continue;
+                if (p.baseline == "stationary") {
+                    deadline = first + std::chrono::milliseconds(shot * p.shot_interval_ms);
+                    continue;
+                }
+                // 恢复等待放在移动之前；两种移动组共用移动UP ACK后的观察窗。
+                const auto earliest = last_shot_submit + std::chrono::milliseconds(p.shot_interval_ms);
+                const auto move_start = earliest - std::chrono::milliseconds(p.move_ms + p.brake_window_ms);
+                next_shot_deadline = earliest + std::chrono::milliseconds(p.late_tolerance_ms);
+                shot_recovery_limit = next_shot_deadline;
+                if (!wait(move_start) || !command(false, p.direction, shot + 1, move_start)) break;
                 const auto move_release = ack + std::chrono::milliseconds(p.move_ms);
                 if (!wait(move_release) || !command(false, 0, shot + 1, move_release)) break;
+                const auto move_up_ack = ack;
+                deadline = move_up_ack + std::chrono::milliseconds(p.brake_window_ms);
+                // ACK耗时不是调度迟到；过大时拒绝该组，不能扩大已认可的枪间恢复窗口。
+                if (deadline > next_shot_deadline) { failure = "ACTION_BUDGET_EXCEEDED"; break; }
+                next_shot_deadline = deadline;
+                report["cycles"].push_back({{"shot_index", shot + 1}, {"move_up_ack_ns", ns(move_up_ack)},
+                    {"shot_deadline_ns", ns(deadline)}, {"minimum_shot_ns", ns(earliest)},
+                    {"brake_window_ms", p.brake_window_ms}});
                 if (p.baseline == "counter") {
                     if (!command(false, p.direction == 2 ? 8 : 2, shot + 1, clock.now())) break;
                     const auto counter_release = ack + std::chrono::milliseconds(p.counter_hold_ms);
                     if (!wait(counter_release) || !command(false, 0, shot + 1, counter_release)) break;
                 }
                 // 动作已超出下一枪计划时取消；绝不压缩动作或补射。
-                if (clock.now() > deadline + std::chrono::milliseconds(p.shot_interval_ms)) failure = "ACTION_BUDGET_EXCEEDED";
+                if (clock.now() > deadline) failure = "ACTION_BUDGET_EXCEEDED";
             }
         }
     } catch (const std::exception&) { failure = "EXECUTION_EXCEPTION"; }
