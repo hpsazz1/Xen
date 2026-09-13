@@ -160,7 +160,7 @@ try {
         } elseif ($length -ne [long]$record.size) { throw "继承载荷复制长度错误：$relative" }
         $copiedBytes += $length
         Write-Progress -Activity '继承统一包显式载荷' -Status "$copiedBytes / $totalBytes 字节" `
-            -PercentComplete ([Math]::Min(100, [int](100.0 * $copiedBytes / [Math]::Max(1, $totalBytes))))
+            -PercentComplete ([Math]::Min(100, [int](100.0 * $copiedBytes / [Math]::Max(1.0, [double]$totalBytes))))
     }
     if ((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $baseManifestHash) {
         throw '基包 manifest 在继承期间变化。'
