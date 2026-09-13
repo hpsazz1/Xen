@@ -112,8 +112,8 @@ def analyze(o):
         if not o.command_frame_clock_confirmed or not o.accept_command_windows:
             raise ValueError('命令与所选帧时刻必须明确确认同一单调时钟域；接收时刻不能代替来源曝光时刻')
         raw_report = json.loads(o.report_json.read_text(encoding='utf-8-sig'))
-        if raw_report.get('success') is not True:
-            raise ValueError('执行报告未成功，不能自动建立完整逐枪候选窗')
+        if raw_report.get('success') is not True or raw_report.get('capture_complete') is not True:
+            raise ValueError('执行或采集报告不完整，不能自动建立完整逐枪候选窗')
         candidate_ms = o.candidate_window_ms if o.candidate_window_ms is not None else raw_report['plan']['shot_interval_ms']
         if not math.isfinite(candidate_ms) or not 0 < candidate_ms <= 1000:
             raise ValueError('候选观察窗口必须在 0..1000ms 内，此值不是游戏弹点延迟测量')

@@ -24,7 +24,7 @@ class ImpactTests(unittest.TestCase):
             shots = [{'start_ns': 100 + i*100, 'end_ns': 190+i*100} for i in range(7)]
             (root / 'shots.json').write_text(json.dumps({'shots': shots}), encoding='utf-8')
             use_report = mode.startswith('report_')
-            (root / 'result.json').write_text(json.dumps({'success': True,
+            (root / 'result.json').write_text(json.dumps({'success': True, 'capture_complete': mode != 'report_incomplete',
                 'plan': {'shots': 7, 'shot_interval_ms': 0.00009},
                 'commands': [{'kind': 'left_button', 'value': 1, 'shot_index': i+1,
                               'submit_ns': shot['start_ns']} for i, shot in enumerate(shots)]}), encoding='utf-8')
@@ -132,6 +132,10 @@ class ImpactTests(unittest.TestCase):
         self.assertEqual(result['status'], 'SCENE_GEOMETRY_PASS')
         self.assertEqual(result['timing_window_basis'], 'COMMAND_SUBMIT_CANDIDATE')
         self.assertIsNotNone(result['timing_warning'])
+
+    def test_incomplete_capture_refuses_command_windows(self):
+        with self.assertRaisesRegex(ValueError, '不完整'):
+            self.run_case('report_incomplete', ['--color-confirmed'])
 
     def test_report_ndi_requires_source_uncertainty_gate(self):
         with self.assertRaisesRegex(ValueError, 'NDI'):
