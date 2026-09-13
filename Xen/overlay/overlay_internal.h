@@ -14,6 +14,23 @@
 
 namespace overlay::detail {
 
+enum class HotkeyConflictTarget { RUNTIME_TOGGLE, AIM_HOLD, EMERGENCY, AUTO_STOP };
+
+inline bool hotkey_binding_conflicts(
+        HotkeyConflictTarget target, int key,
+        std::span<const int> runtime_keys, std::span<const int> aim_keys,
+        std::span<const int> emergency_keys,
+        int auto_stop_key, int trigger_key, int recoil_key) noexcept {
+    const auto contains = [key](std::span<const int> keys) {
+        return std::find(keys.begin(), keys.end(), key) != keys.end();
+    };
+    if (target != HotkeyConflictTarget::RUNTIME_TOGGLE && contains(runtime_keys)) return true;
+    if (target != HotkeyConflictTarget::EMERGENCY && contains(emergency_keys)) return true;
+    // 瞄准、自动急停、扳机和压枪属于按住许可；允许共键，安全控制仍互斥。
+    if (target == HotkeyConflictTarget::AIM_HOLD || target == HotkeyConflictTarget::AUTO_STOP) return false;
+    return contains(aim_keys) || key == auto_stop_key || key == trigger_key || key == recoil_key;
+}
+
 inline bool should_post_quit_on_main_window_destroy(
         bool programmatic_shutdown) noexcept {
     return !programmatic_shutdown;

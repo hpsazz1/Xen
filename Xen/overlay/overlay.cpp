@@ -3017,7 +3017,7 @@ struct Overlay::Impl {
             ImGui::EndDisabled();
             const int key = app_config.auto_stop.activation_virtual_key;
             render_hotkey_row("允许键（按住）", "##auto_stop_activation_key",
-                "按住且准星进入配置人物范围时触发制动，可与自动扳机共用；禁止 WASD，不能与运行启停、瞄准输出或安全急停重复。支持本机及已连接后端的按键，Esc 清空。",
+                "按住且准星进入配置人物范围时触发制动，可与瞄准输出、自动扳机共用；禁止 WASD，不能与运行启停或安全急停重复。支持本机及已连接后端的按键，Esc 清空。",
                 HotkeyBindingTarget::AUTO_STOP,
                 key == 0 ? std::vector<int>{} : std::vector<int>{key}, key_active);
             render_hotkey_row("释放急停按键", "##auto_stop_release_keys",
@@ -3576,21 +3576,14 @@ struct Overlay::Impl {
             const AppConfig& app_config,
             const std::vector<int>* current_binding,
             int virtual_key) const noexcept {
-        const std::array<const std::vector<int>*, 3> bindings{{
-            &app_config.keyboard.runtime_toggle_virtual_keys,
-            &app_config.keyboard.aim_hold_virtual_keys,
-            &app_config.keyboard.emergency_virtual_keys}};
-        return (current_binding != nullptr && current_binding != &app_config.keyboard.aim_hold_virtual_keys &&
-                (app_config.trigger.hold_virtual_key == virtual_key || app_config.recoil.hold_virtual_key == virtual_key)) ||
-            (current_binding != nullptr &&
-                app_config.auto_stop.activation_virtual_key == virtual_key) ||
-            std::any_of(
-            bindings.begin(), bindings.end(),
-            [&](const std::vector<int>* binding) {
-                return binding != current_binding &&
-                    std::find(binding->begin(), binding->end(), virtual_key) !=
-                        binding->end();
-            });
+        using Target = overlay::detail::HotkeyConflictTarget;
+        const auto target = current_binding == &app_config.keyboard.runtime_toggle_virtual_keys ? Target::RUNTIME_TOGGLE :
+            current_binding == &app_config.keyboard.aim_hold_virtual_keys ? Target::AIM_HOLD :
+            current_binding == &app_config.keyboard.emergency_virtual_keys ? Target::EMERGENCY : Target::AUTO_STOP;
+        return overlay::detail::hotkey_binding_conflicts(target, virtual_key,
+            app_config.keyboard.runtime_toggle_virtual_keys, app_config.keyboard.aim_hold_virtual_keys,
+            app_config.keyboard.emergency_virtual_keys, app_config.auto_stop.activation_virtual_key,
+            app_config.trigger.hold_virtual_key, app_config.recoil.hold_virtual_key);
     }
 
     void begin_hotkey_binding(
@@ -3686,7 +3679,7 @@ struct Overlay::Impl {
                         hotkey_capture_message = "该按键已被其他功能占用";
                     } else {
                         app_config.auto_stop.activation_virtual_key = key;
-                        hotkey_capture_message = "允许键已设置";
+                        hotkey_capture_message = "允许键已设置，可与瞄准输出或自动扳机共用";
                     }
                 }
             } else if (hotkey_binding_target == HotkeyBindingTarget::AUTO_STOP_RELEASE && binding) {
@@ -3716,7 +3709,9 @@ struct Overlay::Impl {
                         binding->begin(), binding->end(), virtual_key) ==
                         binding->end()) {
                     binding->push_back(virtual_key);
-                    hotkey_capture_message = "按键已追加";
+                    hotkey_capture_message = binding == &app_config.keyboard.aim_hold_virtual_keys
+                        ? "瞄准输出键已追加，按住任意一个键即可生效"
+                        : "按键已追加";
                 } else {
                     hotkey_capture_message = "该按键已在当前绑定中";
                 }
@@ -3741,7 +3736,7 @@ struct Overlay::Impl {
                 app_config.keyboard.runtime_toggle_virtual_keys, key_active);
             render_hotkey_row(
                 "瞄准输出（按住）", "##aim_hold_virtual_keys",
-                "由当前键鼠后端监听；仅在 Runtime 已运行、物理输出已允许且已武装时生效，全部释放、监听断流或状态陈旧后立即关闭。",
+                "由当前键鼠后端监听；重复点击采集可追加多个键，按住任意一个键即可生效，无需同时按下。可与自动急停、自动扳机共用，不能与运行启停或安全急停重复；Esc 清空。仅在 Runtime 已运行、物理输出已允许且已武装时生效，全部释放或监听失效后立即关闭。",
                 HotkeyBindingTarget::AIM_HOLD,
                 app_config.keyboard.aim_hold_virtual_keys, key_active);
             render_hotkey_row(

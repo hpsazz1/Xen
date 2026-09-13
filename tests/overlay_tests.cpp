@@ -320,6 +320,50 @@ void test_auxiliary_capture_requires_fresh_edge_and_cancel_wins() {
         "离开可编辑页面后不得消费延迟到达的按键");
 }
 
+void test_aim_and_auto_stop_hotkeys_share_without_bypassing_safety() {
+    using namespace overlay::detail;
+    using Target = HotkeyConflictTarget;
+    const std::array<int, 1> runtime{VK_F8}, emergency{VK_END};
+    const std::array<int, 3> aim{VK_XBUTTON1, VK_XBUTTON2, 'K'};
+    const auto conflicts = [&](Target target, int key) {
+        return hotkey_binding_conflicts(target, key, runtime, aim, emergency,
+            VK_XBUTTON1, VK_XBUTTON2, 'R');
+    };
+    expect(!conflicts(Target::AIM_HOLD, VK_XBUTTON1) &&
+        !conflicts(Target::AUTO_STOP, VK_XBUTTON1) && !conflicts(Target::AUTO_STOP, 'K'),
+        "瞄准追加已有急停键、急停选择已有瞄准键必须双向允许，包含鼠标侧键与键盘键");
+    expect(!conflicts(Target::AIM_HOLD, VK_XBUTTON2) && !conflicts(Target::AIM_HOLD, 'R') &&
+        !conflicts(Target::AUTO_STOP, VK_XBUTTON2), "瞄准和急停与扳机共键的原有许可必须保留");
+    for (const auto target : {Target::AIM_HOLD, Target::AUTO_STOP}) {
+        expect(conflicts(target, VK_F8) && conflicts(target, VK_END),
+            "功能许可键不能占用管线启停或安全急停键");
+    }
+    for (const auto target : {Target::RUNTIME_TOGGLE, Target::EMERGENCY}) {
+        expect(conflicts(target, VK_XBUTTON1) && conflicts(target, VK_XBUTTON2) && conflicts(target, 'K'),
+            "安全急停与管线启停反向采集也不能占用瞄准、急停或扳机共键");
+    }
+    expect(conflicts(Target::RUNTIME_TOGGLE, VK_END) && conflicts(Target::EMERGENCY, VK_F8),
+        "管线启停与安全急停之间继续互斥");
+}
+
+void test_repeated_aim_capture_accepts_independent_keys() {
+    using namespace overlay::detail;
+    HotkeyCaptureState state;
+    std::array<bool, 256> keys{};
+    const std::array<int, 3> requested{VK_XBUTTON1, VK_XBUTTON2, 'K'};
+    std::array<int, 3> captured{};
+    for (std::size_t index = 0; index < requested.size(); ++index) {
+        keys.fill(false);
+        begin_hotkey_capture(state, keys);
+        keys[requested[index]] = true;
+        const auto result = update_hotkey_capture(state, keys);
+        expect(result.type == HotkeyCaptureResultType::ASSIGNED && !state.active,
+            "重复点击采集可分别获取任意单键，不要求组合键同时按下");
+        captured[index] = result.virtual_key;
+    }
+    expect(captured == requested, "多次采集必须保留各次鼠标侧键和键盘键，供现有列表追加");
+}
+
 void test_recoil_editor_preview_uses_production_curve_without_mutating_base() {
     RecoilProfile base;
     base.id = "editor-fixture"; base.weapon_id = "synthetic"; base.revision = 7;
@@ -461,6 +505,8 @@ int main() {
     test_detection_role_mapping();
     test_hotkey_capture_state_machine();
     test_auxiliary_capture_requires_fresh_edge_and_cancel_wins();
+    test_aim_and_auto_stop_hotkeys_share_without_bypassing_safety();
+    test_repeated_aim_capture_accepts_independent_keys();
     test_recoil_editor_preview_uses_production_curve_without_mutating_base();
     test_output_arm_requires_input_health();
     test_delay_compensation_tooltip_contract_rejects_ambiguous_pairing();

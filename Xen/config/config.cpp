@@ -959,8 +959,7 @@ bool validate_app_config(const AppConfig& config,
         if (stop_key < 0 || stop_key > 0xFF || stop_key == 'W' ||
             stop_key == 'A' || stop_key == 'S' || stop_key == 'D' ||
             (stop_key != 0 &&
-             (contains_stop_key(config.keyboard.aim_hold_virtual_keys) ||
-              contains_stop_key(config.keyboard.emergency_virtual_keys) ||
+             (contains_stop_key(config.keyboard.emergency_virtual_keys) ||
               contains_stop_key(config.keyboard.runtime_toggle_virtual_keys)))) {
             error = "自动急停允许键非法、使用 WASD 或与其他功能冲突";
             return false;

@@ -327,6 +327,11 @@ void test_keyboard_event_state_machine() {
            "按住启用键按下必须产生 active=true 边沿");
     polled = keyboard::detail::update_keyboard_events(state, config, keys);
     expect(polled.count == 0, "持续按住不得重复产生启用事件");
+    // 同一按键可同时作为其他模块许可；持续电平不能在输入分发层变成事件洪泛。
+    std::size_t repeated_events = 0;
+    for (int sample = 0; sample < 100000; ++sample)
+        repeated_events += keyboard::detail::update_keyboard_events(state, config, keys).count;
+    expect(repeated_events == 0, "持续按住十万次采样不得反复产生瞄准事件或积累待处理事件");
 
     keys[0x06] = true;
     polled = keyboard::detail::update_keyboard_events(state, config, keys);

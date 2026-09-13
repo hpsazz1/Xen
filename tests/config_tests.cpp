@@ -653,7 +653,18 @@ void test_auto_stop_config() {
     expect(save_app_config(path.string(), config, error) && load_app_config(path.string(), loaded, error) &&
                loaded.auto_stop.release_virtual_keys.empty(), "显式清空释放键不恢复默认");
     config.auto_stop.release_virtual_keys = AutoStopConfig{}.release_virtual_keys;
-    for (int key : {-1, 256, int('W'), int('A'), int('S'), int('D'), 0x02, 0x23, 0x77}) {
+    // 瞄准的多个允许键可与自动急停、自动扳机同时共用；安全动作仍排他。
+    config.keyboard.aim_hold_virtual_keys = {0x02, 0x05};
+    for (const int key : config.keyboard.aim_hold_virtual_keys) {
+        config.auto_stop.activation_virtual_key = key;
+        config.trigger.hold_virtual_key = key;
+        expect(save_app_config(path.string(), config, error) && load_app_config(path.string(), loaded, error) &&
+            loaded.keyboard.aim_hold_virtual_keys == config.keyboard.aim_hold_virtual_keys &&
+            loaded.auto_stop.activation_virtual_key == key && loaded.trigger.hold_virtual_key == key,
+            "瞄准多键列表中的任意键均可与急停、扳机共用并往返保存");
+    }
+    config.trigger.hold_virtual_key = 0;
+    for (int key : {-1, 256, int('W'), int('A'), int('S'), int('D'), 0x23, 0x77}) {
         config.auto_stop.activation_virtual_key = key;
         expect(!validate_app_config(config, error), "非法、移动或已占用允许键必须拒绝");
     }
