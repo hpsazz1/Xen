@@ -24,7 +24,7 @@ Capture → Detector → Aim → Runtime SafetyGate → Mouse
 | Tools | Sender、Runtime Benchmark、Mouse Benchmark、人工验收与发布脚本 |
 
 反向轻点标定使用独立 `auto_stop_counterpulse` 目标和
-[`scripts/invoke_auto_stop_counterpulse.ps1`](scripts/invoke_auto_stop_counterpulse.ps1)：Prepare只生成一次性计划，
+[`scripts/invoke_auto_stop_counterpulse.ps1`](scripts/invoke_auto_stop_counterpulse.ps1)：Prepare默认生成一次性计划，
 用户前台Launch后执行单组7至20发、280至650ms间隔，支持静止/无反向/固定反向时长比较。先停止生产Runtime；
 源焦点、全松和设备独占不足时拒绝，End/Ctrl+C或人工方向/鼠标按钮输入取消，不自动重试。
 `-NoCapture` 关闭图像采集、截图及断帧检查，由用户人工观察；仍记录命令与实际参数。
@@ -34,8 +34,10 @@ Capture → Detector → Aim → Runtime SafetyGate → Mouse
 上一枪左键释放完成后立即开始下一次移动；`-MoveMs 500` 支持500ms移动。各动作迟到单独检查。
 启用图像时，20发650ms首末至少12.35秒，
 弹着点会陆续消失，须连续观察或查看逐帧证据。
-日常调参可用 Prepare 的 `-ReuseRunDirectory` 更新同目录计划并清理上次结果；运行中拒绝更新。
-更新后沿用该目录TASK中的前台Launch命令，仅比较试验另建目录；不自动重复射击。
+日常调参可在 Prepare 时指定 `-Repeatable`，之后直接编辑同目录 `plan.json` 并重复手动运行同一Launch命令。
+主要参数：`move_ms` 为移动保持时间、`counter_hold_ms` 为反向保持时间、`shot_after_release_ms` 为最后松键ACK后等待时间。
+每次启动先固定本次参数副本并验证，再覆盖上一组result；中途修改原文件只影响下一组。不会自动重试。
+`-ReuseRunDirectory` 用于准备/迁移已有目录，运行中拒绝更新；正式比较试验另建目录。
 [`scripts/analyze_auto_stop_impacts.py`](scripts/analyze_auto_stop_impacts.py) 离线分析必须提供实际颜色/ROI/几何容差，
 移动背景可采用独立背景ROI平移配准；结果仅表示本场景几何，不自动应用生产参数。
 

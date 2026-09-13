@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory)][ValidateSet('Prepare', 'Launch')][string]$Mode,
     [Parameter(Mandatory)][string]$RunDirectory,
     [switch]$ReuseRunDirectory,
+    [switch]$Repeatable,
     [switch]$NoCapture,
     [string]$Executable,
     [string]$ConfigPath,
@@ -80,20 +81,25 @@ function Assert-ResultTree([string]$Root) {
         }
     }
 }
+function Assert-ProbeStopped([string]$Binary) {
+    foreach ($process in @(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($Binary)) -ErrorAction SilentlyContinue)) {
+        if (-not $process.Path -or $process.Path -ieq $Binary) { throw '绑定探针仍运行。' }
+    }
+}
 function Assert-OwnedRun($Existing) {
-    if ($Existing.schema_version -notin @(1, 2) -or $Existing.status -ne 'PREPARED_NOT_LAUNCHED' -or
+    if ($Existing.schema_version -notin @(1, 2, 3) -or $Existing.status -ne 'PREPARED_NOT_LAUNCHED' -or
         $Existing.plan -cne $planPath -or $Existing.run_id -cne [IO.Path]::GetFileName($runPath)) { throw '不是本工具绑定目录。' }
-    if ($Existing.schema_version -eq 2 -and ($Existing.owner -cne 'XEN_AUTO_STOP_COUNTERPULSE' -or
+    if ($Existing.schema_version -ge 2 -and ($Existing.owner -cne 'XEN_AUTO_STOP_COUNTERPULSE' -or
         $Existing.run_directory -cne $runPath)) { throw '目录所有权无效。' }
+    if ($Existing.schema_version -eq 3 -and $Existing.repeatable -ne $true) { throw '重复运行绑定无效。' }
     if ([IO.Path]::GetFileName($Existing.script) -notmatch '^invoke_auto_stop_counterpulse(-r[0-9]+)?\.ps1$') { throw '原入口身份无效。' }
     foreach ($name in @('executable', 'config', 'plan', 'script')) {
         Assert-PlainPath $Existing.$name
+        if ($name -eq 'plan' -and $Existing.schema_version -eq 3) { continue }
         if ((Get-Digest $Existing.$name) -cne $Existing.($name + '_sha256')) { throw '原目录绑定已变化。' }
     }
     # 旧 schema 的入口没有共享锁；迁移前还须排除仍运行的绑定探针。
-    foreach ($process in @(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($Existing.executable)) -ErrorAction SilentlyContinue)) {
-        if (-not $process.Path -or $process.Path -ieq $Existing.executable) { throw '绑定探针仍运行。' }
-    }
+    Assert-ProbeStopped $Existing.executable
 }
 function Invoke-Probe([string]$Binary, [string[]]$Arguments, [bool]$Physical) {
     $info = New-Object Diagnostics.ProcessStartInfo
@@ -190,7 +196,7 @@ try {
     $planPath = Join-Path $runPath 'plan.json'
     $taskPath = Join-Path $runPath 'task.json'
     Assert-PlainPath $runPath
-    if ($Mode -eq 'Launch' -and $ReuseRunDirectory) { throw '复用仅适用于Prepare。' }
+    if ($Mode -eq 'Launch' -and ($ReuseRunDirectory -or $Repeatable)) { throw '复用模式仅适用于Prepare。' }
     if ($Mode -eq 'Prepare') {
         if ($PSBoundParameters.ContainsKey('AllowPhysicalOutput') -or $PSBoundParameters.ContainsKey('Confirm')) { throw 'Prepare禁止混入物理授权参数。' }
         if (-not $Executable -or -not $ConfigPath) { throw 'Prepare需要Executable和ConfigPath。' }
@@ -220,10 +226,11 @@ try {
         if (Test-Path -LiteralPath $consumed) { Remove-Item -LiteralPath $consumed -Force }
         Move-Item -LiteralPath $candidatePlan -Destination $planPath -Force
         $candidatePlan = $null
-        $task = [ordered]@{ schema_version = 2; owner = 'XEN_AUTO_STOP_COUNTERPULSE'; run_directory = $runPath; status = 'PREPARED_NOT_LAUNCHED'; run_id = [IO.Path]::GetFileName($runPath);
+        $task = [ordered]@{ schema_version = $(if ($Repeatable) { 3 } else { 2 }); owner = 'XEN_AUTO_STOP_COUNTERPULSE'; run_directory = $runPath; status = 'PREPARED_NOT_LAUNCHED'; run_id = [IO.Path]::GetFileName($runPath);
             executable = $binary; config = $config; plan = $planPath; script = $scriptPath;
             executable_sha256 = (Get-Digest $binary); config_sha256 = (Get-Digest $config);
             plan_sha256 = (Get-Digest $planPath); script_sha256 = (Get-Digest $scriptPath) }
+        if ($Repeatable) { $task.repeatable = $true }
         Write-Json $taskPath $task
         $launch = '& ' + (Quote-PS $scriptPath) + ' -Mode Launch -RunDirectory ' + (Quote-PS $runPath) +
             ' -AllowPhysicalOutput -Confirm AUTO_STOP_COUNTERPULSE'
@@ -239,7 +246,13 @@ try {
         }
         $cadence = if ($ShotIntervalMs -eq 0) { "动作完成后接续下一次移动；实际枪间隔由移动、反向轻点、松键后等待和命令耗时决定" } else { "最小射击间隔$($ShotIntervalMs)ms；该间隔仅为候选" }
         $observation = if ($NoCapture) { '不采集图像，以人工观察判断；长组前面的弹着点可能消失，请连续观察' } else { '长组前面的弹着点可能消失，请连续观察，图像逐帧保存' }
-        $markdown = "# 反向轻点人工Run`n`n状态：PREPARED_NOT_LAUNCHED。仅用户在当前前台执行一次；会发送真实开火输入。`n`n$behavior`n`n请先确认测试场景、源焦点、独占设备和紫色弹着点显示；End或人工输入取消。`n`n``````powershell`n$launch`n```````n`n一组$Shots 发；$observation。$cadence；结果不代表已经稳定。结果目录：result。`n`n参数探索可通过Prepare -ReuseRunDirectory复用本目录；验证新计划后替换参数并清理上次result和CONSUMED。每次Prepare后仍须用户手动运行本TASK中的同一Launch命令，不会自动重试。开始正式对比时另建目录。迁移旧目录后仅使用本TASK中的新入口。`n"
+        $reuseInstructions = if ($Repeatable) {
+            "本目录允许重复手动Launch，无需再次Prepare。编辑plan.json中的move_ms（正向键保持，1..500ms）、counter_hold_ms（反向键保持，1..200ms）和shot_after_release_ms（最后方向键UP ACK后等待，当前模式使用1..20ms）。本次准备值分别为$MoveMs/$CounterHoldMs/$ShotAfterReleaseMs；执行以本次读取并验证的plan.json为准。每次Launch冻结execution-plan.json，运行中编辑原plan不改变本轮。新计划验证通过后会覆盖上次result；失败不自动重试。每次仅用户手动触发一组，开始正式对比时另建目录。"
+        } else {
+            '参数探索可通过Prepare -ReuseRunDirectory复用本目录；验证新计划后替换参数并清理上次result和CONSUMED。每次Prepare后仍须用户手动运行本TASK中的同一Launch命令，不会自动重试。开始正式对比时另建目录。'
+        }
+        $manualMode = if ($Repeatable) { '仅用户在当前前台每次手动执行一组，可重复启动' } else { '仅用户在当前前台执行一次' }
+        $markdown = "# 反向轻点人工Run`n`n状态：PREPARED_NOT_LAUNCHED。$manualMode；会发送真实开火输入。`n`n$behavior`n`n请先确认测试场景、源焦点、独占设备和紫色弹着点显示；End或人工输入取消。`n`n``````powershell`n$launch`n```````n`n一组$Shots 发；$observation。$cadence；结果不代表已经稳定。结果目录：result。`n`n$reuseInstructions`n`n迁移旧目录后仅使用本TASK中的新入口。`n"
         [IO.File]::WriteAllText((Join-Path $runPath 'TASK.md'), $markdown, (New-Object Text.UTF8Encoding($false)))
         Write-Output 'PREPARED_NOT_LAUNCHED；未发送设备输入。'
     } else {
@@ -249,20 +262,55 @@ try {
         Assert-PlainPath $lockPath
         $runLock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
         $task = Get-Content -LiteralPath $taskPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ($task.schema_version -notin @(1, 2) -or $task.status -ne 'PREPARED_NOT_LAUNCHED' -or
+        if ($task.schema_version -notin @(1, 2, 3) -or $task.status -ne 'PREPARED_NOT_LAUNCHED' -or
             $task.plan -cne $planPath -or $task.script -cne $scriptPath) { throw 'Run绑定无效。' }
-        if ($task.schema_version -eq 2 -and ($task.owner -cne 'XEN_AUTO_STOP_COUNTERPULSE' -or $task.run_directory -cne $runPath)) { throw 'Run所有权无效。' }
+        if ($task.schema_version -ge 2 -and ($task.owner -cne 'XEN_AUTO_STOP_COUNTERPULSE' -or $task.run_directory -cne $runPath)) { throw 'Run所有权无效。' }
+        $isRepeatable = $task.schema_version -eq 3
+        if ($isRepeatable -and $task.repeatable -ne $true) { throw '重复运行绑定无效。' }
         foreach ($name in @('executable', 'config', 'plan', 'script')) {
             Assert-PlainPath $task.$name
+            if ($isRepeatable -and $name -eq 'plan') { continue }
             if ((Get-Digest $task.$name) -cne $task.($name + '_sha256')) { throw 'Run绑定文件已变化，必须新建Run。' }
         }
         $output = Join-Path $runPath 'result'
-        if (Test-Path -LiteralPath $output) { throw '结果目录已存在，拒绝重复执行。' }
+        $executionPlan = $planPath
+        if ($isRepeatable) {
+            Assert-ProbeStopped $task.executable
+            $executionPlan = Join-Path $runPath 'execution-plan.json'
+            Assert-PlainPath $executionPlan
+            Assert-PlainPath (Join-Path $runPath 'CONSUMED')
+            Assert-ResultTree $output
+            # 原计划只读取一次；dry-run 与本轮 Worker 使用同一份冻结内容。
+            try {
+                $reader = [IO.File]::Open($planPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+                try {
+                    if ($reader.Length -gt 16384) { throw '计划超过大小限制。' }
+                    $planBytes = New-Object byte[] ([int]$reader.Length)
+                    $offset = 0
+                    while ($offset -lt $planBytes.Length) {
+                        $count = $reader.Read($planBytes, $offset, $planBytes.Length - $offset)
+                        if ($count -le 0) { throw '计划读取不完整。' }
+                        $offset += $count
+                    }
+                } finally { $reader.Dispose() }
+                $candidatePlan = Join-Path $runPath ('plan.' + [Guid]::NewGuid().ToString('N') + '.candidate.json')
+                [IO.File]::WriteAllBytes($candidatePlan, $planBytes)
+                Invoke-Probe $task.executable @('--plan', $candidatePlan, '--dry-run') $false
+            } catch {
+                $script:FailureCode = 'PLAN_VALIDATION_FAILED'
+                throw '本轮计划校验失败，保留上次结果。'
+            }
+            Move-Item -LiteralPath $candidatePlan -Destination $executionPlan -Force
+            $candidatePlan = $null
+            if (Test-Path -LiteralPath $output) { Remove-Item -LiteralPath $output -Recurse -Force }
+            $consumed = Join-Path $runPath 'CONSUMED'
+            if (Test-Path -LiteralPath $consumed) { Remove-Item -LiteralPath $consumed -Force }
+        } elseif (Test-Path -LiteralPath $output) { throw '结果目录已存在，拒绝重复执行。' }
         # CreateNew原子抢占；失败或取消也不自动重试此Run。
         $marker = [IO.File]::Open((Join-Path $runPath 'CONSUMED'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
         $marker.Dispose()
         [Console]::WriteLine('请将游戏切到前台并松开移动键和鼠标按钮；等待首个键态报告时可单独轻按松开Shift，不按方向键或鼠标；人物须事先静止并固定瞄准。下方实时显示就绪阶段。')
-        Invoke-Probe $task.executable @('--config', $task.config, '--plan', $planPath, '--output', $output,
+        Invoke-Probe $task.executable @('--config', $task.config, '--plan', $executionPlan, '--output', $output,
             '--allow-physical-output', '--confirm', 'AUTO_STOP_COUNTERPULSE') $true
         Write-Output '本次有界Run结束；请回收result及人工观察，不能自动认定停稳。'
     }

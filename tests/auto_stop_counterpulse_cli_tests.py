@@ -28,10 +28,11 @@ def main():
     syntax = "$tokens=$null;$errors=$null;[System.Management.Automation.Language.Parser]::ParseFile('" + str(script).replace("'", "''") + "',[ref]$tokens,[ref]$errors)>$null;if($errors.Count){exit 1}"
     subprocess.run([shell, '-NoProfile', '-Command', syntax], check=True, timeout=20)
 
-    def invoke(*values, ok=False):
-        result = subprocess.run([shell, '-NoProfile', '-File', str(script), *map(str, values)],
+    def invoke(*values, ok=False, entry=script):
+        result = subprocess.run([shell, '-NoProfile', '-File', str(entry), *map(str, values)],
                                 capture_output=True, timeout=30)
         assert (result.returncode == 0) == ok, '入口返回值不符合预期'
+        return result
 
     with tempfile.TemporaryDirectory(prefix='xen-counterpulse-cli-') as folder:
         root = Path(folder)
@@ -205,6 +206,85 @@ def main():
             invoke('-Mode', 'Launch', '-RunDirectory', run, '-AllowPhysicalOutput', '-Confirm', 'AUTO_STOP_COUNTERPULSE')
             assert (run / 'CONSUMED').read_text(encoding='utf-8') == 'already-consumed'
             assert not (run / 'result').exists()
+            # AST仅改测试副本：物理分支完全替为写文件桩，真实exe只接收--dry-run。
+            harness = root / 'invoke_auto_stop_counterpulse-r99.ps1'
+            source = script.read_bytes().decode('utf-8-sig')
+            ast_query = "$t=$null;$e=$null;$a=[System.Management.Automation.Language.Parser]::ParseFile('" + str(script).replace("'", "''") + "',[ref]$t,[ref]$e);$a.FindAll({param($n) ($n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-Probe') -or ($n -is [System.Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text.Contains(\"SessionId\"))},$true) | ForEach-Object { @{start=$_.Extent.StartOffset;end=$_.Extent.EndOffset;kind=$_.GetType().Name;name=$(if($_ -is [System.Management.Automation.Language.FunctionDefinitionAst]){$_.Name}else{''})} } | ConvertTo-Json"
+            spans = json.loads(subprocess.run([shell, '-NoProfile', '-Command', ast_query],
+                capture_output=True, check=True, timeout=20).stdout.decode('utf-8-sig'))
+            assert len(spans) == 2
+            mock = r'''function Invoke-Probe([string]$Binary, [string[]]$Arguments, [bool]$Physical) {
+    if (-not $Physical) {
+        if ($Arguments.Length -ne 3 -or $Arguments[0] -ne '--plan' -or $Arguments[2] -ne '--dry-run') { throw 'MOCK_REJECTED_ARGUMENTS' }
+        & $Binary @Arguments > $null
+        if ($LASTEXITCODE -ne 0) { throw 'MOCK_DRY_RUN_FAILED' }
+        return
+    }
+    $snapshot = $Arguments[[Array]::IndexOf($Arguments, '--plan') + 1]
+    $output = $Arguments[[Array]::IndexOf($Arguments, '--output') + 1]
+    if ((Test-Path -LiteralPath (Join-Path $runPath 'edit-during-mock'))) {
+        $edited = Get-Content -LiteralPath $planPath -Raw | ConvertFrom-Json
+        $edited.move_ms = 123
+        Write-Json $planPath $edited
+    }
+    $null = [IO.Directory]::CreateDirectory($output)
+    [IO.File]::WriteAllBytes((Join-Path $output 'plan.json'), [IO.File]::ReadAllBytes($snapshot))
+    [IO.File]::WriteAllText((Join-Path $output 'result.json'), 'MOCK_ONLY')
+    [IO.File]::AppendAllText((Join-Path $runPath 'mock-calls'), "once`n")
+}'''
+            # AST偏移包括文件BOM；ParseFile视BOM为编码头，不计入源码偏移。
+            for span in sorted(spans, key=lambda item: item['start'], reverse=True):
+                if span['name'] == 'Invoke-Probe':
+                    replacement = mock
+                else:
+                    replacement = 'if ($false) { throw "MOCK_SESSION_ONLY" }'
+                source = source[:span['start']] + replacement + source[span['end']:]
+            harness.write_bytes(source.encode('utf-8-sig'))
+            repeat_run = root / 'repeatable'
+            invoke('-Mode', 'Prepare', '-RunDirectory', repeat_run, '-Executable', args.executable,
+                '-ConfigPath', config, '-Repeatable', '-MoveMs', 300, '-CounterHoldMs', 50,
+                '-ShotAfterReleaseMs', 5, '-ShotIntervalMs', 0, '-Shots', 20, '-NoCapture', entry=harness, ok=True)
+            repeat_task = json.loads((repeat_run / 'task.json').read_text())
+            assert repeat_task['schema_version'] == 3 and repeat_task['repeatable'] is True
+            launch = ('-Mode', 'Launch', '-RunDirectory', repeat_run,
+                      '-AllowPhysicalOutput', '-Confirm', 'AUTO_STOP_COUNTERPULSE')
+            invoke(*launch, entry=harness, ok=True)
+            repeat_plan = json.loads((repeat_run / 'plan.json').read_text())
+            repeat_plan['move_ms'] = 200
+            repeat_plan['counter_hold_ms'] = 40
+            (repeat_run / 'plan.json').write_text(json.dumps(repeat_plan), encoding='utf-8')
+            (repeat_run / 'edit-during-mock').write_text('edit', encoding='utf-8')
+            invoke(*launch, entry=harness, ok=True)
+            executed = json.loads((repeat_run / 'result' / 'plan.json').read_text())
+            assert executed['move_ms'] == 200 and executed['counter_hold_ms'] == 40
+            assert json.loads((repeat_run / 'plan.json').read_text())['move_ms'] == 123
+            assert (repeat_run / 'execution-plan.json').read_bytes() == (repeat_run / 'result' / 'plan.json').read_bytes()
+            assert (repeat_run / 'mock-calls').read_text().splitlines() == ['once', 'once']
+            previous = (repeat_run / 'result' / 'plan.json').read_bytes()
+            for invalid in ['{"move_ms":0}', ' ' * 16385]:
+                (repeat_run / 'plan.json').write_text(invalid, encoding='utf-8')
+                rejected = invoke(*launch, entry=harness)
+                assert b'PLAN_VALIDATION_FAILED' in rejected.stderr
+                assert (repeat_run / 'result' / 'plan.json').read_bytes() == previous
+                assert (repeat_run / 'CONSUMED').exists()
+                assert (repeat_run / 'mock-calls').read_text().splitlines() == ['once', 'once']
+            (repeat_run / 'plan.json').write_text(json.dumps(repeat_plan), encoding='utf-8')
+            live_task = dict(repeat_task)
+            live_task['executable'] = str(Path(shell).resolve())
+            live_task['executable_sha256'] = hashlib.sha256(Path(shell).read_bytes()).hexdigest().upper()
+            (repeat_run / 'task.json').write_text(json.dumps(live_task), encoding='utf-8')
+            invoke(*launch, entry=harness)
+            assert (repeat_run / 'result' / 'plan.json').read_bytes() == previous
+            assert (repeat_run / 'mock-calls').read_text().splitlines() == ['once', 'once']
+            (repeat_run / 'task.json').write_text(json.dumps(repeat_task), encoding='utf-8')
+            if os.name == 'nt':
+                handle = kernel.CreateFileW(str(repeat_run / '.counterpulse.lock'), 0xC0000000, 0, None, 3, 0, None)
+                assert handle != ctypes.c_void_p(-1).value
+                try:
+                    invoke(*launch, entry=harness)
+                    assert (repeat_run / 'result' / 'plan.json').read_bytes() == previous
+                finally:
+                    kernel.CloseHandle(handle)
     print('反向轻点CLI无设备回归通过')
 
 
