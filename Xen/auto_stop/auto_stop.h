@@ -111,6 +111,9 @@ public:
     AutoStopDecision request(std::uint64_t request_id, std::int64_t now_ns) noexcept;
     AutoStopDecision cancel(std::uint64_t request_id, std::int64_t now_ns) noexcept;
     AutoStopDecision tick(std::int64_t now_ns) noexcept;
+    // 调用方须证明完整屏蔽、正常释放与清理ACK，并保持真实监听连续；
+    // 此接口只承接估计模型，不创建物理释放事件或停稳证据。
+    bool resume_after_masked_hold(const WasdMotionIntent& intent, std::int64_t released_at_ns) noexcept;
     AutoStopDecision acknowledge(std::uint64_t request_id, std::uint64_t command_id,
         std::uint8_t applied_mask, std::int64_t ack_ns) noexcept;
     AutoStopDecision decision() const noexcept { return decision_; }
@@ -128,6 +131,7 @@ private:
     std::uint8_t applied_mask_ = 0;
     bool synchronized_ = false;
     bool output_started_ = false;
+    bool masked_hold_model_valid_ = false;
 };
 
 class WasdInputHistory {

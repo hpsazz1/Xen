@@ -3004,7 +3004,7 @@ struct Overlay::Impl {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         begin_config_panel("auto_stop_panel", "自动急停", 300.0f);
         ImGui::TextWrapped("按住快捷键且准星进入人物完整检测范围时制动；无需开启自动扳机，不使用扳机缩小区域。");
-        ImGui::TextWrapped("需要有效源端焦点与新鲜图像；持续按住且准星在人物范围时，制动后保持方向键屏蔽。松键、离框、失焦或图像过期即取消并归还原物理方向键。");
+        ImGui::TextWrapped("准星进入人物范围后触发制动；制动完成后锁存全部WASD，离框或目标消失不会解除。松开允许键恢复移动；失焦、救援和输入异常仍会安全释放。");
         ImGui::TextWrapped("面向单方向及相邻双键移动；自动急停与物理输出安全急停相互独立。");
         ImGui::BeginDisabled(!can_edit);
         const auto key_active = current_virtual_key_state();
@@ -3052,7 +3052,7 @@ struct Overlay::Impl {
             case AutoStopStatus::READY: status = "等待快捷键与目标"; break;
             case AutoStopStatus::WAITING_INPUT: status = "等待有效输入"; break;
             case AutoStopStatus::BRAKING: status = "制动中"; break;
-            case AutoStopStatus::ESTIMATED: status = "制动预计完成，方向键屏蔽中"; break;
+            case AutoStopStatus::ESTIMATED: status = "制动预计完成，松开允许键恢复移动"; break;
             case AutoStopStatus::CANCELED: status = "已取消"; break;
             case AutoStopStatus::FAULT: status = "故障，需检查清理状态"; break;
         }

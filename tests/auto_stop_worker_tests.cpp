@@ -41,11 +41,14 @@ public:
     bool set_wasd_event_subscription(bool value) noexcept override {
         std::lock_guard<std::mutex> lock(mutex); subscribed = value; ++subscriptions; return true;
     }
-    bool read_wasd_events(WasdEventCursor&, WasdEventBatch& batch) noexcept override {
+    bool read_wasd_events(WasdEventCursor& cursor, WasdEventBatch& batch) noexcept override {
         std::lock_guard<std::mutex> lock(mutex); batch = {}; batch.subscribed = subscribed; batch.gap = gap;
-        while (!events.empty() && batch.count < batch.events.size()) {
-            batch.events[batch.count++] = events.front(); events.pop_front();
+        // 与生产环形历史一致：读取只推进调用方游标，不破坏其它游标的事件。
+        cursor.epoch = 1;
+        for (const auto& event : events) if (event.sequence > cursor.sequence && batch.count < batch.events.size()) {
+            batch.events[batch.count++] = event; cursor.sequence = event.sequence;
         }
+        delivered_sequence = std::max(delivered_sequence, cursor.sequence);
         return true;
     }
     KeyboardReceipt acknowledged() noexcept {
@@ -74,6 +77,11 @@ public:
         cleanup_at = Clock::now();
         if (cleanup_fails) receipt.disposition = KeyboardDisposition::APPLICATION_UNKNOWN;
         else { installed_masks = 0; current_software = 0; }
+        if (physical_during_cleanup >= 0) {
+            held = static_cast<std::uint8_t>(physical_during_cleanup);
+            events.push_back({held, true, 1, ++sequence, clock_ns()});
+            physical_during_cleanup = -1;
+        }
         return receipt;
     }
     void close() noexcept override { ++closes; }
@@ -83,7 +91,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex); held = mask;
         events.push_back({mask, true, 1, ++sequence, clock_ns()});
     }
-    bool drained() { std::lock_guard<std::mutex> lock(mutex); return events.empty(); }
+    bool drained() { std::lock_guard<std::mutex> lock(mutex); return delivered_sequence == sequence; }
     bool has_software() { std::lock_guard<std::mutex> lock(mutex); return !software.empty(); }
     bool has_cleanup() { std::lock_guard<std::mutex> lock(mutex); return cleanups != 0; }
     bool has_masks() { std::lock_guard<std::mutex> lock(mutex); return !masks.empty(); }
@@ -94,11 +102,12 @@ public:
     std::deque<WasdEvent> events;
     std::vector<int> software, masks;
     std::array<bool, 256> extra_keys{};
-    std::uint64_t sequence = 0;
+    std::uint64_t sequence = 0, delivered_sequence = 0;
     std::uint8_t held = 0, installed_masks = 0, current_software = 0;
     bool healthy = true, subscribed = false, gap = false, cleanup_fails = false, end = false, activation = true;
     std::size_t software_fail_at = 0, mask_fail_at = 0;
     int cleanups = 0, cleanup_checks = 0, subscriptions = 0;
+    int physical_during_cleanup = -1;
     std::atomic<int> closes{0};
     Clock::time_point cleanup_at{};
 };
@@ -113,6 +122,73 @@ void ready(AutoStopWorker& worker, const std::shared_ptr<Fake>& fake) {
 int main() {
     try {
         const AutoStopConfig config{true, 5};
+        {
+            auto fake = std::make_shared<Fake>();
+            std::atomic<std::uint64_t> id{0};
+            AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+                [&] { return ++id; }, [] { return true; });
+            require(worker.start(config), "清理期间真实按键事件不得丢失");
+            ready(worker, fake);
+            worker.publish_target(Clock::now() + std::chrono::seconds(1));
+            wait_for([&] { return worker.snapshot().status == AutoStopStatus::ESTIMATED; });
+            fake->physical(0);
+            wait_for([&] { return fake->drained(); });
+            { std::lock_guard<std::mutex> lock(fake->mutex);
+                fake->physical_during_cleanup = 1; fake->activation = false; }
+            wait_for([&] { return fake->released() && worker.snapshot().canceled == 1; });
+            { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = true; }
+            worker.publish_target(Clock::now() + std::chrono::seconds(1));
+            wait_for([&] { return worker.snapshot().requests == 2 && worker.snapshot().status == AutoStopStatus::ESTIMATED; });
+            worker.stop();
+        }
+        {
+            auto fake = std::make_shared<Fake>();
+            std::atomic<std::uint64_t> id{0};
+            AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+                [&] { return ++id; }, [] { return true; });
+            require(worker.start(config), "W持续按住时允许键完整循环启动");
+            ready(worker, fake);
+            for (int cycle = 1; cycle <= 3; ++cycle) {
+                { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = true; }
+                worker.publish_target(Clock::now() + std::chrono::seconds(1));
+                wait_for([&] { return worker.snapshot().requests == cycle &&
+                    worker.snapshot().status == AutoStopStatus::ESTIMATED; });
+                worker.publish_target({});
+                { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
+                wait_for([&] { return fake->released() && worker.snapshot().canceled == cycle; });
+                // 全循环中不发布任何W释放/重按事件；下一轮必须从受控归还继续。
+                wait_for([&] { return worker.snapshot().status == AutoStopStatus::READY; });
+                std::this_thread::sleep_for(std::chrono::milliseconds(40));
+            }
+            worker.stop();
+        }
+        {
+            auto fake = std::make_shared<Fake>();
+            std::atomic<std::uint64_t> id{0};
+            AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+                [&] { return ++id; }, [] { return true; });
+            require(worker.start(config), "锁存式急停回归启动");
+            ready(worker, fake);
+            worker.publish_target(Clock::now() + std::chrono::seconds(1));
+            wait_for([&] { return worker.snapshot().status == AutoStopStatus::ESTIMATED; });
+            worker.publish_target({}, AutoStopBlockReason::CROSSHAIR_OUTSIDE_TARGET);
+            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+            require(!fake->released() && worker.snapshot().canceled == 0,
+                "第一次制动完成后离框不能解除急停，必须保持至允许键释放");
+            const auto reports_after_braking = fake->reports().size();
+            for (const std::uint8_t directions : {0, 2, 4, 8, 3, 12, 15, 1}) {
+                fake->physical(directions);
+                wait_for([&] { return fake->drained(); });
+                { std::lock_guard<std::mutex> lock(fake->mutex);
+                    require(fake->installed_masks == 15 && fake->current_software == 0,
+                        "锁存后全部WASD必须屏蔽，换向或重按不能绕过急停"); }
+                require(worker.snapshot().canceled == 0 && fake->reports().size() == reports_after_braking,
+                    "锁存时改向不能解除或重新发送反向制动");
+            }
+            { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
+            wait_for([&] { return fake->released() && worker.snapshot().canceled == 1; });
+            worker.stop();
+        }
         {
             auto fake = std::make_shared<Fake>();
             std::atomic<bool> allowed{true};
@@ -277,7 +353,7 @@ int main() {
             require(!worker.snapshot().fire_permitted, "目标/旧帧/失焦/松键/安全撤销均不能授予开火");
             worker.stop();
         }
-        for (int ending = 0; ending < 8; ++ending) {
+        for (int ending = 0; ending < 11; ++ending) {
             auto fake = std::make_shared<Fake>();
             std::atomic<std::uint64_t> id{0};
             std::atomic<bool> focused{true};
@@ -311,6 +387,15 @@ int main() {
             if (ending == 5) { std::lock_guard<std::mutex> lock(fake->mutex); fake->healthy = false; }
             if (ending == 6) { std::lock_guard<std::mutex> lock(fake->mutex); fake->extra_keys['Q'] = true; }
             if (ending == 7) fake->physical(2);
+            if (ending == 8) worker.set_paused(true);
+            if (ending == 9) { std::lock_guard<std::mutex> lock(fake->mutex); fake->gap = true; }
+            if (ending == 10) arbiter->latch_output_fault();
+            if (ending == 0 || ending == 1 || ending == 7) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(80));
+                require(!fake->released() && worker.snapshot().canceled == 0,
+                    "锁存后目标到期、离框及改向均不能归还方向键");
+                { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
+            }
             wait_for([&] {
                 // 非目标撤销仍提供新鲜目标，不能让50ms到期掩盖撤销入口失效。
                 if (ending >= 2) worker.publish_target(Clock::now() + std::chrono::milliseconds(50));
@@ -318,6 +403,8 @@ int main() {
             });
             require(worker.snapshot().requests == 1 && fake->reports().size() == reports_while_holding,
                 "目标到期清理不得重发反向制动或分配第二个请求");
+            if (ending == 10) require(worker.snapshot().status == AutoStopStatus::FAULT,
+                "共享输出故障必须归还键盘并保留FAULT");
             worker.stop();
         }
         {

@@ -114,7 +114,39 @@ std::array<double, 2> direction(std::uint8_t mask) noexcept {
 bool AutoStopController::active() const noexcept {
     return decision_.phase == AutoStopPhase::WAITING_ACK || decision_.phase == AutoStopPhase::BRAKING;
 }
+bool AutoStopController::resume_after_masked_hold(
+        const WasdMotionIntent& intent, std::int64_t released_at_ns) noexcept {
+    if (decision_.phase != AutoStopPhase::COMPLETE_ESTIMATED ||
+        !masked_hold_model_valid_ || !output_started_ || applied_mask_ != 0 ||
+        decision_.desired_mask != 0 || released_at_ns <= 0 || released_at_ns < time_ns_ ||
+        !intent.history_valid || intent.conflicting || intent.epoch == 0 ||
+        intent.epoch != input_.epoch || intent.sequence == 0 || intent.sequence < input_.sequence ||
+        intent.received_at_ns <= 0 || intent.received_at_ns < input_.received_at_ns ||
+        intent.received_at_ns > released_at_ns || intent.held_mask > 15 ||
+        (intent.held_mask & 5) == 5 || (intent.held_mask & 10) == 10 ||
+        intent.longitudinal != int(bool(intent.held_mask & 1)) - int(bool(intent.held_mask & 4)) ||
+        intent.horizontal != int(bool(intent.held_mask & 8)) - int(bool(intent.held_mask & 2))) return false;
+    for (unsigned key = 0; key < 4; ++key) {
+        const auto edge = intent.held_since_ns[key];
+        if ((intent.held_mask & (1U << key)) ? edge <= 0 || edge > intent.received_at_ns : edge != 0)
+            return false;
+    }
+    if (intent.sequence == input_.sequence &&
+        (intent.held_mask != input_.held_mask || intent.received_at_ns != input_.received_at_ns ||
+         intent.held_since_ns != input_.held_since_ns)) return false;
+    // 只承接已ACK的零软件输出模型；物理事件时间保持原样，
+    // 归还后的积分起点单独使用released_at_ns，不把屏蔽期间当作物理加速。
+    synchronized_ = true;
+    if (!advance(released_at_ns)) return false;
+    input_ = intent;
+    output_started_ = false;
+    masked_hold_model_valid_ = false;
+    decision_.phase = AutoStopPhase::IDLE;
+    decision_.axis_deadline_ns = {};
+    return true;
+}
 void AutoStopController::invalidate() noexcept {
+    masked_hold_model_valid_ = false;
     synchronized_ = false;
     decision_.phase = AutoStopPhase::INVALID;
     decision_.desired_mask = 0;
@@ -243,7 +275,9 @@ AutoStopDecision AutoStopController::acknowledge(std::uint64_t id, std::uint64_t
     if (mask == 0) {
         decision_.phase = AutoStopPhase::COMPLETE_ESTIMATED;
         decision_.axis_deadline_ns = {};
-        // 真实剩余速度未知；下一请求必须重新观察完整释放建立历史。
+        // 真实剩余速度未知。正常路径仍需物理释放；仅有完整输出归还
+        // 证据的调用方可以通过专用接口承接此估计模型。
+        masked_hold_model_valid_ = synchronized_;
         synchronized_ = false;
     } else {
         decision_.phase = AutoStopPhase::BRAKING;
@@ -253,6 +287,7 @@ AutoStopDecision AutoStopController::acknowledge(std::uint64_t id, std::uint64_t
 }
 AutoStopDecision AutoStopController::cancel(std::uint64_t id, std::int64_t now_ns) noexcept {
     if (id != decision_.request_id || id == 0) return decision_;
+    masked_hold_model_valid_ = false;
     if (!advance(now_ns)) return decision_;
     decision_.phase = AutoStopPhase::CANCELLED;
     decision_.desired_mask = 0; decision_.axis_deadline_ns = {};

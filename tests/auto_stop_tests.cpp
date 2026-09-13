@@ -41,6 +41,74 @@ int main() {
            long_duration > short_duration && long_duration < 140 * ms,
            "连续持键库存应区分短长按，不能固定75ms");
     {
+        WasdInputHistory history;
+        AutoStopController completed;
+        completed.observe(history.observe(0, 1, 1, base), base);
+        const auto held = history.observe(1, 1, 2, base + ms);
+        completed.observe(held, base + ms);
+        auto pending = completed.request(1, base + 151 * ms);
+        const auto waiting = completed;
+        auto braking = completed.acknowledge(1, pending.command_id, 4, base + 152 * ms);
+        const auto active = completed;
+        const auto stopped_at = braking.axis_deadline_ns[0];
+        pending = completed.tick(stopped_at);
+        const auto unconfirmed = completed;
+        completed.acknowledge(1, pending.command_id, 0, stopped_at);
+        const auto returned_at = stopped_at + 300 * ms;
+        for (auto invalid_phase : {AutoStopController{}, waiting, active, unconfirmed})
+            expect(!invalid_phase.resume_after_masked_hold(held, returned_at),
+                   "只有零软件ACK后的完成阶段允许恢复");
+        for (int kind = 0; kind < 12; ++kind) {
+            auto candidate = completed;
+            auto invalid = held;
+            auto when = returned_at;
+            switch (kind) {
+                case 0: when = 0; break;
+                case 1: when = stopped_at - 1; break;
+                case 2: invalid.epoch = 2; break;
+                case 3: invalid.sequence = 1; break;
+                case 4: invalid.history_valid = false; break;
+                case 5: invalid.conflicting = true; break;
+                case 6: invalid.held_mask = 5; invalid.held_since_ns[2] = base + ms; break;
+                case 7: invalid.held_since_ns[0] = 0; break;
+                case 8: invalid.received_at_ns = when + 1; break;
+                case 9: invalid.received_at_ns = base; break;
+                case 10: invalid.horizontal = 1; break;
+                case 11: invalid.held_since_ns[1] = base; break;
+            }
+            expect(!candidate.resume_after_masked_hold(invalid, when),
+                   "恢复必须拒绝非法时间、代际、序号、冲突与不完整真实字段");
+            expect(candidate.decision().phase == AutoStopPhase::COMPLETE_ESTIMATED,
+                   "拒绝恢复不能改变原完成状态");
+        }
+        auto candidate = completed;
+        expect(candidate.resume_after_masked_hold(held, returned_at),
+               "真实W未释放可从受控归还恢复模型，不伪造零边沿");
+        expect(candidate.decision().phase == AutoStopPhase::IDLE && !candidate.decision().fire_permitted,
+               "恢复仅回到空闲估计模型，不授予开火");
+        expect(!candidate.resume_after_masked_hold(held, returned_at + ms),
+               "同一次受控完成不可重复恢复");
+        candidate.observe(held, returned_at + ms);
+        pending = candidate.request(2, returned_at + 150 * ms);
+        expect(pending.phase == AutoStopPhase::WAITING_ACK && pending.desired_mask == 4,
+               "连续持W松开再按允许键，应可产生第二次反向计划");
+        braking = candidate.acknowledge(2, pending.command_id, 4, returned_at + 151 * ms);
+        expect(braking.axis_deadline_ns[0] - (returned_at + 151 * ms) < 90 * ms,
+               "第二次计划不能累计屏蔽期间的物理持键时长");
+        auto residual = unconfirmed;
+        const auto late_ack = stopped_at + 20 * ms;
+        const auto zero = residual.decision();
+        residual.acknowledge(1, zero.command_id, 0, late_ack);
+        expect(residual.resume_after_masked_hold(held, late_ack + ms),
+               "延迟零ACK后的模型也可在完整归还后承接");
+        expect(residual.request(2, late_ack + ms).desired_mask == 1,
+               "受控归还保留反向过冲的剩余估计，不能宣称或强设物理速度为零");
+        auto canceled = completed;
+        canceled.cancel(1, returned_at);
+        expect(!canceled.resume_after_masked_hold(held, returned_at),
+               "取消已撤销受控保持资格，不得再次复活");
+    }
+    {
         AutoStopController controller;
         WasdInputHistory input;
         controller.observe(input.observe(0, 1, 1, base), base + 100 * ms);
