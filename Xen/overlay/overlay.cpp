@@ -3004,7 +3004,7 @@ struct Overlay::Impl {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         begin_config_panel("auto_stop_panel", "自动急停", 300.0f);
         ImGui::TextWrapped("按住快捷键且准星进入人物完整检测范围时制动；无需开启自动扳机，不使用扳机缩小区域。");
-        ImGui::TextWrapped("准星进入人物范围后触发制动；制动完成后锁存全部WASD，离框或目标消失不会解除。松开允许键恢复移动；失焦、救援和输入异常仍会安全释放。");
+        ImGui::TextWrapped("准星进入人物范围用于首次触发；接管WASD后，制动途中和保持期间的离框、目标消失或换向都不会解除。松开允许键恢复移动；失焦、救援和输入异常仍会安全释放。");
         ImGui::TextWrapped("面向单方向及相邻双键移动；自动急停与物理输出安全急停相互独立。");
         ImGui::BeginDisabled(!can_edit);
         const auto key_active = current_virtual_key_state();

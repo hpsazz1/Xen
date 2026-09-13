@@ -63,7 +63,7 @@ public:
     void set_paused(bool paused) noexcept;
     AutoStopSnapshot snapshot() const noexcept;
     // 检测线程发布不可变目标事实；无目标/失败发布零期限，旧帧不能自行续期。
-    // 独立制动最多500ms；零软件键确认后锁存全部WASD至允许键释放或安全撤销。
+    // 目标仅准入；四键接管后制动与保持都锁存至松键或安全撤销，软件制动最多500ms。
     void publish_target(std::chrono::steady_clock::time_point valid_until,
         AutoStopBlockReason reason = AutoStopBlockReason::NO_TARGET) noexcept;
 private:
