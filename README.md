@@ -36,6 +36,7 @@ Capture → Detector → Aim → Runtime SafetyGate → Mouse
 弹着点会陆续消失，须连续观察或查看逐帧证据。
 日常调参可在 Prepare 时指定 `-Repeatable`，之后直接编辑同目录 `plan.json` 并重复手动运行同一Launch命令。
 计划文件支持行末 `// 中文说明` 和块注释（JSONC），注释不参与参数计算；结果中的计划仍保存为标准JSON。
+`move_during_fire_delay` 默认true：射后等待期间保持移动；false：先等完 `fire_delay_ms`，再开始 `move_ms` 移动，之后急停开枪。
 主要参数：`move_ms` 为正向最小保持时间，`fire_delay_ms` 为单发左键UP ACK起的射击间隔，A在此期间保持，二者并行满足后释放A。
 `counter_delay_ms` 是A释放ACK后到按D之前的等待，`counter_hold_ms` 才是D实际点按时长；二者不可混淆。
 `shot_after_release_ms` 为D释放ACK后等待，新模式设0即立即单发；`shots` 为子弹数（1至30）。

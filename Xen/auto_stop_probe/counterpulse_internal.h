@@ -9,7 +9,8 @@ struct CounterpulsePlan {
     int shots = 8;
     bool capture_enabled = true;
     int shot_interval_ms = 280;
-    int fire_delay_ms = 0; // 单发左键UP ACK起计时，等待期间保持正向键；0兼容旧流程。
+    int fire_delay_ms = 0; // 单发左键UP ACK起计时；0兼容旧流程。
+    bool move_during_fire_delay = true; // true并行移动；false等待结束后才开始移动。
     int move_ms = 120;
     int counter_hold_ms = 30;
     int counter_delay_ms = 0; // 正向UP ACK后等待多久再按反向；不同于反向持键时长。
@@ -26,20 +27,22 @@ struct CounterpulsePlan {
             (baseline == "counter" ? counter_delay_ms + counter_hold_ms : 0) : brake_window_ms;
     }
     int cycle_budget_ms() const {
-        return fire_delay_ms > 0 ? shot_hold_ms + std::max(move_ms, fire_delay_ms) + move_tail_ms() :
+        return fire_delay_ms > 0 ? shot_hold_ms +
+            (move_during_fire_delay ? std::max(move_ms, fire_delay_ms) : fire_delay_ms + move_ms) + move_tail_ms() :
             (shot_interval_ms > 0 ? shot_interval_ms : shot_hold_ms + move_ms + move_tail_ms());
     }
 };
 
 inline CounterpulsePlan parse_counterpulse_plan(const Json& input) {
     if (!input.is_object()) throw std::runtime_error("反冲计划必须为对象");
-    const std::vector<std::string> fields{"baseline", "capture_enabled", "shots", "shot_interval_ms", "fire_delay_ms", "move_ms",
+    const std::vector<std::string> fields{"baseline", "capture_enabled", "shots", "shot_interval_ms", "fire_delay_ms", "move_during_fire_delay", "move_ms",
         "counter_hold_ms", "counter_delay_ms", "brake_window_ms", "shot_after_release_ms", "shot_hold_ms", "late_tolerance_ms", "direction"};
     for (const auto& [key, value] : input.items()) {
         if (std::find(fields.begin(), fields.end(), key) == fields.end())
             throw std::runtime_error("反冲计划存在未知字段");
-        if (key == "capture_enabled" && !value.is_boolean()) throw std::runtime_error("采集开关必须为布尔值");
-        if (key != "baseline" && key != "capture_enabled" && (!value.is_number_integer() || value.get<double>() < 0 || value.get<double>() > 10000))
+        const bool boolean_field = key == "capture_enabled" || key == "move_during_fire_delay";
+        if (boolean_field && !value.is_boolean()) throw std::runtime_error("计划开关必须为布尔值");
+        if (key != "baseline" && !boolean_field && (!value.is_number_integer() || value.get<double>() < 0 || value.get<double>() > 10000))
             throw std::runtime_error("时序字段必须为有界非负整数");
     }
     CounterpulsePlan p;
@@ -48,6 +51,7 @@ inline CounterpulsePlan parse_counterpulse_plan(const Json& input) {
     p.shots = input.value("shots", p.shots);
     p.shot_interval_ms = input.value("shot_interval_ms", p.shot_interval_ms);
     p.fire_delay_ms = input.value("fire_delay_ms", p.fire_delay_ms);
+    p.move_during_fire_delay = input.value("move_during_fire_delay", p.move_during_fire_delay);
     p.move_ms = input.value("move_ms", p.move_ms);
     p.counter_hold_ms = input.value("counter_hold_ms", p.counter_hold_ms);
     p.counter_delay_ms = input.value("counter_delay_ms", p.counter_delay_ms);
@@ -78,7 +82,7 @@ inline CounterpulsePlan parse_counterpulse_plan(const Json& input) {
 
 inline Json counterpulse_plan_json(const CounterpulsePlan& p) {
     return {{"baseline", p.baseline}, {"capture_enabled", p.capture_enabled}, {"shots", p.shots}, {"shot_interval_ms", p.shot_interval_ms}, {"fire_delay_ms", p.fire_delay_ms},
-        {"move_ms", p.move_ms}, {"counter_hold_ms", p.counter_hold_ms}, {"counter_delay_ms", p.counter_delay_ms}, {"brake_window_ms", p.brake_window_ms}, {"shot_after_release_ms", p.shot_after_release_ms}, {"shot_hold_ms", p.shot_hold_ms},
+        {"move_during_fire_delay", p.move_during_fire_delay}, {"move_ms", p.move_ms}, {"counter_hold_ms", p.counter_hold_ms}, {"counter_delay_ms", p.counter_delay_ms}, {"brake_window_ms", p.brake_window_ms}, {"shot_after_release_ms", p.shot_after_release_ms}, {"shot_hold_ms", p.shot_hold_ms},
         {"late_tolerance_ms", p.late_tolerance_ms}, {"direction", p.direction}};
 }
 
@@ -111,7 +115,7 @@ inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan
     const auto p = parse_counterpulse_plan(counterpulse_plan_json(proposed));
     Json report{{"schema_version", 2}, {"input_source", "TEST_SCRIPT"}, {"plan", counterpulse_plan_json(p)},
         {"timing_model", p.baseline == "stationary" ? "STATIONARY_INTERVAL" :
-            (p.fire_delay_ms > 0 ? "HOLD_MOVE_DURING_FIRE_DELAY" :
+            (p.fire_delay_ms > 0 ? (p.move_during_fire_delay ? "HOLD_MOVE_DURING_FIRE_DELAY" : "WAIT_FIRE_DELAY_THEN_MOVE") :
                 (p.uses_release_timing() ? "DIRECTION_UP_ACK_DELAY" : "MOVE_UP_ACK_FIXED_WINDOW"))}, {"cycles", Json::array()},
         {"commands", Json::array()}, {"success", false}, {"settled", nullptr},
         {"physical_effect_observed", false}, {"shot_down_attempts", 0}};
@@ -188,7 +192,8 @@ inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan
             failure = button ? "SHOT_DEADLINE_MISSED" : "COMMAND_DEADLINE_MISSED"; return false;
         }
         if (!button && value) {
-            const int remaining_hold = value == p.direction ? std::max(p.move_ms, p.fire_delay_ms) + p.move_tail_ms() :
+            const int remaining_hold = value == p.direction ?
+                (p.move_during_fire_delay ? std::max(p.move_ms, p.fire_delay_ms) : p.move_ms) + p.move_tail_ms() :
                 p.counter_hold_ms + p.shot_after_release_ms;
             if (submit + std::chrono::milliseconds(remaining_hold) > next_shot_deadline) {
                 budget_failure("REMAINING_HOLD", shot, submit + std::chrono::milliseconds(remaining_hold), next_shot_deadline); return false;
@@ -238,7 +243,7 @@ inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan
                 if (!command(true, 1, shot, deadline)) break;
                 const auto button_release = ack + std::chrono::milliseconds(p.shot_hold_ms);
                 if (!wait(button_release) || !command(true, 0, shot, button_release)) break;
-                const auto fire_delay_start = ack; // 当前单发已释放，后续保持A覆盖此间隔。
+                const auto fire_delay_start = ack; // 当前单发已释放，射后等待由此ACK起计时。
                 if (shot == p.shots) continue;
                 if (p.baseline == "stationary") {
                     deadline = first + std::chrono::milliseconds(shot * p.shot_interval_ms);
@@ -246,13 +251,15 @@ inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan
                 }
                 // 恢复等待放在移动之前，不能在松键后为了枪间恢复追加等待。
                 const auto earliest = last_shot_submit + std::chrono::milliseconds(p.shot_interval_ms);
-                const auto move_start = p.shot_interval_ms == 0 ? clock.now() :
+                auto move_start = p.shot_interval_ms == 0 ? clock.now() :
                     earliest - std::chrono::milliseconds(p.move_ms + p.move_tail_ms());
+                if (p.fire_delay_ms > 0 && !p.move_during_fire_delay)
+                    move_start = std::max(move_start, fire_delay_start + std::chrono::milliseconds(p.fire_delay_ms));
                 next_shot_deadline = run_deadline;
                 minimum_shot = earliest;
                 if (!wait(move_start) || !command(false, p.direction, shot + 1, move_start)) break;
                 auto move_release = ack + std::chrono::milliseconds(p.move_ms);
-                if (p.fire_delay_ms > 0)
+                if (p.fire_delay_ms > 0 && p.move_during_fire_delay)
                     move_release = std::max(move_release, fire_delay_start + std::chrono::milliseconds(p.fire_delay_ms));
                 if (!wait(move_release) || !command(false, 0, shot + 1, move_release)) break;
                 const auto move_up_ack = ack;

@@ -326,6 +326,62 @@ void fire_delay_while_moving() {
           "A释放ACK未知时立即清理，不能继续反向或开枪");
       require(std::find(m.keyboards.begin(), m.keyboards.end(), 8) == m.keyboards.end(), "A释放未确认绝不发送D"); }
 }
+void fire_delay_before_moving() {
+    require(parse_counterpulse_plan(Json::object()).move_during_fire_delay,
+        "缺省开关须保留射后等待期间并行移动的旧行为");
+    for (const auto* baseline : {"counter", "no_counter"}) for (const int direction : {2, 8})
+        for (const int delay : {0, 100, 600}) {
+        const auto p = parse_counterpulse_plan(Json{{"baseline", baseline}, {"direction", direction},
+            {"shots", 20}, {"capture_enabled", false}, {"shot_interval_ms", 0},
+            {"fire_delay_ms", delay}, {"move_during_fire_delay", false}, {"move_ms", 300},
+            {"counter_hold_ms", 5}, {"shot_after_release_ms", 5}});
+        Fake m; const auto r = execute_counterpulse(m, p, {}, m.clock());
+        require(r["success"] && m.downs == 20 && !m.held && !m.left,
+            "先等射后间隔再移动须完成配置发数并归零");
+        require(r["plan"]["move_during_fire_delay"] == false,
+            "实际执行报告须保留关闭等待期间移动的布尔配置");
+        require(r["timing_model"] == (delay > 0 ? "WAIT_FIRE_DELAY_THEN_MOVE" : "DIRECTION_UP_ACK_DELAY"),
+            "串行等待必须在报告中与并行模式区分，零等待沿用释放锚点模式");
+        std::int64_t shot_up_ack = 0, move_ack = 0;
+        bool moving = false;
+        for (const auto& c : r["commands"]) {
+            if (c["shot_index"] == 0) continue;
+            if (c["kind"] == "left_button" && c["value"] == 0) shot_up_ack = c["ack_received_ns"];
+            if (c["kind"] != "wasd") continue;
+            const auto submitted = c["submit_ns"].get<std::int64_t>();
+            if (c["value"] == direction) {
+                require(submitted == shot_up_ack + delay * 1000000LL,
+                    "关闭后须从上一枪左键UP ACK等满射后间隔才提交正向DOWN");
+                move_ack = c["ack_received_ns"]; moving = true;
+            } else if (moving && c["value"] == 0) {
+                require(submitted - move_ack == 300000000,
+                    "串行模式的移动保持从正向DOWN ACK独立计满move_ms");
+                moving = false;
+            }
+        }
+        require(p.cycle_budget_ms() == p.shot_hold_ms + delay + p.move_ms + p.move_tail_ms(),
+            "串行等待预算须计入射后等待加移动，不得沿用两者最大值");
+    }
+    const auto p = parse_counterpulse_plan(Json{{"shots", 3}, {"capture_enabled", false},
+        {"shot_interval_ms", 0}, {"fire_delay_ms", 300}, {"move_during_fire_delay", false},
+        {"move_ms", 300}, {"counter_hold_ms", 5}, {"shot_after_release_ms", 5}});
+    { Fake m; m.physical_at_ms = 100;
+      const auto r = execute_counterpulse(m, p, {}, m.clock());
+      require(r["failure"] == "PHYSICAL_INPUT_CANCELED" && m.downs == 1 && !m.held && !m.left && m.cleanup_calls == 1,
+          "射后静置等待期间仍须检查真实输入并立即清理");
+      require(m.keyboards == std::vector<int>{0}, "静置等待取消后不得发出任何移动按键"); }
+    { Fake m; auto clock = m.clock(); bool injected = false;
+      clock.sleep_until = [&](auto target) {
+          m.time = std::max(m.time, target);
+          if (!injected && target >= Clock::time_point(std::chrono::seconds(10)) + std::chrono::milliseconds(309)) {
+              m.time += std::chrono::milliseconds(6); injected = true;
+          }
+      };
+      const auto r = execute_counterpulse(m, p, {}, clock);
+      require(r["failure"] == "COMMAND_DEADLINE_MISSED" && m.downs == 1 && !m.held && !m.left && m.cleanup_calls == 1,
+          "射后等待越过计划移动时刻超过容差时应取消，不重设时刻补发");
+      require(m.keyboards == std::vector<int>{0}, "等待超期后不得补发正向按键"); }
+}
 void failures_stop_and_cleanup() {
     CounterpulsePlan p;
     { Fake m; m.unknown_down = 2; const auto r = execute_counterpulse(m, p, {}, m.clock());
@@ -364,6 +420,9 @@ void failures_stop_and_cleanup() {
 }
 void invalid_plans() {
     for (const auto& json : {Json{{"counter_delay_ms", 201}}, Json{{"baseline", "stationary"}, {"counter_delay_ms", 50}}, Json{{"fire_delay_ms", 300}}, Json{{"fire_delay_ms", 2001}},
+        Json{{"move_during_fire_delay", 0}}, Json{{"move_during_fire_delay", "false"}}, Json{{"move_during_fire_delay", nullptr}},
+        Json{{"shots", 30}, {"capture_enabled", false}, {"shot_interval_ms", 0}, {"fire_delay_ms", 1000},
+            {"move_ms", 500}, {"move_during_fire_delay", false}, {"shot_after_release_ms", 5}},
         Json{{"capture_enabled", false}, {"shots", 30}, {"shot_interval_ms", 0}, {"fire_delay_ms", 2000}, {"shot_after_release_ms", 5}},
         Json{{"shots", 30}, {"shot_interval_ms", 650}}, Json{{"shot_interval_ms", 0}},
         Json{{"baseline", "stationary"}, {"shot_interval_ms", 0}, {"shot_after_release_ms", 5}},
@@ -382,7 +441,7 @@ void invalid_plans() {
 }
 }
 int main() {
-    try { delayed_reverse_tap_then_fire(); fire_delay_while_moving(); immediate_movement_cycles(); shot_after_direction_release(); matched_brake_window(); successful_and_baselines(); configurable_stationary_intervals(); failures_stop_and_cleanup(); invalid_plans(); }
+    try { fire_delay_before_moving(); delayed_reverse_tap_then_fire(); fire_delay_while_moving(); immediate_movement_cycles(); shot_after_direction_release(); matched_brake_window(); successful_and_baselines(); configurable_stationary_intervals(); failures_stop_and_cleanup(); invalid_plans(); }
     catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
     std::cout << "反冲纯fake专项通过：时序、基线、预算、取消、未知ACK、清理及参数拒绝\n";
 }

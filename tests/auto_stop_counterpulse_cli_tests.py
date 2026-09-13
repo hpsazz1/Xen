@@ -84,6 +84,7 @@ def main():
             assert task['status'] == 'PREPARED_NOT_LAUNCHED'
             assert plan['capture_enabled'] is True
             assert plan['fire_delay_ms'] == 0
+            assert plan['move_during_fire_delay'] is True
             assert plan['counter_delay_ms'] == 0
             assert plan['counter_hold_ms'] == 30 and plan['shot_interval_ms'] == 280
             slow = root / 'slow-stationary'

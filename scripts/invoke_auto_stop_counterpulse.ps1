@@ -10,6 +10,7 @@ param(
     [ValidateSet('stationary', 'no_counter', 'counter')][string]$Baseline = 'counter',
     [ValidateRange(1, 30)][int]$Shots = 8,
     [ValidateRange(0, 2000)][int]$FireDelayMs = 0,
+    [bool]$MoveDuringFireDelay = $true,
     [ValidateScript({ $_ -eq 0 -or ($_ -ge 280 -and $_ -le 650) })][int]$ShotIntervalMs = 280,
     [ValidateSet('A', 'D')][string]$Direction = 'A',
     [ValidateRange(1, 500)][int]$MoveMs = 120,
@@ -208,7 +209,7 @@ try {
         $binary = (Resolve-Path -LiteralPath $Executable).Path
         $config = (Resolve-Path -LiteralPath $ConfigPath).Path
         if (-not [IO.File]::Exists($binary) -or -not [IO.File]::Exists($config)) { throw '需要有效文件。' }
-        $plan = [ordered]@{ capture_enabled = [bool](-not $NoCapture); baseline = $Baseline; shots = $Shots; shot_interval_ms = $ShotIntervalMs; fire_delay_ms = $FireDelayMs;
+        $plan = [ordered]@{ capture_enabled = [bool](-not $NoCapture); baseline = $Baseline; shots = $Shots; shot_interval_ms = $ShotIntervalMs; fire_delay_ms = $FireDelayMs; move_during_fire_delay = $MoveDuringFireDelay;
             move_ms = $MoveMs; counter_hold_ms = $CounterHoldMs; counter_delay_ms = $CounterDelayMs; brake_window_ms = $BrakeWindowMs; shot_after_release_ms = $ShotAfterReleaseMs; shot_hold_ms = $ShotHoldMs;
             late_tolerance_ms = $LateToleranceMs; direction = $(if ($Direction -eq 'A') { 2 } else { 8 }) }
         if (-not $exists) { $null = New-Item -ItemType Directory -Path $runPath }
@@ -249,14 +250,16 @@ try {
             } else { "移动UP ACK后$($BrakeWindowMs)ms计划开枪" }
             $recovery = if ($ShotIntervalMs -eq 0) { "按动作完成接续，不设最小枪间隔" } else { "枪间至少$($ShotIntervalMs)ms，ACK耗时计入实际枪间隔" }
             $behavior = "首枪原地，随后每次按$Direction 移动$($MoveMs)ms；收到该键UP ACK后等待$($CounterDelayMs)ms，再$action；$timing。$recovery；松键后开枪迟到超过$($LateToleranceMs)ms则拒绝该组。固定瞄准，不人为按方向或射击键。"
-            if ($FireDelayMs -gt 0) {
+            if ($FireDelayMs -gt 0 -and -not $MoveDuringFireDelay) {
+                $behavior = "首枪原地；上一枪左键UP ACK后静止等待$($FireDelayMs)ms，然后按$Direction保持$($MoveMs)ms（DOWN ACK起计）；松键ACK后等$($CounterDelayMs)ms，再$action；$timing。重复至$Shots 发。"
+            } elseif ($FireDelayMs -gt 0) {
                 $behavior = "首枪原地；上一枪左键UP ACK后开始$($FireDelayMs)ms间隔，立刻按$Direction，方向键从DOWN ACK起至少保持$($MoveMs)ms。间隔与保持时间都满足后才松$Direction，即等待两者结束时刻的较晚者；收到该键UP ACK后等待$($CounterDelayMs)ms，再$action；$timing。单发完成后继续同一流程。固定瞄准，不人为按方向或射击键。"
             }
         }
         $cadence = if ($ShotIntervalMs -eq 0) { "动作完成后接续下一次移动；实际枪间隔由移动、反向轻点、松键后等待和命令耗时决定" } else { "最小射击间隔$($ShotIntervalMs)ms；该间隔仅为候选" }
         $observation = if ($NoCapture) { '不采集图像，以人工观察判断；长组前面的弹着点可能消失，请连续观察' } else { '长组前面的弹着点可能消失，请连续观察，图像逐帧保存' }
         $reuseInstructions = if ($Repeatable) {
-            "本目录允许重复手动Launch，无需再次Prepare。编辑plan.json中的move_ms（正向键最少保持，1..500ms）、counter_delay_ms（正向键UP ACK后到反向键DOWN的等待，0..200ms）、counter_hold_ms（反向键实际短按时长，1..200ms）、shot_after_release_ms（最后方向键UP ACK后到单发的等待，0..20ms；新时序模式下0表示立即开枪）、fire_delay_ms（上一枪松左键后在正向移动期间等待，1..2000ms；0保留旧时序）和shots（子弹数，1..30）。本次准备值为移动$($MoveMs)ms、松正向键后等待$($CounterDelayMs)ms、反向键实际短按$($CounterHoldMs)ms、松键后$($ShotAfterReleaseMs)ms、移动期间等待$($FireDelayMs)ms、$Shots 发；执行以本次读取并验证的plan.json为准。每次Launch冻结execution-plan.json，运行中编辑原plan不改变本轮。新计划验证通过后会覆盖上次result；失败不自动重试。每次仅用户手动触发一组，开始正式对比时另建目录。"
+            "本目录允许重复手动Launch，无需再次Prepare。编辑plan.json中的move_during_fire_delay（true=射后等待与移动并行；false=先等完射后间隔再移动），以及move_ms（正向键最少保持，1..500ms）、counter_delay_ms（正向键UP ACK后到反向键DOWN的等待，0..200ms）、counter_hold_ms（反向键实际短按时长，1..200ms）、shot_after_release_ms（最后方向键UP ACK后到单发的等待，0..20ms；新时序模式下0表示立即开枪）、fire_delay_ms（上一枪松左键后在正向移动期间等待，1..2000ms；0保留旧时序）和shots（子弹数，1..30）。本次准备值为移动$($MoveMs)ms、松正向键后等待$($CounterDelayMs)ms、反向键实际短按$($CounterHoldMs)ms、松键后$($ShotAfterReleaseMs)ms、移动期间等待$($FireDelayMs)ms、$Shots 发；执行以本次读取并验证的plan.json为准。每次Launch冻结execution-plan.json，运行中编辑原plan不改变本轮。新计划验证通过后会覆盖上次result；失败不自动重试。每次仅用户手动触发一组，开始正式对比时另建目录。"
         } else {
             '参数探索可通过Prepare -ReuseRunDirectory复用本目录；验证新计划后替换参数并清理上次result和CONSUMED。每次Prepare后仍须用户手动运行本TASK中的同一Launch命令，不会自动重试。开始正式对比时另建目录。'
         }
