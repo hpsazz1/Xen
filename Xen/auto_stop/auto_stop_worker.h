@@ -56,13 +56,14 @@ public:
     bool start(const AutoStopConfig& config, int command_timeout_ms = 300) noexcept;
     void stop() noexcept;
     // 保留显式请求入口；独立目标模式与调用方共用互斥请求槽，取消按 id 隔离。
-    // 每个新id在500ms时触发取消，不能续期；归还另受在途ACK与清理耗时约束。
+    // 显式新id在500ms时触发取消，不能续期；归还另受在途ACK与清理耗时约束。
     bool request(std::uint64_t request_id) noexcept;
     void cancel() noexcept;
     void cancel(std::uint64_t request_id) noexcept;
     void set_paused(bool paused) noexcept;
     AutoStopSnapshot snapshot() const noexcept;
     // 检测线程发布不可变目标事实；无目标/失败发布零期限，旧帧不能自行续期。
+    // 独立制动最多500ms；零软件键确认后按新鲜目标及持续许可保持屏蔽，失效即清理。
     void publish_target(std::chrono::steady_clock::time_point valid_until,
         AutoStopBlockReason reason = AutoStopBlockReason::NO_TARGET) noexcept;
 private:

@@ -195,7 +195,10 @@ public:
             return success;
         };
         auto cancel_active = [&](bool force_fault, const char* reason) {
-            LOG_INFO("auto_stop", "取消请求{}，原因={}", active_id, reason);
+            AutoStopBlockReason block_reason;
+            { std::lock_guard<std::mutex> lock(mutex); block_reason = state.block_reason; }
+            LOG_INFO("auto_stop", "取消请求{}，原因={}，阻断={}", active_id, reason,
+                AutoStopBlockReasonName(block_reason));
             (void)reason;
             if (active_id) controller.cancel(active_id, now_ns());
             const bool clean_ok = clean();
@@ -292,7 +295,8 @@ public:
                 if (active_id && independent && (!target_eligible || active_target_generation != current_target_generation))
                     cancel_active(false, "target_or_focus_revoked");
                 if (active_id && (!input_ok || !events_ok || !intent.history_valid || !permission(input) ||
-                    held_wasd(input) != original_mask || active_generation != cancel_generation.load() || Clock::now() >= lease_end)) {
+                    held_wasd(input) != original_mask || active_generation != cancel_generation.load() ||
+                    ((!independent || !estimated || software_mask != 0) && Clock::now() >= lease_end))) {
                     const char* reason = !input_ok ? "input_invalid" : !events_ok ? "input_gap" :
                         !intent.history_valid ? "history_invalid" : paused.load() ? "paused" :
                         !permission(input) ? "permission_revoked" : held_wasd(input) != original_mask ? "direction_changed" :
@@ -309,7 +313,7 @@ public:
                     std::uint64_t requested = 0;
                     {
                         std::lock_guard<std::mutex> lock(mutex);
-                        // 连续目标与按住会话只消费一次，观察刷新不生成新租期。
+                        // 连续目标与按住会话只制动一次；估算完成后由新鲜目标维持物理屏蔽。
                         if (!pending_id && !target_consumed && target_eligible && events_ok &&
                             intent.history_valid && intent.held_mask != 0 && !intent.conflicting &&
                             state.status == AutoStopStatus::READY) {
@@ -395,7 +399,8 @@ public:
                                     estimated = true;
                                     LOG_INFO("auto_stop", "请求{}反向软件键释放已确认，进入估算完成，未授予开火", active_id);
                                     { std::lock_guard<std::mutex> lock(mutex); ++state.completed; state.status = AutoStopStatus::ESTIMATED; }
-                                    // 软件键已经释放，物理屏蔽的有界租期内允许Aim继续发送。
+                                    // 反向软件键已释放。独立模式由每轮新鲜目标/许可维持屏蔽，
+                                    // 500ms仍限制制动过程和显式请求，不在持续满足条件时恢复移动。
                                     release_reservation();
                                 }
                             }

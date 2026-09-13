@@ -277,12 +277,14 @@ int main() {
             require(!worker.snapshot().fire_permitted, "目标/旧帧/失焦/松键/安全撤销均不能授予开火");
             worker.stop();
         }
-        {
+        for (int ending = 0; ending < 8; ++ending) {
             auto fake = std::make_shared<Fake>();
             std::atomic<std::uint64_t> id{0};
-            AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
-                [&] { return ++id; }, [] { return true; });
-            require(worker.start(config), "不可续租测试启动");
+            std::atomic<bool> focused{true};
+            auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+            AutoStopWorker worker(fake, arbiter, [] { return true; },
+                [&] { return ++id; }, [&] { return focused.load(); });
+            require(worker.start(config), "持续目标保持测试启动");
             ready(worker, fake);
             worker.publish_target(Clock::now() + std::chrono::seconds(1));
             wait_for([&] { return fake->has_software(); });
@@ -291,11 +293,31 @@ int main() {
             require(worker.snapshot().canceled == 0, "其他owner的id不得取消独立请求");
             const auto until = Clock::now() + std::chrono::milliseconds(650);
             while (Clock::now() < until) {
-                worker.publish_target(Clock::now() + std::chrono::seconds(1));
+                worker.publish_target(Clock::now() + std::chrono::milliseconds(50));
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
-            require(fake->released() && worker.snapshot().requests == 1 && worker.snapshot().canceled == 1,
-                "连续刷新目标不得续500ms租期或生成第二个请求");
+            require(!fake->released() && !fake->has_cleanup() && worker.snapshot().requests == 1 &&
+                worker.snapshot().canceled == 0 && worker.snapshot().status == AutoStopStatus::ESTIMATED,
+                "持续按住且目标新鲜时超过500ms必须保持屏蔽，不重复制动或提前恢复移动");
+            require(fake->reports().back() == 0 && !worker.snapshot().fire_permitted,
+                "保持阶段反向软件键必须已释放且不得授予开火");
+            require(arbiter->try_enter_aim().owns_lock(), "保持阶段不得继续占住Aim发送机会");
+            const auto reports_while_holding = fake->reports().size();
+            // 0停止观测刷新；其余覆盖越过初始500ms后的全部主要撤销入口。
+            if (ending == 1) worker.publish_target({});
+            if (ending == 2) focused.store(false);
+            if (ending == 3) { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
+            if (ending == 4) { std::lock_guard<std::mutex> lock(fake->mutex); fake->end = true; }
+            if (ending == 5) { std::lock_guard<std::mutex> lock(fake->mutex); fake->healthy = false; }
+            if (ending == 6) { std::lock_guard<std::mutex> lock(fake->mutex); fake->extra_keys['Q'] = true; }
+            if (ending == 7) fake->physical(2);
+            wait_for([&] {
+                // 非目标撤销仍提供新鲜目标，不能让50ms到期掩盖撤销入口失效。
+                if (ending >= 2) worker.publish_target(Clock::now() + std::chrono::milliseconds(50));
+                return fake->released() && worker.snapshot().canceled == 1;
+            });
+            require(worker.snapshot().requests == 1 && fake->reports().size() == reports_while_holding,
+                "目标到期清理不得重发反向制动或分配第二个请求");
             worker.stop();
         }
         {
