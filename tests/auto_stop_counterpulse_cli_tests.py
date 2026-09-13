@@ -84,10 +84,15 @@ def main():
             movement_plan = json.loads((movement / 'plan.json').read_text(encoding='utf-8-sig'))
             assert movement_plan['baseline'] == 'no_counter' and movement_plan['brake_window_ms'] == 60
             movement_task = (movement / 'TASK.md').read_text(encoding='utf-8-sig')
-            assert '60ms' in movement_task and '655ms' in movement_task
+            assert '60ms' in movement_task and '迟到超过5ms' in movement_task
+            long_run = root / 'twenty-counter'
+            invoke('-Mode', 'Prepare', '-RunDirectory', long_run, '-Executable', args.executable,
+                '-ConfigPath', config, '-Shots', 20, '-ShotIntervalMs', 650, '-CounterHoldMs', 25, ok=True)
+            long_plan = json.loads((long_run / 'plan.json').read_text(encoding='utf-8-sig'))
+            assert long_plan['shots'] == 20 and long_plan['counter_hold_ms'] == 25
             overflow = root / 'overflow'
             invoke('-Mode', 'Prepare', '-RunDirectory', overflow, '-Executable', args.executable,
-                '-ConfigPath', config, '-Shots', 8, '-ShotIntervalMs', 600)
+                '-ConfigPath', config, '-Shots', 21, '-ShotIntervalMs', 650)
             assert not overflow.exists()
             text = (run / 'TASK.md').read_text(encoding='utf-8-sig')
             assert text.count('-Mode Launch') == 1 and '-AllowPhysicalOutput' in text

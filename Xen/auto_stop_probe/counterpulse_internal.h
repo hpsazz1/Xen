@@ -37,8 +37,7 @@ inline CounterpulsePlan parse_counterpulse_plan(const Json& input) {
     p.late_tolerance_ms = input.value("late_tolerance_ms", p.late_tolerance_ms);
     const int direction = input.value("direction", static_cast<int>(p.direction));
     if ((p.baseline != "counter" && p.baseline != "stationary" && p.baseline != "no_counter") ||
-        (p.shots != 7 && p.shots != 8) || p.shot_interval_ms < 280 || p.shot_interval_ms > 650 ||
-        (p.shots - 1) * p.shot_interval_ms > 3900 ||
+        (p.shots < 7 || p.shots > 20) || p.shot_interval_ms < 280 || p.shot_interval_ms > 650 ||
         (direction != 2 && direction != 8) || p.move_ms < 1 || p.move_ms > 250 ||
         p.counter_hold_ms < 1 || p.counter_hold_ms > 200 || p.shot_hold_ms < 1 || p.shot_hold_ms > 20 ||
         p.brake_window_ms < 1 || p.brake_window_ms > 200 ||
@@ -144,7 +143,7 @@ inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan
     Clock::time_point ack{};
     Clock::time_point next_shot_deadline{};
     Clock::time_point last_shot_submit{};
-    Clock::time_point shot_recovery_limit{};
+    Clock::time_point minimum_shot{};
     auto budget_failure = [&](const char* site, int shot, Clock::time_point observed, Clock::time_point limit) {
         failure = "ACTION_BUDGET_EXCEEDED";
         report["failure_context"] = {{"site", site}, {"shot_index", shot},
@@ -153,8 +152,8 @@ inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan
     auto command = [&](bool button, int value, int shot, Clock::time_point planned) -> bool {
         if (!check()) return false;
         const auto submit = clock.now();
-        if (button && value && shot > 1 && p.baseline != "stationary" && submit > shot_recovery_limit) {
-            budget_failure("SHOT_SUBMIT_ENVELOPE", shot, submit, shot_recovery_limit); return false;
+        if (button && value && shot > 1 && p.baseline != "stationary" && submit < minimum_shot) {
+            budget_failure("SHOT_RECOVERY_TOO_SHORT", shot, submit, minimum_shot); return false;
         }
         const bool late = submit > planned + std::chrono::milliseconds(p.late_tolerance_ms);
         if (value && late) {
@@ -218,15 +217,15 @@ inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan
                 // 恢复等待放在移动之前；两种移动组共用移动UP ACK后的观察窗。
                 const auto earliest = last_shot_submit + std::chrono::milliseconds(p.shot_interval_ms);
                 const auto move_start = earliest - std::chrono::milliseconds(p.move_ms + p.brake_window_ms);
-                next_shot_deadline = earliest + std::chrono::milliseconds(p.late_tolerance_ms);
-                shot_recovery_limit = next_shot_deadline;
+                next_shot_deadline = run_deadline;
+                minimum_shot = earliest;
                 if (!wait(move_start) || !command(false, p.direction, shot + 1, move_start)) break;
                 const auto move_release = ack + std::chrono::milliseconds(p.move_ms);
                 if (!wait(move_release) || !command(false, 0, shot + 1, move_release)) break;
                 const auto move_up_ack = ack;
                 deadline = move_up_ack + std::chrono::milliseconds(p.brake_window_ms);
-                // ACK耗时不是调度迟到；过大时拒绝该组，不能扩大已认可的枪间恢复窗口。
-                if (deadline > next_shot_deadline) { budget_failure("PLANNED_SHOT_ENVELOPE", shot + 1, deadline, next_shot_deadline); break; }
+                // 恢复间隔是下限；ACK耗时不重复扣除松键后射击的迟到预算。
+                if (deadline > run_deadline) { budget_failure("PLANNED_SHOT_RUN_LIMIT", shot + 1, deadline, run_deadline); break; }
                 next_shot_deadline = deadline;
                 report["cycles"].push_back({{"shot_index", shot + 1}, {"move_up_ack_ns", ns(move_up_ack)},
                     {"shot_deadline_ns", ns(deadline)}, {"minimum_shot_ns", ns(earliest)},

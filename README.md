@@ -25,9 +25,11 @@ Capture → Detector → Aim → Runtime SafetyGate → Mouse
 
 反向轻点标定使用独立 `auto_stop_counterpulse` 目标和
 [`scripts/invoke_auto_stop_counterpulse.ps1`](scripts/invoke_auto_stop_counterpulse.ps1)：Prepare只生成一次性计划，
-用户前台Launch后执行单组7/8发、280ms间隔，支持静止/无反向/固定反向时长比较。先停止生产Runtime；
+用户前台Launch后执行单组7至20发、280至650ms间隔，支持静止/无反向/固定反向时长比较。先停止生产Runtime；
 源焦点、全松和设备独占不足时拒绝，End/Ctrl+C或人工方向/鼠标按钮输入取消，不自动重试。
-捕获沿用配置的CPU图像源，射前检查128MiB容量（建议320 ROI）；帧与命令分开记录，ACK不代表停稳。
+捕获沿用配置的CPU图像源，射前检查1000帧/384MiB容量（建议320 ROI）；帧与命令分开记录，ACK不代表停稳。
+移动组枪间隔是恢复下限，松键ACK后固定观察窗及各动作迟到单独检查；20发650ms首末至少12.35秒，
+弹着点会陆续消失，须连续观察或查看逐帧证据。
 [`scripts/analyze_auto_stop_impacts.py`](scripts/analyze_auto_stop_impacts.py) 离线分析必须提供实际颜色/ROI/几何容差，
 移动背景可采用独立背景ROI平移配准；结果仅表示本场景几何，不自动应用生产参数。
 

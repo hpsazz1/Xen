@@ -76,7 +76,7 @@ void successful_and_baselines() {
     require(report["success"] && mouse.downs == 7 && mouse.keyboards[1] == 8 && mouse.keyboards[3] == 2, "七发和D方向应使用对向A");
 }
 void configurable_stationary_intervals() {
-    for (const auto [shots, interval] : {std::pair{7, 600}, std::pair{7, 650}, std::pair{8, 500}}) {
+    for (const auto [shots, interval] : {std::pair{7, 600}, std::pair{7, 650}, std::pair{8, 500}, std::pair{20, 650}}) {
         Fake mouse; CounterpulsePlan p;
         p.baseline = "stationary"; p.shots = shots; p.shot_interval_ms = interval;
         const auto parsed = parse_counterpulse_plan(counterpulse_plan_json(p));
@@ -113,13 +113,13 @@ void configurable_stationary_intervals() {
         "八发3899ms跨度应接受");
 }
 void matched_brake_window() {
-    for (const auto* mode : {"no_counter", "counter"}) for (const int latency : {1, 2}) {
+    for (const auto* mode : {"no_counter", "counter"}) for (const int latency : {1, 2, 3}) {
         Fake mouse; CounterpulsePlan p;
         mouse.latency_ms = latency;
-        p.baseline = mode; p.shots = 7; p.shot_interval_ms = 650;
+        p.baseline = mode; p.shots = 20; p.shot_interval_ms = 650;
         const auto r = execute_counterpulse(mouse, p, {}, mouse.clock());
         require(r["success"], "移动时序应在有界窗口完成");
-        for (int shot = 2; shot <= 7; ++shot) {
+        for (int shot = 2; shot <= 20; ++shot) {
             std::int64_t moved_up = 0, fired = 0;
             bool moving = false;
             for (const auto& c : r["commands"]) {
@@ -142,20 +142,21 @@ void matched_brake_window() {
           "报告须保留反向完成超窗的决策现场"); }
     { Fake m; m.latency_ms = 3; CounterpulsePlan p; p.baseline = "no_counter";
       const auto r = execute_counterpulse(m, p, {}, m.clock());
-      require(r["failure"] == "ACTION_BUDGET_EXCEEDED" && m.downs == 1,
-          "两次ACK超出5ms恢复包络应拒绝，不扩大枪间恢复时间"); }
-    { Fake m; CounterpulsePlan p; p.baseline = "no_counter"; p.shots = 7; p.shot_interval_ms = 650;
+      require(r["success"] && m.downs == p.shots,
+          "ACK耗时应计入恢复间隔，不占用松键后射击的迟到预算"); }
+    for (const int delay_ms : {4, 6}) { Fake m; CounterpulsePlan p; p.baseline = "no_counter"; p.shots = 7; p.shot_interval_ms = 650;
       auto clock = m.clock(); bool injected = false;
       clock.sleep_until = [&](auto target) {
           m.time = std::max(m.time, target);
           if (!injected && target >= Clock::time_point(std::chrono::seconds(10)) + std::chrono::milliseconds(654)) {
-              m.time += std::chrono::milliseconds(4); injected = true;
+              m.time += std::chrono::milliseconds(delay_ms); injected = true;
           }
       };
       const auto r = execute_counterpulse(m, p, {}, clock);
-      require(r["failure"] == "ACTION_BUDGET_EXCEEDED" && m.downs == 1 && !m.held && !m.left,
-          "即使相对射击deadline只迟4ms，实际恢复超过655ms仍必须拒绝");
-      require(r["failure_context"]["site"] == "SHOT_SUBMIT_ENVELOPE", "应区别提交上界与反向完成超窗"); }
+      if (delay_ms == 4) require(r["success"] && m.downs == 7 && !m.held && !m.left,
+          "恢复超过655ms但松键后射击仅迟4ms应完成，不能重复扣除ACK预算");
+      else require(r["failure"] == "SHOT_DEADLINE_MISSED" && m.downs == 1 && !m.held && !m.left,
+          "松键后射击迟到超过5ms仍须拒绝第二发并清理"); }
 }
 void failures_stop_and_cleanup() {
     CounterpulsePlan p;
@@ -194,10 +195,10 @@ void failures_stop_and_cleanup() {
       require(r["failure"] == "EXECUTION_EXCEPTION" && !m.left && !m.held && m.cleanup_calls == 1, "异常也必须归零"); }
 }
 void invalid_plans() {
-    for (const auto& json : {Json{{"shots", 9}}, Json{{"direction", 258}}, Json{{"late_tolerance_ms", 11}},
+    for (const auto& json : {Json{{"shots", 21}}, Json{{"direction", 258}}, Json{{"late_tolerance_ms", 11}},
         Json{{"brake_window_ms", 0}}, Json{{"counter_hold_ms", 60}},
         Json{{"shot_interval_ms", 279}}, Json{{"shots", 7}, {"shot_interval_ms", 651}},
-        Json{{"shots", 8}, {"shot_interval_ms", 600}}, Json{{"shots", 8}, {"shot_interval_ms", 558}},
+        Json{{"shots", 6}},
         Json{{"shots", 7}, {"shot_interval_ms", 500.5}},
         Json{{"move_ms", 250}, {"counter_hold_ms", 100}}, Json{{"shots", 7.5}}}) {
         bool rejected = false; try { parse_counterpulse_plan(json); } catch (...) { rejected = true; }

@@ -35,6 +35,8 @@ BOOL WINAPI control(DWORD event) {
     return FALSE;
 }
 struct Evidence {
+    static constexpr std::size_t frame_limit = 1000;
+    static constexpr std::size_t byte_limit = 384ULL * 1024 * 1024;
     struct Frame { cv::Mat pixels; FrameTiming timing; std::int64_t received_ns; };
     std::unique_ptr<ICapture> capture;
     std::vector<Frame> frames;
@@ -57,7 +59,7 @@ struct Evidence {
         capture = create_capture(config);
         if (!capture || !capture->open()) throw std::runtime_error("采集源不可用");
         opened_ns = ns(Clock::now());
-        frames.reserve(350);
+        frames.reserve(frame_limit);
         thread = std::jthread([this](std::stop_token stop) {
             std::size_t bytes = 0;
             try {
@@ -72,9 +74,9 @@ struct Evidence {
                     if (status == CaptureStatus::FRAME) {
                         capture_phase.store(2);
                         const auto size = frame.bgr.total() * frame.bgr.elemSize();
-                        // 慢单发组仍有界；首帧核对全部350帧容量，128MiB字节上限不变。
-                        if (frame.bgr.empty() || size > (128ULL * 1024 * 1024) / 350 ||
-                            frames.size() >= 350 || size > 128ULL * 1024 * 1024 - bytes) {
+                        // 20发650ms连同前后观察窗留在约16秒容量内；首帧检查整组像素内存预算。
+                        if (frame.bgr.empty() || size > byte_limit / frame_limit ||
+                            frames.size() >= frame_limit || size > byte_limit - bytes) {
                             failure_code.store(1); failed.store(true); break;
                         }
                         frames.push_back({frame.bgr.clone(), frame.timing, ns(Clock::now())});
@@ -167,7 +169,7 @@ int main(int argc, char** argv) {
         bool dry = false, allowed = false, capture_check = false;
         std::set<std::string> seen;
         if (argc == 2 && std::string(argv[1]) == "--help") {
-            std::cout << "单组7/8发反向时长测试：--plan JSON --dry-run；真实运行另需--config INI --output NEW_DIR "
+            std::cout << "单组7至20发反向时长测试：--plan JSON --dry-run；真实运行另需--config INI --output NEW_DIR "
                          "--allow-physical-output --confirm AUTO_STOP_COUNTERPULSE。需源焦点、全松与独占设备，End/Ctrl+C取消。\n"
                          "纯采集诊断：--plan JSON --config INI --output NEW_DIR --capture-check；不连接键鼠，拒绝物理授权。\n";
             return 0;
@@ -200,6 +202,7 @@ int main(int argc, char** argv) {
         if (!load_app_config(config_path, config, error)) throw std::runtime_error("配置不可用");
         if (capture_check) {
             // 诊断只接收图像，不创建Mouse或SourceContext；与物理入口共用Evidence。
+            constexpr int observation_ms = 14000;
             if (!std::filesystem::create_directory(output)) throw std::runtime_error("需要新诊断目录");
             created = true;
             progress("CAPTURE_CHECK");
@@ -212,7 +215,7 @@ int main(int argc, char** argv) {
             while (true) {
                 decision = evidence.evaluate(gate, std::filesystem::exists(output / "STOP"));
                 if (decision.state == PrerollState::READY && observation_end == Clock::time_point{})
-                    observation_end = Clock::now() + std::chrono::milliseconds(4800);
+                    observation_end = Clock::now() + std::chrono::milliseconds(observation_ms);
                 const bool complete = observation_end != Clock::time_point{} && Clock::now() >= observation_end;
                 if (Clock::now() >= next_sample || decision.state == PrerollState::FAILED || complete) {
                     auto sample = evidence.snapshot(); sample["reason"] = decision.reason;
@@ -225,7 +228,7 @@ int main(int argc, char** argv) {
             capture_diagnostic = evidence.snapshot();
             evidence.finish();
             write_json(output / "capture-check.json", {{"capture", capture_diagnostic}, {"samples", samples},
-                {"reason", decision.reason}, {"observation_ms", 4800},
+                {"reason", decision.reason}, {"observation_ms", observation_ms},
                 {"success", decision.state == PrerollState::READY}, {"physical_output", false}});
             return decision.state == PrerollState::READY ? 0 : 2;
         }
