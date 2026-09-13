@@ -18,7 +18,7 @@ enum class AutoStopStatus {
     UNBOUND,
     AWAITING_VALIDATION,
     PAUSED,
-    READY, WAITING_INPUT, BRAKING, ESTIMATED, CANCELED, FAULT,
+    READY, WAITING_INPUT, BRAKING, ESTIMATED, CANCELED, FAULT, MASKED,
 };
 
 enum class AutoStopBlockReason {
@@ -79,6 +79,8 @@ AutoStopSnapshot assess_auto_stop_availability(
     bool protocol_available, bool paused) noexcept;
 
 struct WasdMotionIntent {
+    // 原始事件连续不等于运动可估计；相反键重叠只破坏后者。
+    bool input_continuous = false;
     bool history_valid = false;
     bool conflicting = false;
     std::uint8_t held_mask = 0;

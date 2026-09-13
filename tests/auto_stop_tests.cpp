@@ -12,6 +12,24 @@ void expect(bool value, const char* message) {
 
 int main() {
     constexpr std::int64_t base = 1000000000, ms = 1000000;
+    {
+        WasdInputHistory history;
+        expect(!history.observe(2, 1, 1, base).input_continuous, "首次持键不得冒充连续历史");
+        expect(history.observe(0, 1, 2, base + ms).input_continuous, "真实全松建立输入连续性");
+        history.observe(2, 1, 3, base + 2 * ms);
+        const auto overlap = history.observe(10, 1, 4, base + 3 * ms);
+        expect(overlap.input_continuous && !overlap.history_valid && overlap.conflicting,
+            "相反键重叠保留真实连续输入，但不能冒充可靠运动估计");
+        const auto single = history.observe(8, 1, 5, base + 4 * ms);
+        expect(single.input_continuous && !single.history_valid, "重叠后单键可仅屏蔽，不虚构制动模型");
+        auto skipped = history;
+        expect(!skipped.observe(2, 1, 7, base + 6 * ms).input_continuous,
+            "同代际序号前跳必须失去输入连续性，不能降级为仅屏蔽");
+        expect(!history.observe(8, 1, 6, base + 5 * ms, true, true).input_continuous, "缺口必须撤销仅屏蔽资格");
+        expect(!history.observe(2, 1, 7, base + 6 * ms).input_continuous, "缺口后非零改向不能重新取得资格");
+        history.observe(0, 1, 8, base + 7 * ms);
+        expect(!history.observe(2, 2, 1, base + 8 * ms).input_continuous, "新代际的持键不能复用旧输入资格");
+    }
     auto duration = [&](int hold) {
         AutoStopController controller;
         WasdInputHistory input;

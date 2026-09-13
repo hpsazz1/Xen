@@ -125,10 +125,11 @@ public:
         WasdEventCursor cursor;
         AutoStopController controller;
         InputSnapshot input;
-        std::uint64_t active_id = 0, active_generation = 0;
+        std::uint64_t active_id = 0, active_generation = 0, active_input_epoch = 0;
         std::uint8_t software_mask = 0, original_mask = 0;
         bool debt = false, estimated = false, independent = false, target_consumed = false;
         bool independent_acquired = false;
+        bool mask_only = false, masked_hold = false;
         Clock::time_point lease_end;
         Clock::time_point last_block_log{};
         AutoStopBlockReason logged_reason = AutoStopBlockReason::NONE;
@@ -225,6 +226,9 @@ public:
                 intent.held_mask == 0 && input.state_valid && input.status == InputMonitorStatus::READY && held_wasd(input) == 0;
             if (retain_release && !resumed) controller.observe(intent, now_ns());
             if (resumed) LOG_INFO("auto_stop", "允许键释放，键盘归还已确认；保留连续输入以支持再次急停");
+            // 正常归还不破坏真实事件连续性；无法承接模型时，下次仅屏蔽，不伪造运动历史。
+            // 清理期间的事件留给正式游标，下一轮先验证再准入。
+            const bool retain_input = normal_activation_release && clean_ok && !force_fault && intent.input_continuous;
             std::lock_guard<std::mutex> lock(mutex);
             if (active_id) ++state.canceled;
             if (fault || force_fault || !clean_ok) { fault = true; state.status = AutoStopStatus::FAULT; }
@@ -233,7 +237,8 @@ public:
             independent = false;
             independent_acquired = false;
             estimated = false;
-            if (!retain_release && !resumed) { history.reset(); intent = {}; }
+            mask_only = masked_hold = false;
+            if (!retain_release && !resumed && !retain_input) { history.reset(); intent = {}; }
         };
         try {
             while (!stopping.load(std::memory_order_acquire)) {
@@ -245,6 +250,12 @@ public:
                     const auto& event = batch.events[i];
                     if (!event.state_valid) { events_ok = false; history.reset(); intent = {}; break; }
                     intent = history.observe(event.held_mask, event.epoch, event.sequence, event.received_at_steady_ns, event.state_valid);
+                    // 活动会话逐事件锁定缺口/代际/时间故障，同批后续全松不能洗掉撤销。
+                    if (active_id && independent && (!intent.input_continuous || event.epoch != active_input_epoch)) {
+                        events_ok = false;
+                        history.reset(); intent = {};
+                        break;
+                    }
                     // 全部屏蔽确认后，物理改向不再是施加给游戏的输入；制动沿原ACK模型推进。
                     if (!estimated && !independent_acquired) controller.observe(intent, event.received_at_steady_ns);
                 }
@@ -309,7 +320,7 @@ public:
                         allocate_request && !state.source_focused ? AutoStopBlockReason::SOURCE_FOCUS :
                         release_required ? AutoStopBlockReason::RELEASE_REQUIRED :
                         !input_ok ? AutoStopBlockReason::INPUT_UNAVAILABLE :
-                        !events_ok || (!independent_acquired && !intent.history_valid) ? AutoStopBlockReason::INPUT_HISTORY :
+                        !events_ok || (allocate_request ? !intent.input_continuous : !intent.history_valid) ? AutoStopBlockReason::INPUT_HISTORY :
                         paused.load() ? AutoStopBlockReason::PAUSED :
                         config.activation_virtual_key <= 0 || config.activation_virtual_key >= 256 ||
                             !input.virtual_keys[config.activation_virtual_key] ? AutoStopBlockReason::ACTIVATION_NOT_HELD :
@@ -317,22 +328,25 @@ public:
                         active_id && independent_acquired ? AutoStopBlockReason::NONE :
                         allocate_request && !state.target_available ?
                             (target_until != Clock::time_point{} ? AutoStopBlockReason::TARGET_STALE : target_reason) :
-                        !intent.held_mask || intent.conflicting ? AutoStopBlockReason::MOTION_UNAVAILABLE :
+                        !intent.held_mask || (!allocate_request && intent.conflicting) ? AutoStopBlockReason::MOTION_UNAVAILABLE :
                         !active_id && target_consumed ? AutoStopBlockReason::CONTINUOUS_REQUEST_CONSUMED : AutoStopBlockReason::NONE;
                 }
                 if (active_id && independent && !session_ready)
                     cancel_active(false, "source_focus_revoked");
                 if (active_id && (!input_ok || !events_ok ||
-                    (!independent_acquired && !intent.history_valid) || !permission(input) ||
-                    (!independent_acquired && held_wasd(input) != original_mask) || active_generation != cancel_generation.load() ||
-                    ((!independent || !estimated || software_mask != 0) && Clock::now() >= lease_end))) {
-                    const bool normal_release = independent && estimated && input_ok && events_ok &&
+                    (independent && (!intent.input_continuous || intent.epoch != active_input_epoch)) ||
+                    (!independent_acquired && !mask_only && !intent.history_valid) || !permission(input) ||
+                    (!independent_acquired && !mask_only && held_wasd(input) != original_mask) || active_generation != cancel_generation.load() ||
+                    ((!independent || (!estimated && !masked_hold) || software_mask != 0) && Clock::now() >= lease_end))) {
+                    const bool normal_release = independent && (estimated || masked_hold) && input_ok && events_ok &&
+                        intent.input_continuous && intent.epoch == active_input_epoch &&
                         !input.virtual_keys[config.activation_virtual_key] && !input.virtual_keys[0x23] &&
                         !release_key_held(input) && !paused.load() && !stopping.load() &&
                         active_generation == cancel_generation.load() && allowed && allowed() &&
                         !release_required && session_permission(false);
                     const char* reason = !input_ok ? "input_invalid" : !events_ok ? "input_gap" :
-                        !independent_acquired && !intent.history_valid ? "history_invalid" : paused.load() ? "paused" :
+                        independent && (!intent.input_continuous || intent.epoch != active_input_epoch) ? "input_history_discontinuous" :
+                        !independent_acquired && !mask_only && !intent.history_valid ? "history_invalid" : paused.load() ? "paused" :
                         !permission(input) ? (normal_release ? "activation_released" : "permission_revoked") :
                         !independent_acquired && held_wasd(input) != original_mask ? "direction_changed" :
                         active_generation != cancel_generation.load() ? "caller_canceled" : "lease_expired";
@@ -350,7 +364,7 @@ public:
                         std::lock_guard<std::mutex> lock(mutex);
                         // 目标只用于这次准入；接收后不再因目标变化撤销制动。
                         if (!pending_id && !target_consumed && request_eligible && events_ok &&
-                            intent.history_valid && intent.held_mask != 0 && !intent.conflicting &&
+                            intent.input_continuous && intent.held_mask != 0 &&
                             state.status == AutoStopStatus::READY) {
                             const auto id = allocate_request();
                             if (id > last_request_id) {
@@ -373,15 +387,21 @@ public:
                     }
                     if (requested) {
                         active_id = requested;
+                        active_input_epoch = intent.epoch;
                         original_mask = intent.held_mask;
                         estimated = false;
-                        if (!input_ok || !events_ok || !intent.history_valid || !permission(input) ||
+                        masked_hold = false;
+                        mask_only = independent && (!intent.history_valid || intent.conflicting);
+                        if (!input_ok || !events_ok || (independent ? !intent.input_continuous : !intent.history_valid) || !permission(input) ||
                             (independent && !session_permission(false)) ||
                             active_generation != cancel_generation.load() || Clock::now() >= lease_end) {
                             cancel_active(false, "request_not_eligible");
                         } else {
-                            const auto decision = controller.request(active_id, now_ns());
-                            if (decision.phase != AutoStopPhase::WAITING_ACK || decision.request_id != active_id || !reserve()) {
+                            const auto decision = mask_only ? AutoStopDecision{} : controller.request(active_id, now_ns());
+                            const bool plan_valid = decision.phase == AutoStopPhase::WAITING_ACK && decision.request_id == active_id;
+                            // 归还窗口等情况也可能只保留原始历史，没有可继续使用的运动模型。
+                            if (independent && !plan_valid) mask_only = true;
+                            if ((!mask_only && !plan_valid) || !reserve()) {
                                 cancel_active(false, "controller_or_arbiter_unavailable");
                             } else {
                                 publish(AutoStopStatus::BRAKING);
@@ -391,7 +411,7 @@ public:
                                 const std::uint8_t mask_to_install = independent ? 15 : original_mask;
                                 for (std::uint8_t key = 1; key <= 8; key <<= 1) if (mask_to_install & key) {
                                     if (!mouse->poll_input(input) || !permission(input) ||
-                                        (independent && !session_permission(false)) || held_wasd(input) != original_mask ||
+                                        (independent && !session_permission(false)) || (!mask_only && held_wasd(input) != original_mask) ||
                                         active_generation != cancel_generation.load() || Clock::now() >= lease_end) { cancel_active(false, "permission_changed_before_mask"); break; }
                                     const auto started = now_ns();
                                     const auto result = mouse->set_wasd_mask(key, true);
@@ -405,28 +425,53 @@ public:
                                     const auto acquired_at = now_ns();
                                     auto acquisition_cursor = cursor;
                                     WasdEventBatch acquisition_events;
+                                    auto acquisition_history = history;
                                     const bool acquisition_valid = mouse->read_wasd_events(acquisition_cursor, acquisition_events) &&
                                         acquisition_events.subscribed && !acquisition_events.gap &&
+                                        acquisition_cursor.epoch == active_input_epoch &&
                                         acquisition_events.count < acquisition_events.events.size() &&
                                         std::all_of(acquisition_events.events.begin(),
                                             acquisition_events.events.begin() + acquisition_events.count, [&](const auto& event) {
-                                                return event.state_valid && (event.received_at_steady_ns > acquired_at ||
-                                                    event.held_mask == original_mask);
+                                                const auto observed = acquisition_history.observe(event.held_mask, event.epoch,
+                                                    event.sequence, event.received_at_steady_ns, event.state_valid);
+                                                return event.state_valid && event.epoch == active_input_epoch && observed.input_continuous &&
+                                                    (mask_only || event.received_at_steady_ns > acquired_at || event.held_mask == original_mask);
                                             });
                                     if (!acquisition_valid) cancel_active(false, "input_changed_during_acquisition");
                                     else {
                                         independent_acquired = true;
-                                        LOG_INFO("auto_stop", "请求{}全部WASD屏蔽已确认，执行一次有限制动并保持至松键", active_id);
+                                        LOG_INFO("auto_stop", "请求{}全部WASD屏蔽已确认，模式={}", active_id,
+                                            mask_only ? "仅零报告保持，运动模型不可用" : "有限制动后保持至松键");
                                     }
                                 }
                             }
                         }
                     } else if (!fault) {
                         publish(config.activation_virtual_key == 0 ? AutoStopStatus::UNBOUND : paused.load() ? AutoStopStatus::PAUSED :
-                            (input_ok && events_ok && intent.history_valid ? AutoStopStatus::READY : AutoStopStatus::WAITING_INPUT));
+                            (input_ok && events_ok && (allocate_request ? intent.input_continuous : intent.history_valid) ? AutoStopStatus::READY : AutoStopStatus::WAITING_INPUT));
                     }
                 }
-                if (active_id) {
+                if (active_id && mask_only) {
+                    if (!masked_hold) {
+                        if (!mouse->poll_input(input) || !permission(input) || !session_permission(false) ||
+                            active_generation != cancel_generation.load() || Clock::now() >= lease_end) {
+                            cancel_active(false, "permission_changed_before_zero");
+                        } else {
+                            const auto started = now_ns();
+                            const auto result = mouse->set_wasd_keyboard(0);
+                            debt |= result.datagram_sent;
+                            receipt(result, started);
+                            if (result.disposition != KeyboardDisposition::ACKNOWLEDGED) cancel_active(true, "zero_not_acknowledged");
+                            else {
+                                software_mask = 0;
+                                masked_hold = true;
+                                publish(AutoStopStatus::MASKED);
+                                LOG_INFO("auto_stop", "请求{}零软件报告已确认，仅屏蔽保持至松键；未估算停稳，未授予开火", active_id);
+                                release_reservation();
+                            }
+                        }
+                    }
+                } else if (active_id) {
                     const auto previous = controller.decision();
                     const auto decision = controller.tick(now_ns());
                     if (decision.phase == AutoStopPhase::INVALID || decision.phase == AutoStopPhase::CANCELLED) cancel_active(false, "controller_canceled");

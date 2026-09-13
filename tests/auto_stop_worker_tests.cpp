@@ -132,6 +132,142 @@ void ready(AutoStopWorker& worker, const std::shared_ptr<Fake>& fake) {
 int main() {
     try {
         const AutoStopConfig config{true, 5};
+        {
+            auto fake = std::make_shared<Fake>();
+            std::atomic<std::uint64_t> id{0};
+            AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+                [&] { return ++id; }, [] { return true; });
+            require(worker.start(config), "持续侧键下A/D重叠换向回归启动");
+            fake->physical(0);
+            wait_for([&] { return worker.snapshot().status == AutoStopStatus::READY; });
+            for (const auto mask : {2, 10, 8, 10, 2}) {
+                fake->physical(static_cast<std::uint8_t>(mask));
+                wait_for([&] { return fake->drained(); });
+            }
+            worker.publish_target(Clock::now() + std::chrono::seconds(5));
+            const auto limit = Clock::now() + std::chrono::milliseconds(300);
+            while (Clock::now() < limit && !fake->has_masks()) {
+                for (const auto mask : {10, 8, 10, 2}) {
+                    fake->physical(static_cast<std::uint8_t>(mask));
+                    wait_for([&] { return fake->drained(); });
+                }
+            }
+            require(fake->has_masks(), "健康A/D重叠换向后进框不得永久等待四键全松而完全不接管");
+            wait_for([&] { return worker.snapshot().status == AutoStopStatus::MASKED; });
+            require(worker.snapshot().requests == 1 && worker.snapshot().completed == 0 &&
+                !worker.snapshot().fire_permitted, "仅屏蔽不是估算停稳，不得授予开火");
+            const auto masked_reports = fake->reports();
+            require(!masked_reports.empty() && std::all_of(masked_reports.begin(), masked_reports.end(),
+                [](int mask) { return mask == 0; }), "模型不可用时只能发送零软件报告");
+            worker.publish_target({});
+            for (const auto mask : {10, 8, 10, 2, 0, 8, 10, 2, 10, 8}) {
+                fake->physical(static_cast<std::uint8_t>(mask));
+                wait_for([&] { return fake->drained(); });
+                std::lock_guard<std::mutex> lock(fake->mutex);
+                require(fake->installed_masks == 15 && fake->current_software == 0 && fake->cleanups == 0,
+                    "仅屏蔽后持续乱按AD、重叠及全松均不能解除四键屏蔽");
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(520));
+            require(worker.snapshot().status == AutoStopStatus::MASKED && worker.snapshot().requests == 1 &&
+                fake->reports() == masked_reports && !fake->released(),
+                "仅屏蔽保持不受目标失效或500ms制动期限解除，不重复制动");
+            { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
+            wait_for([&] { return fake->released() && worker.snapshot().canceled == 1; });
+            // 当前仍持D，不补任何全松事件，恢复侧键应可重新进入仅屏蔽。
+            { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = true; }
+            worker.publish_target(Clock::now() + std::chrono::seconds(5));
+            wait_for([&] { return worker.snapshot().requests == 2 && worker.snapshot().status == AutoStopStatus::MASKED; });
+            const auto repeated_reports = fake->reports();
+            require(std::all_of(repeated_reports.begin(), repeated_reports.end(), [](int mask) { return mask == 0; }) &&
+                worker.snapshot().completed == 0 && !worker.snapshot().fire_permitted,
+                "持键重入仅屏蔽不得伪造模型历史或发非零报告");
+            worker.stop();
+            require(fake->released(), "停止仅屏蔽必须归还全部键盘债务");
+        }
+        for (int reason = 0; reason < 11; ++reason) {
+            auto fake = std::make_shared<Fake>();
+            std::atomic<std::uint64_t> id{0};
+            std::atomic<bool> permitted{true}, focused{true};
+            AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [&] { return permitted.load(); },
+                [&] { return ++id; }, [&] { return focused.load(); });
+            require(worker.start(config), "仅屏蔽安全撤销矩阵启动");
+            fake->physical(0);
+            wait_for([&] { return worker.snapshot().status == AutoStopStatus::READY; });
+            for (const auto mask : {2, 10, 8}) {
+                fake->physical(static_cast<std::uint8_t>(mask));
+                wait_for([&] { return fake->drained(); });
+            }
+            worker.publish_target(Clock::now() + std::chrono::seconds(5));
+            wait_for([&] { return worker.snapshot().status == AutoStopStatus::MASKED; });
+            if (reason == 0) focused.store(false);
+            if (reason == 1) permitted.store(false);
+            if (reason == 2) { std::lock_guard<std::mutex> lock(fake->mutex); fake->gap = true; }
+            if (reason == 3) { std::lock_guard<std::mutex> lock(fake->mutex); fake->healthy = false; }
+            if (reason == 4) { std::lock_guard<std::mutex> lock(fake->mutex); fake->end = true; }
+            if (reason == 5) worker.set_paused(true);
+            if (reason == 6) worker.cancel(worker.snapshot().request_id);
+            if (reason == 7) { std::lock_guard<std::mutex> lock(fake->mutex);
+                fake->events.push_back({8, false, 1, ++fake->sequence, clock_ns()}); }
+            if (reason == 8) { std::lock_guard<std::mutex> lock(fake->mutex);
+                fake->events.push_back({8, true, 2, ++fake->sequence, clock_ns()}); }
+            if (reason == 9) { std::lock_guard<std::mutex> lock(fake->mutex);
+                fake->sequence += 2;
+                fake->events.push_back({8, true, 1, fake->sequence, clock_ns()}); }
+            if (reason == 10) { std::lock_guard<std::mutex> lock(fake->mutex);
+                fake->events.push_back({8, true, 1, ++fake->sequence, 0});
+                fake->held = 0;
+                fake->events.push_back({0, true, 1, ++fake->sequence, clock_ns()}); }
+            wait_for([&] { return fake->released() && worker.snapshot().canceled != 0; });
+            const auto reports = fake->reports();
+            require(std::all_of(reports.begin(), reports.end(), [](int mask) { return mask == 0; }) &&
+                worker.snapshot().completed == 0 && !worker.snapshot().fire_permitted,
+                "仅屏蔽遇失焦、安全撤销、缺口、失联、End、暂停、取消、无效事件或换代必须归还且不发非零");
+            worker.stop();
+        }
+        for (int failure = 0; failure < 6; ++failure) {
+            auto fake = std::make_shared<Fake>();
+            std::atomic<std::uint64_t> id{0};
+            AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+                [&] { return ++id; }, [] { return true; });
+            if (failure < 4) fake->mask_fail_at = static_cast<std::size_t>(failure + 1);
+            if (failure == 4) fake->software_fail_at = 1;
+            require(worker.start(config), "仅屏蔽ACK故障矩阵启动");
+            fake->physical(0);
+            wait_for([&] { return worker.snapshot().status == AutoStopStatus::READY; });
+            for (const auto mask : {2, 10, 8}) {
+                fake->physical(static_cast<std::uint8_t>(mask));
+                wait_for([&] { return fake->drained(); });
+            }
+            worker.publish_target(Clock::now() + std::chrono::seconds(5));
+            if (failure == 5) {
+                wait_for([&] { return worker.snapshot().status == AutoStopStatus::MASKED; });
+                { std::lock_guard<std::mutex> lock(fake->mutex); fake->cleanup_fails = true; fake->activation = false; }
+            }
+            wait_for([&] { return worker.snapshot().status == AutoStopStatus::FAULT; });
+            const auto reports = fake->reports();
+            require(std::all_of(reports.begin(), reports.end(), [](int mask) { return mask == 0; }) &&
+                worker.snapshot().completed == 0 && !worker.snapshot().fire_permitted,
+                "任一mask或零报告ACK未知不能冒充成功，更不能发反向报告");
+            if (failure < 5) require(fake->released(), "安装或零报告失败必须清理已安装屏蔽");
+            else require(worker.snapshot().cleanup_unknown && !fake->released(), "清理ACK未知必须保留债务和FAULT");
+            worker.stop();
+        }
+        {
+            auto fake = std::make_shared<Fake>();
+            AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; });
+            require(worker.start(config), "显式请求不能借用仅屏蔽降级路径");
+            fake->physical(0);
+            wait_for([&] { return worker.snapshot().status == AutoStopStatus::READY; });
+            for (const auto mask : {2, 10, 8}) {
+                fake->physical(static_cast<std::uint8_t>(mask));
+                wait_for([&] { return fake->drained(); });
+            }
+            const bool queued = worker.request(1);
+            if (queued) wait_for([&] { return worker.snapshot().canceled == 1; });
+            require(!fake->has_masks() && !fake->has_software() && worker.snapshot().completed == 0 &&
+                !worker.snapshot().fire_permitted, "显式请求遇模型历史失效须拒绝，不能转MASKED");
+            worker.stop();
+        }
         for (int change = 0; change < 3; ++change) {
             auto fake = std::make_shared<Fake>();
             std::atomic<std::uint64_t> id{0};
@@ -231,8 +367,11 @@ int main() {
             std::this_thread::sleep_for(std::chrono::milliseconds(80));
             require(!fake->released() && worker.snapshot().canceled == 0,
                 "第一次制动完成后离框不能解除急停，必须保持至允许键释放");
-            const auto reports_after_braking = fake->reports().size();
-            for (const std::uint8_t directions : {0, 2, 4, 8, 3, 12, 15, 1}) {
+            const auto normal_reports = fake->reports();
+            require(!normal_reports.empty() && normal_reports.front() != 0 && normal_reports.back() == 0,
+                "正常模型路径必须仍完成真实反向报告及末尾零报告");
+            const auto reports_after_braking = normal_reports.size();
+            for (const std::uint8_t directions : {0, 2, 4, 8, 3, 12, 15, 1, 2, 10, 8, 10, 2, 0, 8, 10, 2}) {
                 fake->physical(directions);
                 wait_for([&] { return fake->drained(); });
                 { std::lock_guard<std::mutex> lock(fake->mutex);
@@ -241,6 +380,9 @@ int main() {
                 require(worker.snapshot().canceled == 0 && fake->reports().size() == reports_after_braking,
                     "锁存时改向不能解除或重新发送反向制动");
             }
+            require(worker.snapshot().status == AutoStopStatus::ESTIMATED && worker.snapshot().requests == 1 &&
+                worker.snapshot().completed == 1 && !worker.snapshot().fire_permitted && fake->reports() == normal_reports,
+                "正常ESTIMATED路径持续乱按AD仍保持原零软件报告，不重启也不授予开火");
             { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
             wait_for([&] { return fake->released() && worker.snapshot().canceled == 1; });
             worker.stop();

@@ -3051,6 +3051,7 @@ struct Overlay::Impl {
             case AutoStopStatus::PAUSED: status = "已暂停"; break;
             case AutoStopStatus::READY: status = "等待快捷键与目标"; break;
             case AutoStopStatus::WAITING_INPUT: status = "等待有效输入"; break;
+            case AutoStopStatus::MASKED: status = "已屏蔽保持（未估算制动）"; break;
             case AutoStopStatus::BRAKING: status = "制动中"; break;
             case AutoStopStatus::ESTIMATED: status = "制动预计完成，松开允许键恢复移动"; break;
             case AutoStopStatus::CANCELED: status = "已取消"; break;
@@ -3079,6 +3080,8 @@ struct Overlay::Impl {
             ImGui::TextWrapped("本次会话暂无制动执行记录。");
         }
         ImGui::TextWrapped("预计完成仅表示制动计划结束，不代表实测停稳或允许开火。");
+        if (snapshot.auto_stop.status == AutoStopStatus::MASKED)
+            ImGui::TextWrapped("方向重叠或制动历史不可用：已阻止方向键继续输入，保持至松开急停键；未执行反向制动，可能仍有惯性滑行。");
         if (snapshot.auto_stop.independent_trigger_enabled) {
             ImGui::TextWrapped("当前条件：%s", AutoStopBlockReasonName(snapshot.auto_stop.block_reason));
             if (!snapshot.auto_stop.source_focused)

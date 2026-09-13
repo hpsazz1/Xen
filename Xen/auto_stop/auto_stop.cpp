@@ -15,6 +15,7 @@ const char* AutoStopStatusName(AutoStopStatus status) noexcept {
         case AutoStopStatus::WAITING_INPUT: return "WAITING_INPUT";
         case AutoStopStatus::BRAKING: return "BRAKING";
         case AutoStopStatus::ESTIMATED: return "ESTIMATED";
+        case AutoStopStatus::MASKED: return "MASKED";
         case AutoStopStatus::CANCELED: return "CANCELED";
         case AutoStopStatus::FAULT: return "FAULT";
     }
@@ -51,6 +52,7 @@ WasdMotionIntent WasdInputHistory::observe(
         std::uint64_t sequence, std::int64_t received_at_ns,
         bool input_valid, bool sequence_gap) noexcept {
     if (epoch == 0 || sequence == 0 || received_at_ns <= 0 || epoch < epoch_) {
+        state_.input_continuous = false;
         state_.history_valid = false;
         state_.held_since_ns = {};
         synchronized_ = false;
@@ -61,12 +63,14 @@ WasdMotionIntent WasdInputHistory::observe(
         epoch_ = epoch;
     }
     if (!input_valid || sequence_gap || held_mask > 15 ||
+        (sequence_ != 0 && sequence > sequence_ && sequence - sequence_ > 1) ||
         sequence < sequence_ || received_at_ns < received_at_ns_ ||
         (sequence == sequence_ && held_mask != state_.held_mask)) {
         // 键态未知不等于事件未发生。保留已见水位，防止旧释放越过
         // 一个无效的新报告重新建立输入历史。
         sequence_ = std::max(sequence_, sequence);
         received_at_ns_ = std::max(received_at_ns_, received_at_ns);
+        state_.input_continuous = false;
         state_.history_valid = false;
         state_.held_since_ns = {};
         synchronized_ = false;
@@ -88,6 +92,7 @@ WasdMotionIntent WasdInputHistory::observe(
         synchronized_ = false;
         state_.held_since_ns = {};
     } else if (held_mask == 0) {
+        state_.input_continuous = true;
         synchronized_ = true;
         state_.held_since_ns = {};
     } else if (synchronized_) {
