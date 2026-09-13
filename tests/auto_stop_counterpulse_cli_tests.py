@@ -45,6 +45,22 @@ def main():
         invoke('-Mode', 'Prepare', '-RunDirectory', run, '-Confirm', 'AUTO_STOP_COUNTERPULSE')
         assert not run.exists(), 'Prepare拒绝混入物理授权'
         if args.executable:
+            commented = root / 'commented-plan.json'
+            commented.write_text('{\n  "shots": 3, // 子弹数\n  "capture_enabled": false, /* 人工观察 */\n'
+                                 '  "shot_interval_ms": 0, "fire_delay_ms": 300,\n'
+                                 '  "move_ms": 300, "counter_delay_ms": 50, "counter_hold_ms": 5,\n'
+                                 '  "shot_after_release_ms": 0\n}\n', encoding='utf-8')
+            parsed = subprocess.run([str(Path(args.executable).resolve()), '--plan', str(commented), '--dry-run'],
+                                    capture_output=True, timeout=10)
+            assert parsed.returncode == 0, '计划行末中文注释及块注释应被正式解析器接受'
+            commented.write_text('{"shots": 0 // 越界仍须拒绝\n}', encoding='utf-8')
+            rejected = subprocess.run([str(Path(args.executable).resolve()), '--plan', str(commented), '--dry-run'],
+                                      capture_output=True, timeout=10)
+            assert rejected.returncode != 0, '允许注释不得绕过数值边界'
+            commented.write_text('{"shots": 3, /* 未闭合注释', encoding='utf-8')
+            rejected = subprocess.run([str(Path(args.executable).resolve()), '--plan', str(commented), '--dry-run'],
+                                      capture_output=True, timeout=10)
+            assert rejected.returncode != 0, '损坏的注释仍须拒绝'
             config = root / 'private.ini'
             config.write_text('[source_context]\nenabled=true\n', encoding='utf-8')
             for authorization in [('-AllowPhysicalOutput',), ('-Confirm', 'AUTO_STOP_COUNTERPULSE')]:

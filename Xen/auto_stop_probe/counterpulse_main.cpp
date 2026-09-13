@@ -188,7 +188,8 @@ int main(int argc, char** argv) {
         }
         std::ifstream input(plan_path);
         if (!input || std::filesystem::file_size(plan_path) > 16384) throw std::runtime_error("计划不可读或过大");
-        const auto document = Json::parse(input);
+        // 仅人工计划允许JSONC注释；字段和时序边界仍由正式解析器严格校验。
+        const auto document = Json::parse(input, nullptr, true, true);
         const auto plan = parse_counterpulse_plan(document);
         if (dry) {
             if (capture_check || allowed || !confirmation.empty() || !output.empty() || !config_path.empty()) throw std::runtime_error("dry-run不接受输出授权或配置");
