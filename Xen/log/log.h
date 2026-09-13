@@ -27,7 +27,7 @@ enum class LogLevel {
 struct LogConfig {
     LogLevel global_level  = LogLevel::TRACE; // 全局最低日志级别
     bool enable_console    = true;   // 控制台输出
-    bool enable_file       = true;   // 轮转文件输出（warn/err）
+    bool enable_file       = true;   // 轮转文件输出（INFO 及以上，仍受全局/模块等级过滤）
     bool enable_debug_file = false;  // 调试文件（全级别）
     bool enable_ringbuf    = true;   // 环形缓冲区（内存）
     int  ringbuf_capacity  = 1024;   // 环形缓冲区容量

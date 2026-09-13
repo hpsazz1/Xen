@@ -30,6 +30,8 @@ public:
         input.sequence = sequence;
         input.virtual_keys[5] = activation;
         input.virtual_keys[0x23] = end;
+        for (std::size_t key = 0; key < extra_keys.size(); ++key)
+            input.virtual_keys[key] = input.virtual_keys[key] || extra_keys[key];
         input.virtual_keys['W'] = (held & 1) != 0;
         input.virtual_keys['A'] = (held & 2) != 0;
         input.virtual_keys['S'] = (held & 4) != 0;
@@ -91,6 +93,7 @@ public:
     std::mutex mutex;
     std::deque<WasdEvent> events;
     std::vector<int> software, masks;
+    std::array<bool, 256> extra_keys{};
     std::uint64_t sequence = 0;
     std::uint8_t held = 0, installed_masks = 0, current_software = 0;
     bool healthy = true, subscribed = false, gap = false, cleanup_fails = false, end = false, activation = true;
@@ -110,6 +113,96 @@ void ready(AutoStopWorker& worker, const std::shared_ptr<Fake>& fake) {
 int main() {
     try {
         const AutoStopConfig config{true, 5};
+        {
+            auto fake = std::make_shared<Fake>();
+            std::atomic<bool> allowed{true};
+            auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+            AutoStopWorker worker(fake, arbiter, [&] { return allowed.load(); });
+            require(worker.start(config), "故障救援测试启动");
+            ready(worker, fake);
+            require(worker.request(1), "救援前建立已持键盘债务");
+            wait_for([&] { return fake->has_software(); });
+            { std::lock_guard<std::mutex> lock(fake->mutex); fake->cleanup_fails = true; }
+            worker.cancel(1);
+            wait_for([&] { return worker.snapshot().status == AutoStopStatus::FAULT && worker.snapshot().cleanup_unknown; });
+            allowed.store(false); worker.set_paused(true);
+            const auto reports_before_rescue = fake->reports().size();
+            { std::lock_guard<std::mutex> lock(fake->mutex); fake->extra_keys['1'] = true; }
+            wait_for([&] { return worker.snapshot().rescue_failed == 1; });
+            require(worker.snapshot().cleanup_unknown && !fake->released(), "救援未收到ACK不能报告已归还");
+            { std::lock_guard<std::mutex> lock(fake->mutex); fake->cleanup_fails = false; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            require(worker.snapshot().rescue_attempts == 1, "持续按住救援键不能重复刷清理命令");
+            { std::lock_guard<std::mutex> lock(fake->mutex); fake->extra_keys['1'] = false; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            { std::lock_guard<std::mutex> lock(fake->mutex); fake->extra_keys['1'] = true; }
+            wait_for([&] { return fake->released() && worker.snapshot().rescue_succeeded == 1; });
+            require(!worker.snapshot().cleanup_unknown && worker.snapshot().rescue_attempts == 2 &&
+                fake->reports().size() == reports_before_rescue, "释放再按可重试，救援不能发送新DOWN");
+            require(worker.snapshot().status == AutoStopStatus::FAULT, "救援只清急停债务，不解除共享故障锁存");
+            require(!arbiter->try_enter_aim().owns_lock(), "救援成功不得清除共享输出故障");
+            worker.stop();
+        }
+        for (const int rescue_key : config.release_virtual_keys) {
+            auto fake = std::make_shared<Fake>();
+            AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; });
+            require(worker.start(config), "六键救援启动");
+            ready(worker, fake);
+            require(worker.request(1), "六键救援前建立债务");
+            wait_for([&] { return fake->has_software(); });
+            const auto reports_before_rescue = fake->reports().size();
+            { std::lock_guard<std::mutex> lock(fake->mutex); fake->extra_keys[rescue_key] = true; }
+            wait_for([&] { return worker.snapshot().rescue_succeeded == 1; });
+            require(fake->released() && worker.snapshot().release_required &&
+                fake->reports().size() == reports_before_rescue, "数字行1至5及Q任意单键均只清理并锁存重触发");
+            { std::lock_guard<std::mutex> lock(fake->mutex); fake->extra_keys[rescue_key] = false; }
+            fake->physical(0);
+            wait_for([&] { return worker.snapshot().status == AutoStopStatus::READY; });
+            require(worker.snapshot().release_required, "救援后仍按住activation不得清重触发锁存");
+            { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
+            wait_for([&] { return !worker.snapshot().release_required; });
+            { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = true; }
+            fake->physical(1);
+            wait_for([&] { return fake->drained(); });
+            require(worker.request(2), "显式模式救援后松开重新按下可接收新请求");
+            wait_for([&] { return fake->reports().size() > reports_before_rescue; });
+            worker.stop();
+        }
+        {
+            auto fake = std::make_shared<Fake>();
+            AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; });
+            require(worker.start(config), "监听失效救援边界启动");
+            ready(worker, fake);
+            { std::lock_guard<std::mutex> lock(fake->mutex); fake->healthy = false; fake->extra_keys['Q'] = true; }
+            wait_for([&] { return worker.snapshot().block_reason == AutoStopBlockReason::INPUT_UNAVAILABLE; });
+            require(worker.snapshot().rescue_attempts == 0, "失联快照中的缓存按键不产生救援事实");
+            worker.stop();
+        }
+        {
+            auto fake = std::make_shared<Fake>();
+            std::atomic<bool> focused{true};
+            std::atomic<std::uint64_t> id{0};
+            AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+                [&] { return ++id; }, [&] { return focused.load(); });
+            require(worker.start(config), "焦点恢复重新按键回归启动");
+            ready(worker, fake);
+            worker.publish_target(Clock::now() + std::chrono::seconds(2));
+            wait_for([&] { return fake->has_software(); });
+            focused.store(false);
+            wait_for([&] { return fake->released() && worker.snapshot().canceled == 1; });
+            fake->physical(0);
+            wait_for([&] { return worker.snapshot().status == AutoStopStatus::READY; });
+            focused.store(true);
+            fake->physical(1);
+            wait_for([&] { return fake->drained(); });
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            require(worker.snapshot().requests == 1, "切回仍按住侧键不得自动再次接管键盘");
+            { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = true; }
+            wait_for([&] { return worker.snapshot().requests == 2; });
+            worker.stop();
+        }
         {
             auto fake = std::make_shared<Fake>();
             std::atomic<std::uint64_t> id{0};

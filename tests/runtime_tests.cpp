@@ -622,6 +622,18 @@ void test_runtime_preview_held_slots_and_reset() {
 
 int main() {
     {
+        AutoStopConfig stop{true, 5};
+        source_context::SourceContextConfig source;
+        expect(runtime::detail::auto_stop_startup_error(stop, source) != nullptr,
+            "启用急停但没有源焦点桥接必须在生产启动入口明确拒绝");
+        stop.enabled = false;
+        expect(runtime::detail::auto_stop_startup_error(stop, source) == nullptr,
+            "未启用急停不额外要求桥接");
+        stop.enabled = true; source.enabled = true;
+        expect(runtime::detail::auto_stop_startup_error(stop, source) == nullptr,
+            "已启用桥接继续由源客户端校验连接配置");
+    }
+    {
         AimConfig config;
         config.person_class_ids = {2}; config.head_class_ids = {3}; config.high_confidence = 0.5f;
         const auto now = std::chrono::steady_clock::now();

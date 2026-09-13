@@ -63,7 +63,8 @@ public:
     void set_paused(bool paused) noexcept;
     AutoStopSnapshot snapshot() const noexcept;
     // 检测线程发布不可变目标事实；无目标/失败发布零期限，旧帧不能自行续期。
-    void publish_target(std::chrono::steady_clock::time_point valid_until) noexcept;
+    void publish_target(std::chrono::steady_clock::time_point valid_until,
+        AutoStopBlockReason reason = AutoStopBlockReason::NO_TARGET) noexcept;
 private:
     class Impl;
     std::unique_ptr<Impl> impl_;

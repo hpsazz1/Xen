@@ -3,11 +3,13 @@
 
 #include <cstdint>
 #include <array>
+#include <vector>
 
 // 移动制动配置独立于 Aim；允许键与有效目标可发起制动，不代表武装或开火请求。
 struct AutoStopConfig {
     bool enabled = false;
     int activation_virtual_key = 0;
+    std::vector<int> release_virtual_keys{0x31, 0x32, 0x33, 0x34, 0x35, 0x51};
 };
 
 enum class AutoStopStatus {
@@ -18,6 +20,33 @@ enum class AutoStopStatus {
     PAUSED,
     READY, WAITING_INPUT, BRAKING, ESTIMATED, CANCELED, FAULT,
 };
+
+enum class AutoStopBlockReason {
+    NONE, SOURCE_FOCUS, RELEASE_REQUIRED, INPUT_UNAVAILABLE, INPUT_HISTORY,
+    ACTIVATION_NOT_HELD, SAFETY_PERMISSION, PAUSED, MOTION_UNAVAILABLE,
+    CONTINUOUS_REQUEST_CONSUMED, NO_TARGET, SOURCE_TIMING_INVALID,
+    SOURCE_UNCERTAINTY, TARGET_STALE, OUTPUT_FAULT
+};
+inline const char* AutoStopBlockReasonName(AutoStopBlockReason reason) noexcept {
+    switch (reason) {
+    case AutoStopBlockReason::NONE: return "条件满足";
+    case AutoStopBlockReason::SOURCE_FOCUS: return "源程序未聚焦或桥接不可用";
+    case AutoStopBlockReason::RELEASE_REQUIRED: return "切回后请松开允许键再按下";
+    case AutoStopBlockReason::INPUT_UNAVAILABLE: return "设备按键监听不可用";
+    case AutoStopBlockReason::INPUT_HISTORY: return "等待WASD全部释放以同步历史";
+    case AutoStopBlockReason::ACTIVATION_NOT_HELD: return "未按住允许键";
+    case AutoStopBlockReason::SAFETY_PERMISSION: return "物理输出未获安全许可";
+    case AutoStopBlockReason::PAUSED: return "急停已暂停";
+    case AutoStopBlockReason::MOTION_UNAVAILABLE: return "未移动或方向冲突";
+    case AutoStopBlockReason::CONTINUOUS_REQUEST_CONSUMED: return "本次连续按住已执行，等待重新触发";
+    case AutoStopBlockReason::NO_TARGET: return "未识别到配置目标";
+    case AutoStopBlockReason::SOURCE_TIMING_INVALID: return "源帧时钟映射无效";
+    case AutoStopBlockReason::SOURCE_UNCERTAINTY: return "源时钟不确定度超界";
+    case AutoStopBlockReason::TARGET_STALE: return "目标帧已超过50ms有效期";
+    case AutoStopBlockReason::OUTPUT_FAULT: return "设备输出故障";
+    }
+    return "未知阻断原因";
+}
 
 const char* AutoStopStatusName(AutoStopStatus status) noexcept;
 
@@ -34,6 +63,10 @@ struct AutoStopSnapshot {
     bool independent_trigger_enabled = false;
     bool target_available = false;
     bool source_focused = false;
+    bool focus_required = false;
+    bool release_required = false;
+    AutoStopBlockReason block_reason = AutoStopBlockReason::NONE;
+    std::uint64_t rescue_attempts = 0, rescue_succeeded = 0, rescue_failed = 0;
     std::uint64_t acknowledged_commands = 0, cleanup_attempts = 0, cleanup_failures = 0, release_commands = 0;
     std::uint64_t arbiter_wait_samples = 0;
 };

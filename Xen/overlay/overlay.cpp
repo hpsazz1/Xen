@@ -96,6 +96,7 @@ enum class HotkeyBindingTarget {
     AIM_HOLD,
     EMERGENCY,
     AUTO_STOP,
+    AUTO_STOP_RELEASE,
     TRIGGER,
     RECOIL,
 };
@@ -3019,6 +3020,10 @@ struct Overlay::Impl {
                 "按住并检测到配置目标时触发制动，可与自动扳机共用；禁止 WASD，不能与运行启停、瞄准输出或安全急停重复。支持本机及已连接后端的按键，Esc 清空。",
                 HotkeyBindingTarget::AUTO_STOP,
                 key == 0 ? std::vector<int>{} : std::vector<int>{key}, key_active);
+            render_hotkey_row("释放急停按键", "##auto_stop_release_keys",
+                "任意一个键即取消急停、释放软件按键并解除 WASD 屏蔽。默认数字1至5和Q；重复采集可追加多个键，Esc清空。不能使用WASD或急停允许键。设备失联时无法保证收到按键或确认释放。",
+                HotkeyBindingTarget::AUTO_STOP_RELEASE,
+                app_config.auto_stop.release_virtual_keys, key_active);
             ImGui::EndTable();
         }
         ImGui::EndDisabled();
@@ -3044,7 +3049,7 @@ struct Overlay::Impl {
             case AutoStopStatus::UNBOUND: status = "未绑定允许键"; break;
             case AutoStopStatus::AWAITING_VALIDATION: status = "待设备与制动验证"; break;
             case AutoStopStatus::PAUSED: status = "已暂停"; break;
-            case AutoStopStatus::READY: status = "待自动扳机请求"; break;
+            case AutoStopStatus::READY: status = "等待快捷键与目标"; break;
             case AutoStopStatus::WAITING_INPUT: status = "等待有效输入"; break;
             case AutoStopStatus::BRAKING: status = "制动中"; break;
             case AutoStopStatus::ESTIMATED: status = "预计完成，待归还控制"; break;
@@ -3060,6 +3065,14 @@ struct Overlay::Impl {
             ImGui::Text("清理尝试 %llu | 未确认 %llu",
                 static_cast<unsigned long long>(snapshot.auto_stop.cleanup_attempts),
                 static_cast<unsigned long long>(snapshot.auto_stop.cleanup_failures));
+            if (snapshot.auto_stop.rescue_attempts) {
+                ImGui::Text("按键救援 %llu | 释放确认 %llu | 失败 %llu",
+                    static_cast<unsigned long long>(snapshot.auto_stop.rescue_attempts),
+                    static_cast<unsigned long long>(snapshot.auto_stop.rescue_succeeded),
+                    static_cast<unsigned long long>(snapshot.auto_stop.rescue_failed));
+                if (snapshot.auto_stop.status == AutoStopStatus::FAULT)
+                    ImGui::TextWrapped("故障锁存仍保留；清理确认只表示急停按键已归还，检查后停止并重新启动。");
+            }
             if (snapshot.auto_stop.cleanup_unknown)
                 ImGui::TextWrapped("设备清理尚未确认；控制状态未知。");
         } else {
@@ -3067,6 +3080,7 @@ struct Overlay::Impl {
         }
         ImGui::TextWrapped("预计完成仅表示制动计划结束，不代表实测停稳或允许开火。");
         if (snapshot.auto_stop.independent_trigger_enabled) {
+            ImGui::TextWrapped("当前条件：%s", AutoStopBlockReasonName(snapshot.auto_stop.block_reason));
             if (!snapshot.auto_stop.source_focused)
                 ImGui::TextWrapped("等待源机焦点：请检查下方源状态桥接与源机前台游戏。");
             if (!snapshot.auto_stop.target_available)
@@ -3193,11 +3207,11 @@ struct Overlay::Impl {
 
     void render_source_context_config(const RuntimeSnapshot& snapshot, AppConfig& app_config, bool can_edit) {
         begin_config_panel("source_context_panel", "源端焦点", 300.0f);
-        ImGui::TextWrapped("焦点必须来自游戏所在机器；接收机窗口或持续收到画面不代表游戏在前台。");
+        ImGui::TextWrapped("源状态桥接把游戏主机的前台状态传给辅机；切到其他程序时撤销急停接管，恢复后先松开快捷键再按下。");
         ImGui::BeginDisabled(!can_edit);
         auto& context = app_config.source_context;
         if (begin_form("source_context_form", 150.0f)) {
-            form_row("启用源端状态", "连接独立源端状态服务，只有可信且未过期的目标进程前台事实才授予扳机焦点许可。");
+            form_row("启用源端状态", "急停与扳机需要源机焦点服务。仅当配置的游戏进程在前台且状态有效时允许接管；未连接时等待，不以持续画面代替焦点。");
             toggle_switch("##source_context_enabled", &context.enabled);
             form_row("源端 IPv4", "游戏源端状态服务的 IPv4 地址；应与实际服务绑定地址及网络可达性一致。");
             ImGui::InputText("##source_context_host", &context.host);
@@ -3544,6 +3558,8 @@ struct Overlay::Impl {
                 return &app_config.keyboard.aim_hold_virtual_keys;
             case HotkeyBindingTarget::EMERGENCY:
                 return &app_config.keyboard.emergency_virtual_keys;
+            case HotkeyBindingTarget::AUTO_STOP_RELEASE:
+                return &app_config.auto_stop.release_virtual_keys;
             case HotkeyBindingTarget::AUTO_STOP:
             case HotkeyBindingTarget::TRIGGER:
             case HotkeyBindingTarget::RECOIL:
@@ -3661,12 +3677,27 @@ struct Overlay::Impl {
                     const int key = capture_result.virtual_key;
                     if (key == 'W' || key == 'A' || key == 'S' || key == 'D') {
                         hotkey_capture_message = "允许键不能使用 WASD";
-                    } else if (virtual_key_assigned_elsewhere(app_config, nullptr, key)) {
+                    } else if (std::find(app_config.auto_stop.release_virtual_keys.begin(),
+                            app_config.auto_stop.release_virtual_keys.end(), key) != app_config.auto_stop.release_virtual_keys.end() ||
+                            virtual_key_assigned_elsewhere(app_config, nullptr, key)) {
                         hotkey_capture_message = "该按键已被其他功能占用";
                     } else {
                         app_config.auto_stop.activation_virtual_key = key;
                         hotkey_capture_message = "允许键已设置";
                     }
+                }
+            } else if (hotkey_binding_target == HotkeyBindingTarget::AUTO_STOP_RELEASE && binding) {
+                if (capture_result.type == overlay::detail::HotkeyCaptureResultType::CLEARED) {
+                    binding->clear();
+                    hotkey_capture_message = "急停释放键已清空";
+                } else if (capture_result.type == overlay::detail::HotkeyCaptureResultType::ASSIGNED) {
+                    const int key = capture_result.virtual_key;
+                    if (key == 'W' || key == 'A' || key == 'S' || key == 'D' || key == app_config.auto_stop.activation_virtual_key)
+                        hotkey_capture_message = "释放键不能使用WASD或急停允许键";
+                    else if (std::find(binding->begin(), binding->end(), key) == binding->end()) {
+                        binding->push_back(key);
+                        hotkey_capture_message = "释放键已追加，任意一个键即可释放急停";
+                    } else hotkey_capture_message = "该按键已在释放键列表中";
                 }
             } else if (binding && capture_result.type ==
                     overlay::detail::HotkeyCaptureResultType::CLEARED) {
@@ -3754,7 +3785,7 @@ struct Overlay::Impl {
     void render_log_settings(AppConfig& app_config, OverlayActions& actions) {
         constexpr std::array notes{
             "立即生效；保存配置后保留。运行中也可切换。",
-            "最近日志 / 控制台显示信息及以上，常规日志文件记录警告及以上（需已启用对应输出）。",
+            "最近日志 / 控制台 / 常规日志文件记录所选等级及以上（最低 INFO，需已启用对应输出）。",
             "Release 不启用 TRACE / DEBUG；Debug 运行报告和崩溃报告独立保留。"};
         const float text_width = std::max(1.0f, ImGui::GetContentRegionAvail().x - 24.0f);
         float panel_height = ImGui::GetFrameHeightWithSpacing() + 24.0f;
@@ -4025,7 +4056,7 @@ struct Overlay::Impl {
              snapshot.detector_reload_state !=
                  DetectorReloadState::LOADING);
         const WorkspacePage capture_page =
-            (hotkey_binding_target == HotkeyBindingTarget::AUTO_STOP || hotkey_binding_target == HotkeyBindingTarget::TRIGGER ||
+            (hotkey_binding_target == HotkeyBindingTarget::AUTO_STOP || hotkey_binding_target == HotkeyBindingTarget::AUTO_STOP_RELEASE || hotkey_binding_target == HotkeyBindingTarget::TRIGGER ||
              hotkey_binding_target == HotkeyBindingTarget::RECOIL)
                 ? WorkspacePage::AUXILIARY : WorkspacePage::SETTINGS;
         if (hotkey_capture_state.active &&

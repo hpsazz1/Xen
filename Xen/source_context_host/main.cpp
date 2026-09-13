@@ -6,6 +6,8 @@
 #include <charconv>
 #include <iostream>
 #include <string>
+#include <chrono>
+#include <thread>
 
 namespace {
 std::atomic<bool> stop_requested{false};
@@ -24,16 +26,20 @@ bool number(const char* text, int& result) {
 }
 void usage() {
     std::cout << "用法: XenSourceContext --enable --host IPv4 --port 端口 --process 游戏.exe [--ttl-ms 毫秒]\n"
+              << "只读探测: XenSourceContext --probe --host IPv4 --port 端口 --process 游戏.exe [--timeout-ms 3000]\n"
               << "鉴权值仅从 XEN_SOURCE_CONTEXT_TOKEN 环境读取；默认不启动，不发送设备输入。\n";
 }
 }
 
 int main(int argc, char** argv) {
     source_context::SourceContextConfig config;
+    bool probe = false;
+    int timeout_ms = 3000;
     for (int i = 1; i < argc; ++i) {
         const std::string argument(argv[i]);
         if (argument == "--help" || argument == "-h") { usage(); return 0; }
         if (argument == "--enable") { config.enabled = true; continue; }
+        if (argument == "--probe") { probe = true; config.enabled = true; continue; }
         if (i + 1 >= argc) { usage(); return 2; }
         if (argument == "--host") config.host = argv[++i];
         else if (argument == "--process") config.process_name = argv[++i];
@@ -43,6 +49,8 @@ int main(int argc, char** argv) {
             config.port = static_cast<std::uint16_t>(value);
         } else if (argument == "--ttl-ms") {
             if (!number(argv[++i], config.ttl_ms)) { usage(); return 2; }
+        } else if (argument == "--timeout-ms") {
+            if (!number(argv[++i], timeout_ms) || timeout_ms < 100 || timeout_ms > 10000) { usage(); return 2; }
         } else { usage(); return 2; }
     }
     if (!config.enabled) { usage(); return 0; }
@@ -54,6 +62,26 @@ int main(int argc, char** argv) {
     }
     config.token.assign(token, length);
     SecureZeroMemory(token, sizeof(token));
+    if (probe) {
+        // 只推进既有鉴权客户端，不构造 Runtime 或任何设备后端。
+        source_context::SourceContextClient client;
+        if (!client.start(config)) { std::cerr << client.last_error() << '\n'; return 1; }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        while (std::chrono::steady_clock::now() < deadline) {
+            const auto snapshot = client.snapshot();
+            if (snapshot.available) {
+                std::cout << "{\"available\":true,\"focused\":" << (snapshot.focused ? "true" : "false")
+                          << ",\"session_id\":" << snapshot.session_id << ",\"sequence\":" << snapshot.sequence
+                          << ",\"age_ms\":" << snapshot.age_ms << "}\n";
+                client.stop();
+                return 0;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        client.stop();
+        std::cerr << "源端状态探测超时，未收到新鲜且可用的鉴权状态。\n";
+        return 3;
+    }
     source_context::SourceContextServer server;
     if (!server.start(config)) { std::cerr << server.last_error() << '\n'; return 1; }
     SetConsoleCtrlHandler(console_event, TRUE);

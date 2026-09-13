@@ -8,7 +8,9 @@
     [string]$ConfigPath = '',
     [string]$WorkspaceSettingsPath = '',
     [string]$PackageNotesPath = '',
-    [string]$ManualAcceptancePath = ''
+    [string]$ManualAcceptancePath = '',
+    [string]$SourceContextExecutable = '',
+    [switch]$ChangesOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -27,7 +29,7 @@ function Resolve-UpdateFile([string]$Path) {
     return $item.FullName
 }
 
-function Resolve-UpdatePayload([string]$Root, [string]$Relative) {
+function Resolve-UpdatePayload([string]$Root, [string]$Relative, [bool]$CheckPathChain = $true) {
     # 拒绝 Windows 别名、ADS、设备名和路径归一化歧义；不枚举可变数据目录。
     if ([string]::IsNullOrWhiteSpace($Relative) -or
         [IO.Path]::IsPathRooted($Relative) -or $Relative -match '[<>:"|?*\x00-\x1f]') {
@@ -44,7 +46,7 @@ function Resolve-UpdatePayload([string]$Root, [string]$Relative) {
     if (-not $path.StartsWith($Root.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
         throw '清单路径越出包根。'
     }
-    Assert-XenNoReparsePathChain $path '清单载荷'
+    if ($CheckPathChain) { Assert-XenNoReparsePathChain $path '清单载荷' }
     return $path
 }
 
@@ -82,6 +84,16 @@ if ($identity.schema -ne 1 -or $identity.git_dirty -isnot [bool] -or
 $workerPath = Resolve-UpdateFile (Join-Path $buildRoot 'Release\Xen.exe')
 $workerHash = (Get-FileHash -LiteralPath $workerPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $workerLength = (Get-Item -LiteralPath $workerPath).Length
+$sourceToolRelative = 'tools/source/xen_source_context.exe'
+$sourceToolPath = ''
+$sourceToolHash = ''
+if ($SourceContextExecutable) {
+    $sourceToolPath = Resolve-UpdateFile $SourceContextExecutable
+    if ($sourceToolPath -ine [IO.Path]::GetFullPath((Join-Path $buildRoot 'Release\xen_source_context.exe'))) {
+        throw '源桥接工具必须来自同一干净构建目录的 Release/xen_source_context.exe。'
+    }
+    $sourceToolHash = (Get-FileHash -LiteralPath $sourceToolPath -Algorithm SHA256).Hash.ToLowerInvariant()
+}
 $manifestPath = Resolve-UpdateFile (Join-Path $baseRoot 'manifest.json')
 $baseManifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $manifest = Read-UpdateJson $manifestPath
@@ -113,9 +125,9 @@ foreach ($record in $manifest.files) {
         $record.sha256 -notmatch '^[0-9a-fA-F]{64}$' -or [long]$record.size -lt 0) {
         throw '基包清单包含重复或无效文件记录。'
     }
-    $path = Resolve-UpdatePayload $baseRoot $relative
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or
-        (Get-Item -LiteralPath $path).Length -ne [long]$record.size) {
+    $path = Resolve-UpdatePayload $baseRoot $relative (-not $ChangesOnly)
+    if (-not $ChangesOnly -and (-not (Test-Path -LiteralPath $path -PathType Leaf) -or
+        (Get-Item -LiteralPath $path).Length -ne [long]$record.size)) {
         throw "基包显式载荷缺失或长度变化：$relative"
     }
     $records[$relative] = $record
@@ -126,6 +138,10 @@ foreach ($route in $manifest.runtimes) {
 }
 $workerRelative = "runtimes/$Runtime/Xen.exe"
 $overrides = @{ $workerRelative = $workerPath }
+if ($sourceToolPath) { $overrides[$sourceToolRelative] = $sourceToolPath }
+if ($ChangesOnly -and ($ConfigPath -or $WorkspaceSettingsPath)) {
+    throw '差量暂存禁止替换用户配置或工作区设置。'
+}
 if ($ConfigPath) { $overrides['config.ini'] = Resolve-UpdateFile $ConfigPath }
 if ($WorkspaceSettingsPath) {
     $overrides['cache/model-workspace/settings.json'] = Resolve-UpdateFile $WorkspaceSettingsPath
@@ -151,6 +167,7 @@ try {
     $copiedBytes = [long]0
     foreach ($record in $manifest.files) {
         $relative = ([string]$record.path).Replace('\', '/')
+        if ($ChangesOnly -and -not $overrides.ContainsKey($relative)) { continue }
         $source = Resolve-UpdatePayload $baseRoot $relative
         if ($overrides.ContainsKey($relative)) { $source = $overrides[$relative] }
         $destination = Resolve-UpdatePayload $incoming $relative
@@ -164,9 +181,10 @@ try {
             }
             if ($relative -eq $workerRelative -and
                 ($sourceHash -cne $workerHash -or $length -ne $workerLength)) { throw 'Worker 在发布期间变化。' }
+            if ($relative -eq $sourceToolRelative -and $sourceHash -cne $sourceToolHash) { throw '源桥接工具在发布期间变化。' }
             $record.size = [long]$length
             $record.sha256 = $sourceHash
-            $record.source = if ($relative -eq $workerRelative) { "$source@$commit" } else { $source }
+            $record.source = if ($relative -in @($workerRelative, $sourceToolRelative)) { "$source@$commit" } else { $source }
         } elseif ($length -ne [long]$record.size) { throw "继承载荷复制长度错误：$relative" }
         $copiedBytes += $length
         Write-Progress -Activity '继承统一包显式载荷' -Status "$copiedBytes / $totalBytes 字节" `
@@ -195,7 +213,13 @@ try {
         })
         overridden_files = @($overrides.Keys | Sort-Object)
         inherited_payload_hashes_verified = $false
-        next_validation = 'transfer_release_bundle.ps1 完整跨机清单校验'
+        next_validation = if ($ChangesOnly) { 'publish_worker_delta.ps1 变化载荷校验与服务器本地替换' } else { 'transfer_release_bundle.ps1 完整跨机清单校验' }
+    }
+    if ($sourceToolPath) {
+        $updateEvidence.updated_components += [ordered]@{
+            runtime = ''; path = $sourceToolRelative; git_commit = $commit.ToLowerInvariant()
+            sha256 = $sourceToolHash; build_identity_sha256 = $identityHash
+        }
     }
     # 来源证据属于独立载荷；生产 Launcher 的 manifest 顶层严格固定为五字段。
     $evidenceRelative = 'tools/acceptance/WORKER-UPDATE.json'
@@ -218,8 +242,12 @@ try {
     if (Test-Path -LiteralPath $outputPath) { throw '正式目录在发布期间出现，拒绝覆盖。' }
     Rename-Item -LiteralPath $incoming -NewName $outputName
     $ownedIncoming = $false
-    Write-Host "单 Worker 继承包已准备：$outputPath"
-    Write-Host '未验证继承载荷全量 SHA；正式传输前必须由 transfer_release_bundle.ps1 完整校验。'
+    if ($ChangesOnly) {
+        Write-Host "单 Worker 差量暂存已准备：$outputPath"
+    } else {
+        Write-Host "单 Worker 继承包已准备：$outputPath"
+        Write-Host '未验证继承载荷全量 SHA；正式传输前必须由 transfer_release_bundle.ps1 完整校验。'
+    }
 } finally {
     Write-Progress -Activity '继承统一包显式载荷' -Completed
     if ($ownedIncoming -and (Test-Path -LiteralPath $incoming)) {

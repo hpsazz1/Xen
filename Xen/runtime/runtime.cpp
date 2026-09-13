@@ -178,6 +178,10 @@ struct Runtime::Impl {
             set_error(validation_error);
             return false;
         }
+        if (const auto error = runtime::detail::auto_stop_startup_error(value.auto_stop, value.source_context)) {
+            set_error(error);
+            return false;
+        }
         config = value;
         frame_queue.reset();
         preview_channel.set_session_active(false);
@@ -846,8 +850,10 @@ struct Runtime::Impl {
                 aim_frame = std::move(prepared.frame);
                 if (auto stop = auto_stop_worker.load()) {
                     // 独立急停按配置目标类别识别，不要求准星命中或 Aim hold。
-                    stop->publish_target(runtime::detail::auto_stop_target_deadline(
-                        aim_frame.detections, config.aim, frame->timing, std::chrono::steady_clock::now()));
+                    AutoStopBlockReason reason;
+                    const auto deadline = runtime::detail::auto_stop_target_deadline(
+                        aim_frame.detections, config.aim, frame->timing, std::chrono::steady_clock::now(), &reason);
+                    stop->publish_target(deadline, reason);
                 }
                 profile.background_motion_ms = prepared.background_motion_ms;
                 profile.control_timing_valid = true;

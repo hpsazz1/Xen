@@ -256,7 +256,7 @@ void test_standard_format_and_inline_overflow() {
     Log::shutdown();
 }
 
-void test_sink_threshold_filters_before_formatting() {
+void test_effective_threshold_filters_before_formatting() {
     Log::shutdown();
     TempDirectory directory;
     LogConfig config;
@@ -267,19 +267,21 @@ void test_sink_threshold_filters_before_formatting() {
     config.log_dir = directory.path().string();
     config.file_max_size_mb = 1;
     config.file_max_count = 1;
+    // 普通文件现在接收 INFO；用真实配置等级验证提前过滤契约。
+    config.global_level = LogLevel::WARN;
 
     Log::init(config);
-    expect(Log::initialized(), "sink 等级过滤测试初始化失败");
+    expect(Log::initialized(), "有效等级过滤测试初始化失败");
     Log::register_module("file-only", LogLevel::TRACE);
     int argument_evaluations = 0;
     LOG_INFO("file-only", "不应求值 {}", ++argument_evaluations);
     expect(argument_evaluations == 0,
-           "低于所有 sink 等级的日志不得求值格式化参数");
+           "低于有效等级的日志不得求值格式化参数");
     LOG_WARN("file-only", "应求值 {}", ++argument_evaluations);
     expect(argument_evaluations == 1,
-           "达到 sink 等级的日志必须正常求值格式化参数");
+           "达到有效等级的日志必须正常求值格式化参数");
     expect(wait_for_file_text(directory.path() / "xen.log", "应求值 1"),
-           "达到 sink 等级的 WARN 必须落盘");
+           "达到有效等级的 WARN 必须落盘");
     Log::shutdown();
 }
 
@@ -586,7 +588,8 @@ void test_file_flush_and_restart_preservation() {
     config.enable_debug_file = true;
     config.enable_ringbuf = false;
     config.log_dir = directory.path().string();
-    config.file_max_size_mb = 1;
+    // INFO 现在也写普通文件；上限覆盖原有洪峰总量，仍验证未满重启不轮转。
+    config.file_max_size_mb = 16;
     config.file_max_count = 3;
 
     Log::init(config);
@@ -635,6 +638,41 @@ void test_file_flush_and_restart_preservation() {
            "未达到大小阈值时重启不得生成 xen.1.log");
 }
 
+void test_info_only_file_is_visible_before_shutdown() {
+    Log::shutdown();
+    TempDirectory directory;
+    LogConfig config;
+    config.global_level = LogLevel::INFO;
+    config.enable_console = false;
+    config.enable_file = true;
+    config.enable_debug_file = false;
+    config.enable_ringbuf = false;
+    config.log_dir = directory.path().string();
+    Log::init(config);
+    expect(Log::initialized(), "INFO普通文件测试初始化失败");
+    Log::register_module("info-file", LogLevel::TRACE);
+    const auto path = directory.path() / "xen.log";
+    LOG_INFO("info-file", "info-visible-without-warning");
+    expect(wait_for_file_text(path, "info-visible-without-warning"),
+           "仅INFO且无WARN/退出时普通文件也必须及时flush可见");
+    Log::write("info-file", LogLevel::DEBUG, "debug-must-be-filtered");
+    Log::set_global_level(LogLevel::WARN);
+    int evaluations = 0;
+    LOG_INFO("info-file", "info-filtered-at-warn {}", ++evaluations);
+    expect(evaluations == 0, "全局WARN仍必须在参数求值前过滤INFO");
+    LOG_WARN("info-file", "warn-visible");
+    expect(wait_for_file_text(path, "warn-visible"), "WARN普通文件仍及时可见");
+    Log::set_global_level(LogLevel::INFO);
+    LOG_INFO("info-file", "info-visible-after-level-restore");
+    expect(wait_for_file_text(path, "info-visible-after-level-restore"),
+           "无需重启切回INFO后普通文件恢复写入");
+    Log::shutdown();
+    const auto text = read_file(path);
+    expect(text.find("debug-must-be-filtered") == std::string::npos &&
+           text.find("info-filtered-at-warn") == std::string::npos,
+           "低于全局级别的日志不得在队列排空后泄漏到文件");
+}
+
 void test_priority_queue_preserves_warn_burst() {
     constexpr int kWriterCount = 4;
     constexpr int kMessagesPerWriter = 512;
@@ -679,7 +717,7 @@ int main() {
         test_unregistered_is_dropped_and_ring_is_immediate();
         test_macro_extends_temporary_module_lifetime();
         test_standard_format_and_inline_overflow();
-        test_sink_threshold_filters_before_formatting();
+        test_effective_threshold_filters_before_formatting();
         test_concurrent_same_name_registration();
         test_write_shutdown_race();
         test_concurrent_init_shutdown_serialization();
@@ -690,6 +728,7 @@ int main() {
         test_configured_module_levels_are_applied();
         test_spdlog_global_registry_is_untouched();
         test_file_flush_and_restart_preservation();
+        test_info_only_file_is_visible_before_shutdown();
         test_priority_queue_preserves_warn_burst();
     } catch (const std::exception& exception) {
         std::cerr << "[FAIL] 测试出现未捕获异常: " << exception.what() << '\n';

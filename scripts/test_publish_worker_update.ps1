@@ -20,10 +20,11 @@ function Assert-UpdateReject([hashtable]$Parameters, [string]$Message) {
     Assert-UpdateTest $rejected $Message
     Assert-UpdateTest (-not (Test-Path -LiteralPath $Parameters.OutputDirectory)) "$Message 未产生正式目录"
 }
-function Assert-ProductionManifest([string]$PackagePath) {
+function Assert-ProductionManifest([string]$PackagePath, [switch]$MutableFilesMayDiffer) {
     $document = Get-Content -LiteralPath (Join-Path $PackagePath 'manifest.json') -Raw | ConvertFrom-Json
     Assert-UpdateTest (@($document.PSObject.Properties.Name).Count -eq 5) '生产 manifest 顶层严格五字段'
     foreach ($record in $document.files) {
+        if ($MutableFilesMayDiffer -and $record.path -in @('config.ini', 'cache/model-workspace/settings.json')) { continue }
         $actualHash = (Get-FileHash -LiteralPath (Join-Path $PackagePath $record.path) -Algorithm SHA256).Hash
         Assert-UpdateTest ($actualHash -ieq $record.sha256) "最终清单哈希 $($record.path)"
     }
@@ -33,6 +34,16 @@ function Assert-ProductionManifest([string]$PackagePath) {
     }
 }
 try {
+    if ($ManifestValidator) {
+        # 旧测试程序会忽略未知参数并返回成功；先用不存在的包证明只读校验模式真正生效。
+        $savedErrorPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $validatorOutput = @(& $ManifestValidator --validate-package (Join-Path $runRoot 'missing-package') 2>&1)
+            $validatorExit = $LASTEXITCODE
+        } finally { $ErrorActionPreference = $savedErrorPreference }
+        Assert-UpdateTest ($validatorExit -ne 0) '生产校验器拒绝不存在包，禁止旧程序忽略参数假绿'
+    }
     $sourceRoot = Join-Path $runRoot 'source'
     New-Item -ItemType Directory -Path $sourceRoot | Out-Null
     $git = (Get-Command git -ErrorAction Stop).Source
@@ -45,6 +56,7 @@ try {
     $commit = (& $git -C $sourceRoot rev-parse HEAD).Trim()
     $buildRoot = Join-Path $runRoot 'build'
     Write-UpdateFixture (Join-Path $buildRoot 'Release\Xen.exe') 'updated-worker-fixture'
+    Write-UpdateFixture (Join-Path $buildRoot 'Release\xen_source_context.exe') 'updated-source-context-fixture'
     $identityPath = Join-Path $buildRoot 'xen-build-identity.json'
     $identity = [ordered]@{ schema = 1; source_root = $sourceRoot; git_commit = $commit; git_dirty = $false; runtime = 'nvidia' }
     Write-UpdateFixture $identityPath ($identity | ConvertTo-Json)
@@ -61,6 +73,7 @@ try {
     Write-UpdateFixture (Join-Path $baseRoot 'cache/model-workspace/settings.json') '{}'
     Write-UpdateFixture (Join-Path $baseRoot 'tools/acceptance/PACKAGE-NOTES.md') 'old package notes'
     Write-UpdateFixture (Join-Path $baseRoot 'tools/acceptance/MANUAL-ACCEPTANCE.md') 'old manual acceptance'
+    Write-UpdateFixture (Join-Path $baseRoot 'tools/source/xen_source_context.exe') 'old source context'
     foreach ($file in Get-ChildItem -LiteralPath $baseRoot -Recurse -File) {
         $relative = $file.FullName.Substring($baseRoot.Length + 1).Replace('\', '/')
         $runtime = if ($relative -match '^runtimes/([^/]+)/') { $Matches[1] } else { '' }
@@ -164,6 +177,81 @@ try {
         Assert-UpdateTest ($updatedRecord.sha256 -ieq $copyHash) "说明文档 manifest SHA $($pair[0])"
     }
     Assert-UpdateTest (@(Get-ChildItem -LiteralPath $runRoot -Directory -Filter '.incoming-*').Count -eq 0) '无临时目录残留'
+    # 仅在小型本地夹具验证差量；不连接 SSH、不启动或终止任何程序。
+    $deltaName = ".worker-delta-$([guid]::NewGuid().ToString('N'))"
+    $deltaOutput = Join-Path $runRoot $deltaName
+    $deltaParameters = $parameters.Clone()
+    foreach ($key in @('ConfigPath', 'PackageNotesPath', 'ManualAcceptancePath')) { $deltaParameters.Remove($key) }
+    $deltaParameters.OutputDirectory = $deltaOutput
+    $deltaParameters.ChangesOnly = $true
+    $deltaParameters.SourceContextExecutable = Join-Path $buildRoot 'Release\xen_source_context.exe'
+    $invalidTool = $deltaParameters.Clone()
+    $invalidTool.OutputDirectory = Join-Path $runRoot 'wrong-source-tool'
+    $invalidTool.SourceContextExecutable = Join-Path $buildRoot 'Release\Xen.exe'
+    Assert-UpdateReject $invalidTool '拒绝任意源工具文件映射'
+    Write-UpdateFixture (Join-Path $baseRoot 'config.ini') 'user changed configuration after original publication'
+    Write-UpdateFixture (Join-Path $baseRoot 'cache/model-workspace/settings.json') '{"user_changed":true}'
+    & $publisher @deltaParameters
+    Assert-UpdateTest (@(Get-ChildItem -LiteralPath $deltaOutput -Recurse -File).Count -eq 4) '差量只生成 Worker、选中桥接工具、来源证据和清单'
+    Assert-UpdateTest (-not (Test-Path -LiteralPath (Join-Path $deltaOutput 'config.ini'))) '差量不复制配置'
+    $deltaStage = Join-Path $baseRoot $deltaName
+    [IO.Directory]::Move($deltaOutput, $deltaStage)
+    $deltaEntries = @()
+    foreach ($relative in @('runtimes/nvidia/Xen.exe', 'tools/source/xen_source_context.exe', 'tools/acceptance/WORKER-UPDATE.json', 'manifest.json')) {
+        $oldPath = Join-Path $baseRoot $relative
+        $oldHash = if (Test-Path -LiteralPath $oldPath) { (Get-FileHash -LiteralPath $oldPath).Hash.ToLowerInvariant() } else { '' }
+        $deltaEntries += [ordered]@{ path = $relative; old_sha256 = $oldHash
+            new_sha256 = (Get-FileHash -LiteralPath (Join-Path $deltaStage $relative)).Hash.ToLowerInvariant() }
+    }
+    $protected = @()
+    foreach ($relative in @('config.ini', 'cache/model-workspace/settings.json')) {
+        $protected += [ordered]@{ path = $relative; sha256 = (Get-FileHash -LiteralPath (Join-Path $baseRoot $relative)).Hash.ToLowerInvariant() }
+    }
+    [ordered]@{ schema = 1; runtime = 'nvidia'; files = $deltaEntries; protected_files = $protected } |
+        ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $deltaStage 'delta.json') -Encoding UTF8
+    $apply = Join-Path $PSScriptRoot 'apply_worker_delta.ps1'
+    function Get-Process { param($Name, $ErrorAction); [pscustomobject]@{ Path = $null } }
+    $runningRejected = $false
+    try { & $apply -PackageRoot $baseRoot -StageName $deltaName -CheckOnly } catch {
+        $runningRejected = $_.Exception.Message -match 'XEN_WORKER_RUNNING'
+    }
+    Assert-UpdateTest $runningRejected '路径不可读的 Xen 进程保守拒绝'
+    function Get-Process { param($Name, $ErrorAction); return @() }
+    $lock = [IO.File]::Open((Join-Path $baseRoot 'runtimes/nvidia/Xen.exe'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    $lockedRejected = $false
+    try { & $apply -PackageRoot $baseRoot -StageName $deltaName -CheckOnly } catch { $lockedRejected = $true }
+    finally { $lock.Dispose() }
+    Assert-UpdateTest $lockedRejected '已锁定 Worker 拒绝替换'
+    Assert-UpdateTest ((Get-FileHash -LiteralPath $baseManifestPath).Hash -ceq $baseHash) '拒绝时旧清单不变'
+    $savedDelta = @{}
+    foreach ($entry in $deltaEntries) {
+        $savedDelta[$entry.path] = [IO.File]::ReadAllBytes((Join-Path $deltaStage $entry.path))
+    }
+    $manifestLock = [IO.File]::Open($baseManifestPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    $rollbackObserved = $false
+    try { & $apply -PackageRoot $baseRoot -StageName $deltaName } catch { $rollbackObserved = $true }
+    finally { $manifestLock.Dispose() }
+    Assert-UpdateTest $rollbackObserved 'manifest 最后替换失败可被观察'
+    foreach ($entry in $deltaEntries) {
+        $target = Join-Path $baseRoot $entry.path
+        $actual = if (Test-Path -LiteralPath $target) { (Get-FileHash -LiteralPath $target).Hash.ToLowerInvariant() } else { '' }
+        Assert-UpdateTest ($actual -ceq $entry.old_sha256) "失败后变化文件恢复旧身份 $($entry.path)"
+        [IO.File]::WriteAllBytes((Join-Path $deltaStage $entry.path), $savedDelta[$entry.path])
+    }
+    & $apply -PackageRoot $baseRoot -StageName $deltaName -CheckOnly
+    & $apply -PackageRoot $baseRoot -StageName $deltaName
+    Remove-Item Function:Get-Process
+    Assert-ProductionManifest $baseRoot -MutableFilesMayDiffer
+    Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $baseRoot 'tools/source/xen_source_context.exe') -Raw) -ceq 'updated-source-context-fixture') '选中桥接工具已更新'
+    $deltaEvidence = Get-Content -LiteralPath (Join-Path $baseRoot 'tools/acceptance/WORKER-UPDATE.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $toolIdentity = @($deltaEvidence.updated_components | Where-Object { $_.path -ceq 'tools/source/xen_source_context.exe' })
+    Assert-UpdateTest ($toolIdentity.Count -eq 1 -and $toolIdentity[0].git_commit -ceq $commit) '桥接工具绑定同提交身份'
+    foreach ($entry in $protected) {
+        Assert-UpdateTest ((Get-FileHash -LiteralPath (Join-Path $baseRoot $entry.path)).Hash.ToLowerInvariant() -ceq $entry.sha256) '差量后用户配置原字节保留'
+    }
+    foreach ($runtime in @('directml', 'openvino')) {
+        Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $baseRoot "runtimes/$runtime/Xen.exe") -Raw) -ceq "old-$runtime-worker") '其他 Worker 不变'
+    }
     Write-Host "PASS: $script:passed 项单 Worker 继承发布回归。"
 } finally {
     Remove-XenOwnedTestDirectory -RootPath $runRoot -BasePath $ownedTest.BasePath `

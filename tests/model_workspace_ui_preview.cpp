@@ -358,6 +358,19 @@ int wmain(int argc, wchar_t** argv) {
                 "真实Overlay捕获按钮必须接收后端侧键快照");
             capture_input.capture_virtual_keys[key] = false; frame();
         }
+        const auto default_release_keys = config.auto_stop.release_virtual_keys;
+        for (int key : {'6', 'E'}) {
+            focus_item("##auto_stop_release_keys", preview_window("auto_stop_panel"), "auto_stop_form");
+            input.down = true; frame(); input.down = false; frame();
+            capture_input.capture_virtual_keys[key] = true; frame();
+            require(std::find(config.auto_stop.release_virtual_keys.begin(),
+                    config.auto_stop.release_virtual_keys.end(), key) != config.auto_stop.release_virtual_keys.end(),
+                "真实Overlay必须支持追加多个急停释放键");
+            capture_input.capture_virtual_keys[key] = false; frame();
+        }
+        require(config.auto_stop.release_virtual_keys.size() == default_release_keys.size() + 2,
+            "追加释放键不能覆盖之前的绑定");
+        config.auto_stop.release_virtual_keys = default_release_keys;
         ImGui::SetScrollY(content, 0); frame(); frame();
         save_window(capture, output / "auxiliary-side-button.png");
         focus_item("暂停本次会话", preview_window("auto_stop_panel"));

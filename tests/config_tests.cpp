@@ -631,6 +631,8 @@ void test_auto_stop_config() {
     std::string error;
     expect(!config.auto_stop.enabled && config.auto_stop.activation_virtual_key == 0,
            "自动急停默认关闭且未绑定");
+    expect(config.auto_stop.release_virtual_keys == std::vector<int>{'1', '2', '3', '4', '5', 'Q'},
+           "急停释放键默认数字1至5及Q，任意键触发");
     const auto path = std::filesystem::temp_directory_path() / "xen_auto_stop_config.ini";
     config.auto_stop.enabled = true;
     config.auto_stop.activation_virtual_key = 0x76;
@@ -639,6 +641,18 @@ void test_auto_stop_config() {
     expect(load_app_config(path.string(), loaded, error) && loaded.auto_stop.enabled &&
                loaded.auto_stop.activation_virtual_key == 0x76,
            "自动急停开关和允许键必须往返保留");
+    config.auto_stop.release_virtual_keys = {'6', 'E'};
+    expect(save_app_config(path.string(), config, error) && load_app_config(path.string(), loaded, error) &&
+               loaded.auto_stop.release_virtual_keys == config.auto_stop.release_virtual_keys,
+           "多个自定义急停释放键必须往返保留");
+    for (const std::vector<int>& keys : {std::vector<int>{0}, {256}, {'W'}, {0x76}, {'Q', 'Q'}}) {
+        config.auto_stop.release_virtual_keys = keys;
+        expect(!validate_app_config(config, error), "无效、屏蔽、冲突或重复释放键必须拒绝");
+    }
+    config.auto_stop.release_virtual_keys.clear();
+    expect(save_app_config(path.string(), config, error) && load_app_config(path.string(), loaded, error) &&
+               loaded.auto_stop.release_virtual_keys.empty(), "显式清空释放键不恢复默认");
+    config.auto_stop.release_virtual_keys = AutoStopConfig{}.release_virtual_keys;
     for (int key : {-1, 256, int('W'), int('A'), int('S'), int('D'), 0x02, 0x23, 0x77}) {
         config.auto_stop.activation_virtual_key = key;
         expect(!validate_app_config(config, error), "非法、移动或已占用允许键必须拒绝");
@@ -662,8 +676,11 @@ void test_auto_stop_config() {
     expect(load_app_config(path.string(), loaded, error) && !loaded.auto_stop.enabled &&
                loaded.auto_stop.activation_virtual_key == 0,
            "旧配置必须清除已开启的调用方状态");
+    expect(loaded.auto_stop.release_virtual_keys == AutoStopConfig{}.release_virtual_keys,
+           "旧配置补充默认释放键");
     for (const char* value : {"enabled=perhaps", "activation_virtual_key=1.5",
-                              "activation_virtual_key=999999999999999999999999"}) {
+                              "activation_virtual_key=999999999999999999999999",
+                              "release_virtual_keys=49,q", "release_virtual_keys=49,1.5"}) {
         {
             std::ofstream output(path, std::ios::binary | std::ios::trunc);
             output << "[auto_stop]\n" << value << "\n";

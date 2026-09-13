@@ -20,16 +20,30 @@
 
 namespace runtime::detail {
 
+inline const char* auto_stop_startup_error(const AutoStopConfig& stop,
+        const source_context::SourceContextConfig& source) noexcept {
+    return stop.enabled && !source.enabled
+        ? "自动急停需要源程序焦点桥接；请启用source_context并配置源机游戏进程，避免切出后接管键盘"
+        : nullptr;
+}
+
 inline std::chrono::steady_clock::time_point auto_stop_target_deadline(
         std::span<const Detection> detections, const AimConfig& config,
-        const FrameTiming& timing, std::chrono::steady_clock::time_point now) noexcept {
+        const FrameTiming& timing, std::chrono::steady_clock::time_point now,
+        AutoStopBlockReason* reason = nullptr) noexcept {
+    const auto blocked = [&](AutoStopBlockReason value) {
+        if (reason) *reason = value;
+        return std::chrono::steady_clock::time_point{};
+    };
     constexpr double kObservationAgeMs = 50.0;
     const double uncertainty = timing.source_clock_uncertainty_ms;
-    if (!timing.source_time_timing_valid || !std::isfinite(uncertainty) || uncertainty < 0.0 ||
-        uncertainty >= kObservationAgeMs || timing.source_time_at > now) return {};
+    if (!timing.source_time_timing_valid || timing.source_time_at > now)
+        return blocked(AutoStopBlockReason::SOURCE_TIMING_INVALID);
+    if (!std::isfinite(uncertainty) || uncertainty < 0.0 || uncertainty >= kObservationAgeMs)
+        return blocked(AutoStopBlockReason::SOURCE_UNCERTAINTY);
     const auto deadline = timing.source_time_at + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
         std::chrono::duration<double, std::milli>(kObservationAgeMs - uncertainty));
-    if (deadline <= now) return {};
+    if (deadline <= now) return blocked(AutoStopBlockReason::TARGET_STALE);
     for (const auto& detection : detections) {
         const auto contains = [&](const std::vector<int>& ids) {
             return std::find(ids.begin(), ids.end(), detection.class_id) != ids.end();
@@ -38,9 +52,12 @@ inline std::chrono::steady_clock::time_point auto_stop_target_deadline(
             std::isfinite(detection.x1) && std::isfinite(detection.x2) &&
             std::isfinite(detection.y1) && std::isfinite(detection.y2) &&
             detection.x2 > detection.x1 && detection.y2 > detection.y1 &&
-            (contains(config.person_class_ids) || contains(config.head_class_ids))) return deadline;
+            (contains(config.person_class_ids) || contains(config.head_class_ids))) {
+            if (reason) *reason = AutoStopBlockReason::NONE;
+            return deadline;
+        }
     }
-    return {};
+    return blocked(AutoStopBlockReason::NO_TARGET);
 }
 
 // 同一生产入口维护 observation 时间基准及连续性；不重新判定 Capture 的映射质量。

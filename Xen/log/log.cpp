@@ -343,11 +343,11 @@ struct Log::Impl {
                     false);
             file_sink->set_pattern(
                 "[%Y-%m-%d %H:%M:%S.%e] [%l] [%n] %v");
-            file_sink->set_level(spdlog::level::warn);
+            file_sink->set_level(spdlog::level::info);
             async_sinks.push_back(std::move(file_sink));
-            minimum_sink_level = std::min(minimum_sink_level, LogLevel::WARN);
+            minimum_sink_level = std::min(minimum_sink_level, LogLevel::INFO);
             minimum_async_sink_level =
-                std::min(minimum_async_sink_level, LogLevel::WARN);
+                std::min(minimum_async_sink_level, LogLevel::INFO);
         }
 
         if (requested_config.enable_debug_file) {
@@ -406,6 +406,9 @@ struct Log::Impl {
                 spdlog::async_overflow_policy::block);
             normal_logger->set_level(spdlog::level::trace);
             priority_logger->set_level(spdlog::level::trace);
+            // INFO 被后台消费后即可在文件中查看，不依赖后来出现 WARN 或退出。
+            // flush 仍在既有普通队列线程执行，不让业务线程等待磁盘。
+            normal_logger->flush_on(spdlog::level::info);
             priority_logger->flush_on(spdlog::level::warn);
         }
 

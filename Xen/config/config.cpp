@@ -17,6 +17,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cmath>
@@ -730,6 +731,7 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         return false;
     }
     constexpr TypedConfigKey kOptionalListKeys[]{
+        {"auto_stop", "release_virtual_keys"},
         {"trigger", "general_class_ids"},
         {"keyboard", "aim_hold_virtual_keys"},
         {"keyboard", "emergency_virtual_keys"},
@@ -942,6 +944,15 @@ bool validate_app_config(const AppConfig& config,
             return false;
         }
         const int stop_key = config.auto_stop.activation_virtual_key;
+        std::array<bool, 256> release_keys{};
+        for (const int key : config.auto_stop.release_virtual_keys) {
+            if (key <= 0 || key > 255 || key == 'W' || key == 'A' ||
+                key == 'S' || key == 'D' || key == stop_key || release_keys[key]) {
+                error = "急停释放键非法、重复、使用 WASD 或与允许键冲突";
+                return false;
+            }
+            release_keys[key] = true;
+        }
         const auto contains_stop_key = [stop_key](const std::vector<int>& keys) {
             return std::find(keys.begin(), keys.end(), stop_key) != keys.end();
         };
@@ -1043,6 +1054,9 @@ bool load_app_config(const std::string& path,
         candidate.auto_stop.enabled = ini.GetBoolValue("auto_stop", "enabled", false);
         candidate.auto_stop.activation_virtual_key = static_cast<int>(
             ini.GetLongValue("auto_stop", "activation_virtual_key", 0));
+        const char* release_keys = ini.GetValue("auto_stop", "release_virtual_keys", nullptr);
+        candidate.auto_stop.release_virtual_keys = release_keys
+            ? parse_int_list(release_keys, {}) : AutoStopConfig{}.release_virtual_keys;
         candidate.recoil = {}; candidate.gsi = {};
         candidate.gsi.request_timeout_ms = static_cast<int>(ini.GetLongValue("gsi", "request_timeout_ms", 1000));
         candidate.recoil.max_observation_age_ms = static_cast<int>(ini.GetLongValue("recoil", "max_observation_age_ms", 50));
@@ -1578,6 +1592,8 @@ bool save_app_config(const std::string& path,
         ini.SetBoolValue("auto_stop", "enabled", config.auto_stop.enabled);
         ini.SetLongValue("auto_stop", "activation_virtual_key",
                          config.auto_stop.activation_virtual_key);
+        ini.SetValue("auto_stop", "release_virtual_keys",
+                     format_int_list(config.auto_stop.release_virtual_keys).c_str());
         ini.SetValue(
             "keyboard", "aim_hold_virtual_keys",
             format_int_list(config.keyboard.aim_hold_virtual_keys).c_str());
