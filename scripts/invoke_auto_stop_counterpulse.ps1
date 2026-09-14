@@ -154,6 +154,21 @@ function Assert-OwnedRun($Existing) {
     # 旧 schema 的入口没有共享锁；迁移前还须排除仍运行的绑定探针。
     Assert-ProbeStopped $Existing.executable
 }
+function Invoke-ReportHud([string]$Binary, [string]$Report) {
+    if (-not [IO.File]::Exists($Report)) { return }
+    Assert-PlainPath $Report
+    if ((Get-Item -LiteralPath $Report).Length -gt 64MB) { throw 'HUD报告超出预算。' }
+    $analysis = Get-Content -LiteralPath $Report -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($analysis.settings.hud_enabled -ne $true) { return }
+    foreach ($argument in @($Binary, $Report)) { if ($argument.Contains('"')) { throw 'HUD路径含引号。' } }
+    $info = New-Object Diagnostics.ProcessStartInfo
+    $info.FileName = $Binary; $info.UseShellExecute = $false
+    $info.WorkingDirectory = Split-Path -Parent $Binary
+    $info.Arguments = '--show-hud "' + $Report + '"'
+    # 独立只读查看进程，不继承物理授权，也不进入物理探针的60秒等待。
+    $child = [Diagnostics.Process]::Start($info)
+    $child.Dispose()
+}
 function Invoke-Probe([string]$Binary, [string[]]$Arguments, [bool]$Physical) {
     $info = New-Object Diagnostics.ProcessStartInfo
     $info.FileName = $Binary
@@ -270,7 +285,7 @@ try {
         $lockPath = Join-Path $runPath '.counterpulse.lock'
         Assert-PlainPath $lockPath
         $runLock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
-        foreach ($leaf in @('task.json', 'plan.json', 'TASK.md', 'CONSUMED', 'start-test.bat', 'edit-config.bat', 'launch-test.ps1', 'PARAMETERS.md', 'open-report.bat', 'open-report.ps1', 'sampling-settings.json', 'execution-sampling-settings.json', 'edit-sampling.bat')) { Assert-PlainPath (Join-Path $runPath $leaf) }
+        foreach ($leaf in @('task.json', 'plan.json', 'TASK.md', 'CONSUMED', 'start-test.bat', 'edit-config.bat', 'launch-test.ps1', 'PARAMETERS.md', 'open-report.bat', 'open-report.ps1', 'sampling-settings.json', 'execution-sampling-settings.json', 'edit-sampling.bat', 'start-recording.bat', 'record-manual.ps1', 'show-hud.bat', 'show-hud.ps1', 'manual-recordings')) { Assert-PlainPath (Join-Path $runPath $leaf) }
         if ($exists) {
             $existingTask = Get-Content -LiteralPath $taskPath -Raw -Encoding UTF8 | ConvertFrom-Json
             Assert-OwnedRun $existingTask
@@ -331,6 +346,85 @@ try {
         [IO.File]::WriteAllText((Join-Path $runPath 'edit-config.bat'), $editBat, [Text.Encoding]::ASCII)
         $editSamplingBat = $editBat.Replace('plan.json', 'sampling-settings.json')
         [IO.File]::WriteAllText((Join-Path $runPath 'edit-sampling.bat'), $editSamplingBat, [Text.Encoding]::ASCII)
+        $manualCommon = @'
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
+function Assert-LocalPlain([string]$Path) {
+    if (-not [IO.Path]::IsPathRooted($Path) -or $Path.StartsWith('\\') -or $Path.Contains('"')) { throw '路径必须是本机绝对路径。' }
+    for ($item = [IO.Path]::GetFullPath($Path); $item; $item = [IO.Path]::GetDirectoryName($item)) {
+        if ((Test-Path -LiteralPath $item) -and (([IO.File]::GetAttributes($item) -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw '路径含重解析点。' }
+    }
+}
+try {
+    if ((Get-Process -Id $PID).SessionId -eq 0 -or $env:SSH_CONNECTION -or $env:SSH_CLIENT) { throw '只允许本机用户前台录制或查看。' }
+    Assert-LocalPlain $PSScriptRoot
+    $taskPath = Join-Path $PSScriptRoot 'task.json'; Assert-LocalPlain $taskPath
+    if ((Get-Item -LiteralPath $taskPath).Length -gt 64KB) { throw '绑定清单超限。' }
+    $task = Get-Content -LiteralPath $taskPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($task.schema_version -ne 4 -or $task.owner -cne 'XEN_AUTO_STOP_COUNTERPULSE' -or
+        $task.run_directory -cne $PSScriptRoot -or $task.status -cne 'PREPARED_NOT_LAUNCHED') { throw '绑定清单无效。' }
+    foreach ($name in @('executable', 'config', 'script')) {
+        Assert-LocalPlain $task.$name
+        if ((Get-FileHash -LiteralPath $task.$name -Algorithm SHA256).Hash -cne $task.($name + '_sha256')) { throw '绑定文件已变化，请重新Prepare。' }
+    }
+    Assert-LocalPlain $PSCommandPath
+    $hashField = if ($action -eq 'record') { 'record_manual_sha256' } else { 'show_hud_sha256' }
+    if ((Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash -cne $task.$hashField) { throw '录制或查看入口已变化。' }
+    if ($action -eq 'record') {
+        $settings = Join-Path $PSScriptRoot 'sampling-settings.json'; Assert-LocalPlain $settings
+        if ((Get-Item -LiteralPath $settings).Length -gt 64KB) { throw '模型设置超限。' }
+        $base = Join-Path $PSScriptRoot 'manual-recordings'; Assert-LocalPlain $base
+        $output = Join-Path $base ((Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N'))
+        Assert-LocalPlain $output
+        if (Test-Path -LiteralPath $output) { throw '人工记录目录已存在。' }
+        $arguments = @('--record-manual', '--config', $task.config, '--output', $output,
+            '--sampling-settings', $settings, '--recording-duration-ms', '120000')
+        # 原生入口只创建本轮目录；父目录由入口准备，旧轮次始终保留。
+        $null = [IO.Directory]::CreateDirectory($base)
+        Assert-LocalPlain $base
+    } else {
+        $reports = New-Object 'Collections.Generic.List[string]'
+        $report = Join-Path $PSScriptRoot 'result/sampling-analysis.json'; Assert-LocalPlain $report
+        if ([IO.File]::Exists($report)) { $reports.Add($report) }
+        $base = Join-Path $PSScriptRoot 'manual-recordings'; Assert-LocalPlain $base
+        if ([IO.Directory]::Exists($base)) {
+            $count = 0
+            foreach ($directory in [IO.Directory]::EnumerateDirectories($base)) {
+                if (++$count -gt 1000) { throw '人工记录目录超过查看预算。' }
+                Assert-LocalPlain $directory
+                $candidate = Join-Path $directory 'sampling-analysis.json'; Assert-LocalPlain $candidate
+                if ([IO.File]::Exists($candidate)) { $reports.Add($candidate) }
+            }
+        }
+        if (-not $reports.Count) { throw '没有可查看的采样报告，请先完成一次人工记录或测试。' }
+        $report = $reports | Sort-Object { [IO.File]::GetLastWriteTimeUtc($_) } -Descending | Select-Object -First 1
+        if ((Get-Item -LiteralPath $report).Length -gt 64MB) { throw 'HUD报告超出预算。' }
+        $arguments = @('--show-hud', $report)
+    }
+    $info = New-Object Diagnostics.ProcessStartInfo
+    $info.FileName = $task.executable; $info.UseShellExecute = $false
+    $info.WorkingDirectory = Split-Path -Parent $task.executable
+    $info.Arguments = (($arguments | ForEach-Object { if ($_.Contains('"')) { throw '参数含引号。' }; '"' + $_.TrimEnd('\') + '"' }) -join ' ')
+    $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+    $child = [Diagnostics.Process]::Start($info)
+    $stdout = $child.StandardOutput.ReadToEndAsync(); $stderr = $child.StandardError.ReadToEndAsync()
+    # 人工录制由程序120秒上限停止采集；HUD可继续显示，用户关闭才退出，不进行超时kill。
+    $child.WaitForExit(); $code = $child.ExitCode; $child.Dispose()
+    if ($code -ne 0) { throw '录制或查看失败，请检查本次记录。' }
+    exit 0
+} catch {
+    [Console]::Error.WriteLine('人工录制或HUD查看未启动/未完成；检查前台会话、绑定文件和报告是否存在。')
+    exit 1
+}
+'@
+        foreach ($entry in @(@('record-manual.ps1', 'record', 'start-recording.bat'), @('show-hud.ps1', 'show', 'show-hud.bat'))) {
+            $body = '$action = ' + (Quote-PS $entry[1]) + "`r`n" + $manualCommon
+            [IO.File]::WriteAllText((Join-Path $runPath $entry[0]), $body, (New-Object Text.UTF8Encoding($true)))
+            [IO.File]::WriteAllText((Join-Path $runPath $entry[2]), $startBat.Replace('launch-test.ps1', $entry[0]), [Text.Encoding]::ASCII)
+        }
+        $task.record_manual_sha256 = Get-Digest (Join-Path $runPath 'record-manual.ps1')
+        $task.show_hud_sha256 = Get-Digest (Join-Path $runPath 'show-hud.ps1')
+        Write-Json $taskPath $task
         # 查看入口只在用户手动调用时打开已存在的报告；失败Run也可保留诊断报告。
         $reportScript = @'
 $ErrorActionPreference = 'Stop'
@@ -363,6 +457,7 @@ try {
         $parameterLines = New-Object 'Collections.Generic.List[string]'
         $parameterLines.Add('# 参数说明')
         $parameterLines.Add('')
+        $parameterLines.Add('人工练习：start-recording.bat仅监听KMBOX人工输入，不发送动作；每次在manual-recordings创建独立记录，最多采集120秒，HUD保持至用户关闭。show-hud.bat重开最近采样报告；隐藏或关闭查看器不触发真实输入。')
         $parameterLines.Add('三步调试：双击edit-config.bat编辑plan.json并保存；由用户前台双击start-test.bat启动；结束后双击open-report.bat查看报告。启动会发送真实移动与开火输入。')
         $parameterLines.Add('Repeatable模式每次启动冻结本轮计划，编辑只影响下一轮；成功校验后覆盖上一组result。正式比较请另存证据。')
         $parameterLines.Add('报告是基于ACK回执与输入模型的采样分析，不是游戏速度、实际子弹或命中率测量；失败Run已生成的报告仍可查看。')
@@ -452,8 +547,13 @@ try {
         $marker = [IO.File]::Open((Join-Path $runPath 'CONSUMED'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
         $marker.Dispose()
         [Console]::WriteLine('请将游戏切到前台并松开移动键和鼠标按钮；等待首个键态报告时可单独轻按松开Shift，不按方向键或鼠标；人物须事先静止并固定瞄准。下方实时显示就绪阶段。')
-        Invoke-Probe $task.executable @('--config', $task.config, '--plan', $executionPlan, '--output', $output,
-            '--allow-physical-output', '--confirm', 'AUTO_STOP_COUNTERPULSE', '--require-current-plan', '--sampling-settings', $executionSettings) $true
+        try {
+            Invoke-Probe $task.executable @('--config', $task.config, '--plan', $executionPlan, '--output', $output,
+                '--allow-physical-output', '--confirm', 'AUTO_STOP_COUNTERPULSE', '--require-current-plan', '--sampling-settings', $executionSettings) $true
+        } finally {
+            try { Invoke-ReportHud $task.executable (Join-Path $output 'sampling-analysis.json') }
+            catch { [Console]::WriteLine('采样HUD未打开，可由show-hud.bat重新查看已有报告。') }
+        }
         Write-Output '本次有界Run结束；请回收result及人工观察，不能自动认定停稳。'
     }
 } catch {

@@ -195,11 +195,72 @@ void timeout_test(Fixture& fixture) {
     { std::lock_guard lock(gate->mutex); gate->release = true; } gate->condition.notify_all();
     std::this_thread::sleep_for(std::chrono::milliseconds(50)); session.stop();
 }
+void archive_visitor_tests(Fixture& fixture) {
+    std::vector<Event> expected{event(1,0), event(2,1,kA,true,5,-7), event(3,2,kW|kD)};
+    expected[1].raw_report_valid = true; expected[1].raw_report[12] = 0xb7;
+    expected[1].datagram_size = 20; expected[1].timing_uncertainty_ns = 123;
+    auto directory = fixture.directory(); Limits limits; limits.chunk_events = 1;
+    const auto recorded = record(directory, expected, limits);
+    ArchiveSummary summary; std::string error; std::vector<Event> actual;
+    check(visit_archive(directory, [&](const Event& value) { actual.push_back(value); }, summary, error),
+        "生产归档可以逐事件分析");
+    check(error.empty() && summary.status == Status::STOPPED && summary.events == expected.size() &&
+        summary.chunks == recorded->chunks && summary.bytes == recorded->archive_bytes && !summary.trailing_gap,
+        "逐事件遍历保持归档状态与水位");
+    check(actual.size() == expected.size() && actual[1].dx == 5 && actual[1].dy == -7 &&
+        actual[1].left_down && actual[2].held_mask == (kW|kD) && actual[2].sequence == 3 &&
+        actual[1].raw_report_valid && actual[1].raw_report[12] == 0xb7 && actual[1].datagram_size == 20 &&
+        actual[1].timing_uncertainty_ns == 123,
+        "逐事件遍历不降采样且保持原始字段");
+    check(!visit_archive(directory, [](const Event&) { throw std::runtime_error("访客失败"); }, summary, error) &&
+        summary.status == Status::FAILED && summary.events == 0 && !error.empty(), "访客异常不能静默成功");
+    limits = {}; limits.max_run_events = 2; unsigned callbacks = 0;
+    check(!visit_archive(directory, [&](const Event&) { ++callbacks; }, summary, error, limits) && callbacks == 0,
+        "清单超出调用方预算时不交付事件");
+    const auto inspect = [&](const std::filesystem::path& path) {
+        return visit_archive(path, [](const Event&) {}, summary, error);
+    };
+    check(!inspect(directory / ".." / directory.filename()), "归档遍历拒绝父目录跳转");
+    std::filesystem::remove(directory / "events-1.csv");
+    check(!inspect(directory) && summary.status == Status::FAILED, "缺块不能当完整归档");
+    directory = fixture.directory(); record(directory, expected);
+    { std::ofstream bad(directory / "manifest.txt", std::ios::binary); bad << "XEN_INPUT_TRAINING_V1\n1 3 0 1 3 2 262144\n"; }
+    check(!inspect(directory), "无效尾缺口标志拒绝");
+    { std::ofstream bad(directory / "manifest.txt", std::ios::binary); bad << "XEN_INPUT_TRAINING_V1\n-1 0 0 0 3 0 262144\n"; }
+    check(!inspect(directory), "负数清单字段拒绝");
+    directory = fixture.directory(); record(directory, expected);
+    { std::ofstream bad(directory / "manifest.txt", std::ios::app); bad << "extra\n"; }
+    check(!inspect(directory), "清单额外尾水位拒绝");
+    directory = fixture.directory(); record(directory, expected);
+    { std::string header; { std::ifstream source(directory / "events-0.csv"); std::getline(source, header); }
+        std::ofstream bad(directory / "events-0.csv", std::ios::binary); bad << header << "\nbad,column\n"; }
+    check(!inspect(directory) && error.find("列数") != std::string::npos, "坏列必须经过生产decode拒绝");
+    directory = fixture.directory(); record(directory, expected);
+    auto chunk = directory / "events-0.csv";
+    std::filesystem::resize_file(chunk, std::filesystem::file_size(chunk)-1);
+    check(!inspect(directory), "未关闭尾行不能当完整事件");
+    directory = fixture.directory(); limits = {}; limits.max_run_events = 2;
+    record(directory, expected, limits);
+    check(inspect(directory) && summary.status == Status::LIMIT && summary.events == 2,
+        "合法LIMIT可遍历但不改为完整STOPPED");
+    directory = fixture.directory();
+    auto sent = std::make_shared<bool>(false); Session session;
+    check(session.start(directory, {}, [sent, expected] {
+        ReadBatch batch;
+        if (!*sent) { *sent = true; batch.events = expected; batch.dropped_events = 4; batch.trailing_gap = true; }
+        return batch;
+    }), "尾缺口归档启动");
+    session.stop();
+    check(inspect(directory) && summary.trailing_gap && summary.dropped == 4,
+        "尾缺口和丢弃计数必须交给校准调用方而非静默消失");
+    check(!visit_archive(directory, {}, summary, error), "空访客拒绝");
+}
 }
 int main() {
     try {
         Fixture fixture;
         timing_tests(fixture); hold_tests(fixture); gap_tests(fixture); archive_tests(fixture); timeout_test(fixture);
+        archive_visitor_tests(fixture);
         std::cout << "输入评估生产接口专项通过；未使用设备或真实鼠标输出\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

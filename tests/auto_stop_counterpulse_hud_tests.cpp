@@ -33,6 +33,29 @@ void wait_state(const CounterpulseHud& hud, const char* expected) {
     } while (std::chrono::steady_clock::now() < deadline);
     throw std::runtime_error("HUD未在1秒内进入预期可见状态");
 }
+void wait_snapshot(const CounterpulseHud& hud, unsigned count) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    do {
+        require(hud.status()["state"] != "FAILED", "外部HUD快照不能使UI线程失败");
+        if (hud.status()["snapshots_displayed"].get<unsigned>() >= count) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    } while (std::chrono::steady_clock::now() < deadline);
+    throw std::runtime_error("外部HUD快照未在1秒内显示");
+}
+Json external_snapshot() {
+    Json output{{"source", "KMBOX_MONITOR"}, {"recording", true},
+        {"recording_id", "manual-input-20260915-014523-a1b2c3d4"}, {"timings", Json::array()},
+        {"shots", Json::array()}, {"current_model", {{"valid", true}, {"speed_ratio", 0.5},
+            {"estimated_speed", 0.17}, {"classification", "WITHIN_MODEL_THRESHOLD"}}}};
+    for (int i = 1; i <= 40; ++i) {
+        const auto ratio = (i % 7) * 0.3;
+        output["timings"].push_back({{"ordinal", i}, {"delta_ms", (i % 9 - 4) * 2.0}, {"grade", "EXCELLENT"}});
+        output["shots"].push_back({{"ordinal", i}, {"down_model", output["current_model"]},
+            {"samples", Json::array({Json{{"kind", "FIRST_MODEL_SAMPLE"}, {"time_ns", 1},
+                {"valid", true}, {"speed_ratio", ratio}, {"classification", ratio <= 1 ? "WITHIN_MODEL_THRESHOLD" : "MICRO"}}})}});
+    }
+    return output;
+}
 void snapshot(HWND window, const std::filesystem::path& path) {
     RECT bounds{}; require(GetClientRect(window, &bounds), "HUD窗口尺寸不可读");
     const auto dc = GetDC(window); require(dc != nullptr, "HUD窗口DC不可用");
@@ -102,6 +125,40 @@ int main(int argc, char** argv) {
             if (!snapshot_path.empty()) snapshot(window, snapshot_path);
         }
         require(!IsWindow(window), "HUD析构必须关闭窗口和UI线程");
+        {
+            CounterpulseHud hud(SamplingSettings{}, true);
+            wait_state(hud, "VISIBLE");
+            window = FindWindowW(L"XenCounterpulseReadOnlyHud", nullptr);
+            RECT client{}; require(GetClientRect(window, &client) && client.right == 900 && client.bottom == 280,
+                "双面板HUD客户区必须保持900×280");
+            require((GetWindowLongPtrW(window, GWL_STYLE) & WS_SYSMENU) != 0 &&
+                (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TRANSPARENT) == 0,
+                "常驻HUD必须保留可点击关闭按钮，不能由透传样式吞掉操作");
+            auto data = external_snapshot(); hud.publish(data); wait_snapshot(hud, 1);
+            std::wstring title(static_cast<std::size_t>(GetWindowTextLengthW(window)) + 1, L'\0');
+            GetWindowTextW(window, title.data(), static_cast<int>(title.size()));
+            require(title.find(L"manual-input-20260915-014523-a1b2c3d4") == 0,
+                "HUD标题必须保留完整录制ID供反馈定位，不能截短或只显示日期");
+            require(hud.status()["source"] == "KMBOX_MONITOR" && hud.status()["success"],
+                "外部图表必须声明monitor来源，不冒充命令ACK");
+            require(GetForegroundWindow() == foreground, "外部快照显示不得夺取前台");
+            const auto button = GetDlgItem(window, 1001);
+            require(button && IsWindowEnabled(button), "外部录制中必须提供停止录制按钮");
+            SendMessageW(button, BM_CLICK, 0, 0);
+            require(hud.stop_requested() && !hud.closed() && IsWindowVisible(window),
+                "停止录制只发停止请求，不能关闭反馈窗口");
+            data["recording"] = false; hud.publish(data); wait_snapshot(hud, 2);
+            require(!IsWindowEnabled(button), "录制结束后必须禁用停止按钮");
+            hud.finish(Json{{"success", true}}); wait_state(hud, "FINISHED_VISIBLE");
+            std::this_thread::sleep_for(std::chrono::milliseconds(120));
+            require(!hud.closed() && IsWindowVisible(window), "finish后必须持续保留反馈而不是自行关闭");
+            if (!snapshot_path.empty()) snapshot(window, snapshot_path);
+            PostMessageW(window, WM_SYSCOMMAND, SC_CLOSE, 0);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+            while (!hud.closed() && std::chrono::steady_clock::now() < deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            require(hud.closed() && !IsWindow(window), "用户关闭路径必须关闭窗口并通知owner结束保留");
+        }
         std::cout << "HUD真实窗口专项通过：仅合成ACK、非激活置顶、排空、结束保留与析构关闭\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

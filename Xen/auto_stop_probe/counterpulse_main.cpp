@@ -21,6 +21,8 @@
 #include "auto_stop_probe/sampling_analysis_internal.h"
 #include "auto_stop_probe/debug_report_internal.h"
 #include "auto_stop_probe/counterpulse_hud.h"
+#include "auto_stop_probe/manual_recording_internal.h"
+#include "auto_stop_probe/manual_labels_internal.h"
 #include "runtime/input_training_internal.h"
 #include "source_context/source_context.h"
 
@@ -176,8 +178,7 @@ void write_json(const std::filesystem::path& path, const Json& report) {
     if (!MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
         throw std::runtime_error("报告原子保存失败");
 }
-void write_sampling_report(const std::filesystem::path& directory, const Json& report) {
-    const auto analysis = analyze_counterpulse_sampling(report);
+void write_analysis_files(const std::filesystem::path& directory, const Json& analysis) {
     write_json(directory / "sampling-analysis.json", analysis);
     const auto path = directory / "debug-report.html";
     auto temporary = path; temporary += ".writing";
@@ -189,6 +190,53 @@ void write_sampling_report(const std::filesystem::path& directory, const Json& r
     }
     if (!MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
         throw std::runtime_error("调试报告原子保存失败");
+}
+void write_sampling_report(const std::filesystem::path& directory, const Json& report) {
+    write_analysis_files(directory, analyze_counterpulse_sampling(report));
+}
+Json read_bounded_json(const std::filesystem::path& path, std::uintmax_t limit = 64 * 1024 * 1024) {
+    if (std::filesystem::file_size(path) > limit) throw std::runtime_error("输入文件过大");
+    std::ifstream stream(path);
+    return Json::parse(stream, nullptr, true, true);
+}
+void require_explicit_monitor_config(const std::filesystem::path& path) {
+    if (std::filesystem::file_size(path) > 4 * 1024 * 1024) throw std::runtime_error("配置过大");
+    std::ifstream stream(path);
+    std::string line, section;
+    std::set<std::string> keys;
+    const auto trim = [](std::string text) {
+        const auto first = text.find_first_not_of(" \t\r\n");
+        return first == std::string::npos ? std::string{} : text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1);
+    };
+    while (std::getline(stream, line)) {
+        line = trim(line);
+        if (line.starts_with("\xEF\xBB\xBF")) line.erase(0, 3);
+        if (line.empty() || line[0] == ';' || line[0] == '#') continue;
+        if (line[0] == '[') { section = line; continue; }
+        if (section != "[mouse]") continue;
+        const auto equals = line.find('=');
+        if (equals != std::string::npos && !trim(line.substr(equals + 1)).empty()) keys.insert(trim(line.substr(0, equals)));
+    }
+    for (const auto* key : {"kmbox_ip", "kmbox_port", "kmbox_uuid"})
+        if (!keys.contains(key)) throw std::runtime_error("人工录制拒绝缺省设备地址");
+}
+void keep_hud_visible(CounterpulseHud& hud) {
+    cleanup_finished.store(true);
+    while (!stopped.load() && !hud.closed() && hud.status()["state"] != "FAILED")
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+}
+void describe_manual_quality(Json& analysis) {
+    if (!analysis.value("received_events", 0ULL) || analysis.value("invalid_events", 0ULL) ||
+        analysis.value("gap_count", 0ULL)) analysis["archive_complete"] = false;
+    analysis["quality_issues"] = Json::array();
+    for (const auto* key : {"gap_count", "invalid_events", "missing_start_count"})
+        if (analysis.value(key, 0ULL)) analysis["quality_issues"].push_back(std::string("MANUAL_") + key);
+    if (!analysis.value("received_events", 0ULL)) analysis["quality_issues"].push_back("NO_INPUT_EVENTS");
+    if (!analysis.value("archive_complete", false)) analysis["quality_issues"].push_back("ARCHIVE_INCOMPLETE");
+    for (const auto& shot : analysis["shots"]) if (!shot.value("complete_hold", false)) {
+        analysis["quality_issues"].push_back("INCOMPLETE_HOLD"); break;
+    }
+    analysis["analysis_complete"] = analysis["quality_issues"].empty();
 }
 }
 
@@ -207,14 +255,18 @@ int main(int argc, char** argv) {
         if (created) write_json(output / "startup.json", {{"stage", stage}, {"readiness", readiness}, {"capture", capture_diagnostic}});
     };
     try {
-        std::string config_path, plan_path, confirmation, evaluation_path, migration_path, sampling_path;
-        bool dry = false, allowed = false, capture_check = false, current_plan = false;
+        std::string config_path, plan_path, confirmation, evaluation_path, migration_path, sampling_path, hud_path, manual_path;
+        bool dry = false, allowed = false, capture_check = false, current_plan = false, manual = false;
+        int recording_duration_ms = 120000;
         std::set<std::string> seen;
         if (argc == 2 && std::string(argv[1]) == "--help") {
             std::cout << "单组1至30次开火按住测试：--plan JSON --dry-run；真实运行另需--config INI --output NEW_DIR "
                          "--allow-physical-output --confirm AUTO_STOP_COUNTERPULSE。需源焦点、全松与独占设备，End/Ctrl+C取消。\n"
                          "离线重评：--evaluate-result RESULT_JSON --output NEW_DIR；不连接设备。\n"
                          "采样校准：--sampling-settings JSONC；真实运行显示模型HUD，dry-run与离线重评不打开HUD。\n"
+                         "人工监听：--record-manual --config INI --output NEW_DIR --sampling-settings JSONC；只读KMBOX，默认120秒。\n"
+                         "人工重评：--evaluate-manual RECORD_DIR --output NEW_DIR；可传--sampling-settings比较新参数。\n"
+                         "常驻显示：--show-hud SAMPLING_ANALYSIS_JSON；只显示已保存数据，关闭窗口退出。\n"
                          "计划迁移：--migrate-plan OLD_JSON --output NEW_JSON；不连接设备。\n"
                          "旧计划纯采集诊断：--plan JSON --config INI --output NEW_DIR --capture-check。\n";
             return 0;
@@ -226,6 +278,7 @@ int main(int argc, char** argv) {
             else if (option == "--require-current-plan") current_plan = true;
             else if (option == "--capture-check") capture_check = true;
             else if (option == "--allow-physical-output") allowed = true;
+            else if (option == "--record-manual") manual = true;
             else if (i + 1 < argc && option == "--plan") plan_path = argv[++i];
             else if (i + 1 < argc && option == "--config") config_path = argv[++i];
             else if (i + 1 < argc && option == "--output") output = argv[++i];
@@ -233,7 +286,32 @@ int main(int argc, char** argv) {
             else if (i + 1 < argc && option == "--evaluate-result") evaluation_path = argv[++i];
             else if (i + 1 < argc && option == "--migrate-plan") migration_path = argv[++i];
             else if (i + 1 < argc && option == "--sampling-settings") sampling_path = argv[++i];
+            else if (i + 1 < argc && option == "--show-hud") hud_path = argv[++i];
+            else if (i + 1 < argc && option == "--evaluate-manual") manual_path = argv[++i];
+            else if (i + 1 < argc && option == "--recording-duration-ms") {
+                const std::string text = argv[++i]; std::size_t used = 0;
+                recording_duration_ms = std::stoi(text, &used);
+                if (used != text.size() || recording_duration_ms < 1000 || recording_duration_ms > 600000)
+                    throw std::runtime_error("录制时长应为1000至600000毫秒");
+            }
             else throw std::runtime_error("无效参数");
+        }
+        if (int(manual) + int(!manual_path.empty()) + int(!hud_path.empty()) + int(!migration_path.empty()) + int(!evaluation_path.empty()) > 1)
+            throw std::runtime_error("入口模式冲突");
+        if (!manual && seen.contains("--recording-duration-ms")) throw std::runtime_error("录制时长仅用于人工录制");
+        if (!hud_path.empty()) {
+            if (seen.size() != 1) throw std::runtime_error("常驻HUD仅接受报告路径");
+            const auto analysis = read_bounded_json(hud_path);
+            if (!analysis.is_object() || !analysis.contains("shots") || !analysis["shots"].is_array() ||
+                (analysis.value("source", "") != "KMBOX_MONITOR" && analysis.value("source", "") != "COMMAND_ACK_PROXY"))
+                throw std::runtime_error("不是有效采样报告");
+            const auto settings = parse_sampling_settings(analysis.at("settings"));
+            SetConsoleCtrlHandler(control, TRUE);
+            CounterpulseHud hud(settings, true);
+            auto display = analysis; display["recording"] = false;
+            hud.publish(display);
+            keep_hud_visible(hud);
+            return hud.status()["state"] == "FAILED" ? 2 : 0;
         }
         if (!migration_path.empty()) {
             if (dry || capture_check || allowed || current_plan || !evaluation_path.empty() ||
@@ -258,6 +336,56 @@ int main(int argc, char** argv) {
             if (std::filesystem::file_size(sampling_path) > 16384) throw std::runtime_error("采样设置过大");
             std::ifstream settings_file(sampling_path);
             sampling_settings = parse_sampling_settings(Json::parse(settings_file, nullptr, true, true));
+        }
+        if (manual || !manual_path.empty()) {
+            if (allowed || !confirmation.empty() || capture_check || current_plan || !plan_path.empty())
+                throw std::runtime_error("人工监听与重评拒绝物理输出参数");
+            if (manual) {
+                if (config_path.empty() || (dry ? !output.empty() : output.empty())) throw std::runtime_error("人工录制参数不完整");
+                require_explicit_monitor_config(config_path);
+                AppConfig config; std::string error;
+                if (!load_app_config(config_path, config, error)) throw std::runtime_error("人工录制配置无效");
+                (void)manual_monitor_config(config.mouse);
+                if (dry) { std::cout << "人工录制配置有效；未连接设备，软件输入固定禁用。\n"; return 0; }
+                if (!std::filesystem::create_directory(output)) throw std::runtime_error("人工录制必须使用新目录");
+                created = true; stage = "MANUAL_RECORDING";
+                write_json(output / "sampling-settings.json", sampling_settings_json(sampling_settings));
+                write_json(output / "labels.json", {{"schema_version", 1}, {"recording_id", output.filename().string()},
+                    {"qualified_shot_ranges", Json::array()}, {"rejected_shot_ranges", Json::array()},
+                    {"note", "仅按用户明确反馈填写，未标记不是合格"}});
+                SetConsoleCtrlHandler(control, TRUE);
+                CounterpulseHud hud(sampling_settings, true);
+                std::cout << "人工录制中：自行操作KMBOX键鼠；点击HUD停止录制，结果继续悬浮。\n";
+                auto recorded = record_manual_monitor(config.mouse, output, sampling_settings, recording_duration_ms, hud,
+                    [] { return stopped.load(); });
+                recorded.analysis["archive_complete"] = recorded.archive.value("success", false) &&
+                    recorded.archive.value("received_events", 0ULL) != 0 &&
+                    recorded.archive.value("dropped_events", 0ULL) == 0 && recorded.archive.value("invalid_events", 0ULL) == 0;
+                describe_manual_quality(recorded.analysis);
+                recorded.analysis = apply_manual_labels(std::move(recorded.analysis), read_bounded_json(output / "labels.json", 16384));
+                recorded.analysis["hud_status"] = hud.status();
+                write_json(output / "training-evaluation.json", recorded.archive);
+                write_analysis_files(output, recorded.analysis);
+                cleanup_finished.store(true);
+                std::cout << "录制已停止并保存；设备已关闭，HUD保留至关闭窗口。\n";
+                keep_hud_visible(hud);
+                return recorded.archive.value("success", false) && hud.status().value("success", false) ? 0 : 2;
+            }
+            if (dry || !config_path.empty() || output.empty()) throw std::runtime_error("人工重评参数冲突");
+            const auto original = read_bounded_json(std::filesystem::path(manual_path) / "sampling-settings.json", 16384);
+            if (sampling_path.empty()) sampling_settings = parse_sampling_settings(original);
+            const auto original_analysis = read_bounded_json(std::filesystem::path(manual_path) / "sampling-analysis.json");
+            auto analysis = finalize_manual_archive(std::filesystem::path(manual_path) / "raw",
+                sampling_settings, original_analysis.at("time_ns").get<std::int64_t>());
+            analysis["recording_id"] = std::filesystem::path(manual_path).filename().string();
+            analysis["original_sampling_settings"] = original;
+            analysis["sampling_settings_overridden"] = !sampling_path.empty();
+            describe_manual_quality(analysis);
+            analysis = apply_manual_labels(std::move(analysis), read_bounded_json(std::filesystem::path(manual_path) / "labels.json", 16384));
+            if (!std::filesystem::create_directory(output)) throw std::runtime_error("人工重评必须使用新目录");
+            created = true;
+            write_analysis_files(output, analysis);
+            return 0;
         }
         if (!evaluation_path.empty()) {
             if (dry || capture_check || allowed || current_plan || !confirmation.empty() || !config_path.empty() ||

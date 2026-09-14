@@ -58,6 +58,65 @@ def main():
             sequential_args = ('-Mode', 'Prepare', '-RunDirectory', sequential_run, '-Executable', args.executable,
                                '-ConfigPath', sequential_config, '-Repeatable')
             invoke(*sequential_args, ok=True)
+            # 新入口仅通过进程启动桩验证；绝不执行真实人工监听或打开HUD。
+            manual_entry = sequential_run / 'record-manual.ps1'
+            hud_entry = sequential_run / 'show-hud.ps1'
+            for name in ('start-recording.bat', 'record-manual.ps1', 'show-hud.bat', 'show-hud.ps1'):
+                assert (sequential_run / name).is_file(), 'Prepare须生成录制及常驻查看入口'
+            original_manual = manual_entry.read_bytes()
+            original_hud = hud_entry.read_bytes()
+            original_task = (sequential_run / 'task.json').read_bytes()
+            manual_text = original_manual.decode('utf-8-sig')
+            assert '--record-manual' in manual_text and '--recording-duration-ms' in manual_text and '120000' in manual_text
+            assert '--allow-physical-output' not in manual_text and '--confirm' not in manual_text
+            assert 'ProtectedData' not in manual_text and 'token.dpapi' not in manual_text
+            assert 'WaitForExit()' in manual_text and '.Kill(' not in manual_text
+            remote_env = dict(os.environ, SSH_CONNECTION='mock-remote')
+            for entry in (manual_entry, hud_entry):
+                denied = subprocess.run([shell, '-NoProfile', '-File', str(entry)], env=remote_env,
+                                        capture_output=True, timeout=10)
+                assert denied.returncode != 0, '人工入口拒绝SSH'
+            # 移除前台检查的测试副本只用于纯文件/参数模拟。
+            session_guard = "if ((Get-Process -Id $PID).SessionId -eq 0 -or $env:SSH_CONNECTION -or $env:SSH_CLIENT)"
+            process_start = '$child = [Diagnostics.Process]::Start($info)'
+            stub_start = """if ($action -eq 'record') {
+    if (-not [IO.Directory]::Exists([IO.Path]::GetDirectoryName($output))) { throw '录制父目录必须先准备' }
+    $null = [IO.Directory]::CreateDirectory($output)
+    [IO.File]::WriteAllText((Join-Path $output 'mock-arguments.json'), (ConvertTo-Json -InputObject @($arguments)))
+} else { [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'mock-hud.json'), (ConvertTo-Json -InputObject @($arguments))) }
+exit 0
+"""
+            binding = read_generated_json(sequential_run / 'task.json')
+            for entry, field in ((manual_entry, 'record_manual_sha256'), (hud_entry, 'show_hud_sha256')):
+                text = entry.read_text(encoding='utf-8-sig').replace(session_guard, 'if ($false)')
+                assert process_start in text
+                text = text.replace(process_start, stub_start)
+                entry.write_bytes(text.encode('utf-8-sig'))
+                binding[field] = hashlib.sha256(entry.read_bytes()).hexdigest().upper()
+            (sequential_run / 'task.json').write_text(json.dumps(binding), encoding='utf-8')
+            invoke(entry=hud_entry)  # 无报告必须失败，不能启动空HUD。
+            invoke(entry=manual_entry, ok=True)
+            invoke(entry=manual_entry, ok=True)
+            manual_runs = list((sequential_run / 'manual-recordings').iterdir())
+            assert len(manual_runs) == 2 and manual_runs[0].name != manual_runs[1].name
+            for manual_run in manual_runs:
+                values = read_generated_json(manual_run / 'mock-arguments.json')
+                assert values[0] == '--record-manual' and '--allow-physical-output' not in values
+                assert values[values.index('--output') + 1] == str(manual_run)
+                assert values[values.index('--config') + 1] == str(sequential_config)
+                assert values[values.index('--recording-duration-ms') + 1] == '120000'
+            report = manual_runs[-1] / 'sampling-analysis.json'
+            report.write_text('{}', encoding='utf-8')
+            invoke(entry=hud_entry, ok=True)
+            assert read_generated_json(sequential_run / 'mock-hud.json') == ['--show-hud', str(report)]
+            # 原绑定文件变化时，在进程桩前拒绝，不能只验证脚本自摘要。
+            saved_config = sequential_config.read_bytes()
+            sequential_config.write_bytes(saved_config + b'\n')
+            invoke(entry=manual_entry)
+            assert len(list((sequential_run / 'manual-recordings').iterdir())) == 2
+            sequential_config.write_bytes(saved_config)
+            manual_entry.write_bytes(original_manual); hud_entry.write_bytes(original_hud)
+            (sequential_run / 'task.json').write_bytes(original_task)
             sequential_plan = read_generated_json(sequential_run / 'plan.json')
             sequential_plan['move_during_fire_delay'] = False
             (sequential_run / 'plan.json').write_text(json.dumps(sequential_plan), encoding='utf-8')
@@ -468,10 +527,10 @@ def main():
             # AST仅改测试副本：物理分支完全替为写文件桩，真实exe只接收--dry-run。
             harness = root / 'invoke_auto_stop_counterpulse-r99.ps1'
             source = script.read_bytes().decode('utf-8-sig')
-            ast_query = "$t=$null;$e=$null;$a=[System.Management.Automation.Language.Parser]::ParseFile('" + str(script).replace("'", "''") + "',[ref]$t,[ref]$e);$a.FindAll({param($n) ($n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-Probe') -or ($n -is [System.Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text.Contains(\"SessionId\"))},$true) | ForEach-Object { @{start=$_.Extent.StartOffset;end=$_.Extent.EndOffset;kind=$_.GetType().Name;name=$(if($_ -is [System.Management.Automation.Language.FunctionDefinitionAst]){$_.Name}else{''})} } | ConvertTo-Json"
+            ast_query = "$t=$null;$e=$null;$a=[System.Management.Automation.Language.Parser]::ParseFile('" + str(script).replace("'", "''") + "',[ref]$t,[ref]$e);$a.FindAll({param($n) ($n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in @('Invoke-Probe','Invoke-ReportHud')) -or ($n -is [System.Management.Automation.Language.IfStatementAst] -and $n.Clauses[0].Item1.Extent.Text.Contains(\"SessionId\"))},$true) | ForEach-Object { @{start=$_.Extent.StartOffset;end=$_.Extent.EndOffset;kind=$_.GetType().Name;name=$(if($_ -is [System.Management.Automation.Language.FunctionDefinitionAst]){$_.Name}else{''})} } | ConvertTo-Json"
             spans = json.loads(subprocess.run([shell, '-NoProfile', '-Command', ast_query],
                 capture_output=True, check=True, timeout=20).stdout.decode('utf-8-sig'))
-            assert len(spans) == 2
+            assert len(spans) == 3
             mock = r'''function Invoke-Probe([string]$Binary, [string[]]$Arguments, [bool]$Physical) {
     if (-not $Physical) {
         $dry = $Arguments.Length -eq 6 -and $Arguments[0] -eq '--plan' -and $Arguments[2] -eq '--dry-run' -and $Arguments[3] -eq '--require-current-plan' -and $Arguments[4] -eq '--sampling-settings'
@@ -502,6 +561,8 @@ def main():
             for span in sorted(spans, key=lambda item: item['start'], reverse=True):
                 if span['name'] == 'Invoke-Probe':
                     replacement = mock
+                elif span['name'] == 'Invoke-ReportHud':
+                    replacement = "function Invoke-ReportHud([string]$Binary, [string]$Report) { [IO.File]::AppendAllText((Join-Path $runPath 'mock-hud-calls'), 'once') }"
                 else:
                     replacement = 'if ($false) { throw "MOCK_SESSION_ONLY" }'
                 source = source[:span['start']] + replacement + source[span['end']:]

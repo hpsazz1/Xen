@@ -59,6 +59,22 @@ Prepare 同时生成 `start-test.bat`、`edit-config.bat` 和 `PARAMETERS.md`；
 `monitor-training`，可在辅助页离线回看。参考换键分类只评价输入间隙/重叠，不代表实际停稳或子弹稳定。
 monitor 未回显软件动作时不会用命令记录冒充监听证据；未知 X/Y 语义仍不积分为真实轨迹。
 
+人工练习使用 Prepare 生成的 `start-recording.bat`：仅录制 KMBOX 监听到的键鼠，软件输入固定禁用。
+每次在 `manual-recordings` 创建独立目录，保存原始 `raw` 档案、模型参数快照、分析和空白 `labels.json`。
+默认录制最多120秒，也可点击 HUD 的“停止录制”；停止后关闭设备连接，双图和最近32次结果继续置顶保留，
+直到关闭窗口。`show-hud.bat` 可重开最近的已有结果，不连接设备。普通桌面置顶已测试，游戏内可见性需实际验证。
+`edit-sampling.bat` 调整移速模型、阈值比例及采样时机，下一次录制或显式离线重评生效。
+
+人工反馈用录制ID和按住编号范围对应数据；按住编号不等于实际子弹编号。`labels.json` 的
+`qualified_shot_ranges` / `rejected_shot_ranges` 填写如 `[[1,5],[8,10]]`，未标记不作为合格数据。
+分析保留最近300次按住，原始档案独立保存；越界、重复或冲突标签拒绝。仅有合格样本不能唯一校准模型，
+正反例齐全时先给固定模型下的阈值约束，不自动修改参数。使用下列入口重评同一录制，显式覆盖参数时
+追加 `--sampling-settings '<新参数文件>'`，报告同时保留原参数：
+
+```powershell
+& '<正式程序目录>\auto_stop_counterpulse.exe' --evaluate-manual '<人工录制目录>' --output '<不存在的重评目录>'
+```
+
 已有 `result.json` 可用同一正式程序离线重评，不接设备，不需要配置或物理授权：
 
 ```powershell

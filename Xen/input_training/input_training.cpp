@@ -12,6 +12,15 @@
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace input_training {
 namespace {
@@ -276,6 +285,99 @@ bool valid_limits(const Limits& limits) noexcept {
         limits.max_run_bytes <= 256ull * 1024 * 1024 && limits.max_chunks > 0 && limits.max_chunks <= 4096 &&
         limits.stop_timeout_ms > 0 && limits.stop_timeout_ms <= 5000;
 }
+void require_archive_path(const std::filesystem::path& path, bool directory) {
+    // 保留逐级检查，不能先 canonical 抹掉符号链接/目录联接证据。
+    auto current = path.root_path();
+    for (const auto& component : path.relative_path()) {
+        if (component == "..") throw std::runtime_error("归档路径不能包含父目录跳转");
+        if (component == ".") continue;
+        current /= component;
+        const auto status = std::filesystem::symlink_status(current);
+        if (std::filesystem::is_symlink(status)) throw std::runtime_error("归档路径不能经过符号链接");
+#ifdef _WIN32
+        const auto attributes = GetFileAttributesW(current.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT))
+            throw std::runtime_error("归档路径不存在或含重解析点");
+#endif
+    }
+    if (directory ? !std::filesystem::is_directory(path) : !std::filesystem::is_regular_file(path))
+        throw std::runtime_error("归档路径类型不合法");
+}
+bool archive_line(std::istream& stream, std::string& line, std::size_t limit) {
+    line.clear();
+    char ch;
+    while (stream.get(ch)) {
+        if (ch == '\n') return true;
+        if (line.size() >= limit) throw std::runtime_error("归档行超出长度预算");
+        line.push_back(ch);
+    }
+    if (stream.bad()) throw std::runtime_error("归档读取失败");
+    if (!line.empty()) throw std::runtime_error("归档尾行未完整关闭");
+    return false;
+}
+}
+
+bool visit_archive(const std::filesystem::path& directory, const std::function<void(const Event&)>& visitor,
+    ArchiveSummary& summary, std::string& error, Limits limits) noexcept {
+    summary = {};
+    error.clear();
+    try {
+        if (directory.empty() || !visitor || !valid_limits(limits)) throw std::runtime_error("归档遍历参数无效");
+        // Windows absolute 可能先规范化掉 ..；必须在转换前检查调用方原始路径。
+        for (const auto& component : directory)
+            if (component == "..") throw std::runtime_error("归档路径不能包含父目录跳转");
+        const auto root = std::filesystem::absolute(directory);
+        require_archive_path(root, true);
+        const auto manifest_path = root / "manifest.txt";
+        require_archive_path(manifest_path, false);
+        if (std::filesystem::file_size(manifest_path) > 1024) throw std::runtime_error("归档清单超出预算");
+        std::ifstream manifest(manifest_path, std::ios::binary);
+        std::string line;
+        if (!archive_line(manifest, line, 128) || line != "XEN_INPUT_TRAINING_V1")
+            throw std::runtime_error("无有效归档 manifest");
+        if (!archive_line(manifest, line, 512)) throw std::runtime_error("归档清单缺少水位");
+        std::istringstream fields(line);
+        std::array<std::uint64_t, 7> values{};
+        std::string token;
+        for (auto& value : values) {
+            if (!(fields >> token)) throw std::runtime_error("归档清单字段不足");
+            const auto [end, code] = std::from_chars(token.data(), token.data() + token.size(), value);
+            if (code != std::errc{} || end != token.data() + token.size()) throw std::runtime_error("归档清单数值无效");
+        }
+        if (fields >> token || archive_line(manifest, line, 512)) throw std::runtime_error("归档清单存在多余字段");
+        if (values[0] > limits.max_chunks || values[1] > limits.max_run_events || values[3] > limits.max_run_bytes ||
+            values[5] > 1 || values[6] < 2 || values[6] > limits.max_hold_events ||
+            (values[4] != static_cast<std::uint64_t>(Status::STOPPED) && values[4] != static_cast<std::uint64_t>(Status::LIMIT)))
+            throw std::runtime_error("归档清单超限或终止水位无效");
+        ArchiveSummary result;
+        result.status = static_cast<Status>(values[4]); result.dropped = values[2];
+        result.trailing_gap = values[5] != 0; result.max_hold_events = static_cast<std::size_t>(values[6]);
+        for (std::uint64_t index = 0; index < values[0]; ++index) {
+            const auto path = root / ("events-" + std::to_string(index) + ".csv");
+            require_archive_path(path, false);
+            const auto file_bytes = std::filesystem::file_size(path);
+            if (file_bytes > limits.max_run_bytes - result.bytes || file_bytes > 4096ull * 512 + 1024)
+                throw std::runtime_error("原始 chunk 超出字节预算");
+            std::ifstream stream(path, std::ios::binary);
+            if (!archive_line(stream, line, 512) || line != kColumns) throw std::runtime_error("原始 chunk 表头不匹配");
+            std::size_t count = 0;
+            while (archive_line(stream, line, 512)) {
+                if (++count > 4096 || result.events >= values[1]) throw std::runtime_error("原始事件超出清单或块预算");
+                visitor(decode(line));
+                ++result.events;
+            }
+            if (!count || std::filesystem::file_size(path) != file_bytes) throw std::runtime_error("原始 chunk 为空或读取期间变化");
+            result.bytes += file_bytes; ++result.chunks;
+        }
+        if (result.events != values[1] || result.bytes != values[3]) throw std::runtime_error("原始 chunk 与清单数量不一致");
+        summary = result;
+        return true;
+    } catch (const std::exception& exception) {
+        try { error = exception.what(); } catch (...) {}
+    } catch (...) {
+        try { error = "归档遍历或访客失败"; } catch (...) {}
+    }
+    return false;
 }
 
 class Session::Impl {

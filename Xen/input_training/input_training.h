@@ -75,6 +75,17 @@ struct ReadBatch {
     std::uint64_t dropped_events = 0;
     bool trailing_gap = false;
 };
+struct ArchiveSummary {
+    Status status = Status::FAILED;
+    std::uint64_t chunks = 0, events = 0, dropped = 0, bytes = 0;
+    bool trailing_gap = false;
+    std::size_t max_hold_events = 0;
+};
+// 同步、有界遍历既有 CSV，不修改档案。visitor 只能进行离线分析，不调用设备。
+// true 只证明格式和数量一致；LIMIT/dropped/trailing_gap 仍须由调用者拒绝校准。
+// 失败可能已经交付前缀，调用者必须丢弃本次派生结果；summary 重置为 FAILED。
+bool visit_archive(const std::filesystem::path& directory, const std::function<void(const Event&)>& visitor,
+    ArchiveSummary& summary, std::string& error, Limits limits = {}) noexcept;
 class Session {
 public:
     // Reader 必须有界、无磁盘等待；每次返回尚未消费报告，空批表示暂时无新报告。
