@@ -382,7 +382,7 @@ try {
         } elseif ($MoveDuringFireDelay) {
             "首轮原地；上一轮左键UP ACK后开始$($FireDelayMs)ms间隔，立刻按$Direction，方向键从DOWN ACK起至少保持$($MoveMs)ms。间隔与保持时间都满足后才松键，即等待两者结束时刻的较晚者；收到该键UP ACK后等待$($CounterDelayMs)ms，再$action；$timing。"
         } else {
-            "首轮原地；上一轮左键UP ACK后静止等待$($FireDelayMs)ms，然后按$Direction保持$($MoveMs)ms；收到该键UP ACK后等待$($CounterDelayMs)ms，再$action；$timing。"
+            "首轮原地；上一轮左键UP ACK后静止等待$($FireDelayMs)ms，然后按${Direction}保持$($MoveMs)ms；收到该键UP ACK后等待$($CounterDelayMs)ms，再$action；$timing。"
         }
         $behavior += "各动作迟到超过$($LateToleranceMs)ms则拒绝该组；固定瞄准，不人为按方向或射击键。"
         $observation = '默认不采集图像；自动保存输入训练原始报告和评价。接收域换键评分不代表人物停稳，命令ACK不代表实际开火或弹着稳定'

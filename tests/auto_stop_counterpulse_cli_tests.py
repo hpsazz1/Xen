@@ -51,6 +51,21 @@ def main():
         invoke('-Mode', 'Prepare', '-RunDirectory', run, '-Confirm', 'AUTO_STOP_COUNTERPULSE')
         assert not run.exists(), 'Prepare拒绝混入物理授权'
         if args.executable:
+            # 复用已校准的false分支必须完成整个Prepare，包括TASK文本与快捷入口生成。
+            sequential_run = root / 'sequential-movement'
+            sequential_config = root / 'sequential-private.ini'
+            sequential_config.write_text('[source_context]\nenabled=true\n', encoding='utf-8')
+            sequential_args = ('-Mode', 'Prepare', '-RunDirectory', sequential_run, '-Executable', args.executable,
+                               '-ConfigPath', sequential_config, '-Repeatable')
+            invoke(*sequential_args, ok=True)
+            sequential_plan = read_generated_json(sequential_run / 'plan.json')
+            sequential_plan['move_during_fire_delay'] = False
+            (sequential_run / 'plan.json').write_text(json.dumps(sequential_plan), encoding='utf-8')
+            invoke(*sequential_args, '-ReuseRunDirectory', ok=True)
+            assert read_generated_json(sequential_run / 'plan.json')['move_during_fire_delay'] is False
+            sequential_task = (sequential_run / 'TASK.md').read_text(encoding='utf-8-sig')
+            assert '静止等待300ms，然后按A保持300ms' in sequential_task
+            assert (sequential_run / 'launch-test.ps1').is_file()
             # 正式离线入口复用生产Session；全部输入为合成命令回执，绝不连接设备。
             command_report = root / 'synthetic-result.json'
             commands = []
