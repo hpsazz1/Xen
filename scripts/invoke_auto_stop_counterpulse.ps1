@@ -72,18 +72,41 @@ $planHelp = [ordered]@{
     shot_hold_ms='左键DOWN ACK起保持1..2000ms；1000即按住1秒。';
     late_tolerance_ms='动作调度迟到容差0..10ms。'; direction='2表示A，8表示D。'
 }
-function Write-CommentedPlan([string]$Path, $Value) {
+function Write-CommentedPlan([string]$Path, $Value, $Descriptions = $planHelp) {
     $lines = New-Object 'Collections.Generic.List[string]'
     $lines.Add('{')
     $keys = @($Value.Keys)
     for ($index = 0; $index -lt $keys.Count; $index++) {
         $key = $keys[$index]
-        $lines.Add('  // ' + $planHelp[$key])
+        $lines.Add('  // ' + $Descriptions[$key])
         $suffix = if ($index + 1 -lt $keys.Count) { ',' } else { '' }
         $lines.Add('  "' + $key + '": ' + (ConvertTo-Json -InputObject $Value[$key] -Compress) + $suffix)
     }
     $lines.Add('}')
     [IO.File]::WriteAllText($Path, ($lines -join "`r`n") + "`r`n", (New-Object Text.UTF8Encoding($false)))
+}
+$samplingDefaults = [ordered]@{ max_move_speed=1.0; clean_shot_speed_ratio=0.34; accel_per_sec=5.5;
+    natural_decel_per_sec=2.5; counter_strafe_accel_per_sec=14.0; fire_sample_delay_ms=18;
+    tap_max_hold_ms=90; auto_fire_interval_ms=100; hud_enabled=$true }
+$samplingHelp = [ordered]@{ max_move_speed='模型最大速度，不是游戏实测速率。'; clean_shot_speed_ratio='模型稳定阈值比例。';
+    accel_per_sec='模型同向加速度。'; natural_decel_per_sec='模型自然减速度。'; counter_strafe_accel_per_sec='模型反向减速度。';
+    fire_sample_delay_ms='首次模型采样相对按下的延时ms。'; tap_max_hold_ms='模型短按界限ms。';
+    auto_fire_interval_ms='持续按住的模型采样间隔ms，不是实际射速或开火命令间隔。';
+    hud_enabled='true显示本程序模型HUD，false关闭；一次启动冻结生效，不在运行中热改。' }
+function Read-BoundedBytes([string]$Path) {
+    Assert-PlainPath $Path
+    $reader = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        if ($reader.Length -gt 16384) { throw '配置超过大小限制。' }
+        $bytes = New-Object byte[] ([int]$reader.Length)
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            $count = $reader.Read($bytes, $offset, $bytes.Length - $offset)
+            if ($count -le 0) { throw '配置读取不完整。' }
+            $offset += $count
+        }
+        return ,$bytes
+    } finally { $reader.Dispose() }
 }
 function Write-Json([string]$Path, $Value) {
     [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding($false)))
@@ -220,11 +243,13 @@ function Invoke-Probe([string]$Binary, [string[]]$Arguments, [bool]$Physical) {
 
 $runLock = $null
 $candidatePlan = $null
+$candidateSettings = $null
 try {
     $runPath = [IO.Path]::GetFullPath($RunDirectory)
     $scriptPath = [IO.Path]::GetFullPath($PSCommandPath)
     $planPath = Join-Path $runPath 'plan.json'
     $taskPath = Join-Path $runPath 'task.json'
+    $samplingPath = Join-Path $runPath 'sampling-settings.json'
     Assert-PlainPath $runPath
     if ($Mode -eq 'Launch' -and ($ReuseRunDirectory -or $Repeatable)) { throw '复用模式仅适用于Prepare。' }
     if ($Mode -eq 'Prepare') {
@@ -245,7 +270,7 @@ try {
         $lockPath = Join-Path $runPath '.counterpulse.lock'
         Assert-PlainPath $lockPath
         $runLock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
-        foreach ($leaf in @('task.json', 'plan.json', 'TASK.md', 'CONSUMED', 'start-test.bat', 'edit-config.bat', 'launch-test.ps1', 'PARAMETERS.md')) { Assert-PlainPath (Join-Path $runPath $leaf) }
+        foreach ($leaf in @('task.json', 'plan.json', 'TASK.md', 'CONSUMED', 'start-test.bat', 'edit-config.bat', 'launch-test.ps1', 'PARAMETERS.md', 'open-report.bat', 'open-report.ps1', 'sampling-settings.json', 'execution-sampling-settings.json', 'edit-sampling.bat')) { Assert-PlainPath (Join-Path $runPath $leaf) }
         if ($exists) {
             $existingTask = Get-Content -LiteralPath $taskPath -Raw -Encoding UTF8 | ConvertFrom-Json
             Assert-OwnedRun $existingTask
@@ -274,8 +299,9 @@ try {
                 Set-Variable -Name $parameter -Value $value
             }
         }
+        if (-not (Test-Path -LiteralPath $samplingPath)) { Write-CommentedPlan $samplingPath $samplingDefaults $samplingHelp }
         Write-CommentedPlan $candidatePlan $plan
-        Invoke-Probe $binary @('--plan', $candidatePlan, '--dry-run', '--require-current-plan') $false
+        Invoke-Probe $binary @('--plan', $candidatePlan, '--dry-run', '--require-current-plan', '--sampling-settings', $samplingPath) $false
         # 所有验证通过之后才移除上组结果，并重新武装用户前台的一次性命令。
         if (Test-Path -LiteralPath $resultPath) { Remove-Item -LiteralPath $resultPath -Recurse -Force }
         $consumed = Join-Path $runPath 'CONSUMED'
@@ -303,11 +329,44 @@ try {
             '"%SystemRoot%\System32\notepad.exe" "%~dp0plan.json"' + "`r`n"
         [IO.File]::WriteAllText((Join-Path $runPath 'start-test.bat'), $startBat, [Text.Encoding]::ASCII)
         [IO.File]::WriteAllText((Join-Path $runPath 'edit-config.bat'), $editBat, [Text.Encoding]::ASCII)
+        $editSamplingBat = $editBat.Replace('plan.json', 'sampling-settings.json')
+        [IO.File]::WriteAllText((Join-Path $runPath 'edit-sampling.bat'), $editSamplingBat, [Text.Encoding]::ASCII)
+        # 查看入口只在用户手动调用时打开已存在的报告；失败Run也可保留诊断报告。
+        $reportScript = @'
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
+$reportPath = Join-Path $PSScriptRoot 'result/debug-report.html'
+if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
+    [Console]::Error.WriteLine('报告尚未生成，请先启动测试；失败时请检查result中的诊断记录。')
+    exit 1
+}
+if ((Get-Process -Id $PID).SessionId -eq 0 -or $env:SSH_CONNECTION -or $env:SSH_CLIENT) {
+    [Console]::Error.WriteLine('请在本机前台双击open-report.bat查看报告，远程会话不自动打开浏览器。')
+    exit 1
+}
+try {
+    $info = New-Object Diagnostics.ProcessStartInfo
+    $info.FileName = $reportPath
+    $info.UseShellExecute = $true
+    $null = [Diagnostics.Process]::Start($info)
+    exit 0
+} catch {
+    [Console]::Error.WriteLine('无法打开报告，请在result目录手动打开debug-report.html。')
+    exit 1
+}
+'@
+        [IO.File]::WriteAllText((Join-Path $runPath 'open-report.ps1'), $reportScript, (New-Object Text.UTF8Encoding($true)))
+        $reportBat = '@echo off' + "`r`n" + 'setlocal DisableDelayedExpansion' + "`r`n" +
+            '"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0open-report.ps1"' + "`r`n" +
+            'set "reportExitCode=%errorlevel%"' + "`r`n" + 'pause' + "`r`n" + 'exit /b %reportExitCode%' + "`r`n"
+        [IO.File]::WriteAllText((Join-Path $runPath 'open-report.bat'), $reportBat, [Text.Encoding]::ASCII)
         $parameterLines = New-Object 'Collections.Generic.List[string]'
         $parameterLines.Add('# 参数说明')
         $parameterLines.Add('')
-        $parameterLines.Add('双击edit-config.bat编辑plan.json，保存后关闭记事本，再由用户前台双击start-test.bat。启动会发送真实移动与开火输入。')
+        $parameterLines.Add('三步调试：双击edit-config.bat编辑plan.json并保存；由用户前台双击start-test.bat启动；结束后双击open-report.bat查看报告。启动会发送真实移动与开火输入。')
         $parameterLines.Add('Repeatable模式每次启动冻结本轮计划，编辑只影响下一轮；成功校验后覆盖上一组result。正式比较请另存证据。')
+        $parameterLines.Add('报告是基于ACK回执与输入模型的采样分析，不是游戏速度、实际子弹或命中率测量；失败Run已生成的报告仍可查看。')
+        $parameterLines.Add('三组参数分开：plan.json控制真实动作；sampling-settings.json经edit-sampling.bat调整模型和HUD；报告采样结果只用于核对模型，不能作为游戏测量。auto_fire_interval_ms是模型采样间隔，fire_interval_ms是开火命令最小间隔，shot_hold_ms是实际按住时长。模型设置只在文件不存在时创建，重复Prepare保留用户校准值；每轮冻结后生效。')
         $parameterLines.Add('以下数值是本次Prepare实际采用值；之后手工编辑以plan.json为准。')
         $parameterLines.Add('')
         $parameterLines.Add('| 字段 | 本次Prepare实际值 | 含义 |')
@@ -334,7 +393,7 @@ try {
             '参数探索可通过Prepare -ReuseRunDirectory复用本目录；新计划验证通过后替换参数并清理上次result和CONSUMED。每次Prepare后仍由用户前台触发Launch。固定正式文件不复制打包；需要重复调参时Prepare -Repeatable。'
         }
         $manualMode = if ($Repeatable) { '仅用户在当前前台每次手动执行一组，可重复启动' } else { '仅用户在当前前台执行一次' }
-        $markdown = "# 反向轻点人工Run`n`n状态：PREPARED_NOT_LAUNCHED。$manualMode；会发送真实开火输入。`n`n$behavior`n`n请先确认测试场景、源焦点和独占设备；End或人工输入取消。`n`n``````powershell`n$launch`n```````n`n一组$Shots 次开火；$observation。$cadence；结果不代表已经稳定。结果目录：result。`n`n$reuseInstructions`n`n快捷入口：start-test.bat启动本轮，edit-config.bat编辑plan.json；字段说明见PARAMETERS.md。`n`n迁移旧目录后仅使用本TASK中的新入口。`n"
+        $markdown = "# 反向轻点人工Run`n`n状态：PREPARED_NOT_LAUNCHED。$manualMode；会发送真实开火输入。`n`n$behavior`n`n请先确认测试场景、源焦点和独占设备；End或人工输入取消。`n`n``````powershell`n$launch`n```````n`n一组$Shots 次开火；$observation。$cadence；结果不代表已经稳定。结果目录：result。`n`n$reuseInstructions`n`n三步调试：edit-config.bat编辑并保存参数 → start-test.bat前台启动 → open-report.bat查看报告。报告为ACK输入模型，不是游戏测量；失败Run的已生成报告仍可查看。模型参数和HUD开关由edit-sampling.bat编辑sampling-settings.json，每轮启动冻结生效。字段说明见PARAMETERS.md。`n`n迁移旧目录后仅使用本TASK中的新入口。`n"
         [IO.File]::WriteAllText((Join-Path $runPath 'TASK.md'), $markdown, (New-Object Text.UTF8Encoding($false)))
         Write-Output 'PREPARED_NOT_LAUNCHED；未发送设备输入。'
     } else {
@@ -358,6 +417,8 @@ try {
         }
         $output = Join-Path $runPath 'result'
         $executionPlan = $planPath
+        $executionSettings = $samplingPath
+        Assert-PlainPath $samplingPath
         if ($isRepeatable) {
             Assert-ProbeStopped $task.executable
             $executionPlan = Join-Path $runPath 'execution-plan.json'
@@ -366,24 +427,21 @@ try {
             Assert-ResultTree $output
             # 原计划只读取一次；dry-run 与本轮 Worker 使用同一份冻结内容。
             try {
-                $reader = [IO.File]::Open($planPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
-                try {
-                    if ($reader.Length -gt 16384) { throw '计划超过大小限制。' }
-                    $planBytes = New-Object byte[] ([int]$reader.Length)
-                    $offset = 0
-                    while ($offset -lt $planBytes.Length) {
-                        $count = $reader.Read($planBytes, $offset, $planBytes.Length - $offset)
-                        if ($count -le 0) { throw '计划读取不完整。' }
-                        $offset += $count
-                    }
-                } finally { $reader.Dispose() }
+                $planBytes = Read-BoundedBytes $planPath
+                $settingsBytes = Read-BoundedBytes $samplingPath
+                $candidateSettings = Join-Path $runPath ('sampling.' + [Guid]::NewGuid().ToString('N') + '.candidate.json')
+                [IO.File]::WriteAllBytes($candidateSettings, $settingsBytes)
                 $candidatePlan = Join-Path $runPath ('plan.' + [Guid]::NewGuid().ToString('N') + '.candidate.json')
                 [IO.File]::WriteAllBytes($candidatePlan, $planBytes)
-                Invoke-Probe $task.executable @('--plan', $candidatePlan, '--dry-run', '--require-current-plan') $false
+                Invoke-Probe $task.executable @('--plan', $candidatePlan, '--dry-run', '--require-current-plan', '--sampling-settings', $candidateSettings) $false
             } catch {
                 $script:FailureCode = 'PLAN_VALIDATION_FAILED'
                 throw '本轮计划校验失败，保留上次结果。'
             }
+            $executionSettings = Join-Path $runPath 'execution-sampling-settings.json'
+            Assert-PlainPath $executionSettings
+            Move-Item -LiteralPath $candidateSettings -Destination $executionSettings -Force
+            $candidateSettings = $null
             Move-Item -LiteralPath $candidatePlan -Destination $executionPlan -Force
             $candidatePlan = $null
             if (Test-Path -LiteralPath $output) { Remove-Item -LiteralPath $output -Recurse -Force }
@@ -395,7 +453,7 @@ try {
         $marker.Dispose()
         [Console]::WriteLine('请将游戏切到前台并松开移动键和鼠标按钮；等待首个键态报告时可单独轻按松开Shift，不按方向键或鼠标；人物须事先静止并固定瞄准。下方实时显示就绪阶段。')
         Invoke-Probe $task.executable @('--config', $task.config, '--plan', $executionPlan, '--output', $output,
-            '--allow-physical-output', '--confirm', 'AUTO_STOP_COUNTERPULSE', '--require-current-plan') $true
+            '--allow-physical-output', '--confirm', 'AUTO_STOP_COUNTERPULSE', '--require-current-plan', '--sampling-settings', $executionSettings) $true
         Write-Output '本次有界Run结束；请回收result及人工观察，不能自动认定停稳。'
     }
 } catch {
@@ -404,6 +462,7 @@ try {
     [Console]::Error.WriteLine('[COUNTERPULSE_FAILED] ' + $script:FailureCode + '：未自动重试，请查看上方阶段及本次报告。')
     exit 1
 } finally {
+    if ($candidateSettings -and [IO.File]::Exists($candidateSettings)) { Remove-Item -LiteralPath $candidateSettings -Force }
     if ($candidatePlan -and [IO.File]::Exists($candidatePlan)) { Remove-Item -LiteralPath $candidatePlan -Force }
     if ($null -ne $runLock) { $runLock.Dispose() }
 }

@@ -59,7 +59,17 @@ def main():
                     ('wasd', 0, 16000000), ('left_button', 1, 17000000), ('left_button', 0, 22000000)]:
                 commands.append(dict(kind=kind, value=value, disposition=2, submit_ns=stamp - 1,
                     ack_received_ns=stamp, backend_completed_ns=stamp + 1, returned_ns=stamp + 2))
-            command_report.write_text(json.dumps({'commands': commands}), encoding='utf-8')
+            actual_plan = dict(schema_version=2, capture_enabled=False, baseline='counter', shots=1,
+                fire_delay_ms=300, fire_interval_ms=2000, move_during_fire_delay=True, move_ms=7,
+                counter_hold_ms=5, counter_delay_ms=1, shot_after_release_ms=1, shot_hold_ms=5,
+                late_tolerance_ms=5, direction=2)
+            original_sampling_settings = dict(max_move_speed=1.0, clean_shot_speed_ratio=0.34,
+                accel_per_sec=5.5, natural_decel_per_sec=2.5, counter_strafe_accel_per_sec=14.0,
+                fire_sample_delay_ms=25, tap_max_hold_ms=90, auto_fire_interval_ms=100, hud_enabled=True)
+            hostile_failure = '</script><script>alert(1)</script>'
+            command_report.write_text(json.dumps({'commands': commands, 'plan': actual_plan,
+                'sampling_settings': original_sampling_settings,
+                'success': False, 'failure': hostile_failure}), encoding='utf-8')
             evaluation_dir = root / 'evaluation'
             evaluated = subprocess.run([str(Path(args.executable).resolve()), '--evaluate-result',
                 str(command_report), '--output', str(evaluation_dir)], capture_output=True, timeout=10)
@@ -73,6 +83,61 @@ def main():
             assert ack['total_timings'] == 1 and ack['timings'][0]['delta_ns'] == 1000000
             assert ack['timings'][0]['grade'] == '完美' and ack['total_holds'] == 1, (ack['timings'], ack['total_holds'])
             assert (evaluation_dir / 'command-training' / 'manifest.txt').exists()
+            sampling = read_generated_json(evaluation_dir / 'sampling-analysis.json')
+            assert (evaluation_dir / 'debug-report.html').is_file()
+            rendered_html = (evaluation_dir / 'debug-report.html').read_text(encoding='utf-8-sig')
+            assert hostile_failure not in rendered_html
+            assert r'\u003c/script' in rendered_html
+            assert sampling['actual_plan'] == actual_plan
+            assert sampling['settings']['fire_sample_delay_ms'] == 25
+            assert sampling['shots'][0]['samples'][0]['time_ns'] == 42000000
+            assert sampling['source'] == 'COMMAND_ACK_PROXY' and sampling['samples_are_bullets'] is False
+            assert sampling['physical_validation_passed'] is False and sampling['game_shot_stability'] is None
+            assert sampling['execution_success'] is False and sampling['execution_failure'] == hostile_failure
+            assert sampling['initial_velocity_assumption'] == 'ZERO_NOT_PHYSICALLY_VERIFIED'
+            assert sampling['quality_issues'] == [] and sampling['analysis_complete'] is True
+            assert sampling['shots'][0]['planned_down_interval_ms'] == 2000
+            override_settings = dict(original_sampling_settings, fire_sample_delay_ms=18, hud_enabled=False)
+            override_path = root / 'sampling-override.json'
+            override_path.write_text(json.dumps(override_settings), encoding='utf-8')
+            override_output = root / 'evaluation-override'
+            override_run = subprocess.run([str(Path(args.executable).resolve()), '--evaluate-result',
+                str(command_report), '--output', str(override_output), '--sampling-settings', str(override_path)],
+                capture_output=True, timeout=10)
+            assert override_run.returncode == 0
+            overridden = read_generated_json(override_output / 'sampling-analysis.json')
+            assert overridden['settings']['fire_sample_delay_ms'] == 18
+            assert overridden['sampling_settings_overridden'] is True
+            assert overridden['original_sampling_settings'] == original_sampling_settings
+            assert overridden['shots'][0]['samples'][0]['time_ns'] == 35000000
+            # 一秒按住形成多个模型采样点，但只有一次开火按住，绝不把点数说成子弹数。
+            long_report = root / 'synthetic-long-hold.json'
+            long_commands = [dict(item) for item in commands]
+            for key, offset in [('submit_ns', -1), ('ack_received_ns', 0), ('backend_completed_ns', 1), ('returned_ns', 2)]:
+                long_commands[-1][key] = 1017000000 + offset
+            long_plan = dict(actual_plan, shot_hold_ms=1000)
+            long_report.write_text(json.dumps({'commands': long_commands, 'plan': long_plan}), encoding='utf-8')
+            long_output = root / 'evaluation-long-hold'
+            long_evaluation = subprocess.run([str(Path(args.executable).resolve()), '--evaluate-result',
+                str(long_report), '--output', str(long_output)], capture_output=True, timeout=10)
+            assert long_evaluation.returncode == 0
+            long_sampling = read_generated_json(long_output / 'sampling-analysis.json')
+            assert long_sampling['shot_count'] == 1 and long_sampling['samples_are_bullets'] is False
+            assert long_sampling['first_sample_count'] == 1 and long_sampling['held_sample_count'] == 9
+            assert long_sampling['total_sample_count'] == 10 and long_sampling['actual_plan']['shot_hold_ms'] == 1000
+            assert long_sampling['shots'][0]['observed_hold_ms'] == 1000
+            assert long_sampling['shots'][0]['samples'][0]['kind'] == 'FIRST_MODEL_SAMPLE'
+            assert all(item['kind'] == 'HELD_MODEL_SAMPLE' for item in long_sampling['shots'][0]['samples'][1:])
+            missing_plan_report = root / 'synthetic-missing-plan.json'
+            missing_plan_report.write_text(json.dumps({'commands': commands}), encoding='utf-8')
+            missing_plan_output = root / 'evaluation-missing-plan'
+            missing_plan_run = subprocess.run([str(Path(args.executable).resolve()), '--evaluate-result',
+                str(missing_plan_report), '--output', str(missing_plan_output)], capture_output=True, timeout=10)
+            assert missing_plan_run.returncode == 0
+            missing_sampling = read_generated_json(missing_plan_output / 'sampling-analysis.json')
+            assert missing_sampling['analysis_complete'] is False
+            assert 'PLAN_MISSING:fire_interval_ms' in missing_sampling['quality_issues']
+            assert (missing_plan_output / 'debug-report.html').is_file()
             saved_evaluation = (evaluation_dir / 'training-evaluation.json').read_bytes()
             duplicate = subprocess.run([str(Path(args.executable).resolve()), '--evaluate-result',
                 str(command_report), '--output', str(evaluation_dir)], capture_output=True, timeout=10)
@@ -120,7 +185,7 @@ def main():
                     '--plan', str(run / 'plan.json'), '--config', str(config), '--output', str(diagnostic), *extra],
                     capture_output=True, timeout=10)
                 assert rejected.returncode != 0 and not diagnostic.exists()
-            for leaf in ('start-test.bat', 'edit-config.bat', 'launch-test.ps1', 'PARAMETERS.md'):
+            for leaf in ('start-test.bat', 'edit-config.bat', 'launch-test.ps1', 'PARAMETERS.md', 'open-report.bat', 'open-report.ps1', 'sampling-settings.json', 'edit-sampling.bat'):
                 assert (run / leaf).is_file()
             start_bat = (run / 'start-test.bat').read_text(encoding='ascii')
             edit_bat = (run / 'edit-config.bat').read_text(encoding='ascii')
@@ -130,6 +195,23 @@ def main():
             assert r'%SystemRoot%\System32\notepad.exe' in edit_bat
             assert 'set "testExitCode=%errorlevel%"' in start_bat and 'exit /b %testExitCode%' in start_bat
             assert '-Mode Launch' not in start_bat and '-AllowPhysicalOutput' not in start_bat
+            report_bat = (run / 'open-report.bat').read_text(encoding='ascii')
+            assert 'DisableDelayedExpansion' in report_bat and '"%~dp0open-report.ps1"' in report_bat
+            assert r'%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe' in report_bat
+            assert 'set "reportExitCode=%errorlevel%"' in report_bat and 'exit /b %reportExitCode%' in report_bat
+            report_script = (run / 'open-report.ps1').read_text(encoding='utf-8-sig')
+            assert "Join-Path $PSScriptRoot 'result/debug-report.html'" in report_script
+            assert 'Test-Path -LiteralPath' in report_script and '$env:SSH_CONNECTION' in report_script
+            missing_report = subprocess.run([shell, '-NoProfile', '-File', str(run / 'open-report.ps1')],
+                                            capture_output=True, timeout=10)
+            assert missing_report.returncode != 0
+            assert '报告尚未生成' in missing_report.stderr.decode('utf-8-sig')
+            assert not (run / 'result').exists()
+            sampling_settings = read_generated_json(run / 'sampling-settings.json')
+            assert sampling_settings == dict(max_move_speed=1.0, clean_shot_speed_ratio=0.34,
+                accel_per_sec=5.5, natural_decel_per_sec=2.5, counter_strafe_accel_per_sec=14.0,
+                fire_sample_delay_ms=18, tap_max_hold_ms=90, auto_fire_interval_ms=100, hud_enabled=True)
+            assert '"%~dp0sampling-settings.json"' in (run / 'edit-sampling.bat').read_text(encoding='ascii')
             assert '// ' in (run / 'plan.json').read_text(encoding='utf-8-sig')
             assert '| shot_hold_ms | 5 |' in (run / 'PARAMETERS.md').read_text(encoding='utf-8-sig')
             assert task['status'] == 'PREPARED_NOT_LAUNCHED'
@@ -217,6 +299,23 @@ def main():
                 finally:
                     # 仅删除这个已核对的目录链接，不递归或遍历链接目标。
                     os.rmdir(junction)
+                # 新报告入口也必须在覆盖前拒绝重解析点，不能写入外部目录。
+                for leaf in ('open-report.bat', 'open-report.ps1', 'sampling-settings.json', 'edit-sampling.bat'):
+                    shortcut_path = long_run / leaf
+                    shortcut_bytes = shortcut_path.read_bytes()
+                    shortcut_path.unlink()
+                    escaped_shortcut = str(shortcut_path).replace("'", "''")
+                    subprocess.run([shell, '-NoProfile', '-Command',
+                        "New-Item -ItemType Junction -Path '" + escaped_shortcut + "' -Target '" + escaped_target + "' | Out-Null"],
+                        check=True, capture_output=True, timeout=20)
+                    try:
+                        invoke(*reusable_args)
+                        assert (long_run / 'plan.json').read_bytes() == old_plan
+                        assert (result_dir / 'result.json').read_text(encoding='utf-8-sig') == 'previous-result'
+                        assert list(external.iterdir()) == [external / 'keep.txt']
+                    finally:
+                        os.rmdir(shortcut_path)
+                        shortcut_path.write_bytes(shortcut_bytes)
             invoke(*reusable_args, ok=True)
             assert not result_dir.exists() and not (long_run / 'CONSUMED').exists()
             updated = read_generated_json(long_run / 'plan.json')
@@ -299,6 +398,10 @@ def main():
             invoke('-Mode', 'Prepare', '-RunDirectory', held_run, '-Executable', args.executable,
                 '-ConfigPath', config, '-Shots', 3, '-ShotHoldMs', 1000, '-FireIntervalMs', 2000, ok=True)
             held_plan = read_generated_json(held_run / 'plan.json')
+            user_settings = read_generated_json(held_run / 'sampling-settings.json')
+            user_settings['accel_per_sec'] = 6.0
+            (held_run / 'sampling-settings.json').write_text(json.dumps(user_settings), encoding='utf-8')
+            user_settings_bytes = (held_run / 'sampling-settings.json').read_bytes()
             assert held_plan['shot_hold_ms'] == 1000 and held_plan['fire_interval_ms'] == 2000
             held_task = (held_run / 'TASK.md').read_text(encoding='utf-8-sig')
             assert '左键按住1000ms' in held_task and 'fire_interval_ms=2000ms' in held_task
@@ -308,6 +411,7 @@ def main():
             held_migrated = read_generated_json(held_run / 'plan.json')
             assert held_migrated['shot_hold_ms'] == 1000 and held_migrated['fire_interval_ms'] == 2000
             assert held_migrated['move_ms'] == 10
+            assert (held_run / 'sampling-settings.json').read_bytes() == user_settings_bytes
             parameters = (held_run / 'PARAMETERS.md').read_text(encoding='utf-8-sig')
             assert '| shot_hold_ms | 1000 |' in parameters and '| fire_interval_ms | 2000 |' in parameters
             assert '| move_ms | 10 |' in parameters
@@ -355,7 +459,7 @@ def main():
             assert len(spans) == 2
             mock = r'''function Invoke-Probe([string]$Binary, [string[]]$Arguments, [bool]$Physical) {
     if (-not $Physical) {
-        $dry = $Arguments.Length -eq 4 -and $Arguments[0] -eq '--plan' -and $Arguments[2] -eq '--dry-run' -and $Arguments[3] -eq '--require-current-plan'
+        $dry = $Arguments.Length -eq 6 -and $Arguments[0] -eq '--plan' -and $Arguments[2] -eq '--dry-run' -and $Arguments[3] -eq '--require-current-plan' -and $Arguments[4] -eq '--sampling-settings'
         $migration = $Arguments.Length -eq 4 -and $Arguments[0] -eq '--migrate-plan' -and $Arguments[2] -eq '--output'
         if (-not $dry -and -not $migration) { throw 'MOCK_REJECTED_ARGUMENTS' }
         & $Binary @Arguments > $null
@@ -363,14 +467,19 @@ def main():
         return
     }
     $snapshot = $Arguments[[Array]::IndexOf($Arguments, '--plan') + 1]
+    $settingsSnapshot = $Arguments[[Array]::IndexOf($Arguments, '--sampling-settings') + 1]
     $output = $Arguments[[Array]::IndexOf($Arguments, '--output') + 1]
     if ((Test-Path -LiteralPath (Join-Path $runPath 'edit-during-mock'))) {
         $edited = (Get-Content -LiteralPath $planPath -Encoding UTF8 | Where-Object { -not $_.TrimStart().StartsWith('//') }) -join "`n" | ConvertFrom-Json
         $edited.move_ms = 123
         Write-Json $planPath $edited
+        $editedSettings = (Get-Content -LiteralPath $settingsSnapshot -Encoding UTF8 | Where-Object { -not $_.TrimStart().StartsWith('//') }) -join "`n" | ConvertFrom-Json
+        $editedSettings.accel_per_sec = 7.0
+        Write-Json $samplingPath $editedSettings
     }
     $null = [IO.Directory]::CreateDirectory($output)
     [IO.File]::WriteAllBytes((Join-Path $output 'plan.json'), [IO.File]::ReadAllBytes($snapshot))
+    [IO.File]::WriteAllBytes((Join-Path $output 'sampling-settings.json'), [IO.File]::ReadAllBytes($settingsSnapshot))
     [IO.File]::WriteAllText((Join-Path $output 'result.json'), 'MOCK_ONLY')
     [IO.File]::AppendAllText((Join-Path $runPath 'mock-calls'), "once`n")
 }'''
@@ -419,7 +528,18 @@ def main():
             assert read_generated_json(repeat_run / 'plan.json')['move_ms'] == 123
             assert (repeat_run / 'execution-plan.json').read_bytes() == (repeat_run / 'result' / 'plan.json').read_bytes()
             assert (repeat_run / 'mock-calls').read_text(encoding='utf-8-sig').splitlines() == ['once', 'once']
+            assert read_generated_json(repeat_run / 'sampling-settings.json')['accel_per_sec'] == 7.0
+            assert read_generated_json(repeat_run / 'result' / 'sampling-settings.json')['accel_per_sec'] == 5.5
+            assert (repeat_run / 'execution-sampling-settings.json').read_bytes() == (repeat_run / 'result' / 'sampling-settings.json').read_bytes()
             previous = (repeat_run / 'result' / 'plan.json').read_bytes()
+            valid_settings_bytes = (repeat_run / 'sampling-settings.json').read_bytes()
+            (repeat_run / 'sampling-settings.json').write_text('{"auto_fire_interval_ms":0}', encoding='utf-8')
+            denied_settings = invoke(*launch, entry=harness)
+            assert b'PLAN_VALIDATION_FAILED' in denied_settings.stderr
+            assert (repeat_run / 'result' / 'plan.json').read_bytes() == previous
+            assert (repeat_run / 'mock-calls').read_text(encoding='utf-8-sig').splitlines() == ['once', 'once']
+            assert not list(repeat_run.glob('*.candidate.json'))
+            (repeat_run / 'sampling-settings.json').write_bytes(valid_settings_bytes)
             for invalid in [json.dumps(dict(repeat_plan, **bad)) for bad in [
                     {'move_ms': 0}, {'shots': 0}, {'fire_delay_ms': 2001}, {'counter_delay_ms': 201},
                     {'shot_interval_ms': 280}, {'brake_window_ms': 60}, {'schema_version': 1},

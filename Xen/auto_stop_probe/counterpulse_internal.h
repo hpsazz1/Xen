@@ -146,14 +146,15 @@ private:
 };
 
 inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan& proposed,
-    const std::function<std::string()>& external_cancel = {}, CounterpulseClock clock = {}, bool require_event_history = false) {
+    const std::function<std::string()>& external_cancel = {}, CounterpulseClock clock = {}, bool require_event_history = false,
+    const std::function<void(const Json&)>& command_observer = {}) {
     const auto p = parse_counterpulse_plan(counterpulse_plan_json(proposed));
     Json report{{"schema_version", 2}, {"input_source", "TEST_SCRIPT"}, {"plan", counterpulse_plan_json(p)},
         {"timing_model", p.baseline == "stationary" ? (p.schema_version == 2 ? "STATIONARY_UP_ACK_DELAY" : "STATIONARY_INTERVAL") :
             (p.fire_delay_ms > 0 ? (p.move_during_fire_delay ? "HOLD_MOVE_DURING_FIRE_DELAY" : "WAIT_FIRE_DELAY_THEN_MOVE") :
                 (p.uses_release_timing() ? "DIRECTION_UP_ACK_DELAY" : "MOVE_UP_ACK_FIXED_WINDOW"))}, {"cycles", Json::array()},
         {"commands", Json::array()}, {"success", false}, {"settled", nullptr},
-        {"physical_effect_observed", false}, {"shot_down_attempts", 0}};
+        {"physical_effect_observed", false}, {"shot_down_attempts", 0}, {"observer_failures", 0}};
     if (!mouse.output_owner_exclusive() || !mouse.supports_wasd_keyboard() || !mouse.supports_left_button()) {
         report["failure"] = "CAPABILITY_OR_OWNER_REQUIRED"; return report;
     }
@@ -199,11 +200,23 @@ inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan
         return failure.empty();
     };
     auto wait = [&](Clock::time_point deadline) -> bool {
+        unsigned unchanged_reads = 0;
+        auto observed = clock.now();
         while (clock.now() < deadline) {
             if (!check()) return false;
             const auto before = clock.now();
+            if (before < last_clock) { failure = "CLOCK_REGRESSION"; return false; }
+            // 检查也会消耗时间；已经到点时不再等待过去时刻并要求同tick严格递增。
+            if (before >= deadline) return check();
+            if (before > observed) unchanged_reads = 0;
             clock.sleep_until(std::min(deadline, before + std::chrono::milliseconds(1)));
-            if (clock.now() <= before) { failure = "CLOCK_NOT_ADVANCING"; return false; }
+            const auto after = clock.now();
+            if (after < before) { failure = "CLOCK_REGRESSION"; return false; }
+            // 同tick不是回退；只容忍有界重试，持续冻结仍然取消且每轮复查安全条件。
+            if (after == before) {
+                if (++unchanged_reads >= 64) { failure = "CLOCK_NOT_ADVANCING"; return false; }
+            } else unchanged_reads = 0;
+            observed = after;
         }
         return check();
     };
@@ -265,6 +278,11 @@ inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan
         const auto returned = clock.now();
         entry["ack_received_ns"] = ns(ack); entry["backend_completed_ns"] = ns(completed); entry["returned_ns"] = ns(returned);
         report["commands"].push_back(std::move(entry));
+        // 观察器仅允许有界入队；异常作为遥测失败记录，不跳过当前回执校验或释放清理。
+        if (command_observer) {
+            try { command_observer(report["commands"].back()); }
+            catch (...) { report["observer_failures"] = report["observer_failures"].get<int>() + 1; }
+        }
         if (!accepted) failure = "COMMAND_NOT_ACKNOWLEDGED";
         else if (ack < submit || ack > returned || completed < ack || completed > returned) failure = "COMMAND_TIME_INVALID";
         else if (late) failure = "RELEASE_DEADLINE_MISSED";

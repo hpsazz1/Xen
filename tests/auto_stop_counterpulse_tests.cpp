@@ -547,6 +547,42 @@ void schema2_weapon_hold_and_interval() {
         require(rejected, "必须拒绝武器参数越界、含末枪超40秒以及旧版本新增参数或超过20ms保持");
     }
 }
+void wait_deadline_reached_during_check() {
+    Fake m; const auto p = parse_counterpulse_plan(Json{{"schema_version", 2}, {"shots", 1}});
+    bool crossed = false;
+    const auto r = execute_counterpulse(m, p, [&]() -> std::string {
+        // 模拟全松/焦点检查消耗最后等待时间；随后sleep_until过去时刻立即返回。
+        if (m.left && !crossed) { m.time += std::chrono::milliseconds(5); crossed = true; }
+        return {};
+    }, m.clock());
+    require(crossed && r["success"] && m.downs == 1 && !m.left && !m.held && m.cleanup_calls == 1,
+        "检查期间已到deadline且同tick返回不能误判CLOCK_NOT_ADVANCING");
+}
+void wait_transient_equal_clock_ticks() {
+    Fake m; const auto p = parse_counterpulse_plan(Json{{"schema_version", 2}, {"shots", 1}});
+    auto clock = m.clock(); int equal_ticks = 0;
+    clock.sleep_until = [&](auto target) {
+        if (equal_ticks < 3) { ++equal_ticks; return; }
+        m.time = std::max(m.time, target);
+    };
+    const auto r = execute_counterpulse(m, p, {}, clock);
+    require(equal_ticks == 3 && r["success"] && m.downs == 1 && !m.left && !m.held && m.cleanup_calls == 1,
+        "有限同tick读取后恢复推进不等于冻结时钟，不得截断动作");
+}
+void command_observer_failure_keeps_cleanup() {
+    Fake m; const auto p = parse_counterpulse_plan(Json{{"schema_version", 2}, {"shots", 3}});
+    int callbacks = 0;
+    const auto r = execute_counterpulse(m, p, {}, m.clock(), false, [&](const Json& command) {
+        require(command.contains("ack_received_ns") && command.contains("returned_ns"),
+            "观察器只能消费完整记录的命令回执");
+        ++callbacks;
+        throw std::runtime_error("测试HUD观察器失败");
+    });
+    require(r["success"] && m.downs == 3 && !m.left && !m.held && m.cleanup_calls == 1,
+        "HUD观察器异常不得跳过开火释放或最终清理");
+    require(callbacks == static_cast<int>(r["commands"].size()) && r["observer_failures"] == callbacks,
+        "每条已记录回执恰好通知一次，观察器失败须显式计数而非冒充正常");
+}
 void invalid_plans() {
     for (const auto& json : {Json{{"counter_delay_ms", 201}}, Json{{"baseline", "stationary"}, {"counter_delay_ms", 50}}, Json{{"fire_delay_ms", 300}}, Json{{"fire_delay_ms", 2001}},
         Json{{"move_during_fire_delay", 0}}, Json{{"move_during_fire_delay", "false"}}, Json{{"move_during_fire_delay", nullptr}},
@@ -570,7 +606,7 @@ void invalid_plans() {
 }
 }
 int main() {
-    try { schema2_weapon_hold_and_interval(); schema2_release_timing(); fire_delay_before_moving(); delayed_reverse_tap_then_fire(); fire_delay_while_moving(); immediate_movement_cycles(); shot_after_direction_release(); matched_brake_window(); successful_and_baselines(); configurable_stationary_intervals(); failures_stop_and_cleanup(); invalid_plans(); }
+    try { command_observer_failure_keeps_cleanup(); wait_deadline_reached_during_check(); wait_transient_equal_clock_ticks(); schema2_weapon_hold_and_interval(); schema2_release_timing(); fire_delay_before_moving(); delayed_reverse_tap_then_fire(); fire_delay_while_moving(); immediate_movement_cycles(); shot_after_direction_release(); matched_brake_window(); successful_and_baselines(); configurable_stationary_intervals(); failures_stop_and_cleanup(); invalid_plans(); }
     catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
     std::cout << "反冲纯fake专项通过：时序、基线、预算、取消、未知ACK、清理及参数拒绝\n";
 }

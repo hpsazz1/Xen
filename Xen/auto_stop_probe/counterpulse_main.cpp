@@ -18,6 +18,9 @@
 #include "auto_stop_probe/readiness_internal.h"
 #include "auto_stop_probe/preroll_internal.h"
 #include "auto_stop_probe/training_evaluation_internal.h"
+#include "auto_stop_probe/sampling_analysis_internal.h"
+#include "auto_stop_probe/debug_report_internal.h"
+#include "auto_stop_probe/counterpulse_hud.h"
 #include "runtime/input_training_internal.h"
 #include "source_context/source_context.h"
 
@@ -173,6 +176,20 @@ void write_json(const std::filesystem::path& path, const Json& report) {
     if (!MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
         throw std::runtime_error("报告原子保存失败");
 }
+void write_sampling_report(const std::filesystem::path& directory, const Json& report) {
+    const auto analysis = analyze_counterpulse_sampling(report);
+    write_json(directory / "sampling-analysis.json", analysis);
+    const auto path = directory / "debug-report.html";
+    auto temporary = path; temporary += ".writing";
+    {
+        std::ofstream file(temporary, std::ios::binary);
+        file.exceptions(std::ios::badbit | std::ios::failbit);
+        file << render_counterpulse_debug_report(analysis);
+        file.flush();
+    }
+    if (!MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        throw std::runtime_error("调试报告原子保存失败");
+}
 }
 
 int main(int argc, char** argv) {
@@ -190,13 +207,14 @@ int main(int argc, char** argv) {
         if (created) write_json(output / "startup.json", {{"stage", stage}, {"readiness", readiness}, {"capture", capture_diagnostic}});
     };
     try {
-        std::string config_path, plan_path, confirmation, evaluation_path, migration_path;
+        std::string config_path, plan_path, confirmation, evaluation_path, migration_path, sampling_path;
         bool dry = false, allowed = false, capture_check = false, current_plan = false;
         std::set<std::string> seen;
         if (argc == 2 && std::string(argv[1]) == "--help") {
             std::cout << "单组1至30次开火按住测试：--plan JSON --dry-run；真实运行另需--config INI --output NEW_DIR "
                          "--allow-physical-output --confirm AUTO_STOP_COUNTERPULSE。需源焦点、全松与独占设备，End/Ctrl+C取消。\n"
                          "离线重评：--evaluate-result RESULT_JSON --output NEW_DIR；不连接设备。\n"
+                         "采样校准：--sampling-settings JSONC；真实运行显示模型HUD，dry-run与离线重评不打开HUD。\n"
                          "计划迁移：--migrate-plan OLD_JSON --output NEW_JSON；不连接设备。\n"
                          "旧计划纯采集诊断：--plan JSON --config INI --output NEW_DIR --capture-check。\n";
             return 0;
@@ -214,11 +232,12 @@ int main(int argc, char** argv) {
             else if (i + 1 < argc && option == "--confirm") confirmation = argv[++i];
             else if (i + 1 < argc && option == "--evaluate-result") evaluation_path = argv[++i];
             else if (i + 1 < argc && option == "--migrate-plan") migration_path = argv[++i];
+            else if (i + 1 < argc && option == "--sampling-settings") sampling_path = argv[++i];
             else throw std::runtime_error("无效参数");
         }
         if (!migration_path.empty()) {
             if (dry || capture_check || allowed || current_plan || !evaluation_path.empty() ||
-                !confirmation.empty() || !config_path.empty() || !plan_path.empty() || output.empty())
+                !confirmation.empty() || !config_path.empty() || !plan_path.empty() || !sampling_path.empty() || output.empty())
                 throw std::runtime_error("计划迁移参数冲突");
             if (std::filesystem::file_size(migration_path) > 16384 || std::filesystem::exists(output))
                 throw std::runtime_error("计划过大或输出已存在");
@@ -234,18 +253,30 @@ int main(int argc, char** argv) {
             write_json(output, normalized);
             return 0;
         }
+        auto sampling_settings = SamplingSettings{};
+        if (!sampling_path.empty()) {
+            if (std::filesystem::file_size(sampling_path) > 16384) throw std::runtime_error("采样设置过大");
+            std::ifstream settings_file(sampling_path);
+            sampling_settings = parse_sampling_settings(Json::parse(settings_file, nullptr, true, true));
+        }
         if (!evaluation_path.empty()) {
             if (dry || capture_check || allowed || current_plan || !confirmation.empty() || !config_path.empty() ||
                 !plan_path.empty() || output.empty()) throw std::runtime_error("离线重评参数冲突");
             if (std::filesystem::file_size(evaluation_path) > 4 * 1024 * 1024)
                 throw std::runtime_error("命令报告过大");
             std::ifstream file(evaluation_path);
-            const auto commands = Json::parse(file);
+            auto commands = Json::parse(file);
+            if (!sampling_path.empty()) {
+                commands["original_sampling_settings"] = commands.value("sampling_settings", Json(nullptr));
+                commands["sampling_settings"] = sampling_settings_json(sampling_settings);
+                commands["sampling_settings_overridden"] = true;
+            }
             if (!std::filesystem::create_directory(output)) throw std::runtime_error("重评需要新目录");
             created = true;
             const auto evaluation = evaluate_counterpulse_training(commands, output / "command-training");
             write_json(output / "training-evaluation.json", {{"schema_version", 1},
                 {"command_ack", evaluation}, {"monitor", nullptr}, {"physical_output", false}});
+            write_sampling_report(output, commands);
             return evaluation.value("success", false) ? 0 : 2;
         }
         std::ifstream input(plan_path);
@@ -401,7 +432,11 @@ int main(int argc, char** argv) {
         if (document.value("schema_version", 0) == 2)
             training = std::make_unique<MonitorTraining>(resources.mouse, output / "monitor-training");
         execution_entered = true;
-        auto report = execute_counterpulse(*resources.mouse, plan, cancel, {}, true);
+        std::unique_ptr<CounterpulseHud> hud;
+        if (sampling_settings.hud_enabled) hud = std::make_unique<CounterpulseHud>(sampling_settings);
+        auto report = execute_counterpulse(*resources.mouse, plan, cancel, {}, true,
+            [&](const Json& command) { if (hud) hud->observe(command); });
+        report["sampling_settings"] = sampling_settings_json(sampling_settings);
         if (training) training->stop();
         resources.mouse->close();
         cleanup_finished.store(true);
@@ -417,6 +452,9 @@ int main(int argc, char** argv) {
         if (training) {
             const auto command_evaluation = evaluate_counterpulse_training(report, output / "command-training");
             const auto monitor_evaluation = training->report();
+            report["monitor_evidence"] = {{"source", "KMBOX_MONITOR"},
+                {"received_events", monitor_evaluation.value("received_events", Json(nullptr))},
+                {"samples_present", monitor_evaluation.value("samples_present", Json(nullptr))}};
             write_json(output / "training-evaluation.json", {{"schema_version", 1},
                 {"command_ack", command_evaluation}, {"monitor", monitor_evaluation},
                 {"game_shot_stability", nullptr}, {"scene_settled", nullptr}});
@@ -439,7 +477,22 @@ int main(int argc, char** argv) {
             report["capture_status"] = "DISABLED_BY_PLAN";
         }
         write_json(output / "result.json", report);
-        std::cout << "组结束，执行结果已保存；停稳效果由人工观察判断。\n";
+        if (hud) {
+            // 设备已关闭；仅保留显示，让末次短按的延迟样本按真实时间到期。
+            std::this_thread::sleep_for(std::chrono::milliseconds(sampling_settings.fire_sample_delay_ms + 40));
+            hud->finish(report);
+            const auto hud_deadline = Clock::now() + std::chrono::milliseconds(80);
+            while (Clock::now() < hud_deadline) {
+                const auto state = hud->status();
+                if (state["state"] == "FAILED" ||
+                    (state["state"] == "FINISHED_VISIBLE" && state["queued_commands"] == 0)) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        }
+        report["hud_status"] = hud ? hud->status() : Json{{"state", "DISABLED"}, {"physical_validation_passed", false}};
+        write_json(output / "result.json", report);
+        write_sampling_report(output, report);
+        std::cout << "组结束，执行结果与采样调试报告已保存；停稳效果由人工观察判断。\n";
         return report.value("success", false) && report.value("training_archive_success", true) &&
             (!plan.capture_enabled || report.value("capture_complete", false)) ? 0 : 2;
     } catch (...) {
