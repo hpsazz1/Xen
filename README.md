@@ -104,6 +104,7 @@ HUD急停面板显示最近偏差、平均快慢、优秀率、波动、最快/�
 
 [`scripts/analyze_auto_stop_impacts.py`](scripts/analyze_auto_stop_impacts.py) 仍用于独立的已有图像证据，
 不把输入评价分数当作游戏弹着或停稳测量。
+两组已完成Run可用 scripts/analyze_auto_stop_runs.py 离线比较；它调用正式程序分析，并仅改变反向保持时长做假设重放，保留源报告的ACK延迟形状。首发未移动，移动后汇总单独统计。候选是未执行的模型假设，不是实际停稳证据；不会连接设备或修改输入报告。
 不同 Provider 使用各自匹配的 ONNX Runtime 发行包和独立构建目录。请求严格后端时不会静默回退
 到 CPU。固定 shape TensorRT 可启用 CUDA Graph；DirectML/OpenVINO 保持独立运行库闭包。
 
