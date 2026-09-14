@@ -54,7 +54,7 @@ function Read-FireSettings([string]$Path) {
     return $settings
 }
 function New-FirePlan($Settings) {
-    return [ordered]@{ schema_version=2; capture_enabled=$false; baseline='stationary'; shots=5;
+    return [ordered]@{ schema_version=2; capture_enabled=$false; baseline='stationary'; shots=15;
         fire_delay_ms=1; fire_interval_ms=$Settings.fire_interval_ms; move_during_fire_delay=$false;
         move_ms=1; counter_hold_ms=1; counter_delay_ms=0; shot_after_release_ms=0;
         shot_hold_ms=$Settings.shot_hold_ms; late_tolerance_ms=5; direction=2 }
@@ -93,7 +93,7 @@ try {
         [IO.File]::WriteAllText((Join-Path $runPath 'check-config.bat'), $start.Replace('launch-test.ps1', 'check-config.ps1'), [Text.Encoding]::ASCII)
         $binding.launcher_sha256 = Get-Digest (Join-Path $runPath 'launch-test.ps1')
         Write-Json (Join-Path $runPath 'task.json') $binding
-        $taskText = "# 原地射击测试`n`nPREPARED_NOT_LAUNCHED。固定每组5次左键按住，不代表5颗子弹；无移动动作，关闭模型HUD。`n`nfire-settings.json仅接受shot_hold_ms和fire_interval_ms两个整数字段。按住1..2000ms；相邻左键DOWN提交最小间隔1..5000ms且大于按住时长。默认80/800ms是观察与操作余量起点，不是人体反应常数，也不证明后座已恢复。`n`nedit-config.bat编辑参数，check-config.bat仅校验并生成preview-plan.json，不发送输入或创建真实组；start-test.bat由用户前台启动。每组独立保存到runs/时间GUID，期间编辑只影响下一组。End或人工输入取消沿用正式引擎；结束后需人工观察，不自动判断准确度。`n`n``````powershell`n$launch`n```````n"
+        $taskText = "# 原地射击测试`n`nPREPARED_NOT_LAUNCHED。固定每组15次左键按住，不代表15颗子弹；无移动动作，关闭模型HUD。`n`nfire-settings.json仅接受shot_hold_ms和fire_interval_ms两个整数字段。按住1..2000ms；相邻左键DOWN提交最小间隔1..5000ms且大于按住时长。默认80/800ms是观察与操作余量起点，不是人体反应常数，也不证明后座已恢复。`n`nedit-config.bat编辑参数，check-config.bat仅校验并生成preview-plan.json，不发送输入或创建真实组；start-test.bat由用户前台启动。每组独立保存到runs/时间GUID，期间编辑只影响下一组。End或人工输入取消沿用正式引擎；结束后需人工观察，不自动判断准确度。`n`n``````powershell`n$launch`n```````n"
         [IO.File]::WriteAllText((Join-Path $runPath 'TASK.md'), $taskText, $utf8)
         [Console]::WriteLine('PREPARED_NOT_LAUNCHED；未发送设备输入。')
     } else {
@@ -140,7 +140,7 @@ try {
         $samplingText = [regex]::Replace($samplingText, '"hud_enabled"\s*:\s*true', '"hud_enabled": false')
         if ($samplingText -notmatch '"hud_enabled"\s*:\s*false') { throw '无法确认HUD关闭，未启动。' }
         [IO.File]::WriteAllText($samplingPath, $samplingText, $utf8)
-        [Console]::WriteLine('本组固定5次左键按住；不代表子弹数。结果目录：' + $group)
+        [Console]::WriteLine('本组固定15次左键按住；不代表子弹数。结果目录：' + $group)
         $launchArguments = @{ Mode='Launch'; RunDirectory=$group; AllowPhysicalOutput=$true; Confirm='AUTO_STOP_COUNTERPULSE'; Scope=$task.scope }
         if ($task.credential_directory) { $launchArguments.CredentialDirectory = $task.credential_directory }
         & $task.engine @launchArguments

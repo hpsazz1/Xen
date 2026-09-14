@@ -108,7 +108,7 @@ HUD急停面板显示最近偏差、平均快慢、优秀率、波动、最快/�
 独立原地射击使用 `scripts/invoke_weapon_fire_test.ps1`：Prepare生成独立目录，
 `edit-config.bat`只编辑 `fire-settings.json` 的 `shot_hold_ms`（默认80）与 `fire_interval_ms`（默认800）。
 按住从DOWN ACK起计时，间隔为相邻DOWN提交的最小间隔，单位ms，间隔必须大于按住时长。
-`check-config.bat`离线校验，`start-test.bat`仅由用户前台启动每组5次左键按住；原地不移动，
+`check-config.bat`离线校验，`start-test.bat`仅由用户前台启动每组15次左键按住；原地不移动，
 关闭移动模型HUD，不把按住次数当子弹数或把模型零速当后座恢复。每组保留在独立runs目录，
 修改只影响下一组。80/800是观察用工程起点，不是人类反应常数或任何武器的已验证恢复值。
 当前测试阶段不添加随机范围或自动等待补偿；保持固定参数便于对照。

@@ -42,7 +42,7 @@ def main():
         assert json.loads(original.decode('utf-8-sig')) == dict(shot_hold_ms=80, fire_interval_ms=800)
         invoke('Validate', good=True)
         preview = json.loads((run / 'preview-plan.json').read_text(encoding='utf-8-sig'))
-        assert preview['baseline'] == 'stationary' and preview['shots'] == 5
+        assert preview['baseline'] == 'stationary' and preview['shots'] == 15
         assert preview['shot_hold_ms'] == 80 and preview['fire_interval_ms'] == 800
         assert preview['counter_delay_ms'] == 0 and preview['move_during_fire_delay'] is False
         assert not (run / 'runs').exists() or not list((run / 'runs').iterdir())
@@ -53,7 +53,7 @@ def main():
         assert preview['shot_hold_ms'] == 1000 and preview['fire_interval_ms'] == 2000
         for value in [dict(shot_hold_ms=0, fire_interval_ms=800), dict(shot_hold_ms=80, fire_interval_ms=80),
                       dict(shot_hold_ms=True, fire_interval_ms=800), dict(shot_hold_ms=80.5, fire_interval_ms=800),
-                      dict(shot_hold_ms=80, fire_interval_ms=5001), dict(shot_hold_ms=80),
+                      dict(shot_hold_ms=80, fire_interval_ms=5001), dict(shot_hold_ms=80, fire_interval_ms=3000), dict(shot_hold_ms=80),
                       dict(shot_hold_ms=80, fire_interval_ms=800, counter_hold_ms=40)]:
             settings.write_text(json.dumps(value), encoding='utf-8')
             invoke('Validate')
