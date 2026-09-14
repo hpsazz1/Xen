@@ -185,22 +185,6 @@ public:
             }
         } else {
             displayed = analyze_counterpulse_live_sampling(Json{{"commands", commands}}, settings, now);
-            displayed["timings"] = Json::array();
-            // 自动组仅显示已确认的同轴释放→对向按下ACK间隔。
-            int previous_direction = 0;
-            std::int64_t released = 0;
-            for (const auto& item : commands) {
-                if (item["kind"] != "wasd" || item["disposition"] != static_cast<int>(KeyboardDisposition::ACKNOWLEDGED)) continue;
-                const int value = item["value"];
-                const auto ack = item["ack_received_ns"].get<std::int64_t>();
-                if (!value && previous_direction) released = ack;
-                else if (value == 2 || value == 8) {
-                    if (released && previous_direction && value != previous_direction)
-                        displayed["timings"].push_back({{"delta_ms", (ack - released) / 1e6},
-                            {"ordinal", displayed["timings"].size() + 1}, {"grade", "ACK_INTERVAL"}});
-                    previous_direction = value; released = 0;
-                }
-            }
             displayed["feedback"] = summarize_hud_feedback(displayed, settings);
         }
         const auto& analysis = displayed;

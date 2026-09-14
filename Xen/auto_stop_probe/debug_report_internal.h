@@ -16,6 +16,7 @@ inline std::string render_counterpulse_debug_report(const Json& analysis) {
 <style>body{font:16px system-ui,sans-serif;background:#101923;color:#e3edf5;margin:28px auto;max-width:1100px;padding:0 20px}h1{font-size:28px}h2{font-size:19px;margin-top:30px}.note{color:#a9bfd0;line-height:1.7}.panel{background:#192734;border:1px solid #314959;border-radius:12px;padding:20px;margin:16px 0}table{border-collapse:collapse;width:100%;font-size:14px}td,th{text-align:left;padding:10px;border-bottom:1px solid #314959}select,button{font:inherit;background:#203b4c;color:white;padding:8px;border:1px solid #66899c;border-radius:6px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}canvas{width:100%;height:240px}.scroll{overflow:auto}.bad{color:#ffcb88}</style>
 <h1>开火采样调试报告</h1><p class="note" id="source">输入估计模型 · 初始静止未经实测确认 · 采样次数不等于子弹数<br>“模型阈值内”只表示当前参数下的估计。游戏中是否停稳，以人工观察独立记录。</p>
 <div class="panel"><strong id="status"></strong><p id="quality" class="bad"></p><span id="counts"></span></div>
+<h2>急停换键反馈</h2><div class="panel"><p class="note" id="timing-source"></p><div id="timing-summary" class="scroll"></div><p id="timing-empty" class="note"></p><canvas id="timing-plot" width="1000" height="240" aria-label="最近32次换键间隔，毫秒"></canvas><p class="note">纵轴：松开至反向按下间隔（毫秒）；横轴：保留记录顺序。青色：完美，绿色：优秀，黄色：偏早，红色：偏晚，蓝色：未分类。无效或同包歧义记录断线，不计作零间隔。</p></div>
 <div class="panel"><label>查看开火尝试 <select id="attempt"></select></label><p id="detail"></p><canvas id="plot" width="1000" height="240"></canvas><p class="note">纵轴：估计速度 / 稳定阈值；横轴：相对按下时间（毫秒）。虚线为阈值 1。无效样本不绘制。</p><div id="stages" class="scroll"></div></div>
 <h2>每次尝试</h2><div id="shots" class="panel scroll"></div>
 <h2>本次模型和采样参数</h2><pre id="settings" class="panel"></pre>
@@ -34,6 +35,21 @@ $('source').append(document.createTextNode(manual?' 来源：KMBOX 人工输入�
 $('status').textContent=manual?`人工录制 ${a.recording_id||''} · ${a.recording?'录制中':'已停止'}`:a.execution_success===true?'动作执行完成':`动作未完整完成：${a.execution_failure||'状态未知'}`;
 $('quality').textContent=(a.quality_issues||[]).length?'数据质量：'+a.quality_issues.join('；'):'已检查记录结构；仍需人工验证模型。';
 $('counts').textContent=`记录 ${a.shot_count||0} 次按住，${a.first_sample_count||0} 个首发模型样本，${a.held_sample_count||0} 个持续按住模型样本。`;
+$('timing-source').textContent=manual?'来源：人工键鼠接收间隔，不等同物理停稳时刻。':'来源：软件命令 ACK 间隔，不是物理按键间隔，不等同物理停稳时刻。';
+const timing=a.feedback?.timing;
+if(timing)table('timing-summary',['记录数','有效数','最近 ms','最近分类','平均 ms','波动 σ ms','整体习惯','优秀率 %'],[[timing.count??'—',timing.valid_count??'—',f(timing.latest_delta_ms),timing.latest_grade||'暂无',f(timing.mean_ms),f(timing.stddev_ms),timing.habit||'暂无',f(timing.excellent_percent)]]);
+else $('timing-summary').textContent='暂无已计算换键反馈。';
+function drawTiming(){const points=(Array.isArray(a.timings)?a.timings:[]).slice(-32),ctx=$('timing-plot').getContext('2d');
+const valid=p=>p&&p.valid!==false&&!p.atomic_ambiguous&&!p.uncertainty_crosses_boundary&&typeof p.delta_ms==='number'&&Number.isFinite(p.delta_ms)&&Math.abs(p.delta_ms)<=120;
+const values=points.filter(valid).map(p=>Math.abs(p.delta_ms)),range=Math.max(10,...values)*1.15,x=i=>55+i/Math.max(1,points.length-1)*890,y=v=>120-v/range*90;
+ctx.clearRect(0,0,1000,240);ctx.font='14px sans-serif';ctx.fillStyle='#a9bfd0';ctx.fillText(`${range.toFixed(1)} ms`,2,22);ctx.fillText(`−${range.toFixed(1)} ms`,2,222);ctx.fillText('0',20,125);
+ctx.strokeStyle='#526777';ctx.setLineDash([5,5]);ctx.beginPath();ctx.moveTo(50,120);ctx.lineTo(960,120);ctx.stroke();ctx.setLineDash([]);
+const colors={PERFECT:'#5eead4',EXCELLENT:'#4ade80',EARLY:'#fbbf24',LATE:'#f87171','完美':'#5eead4','优秀':'#4ade80','偏早':'#fbbf24','偏晚':'#f87171'};
+let previous=null;points.forEach((point,index)=>{if(!valid(point)){previous=null;return}const px=x(index),py=y(point.delta_ms),color=colors[point.grade]||'#89b5ef';
+if(previous){ctx.strokeStyle=color;ctx.beginPath();ctx.moveTo(previous.x,previous.y);ctx.lineTo(px,py);ctx.stroke()}
+ctx.fillStyle=color;ctx.beginPath();ctx.arc(px,py,4,0,Math.PI*2);ctx.fill();ctx.fillStyle='#a9bfd0';if(index===0||index===points.length-1||(index+1)%8===0)ctx.fillText(String(point.ordinal??index+1),px-5,238);previous={x:px,y:py}});
+$('timing-empty').textContent=values.length?'仅显示最近32条；汇总采用分析器已计算结果。':'暂无有效换键数据。';}
+drawTiming();
 $('settings').textContent=JSON.stringify(a.settings,null,2);$('plan').textContent=JSON.stringify(a.actual_plan,null,2);$('raw').textContent=JSON.stringify(a,null,2);
 $('labels').textContent=a.calibration_envelope?JSON.stringify({ranges:a.human_labels,bounds:a.calibration_envelope},null,2):'尚未提供人工标记；模型评分不会自动成为合格标签。';
 const metrics=a.operation_intervals?.metrics;

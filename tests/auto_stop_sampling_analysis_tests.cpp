@@ -23,6 +23,23 @@ void tests() {
     check(defaults.hud_enabled && sampling_detail::sampling_settings_json(defaults)["fire_sample_delay_ms"] == 18,
         "参数默认兼容并输出完整快照");
     const auto five = analyze_counterpulse_sampling(report(5));
+    check(five.contains("timings") && five["timings"].size() == 1,
+        "离线自动报告必须保存释放至反向按下的急停反馈，不能仅实时HUD有数据");
+    check(five["timings"][0]["delta_ms"] == 0 && five["timing_source"] == "COMMAND_ACK_INTERVAL",
+        "零间隔是有效ACK数据，不能缺省为空或冒充物理停稳");
+    auto timing_source = report(5);
+    check(analyze_counterpulse_live_sampling(timing_source, defaults, 500000000)["timings"] == five["timings"],
+        "实时与保存必须共用相同急停记录");
+    timing_source["commands"].insert(timing_source["commands"].begin()+4, cmd("wasd",0,110));
+    const auto repeated = analyze_counterpulse_sampling(timing_source);
+    check(repeated["timings"].size() == 1 && repeated["timings"][0]["release_ack_ns"] == 110000000,
+        "重复全松不得改写释放时刻或增加记录");
+    timing_source = report(5);
+    timing_source["commands"].push_back(cmd("wasd",2,420));
+    check(analyze_counterpulse_sampling(timing_source)["timings"].size() == 1,
+        "开火后下一周期移动不得被当作上周期急停");
+    timing_source = report(5); timing_source["commands"][3]["disposition"] = 3;
+    check(analyze_counterpulse_sampling(timing_source)["timings"].empty(), "无效释放ACK必须断开配对");
     check(five["analysis_complete"] == true, "正式schema2数字direction=2可解析");
     check(five["shots"][0]["down_model"]["classification"] == "MICRO" &&
         five["shots"][0]["samples"][0]["classification"] == "MICRO", "5ms反向仍微动");

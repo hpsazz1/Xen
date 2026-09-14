@@ -164,7 +164,8 @@ inline Json analyze_counterpulse_sampling_impl(const Json& report, std::optional
         {"analysis_mode", live_as_of ? "LIVE_ACK_PROXY" : "OFFLINE_ACK_PROXY"},
         {"execution_success", report.value("success", Json(nullptr))}, {"execution_failure", report.value("failure", Json(nullptr))},
         {"monitor_evidence", report.value("monitor_evidence", Json(nullptr))},
-        {"quality_issues", Json::array()}, {"shots", Json::array()}, {"commands", Json::array()}};
+        {"quality_issues", Json::array()}, {"shots", Json::array()}, {"commands", Json::array()},
+        {"timings", Json::array()}, {"total_timing_count", 0}, {"timing_source", "COMMAND_ACK_INTERVAL"}};
     const Json plan = out["actual_plan"].is_object() ? out["actual_plan"] : Json::object();
     const auto issue = [&](const std::string& reason) { out["quality_issues"].push_back(reason); };
     SamplingSettings settings;
@@ -201,6 +202,8 @@ inline Json analyze_counterpulse_sampling_impl(const Json& report, std::optional
     std::vector<Shot> shots;
     std::optional<std::size_t> active;
     std::int64_t previous = 0;
+    int timing_direction = 0, timing_held = 0;
+    std::optional<std::int64_t> timing_release;
     for (std::size_t index = 0; index < count; ++index) {
         const auto& command = commands[index];
         Json item{{"index", index}, {"valid_receipt", false}, {"submit_lateness_ms", nullptr}, {"ack_latency_ms", nullptr}};
@@ -222,21 +225,36 @@ inline Json analyze_counterpulse_sampling_impl(const Json& report, std::optional
             if (!valid) throw std::runtime_error("无效或不支持的命令回执");
             item["valid_receipt"] = true;
             if (keyboard) {
+                // 急停反馈统一保存ACK释放→对向按下间隔，实时及离线共用；不跨开火周期配对。
+                if (value == 0) {
+                    if (timing_held == 2 || timing_held == 8) timing_release = ack;
+                } else if (value == 2 || value == 8) {
+                    if (timing_release && timing_direction && value != timing_direction)
+                        out["timings"].push_back({{"delta_ms", (ack - *timing_release) / 1e6},
+                            {"ordinal", out["timings"].size() + 1}, {"grade", "ACK_INTERVAL"},
+                            {"release_ack_ns", *timing_release}, {"press_ack_ns", ack},
+                            {"from_mask", timing_direction}, {"to_mask", value}, {"command_index", index}});
+                    timing_direction = static_cast<int>(value); timing_release.reset();
+                } else { timing_direction = 0; timing_release.reset(); }
+                timing_held = static_cast<int>(value);
                 if (!model.known() && value != 0) issue("INITIAL_KEYBOARD_STATE_UNKNOWN");
                 model.observe_wasd(ack, static_cast<std::uint8_t>(value));
             } else model.observe_time(ack);
             if (button && value == 1) {
+                timing_direction = timing_held = 0; timing_release.reset();
                 if (active) { shots[*active].valid = false; model.invalidate(ack); issue("DUPLICATE_FIRE_DOWN"); }
                 shots.push_back({index, ack, submit, {}, model.valid()}); active = shots.size() - 1;
             } else if (button && active) { shots[*active].up = ack; active.reset(); }
             previous = ack;
         } catch (const std::exception&) {
+            timing_direction = timing_held = 0; timing_release.reset();
             if (active) shots[*active].valid = false;
             issue("INVALID_RECEIPT_OR_UNSUPPORTED_AXIS:" + std::to_string(index));
             model.invalidate(previous);
         }
         out["commands"].push_back(std::move(item));
     }
+    out["total_timing_count"] = out["timings"].size();
     std::size_t total_samples = 0, first_samples = 0, held_samples = 0;
     const bool live_time_valid = !live_as_of || (*live_as_of >= previous && *live_as_of <= INT64_MAX - 100000000000LL);
     if (!live_time_valid) issue("LIVE_HORIZON_INVALID");
