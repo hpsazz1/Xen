@@ -273,6 +273,16 @@ public:
         if (!inner_ || !output_owner_.held()) { batch = {}; return false; }
         return inner_->read_wasd_events(cursor, batch);
     }
+    bool set_input_report_subscription(bool enabled) noexcept override {
+        return inner_ && (!enabled || output_owner_.held()) && inner_->set_input_report_subscription(enabled);
+    }
+    bool freeze_input_reports() noexcept override {
+        return inner_ && inner_->freeze_input_reports();
+    }
+    bool read_input_reports(InputReportCursor& cursor, InputReportBatch& batch) noexcept override {
+        if (!inner_) { batch = {}; return false; }
+        return inner_->read_input_reports(cursor, batch);
+    }
 
     bool output_owner_exclusive() const noexcept override {
         return output_owner_.held();

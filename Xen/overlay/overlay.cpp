@@ -4,6 +4,7 @@
 #include "overlay/overlay.h"
 #include "overlay/overlay_internal.h"
 #include "overlay/recoil_panel.h"
+#include "overlay/input_training_panel.h"
 
 #include "log/log.h"
 
@@ -709,6 +710,7 @@ struct Overlay::Impl {
     bool history_runtime_active = false;
     HotkeyBindingTarget hotkey_binding_target = HotkeyBindingTarget::NONE;
     RecoilPanel recoil_panel;
+    InputTrainingPanel input_training_panel;
     int trigger_general_class = 0;
     overlay::detail::HotkeyCaptureState hotkey_capture_state;
     std::array<bool, 256> capture_device_keys{};
@@ -3000,6 +3002,8 @@ struct Overlay::Impl {
     void render_auxiliary_config(
             const RuntimeSnapshot& snapshot, AppConfig& app_config,
             bool can_edit, OverlayActions& actions) {
+        input_training_panel.render(snapshot.training, actions);
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
         ImGui::TextWrapped("停止运行后可编辑并保存参数；下次启动生效。");
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         begin_config_panel("auto_stop_panel", "自动急停", 300.0f);

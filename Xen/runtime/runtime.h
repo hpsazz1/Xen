@@ -17,6 +17,7 @@
 #include "config/config.h"
 #include "detector/detector.h"
 #include "mouse/mouse.h"
+#include "input_training/input_training.h"
 
 namespace data_collection { class Collector; }
 
@@ -244,6 +245,7 @@ struct RuntimePreviewFrame {
 };
 
 struct RuntimeSnapshot {
+    std::shared_ptr<const input_training::Snapshot> training;
     AutoStopSnapshot auto_stop;
     TriggerSnapshot trigger;
     bool trigger_telemetry_available = false;
@@ -334,6 +336,11 @@ public:
                std::shared_ptr<IMouseController> input_device,
                std::optional<RecoilArchiveConfig> archive = {}) noexcept;
     void stop() noexcept;
+    // 只订阅调用方已经打开的设备，停止态也可记录；不启动检测或武装输出。
+    bool start_input_training(const std::filesystem::path& directory,
+                              std::shared_ptr<IMouseController> input_device = {}) noexcept;
+    void stop_input_training() noexcept;
+    bool load_input_training(const std::filesystem::path& directory) noexcept;
     // 仅在停止且没有后台线程时接入；采集器不拥有输出设备。
     bool set_data_collector(std::shared_ptr<data_collection::Collector> collector) noexcept;
     // 仅在 RUNNING 状态接受请求。候选模型异步加载，失败不替换旧模型。

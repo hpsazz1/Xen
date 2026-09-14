@@ -987,13 +987,17 @@ target_include_directories(model_workspace PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(model_workspace PUBLIC data_collection
     PRIVATE nlohmann_json::nlohmann_json bcrypt shell32 log)
 
+add_library(input_training STATIC Xen/input_training/input_training.cpp)
+target_include_directories(input_training PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(input_training PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
+
 add_library(runtime STATIC
     Xen/runtime/runtime.cpp
     Xen/runtime/runtime_queue.cpp
     Xen/runtime/camera_motion.cpp)
 target_include_directories(runtime PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(runtime
-    PUBLIC detector capture aim aim_landmark auto_stop auto_stop_worker trigger_worker source_context recoil_worker recoil_archive weapon mouse keyboard config log data_collection
+    PUBLIC detector capture aim aim_landmark auto_stop auto_stop_worker trigger_worker source_context recoil_worker recoil_archive weapon mouse keyboard config log data_collection input_training
     PRIVATE Threads::Threads)
 
 add_library(app_input STATIC
@@ -1038,7 +1042,7 @@ target_link_libraries(mouse_effect_probe_runner
     PRIVATE config nlohmann_json::nlohmann_json bcrypt)
 
 add_library(overlay STATIC
-    Xen/overlay/overlay.cpp Xen/overlay/recoil_panel.cpp)
+    Xen/overlay/overlay.cpp Xen/overlay/recoil_panel.cpp Xen/overlay/input_training_panel.cpp)
 target_include_directories(overlay PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(overlay
     PUBLIC runtime config model_workspace
@@ -1659,6 +1663,24 @@ if(BUILD_TESTING)
         PRIVATE mouse_effect_probe_runner)
     add_test(NAME mouse_effect_probe_runner_tests
         COMMAND mouse_effect_probe_runner_tests)
+
+    add_executable(input_training_tests tests/input_training_tests.cpp)
+    target_link_libraries(input_training_tests PRIVATE input_training)
+    add_test(NAME input_training_tests COMMAND input_training_tests)
+
+    add_executable(test_mouse_input_reports tests/test_mouse_input_reports.cpp)
+    target_include_directories(test_mouse_input_reports PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
+    add_test(NAME mouse_input_report_tests COMMAND test_mouse_input_reports)
+
+    add_executable(input_training_panel_tests tests/input_training_panel_tests.cpp
+        Xen/overlay/input_training_panel.cpp)
+    target_link_libraries(input_training_panel_tests PRIVATE input_training imgui runtime)
+    add_test(NAME input_training_panel_tests COMMAND input_training_panel_tests)
+
+    add_executable(runtime_input_training_tests tests/runtime_input_training_tests.cpp)
+    target_link_libraries(runtime_input_training_tests PRIVATE runtime)
+    xen_deploy_runtime_dlls(runtime_input_training_tests OPENCV ORT NDI)
+    add_test(NAME runtime_input_training_tests COMMAND runtime_input_training_tests)
 
     add_executable(runtime_tests
         tests/runtime_tests.cpp

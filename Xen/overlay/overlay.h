@@ -20,6 +20,11 @@ struct OverlayActions {
     bool preview_enabled_changed = false;
     bool preview_enabled = false;
     bool hotkey_capture_consumed = false;
+    bool training_start_requested = false;
+    bool training_stop_requested = false;
+    bool training_load_requested = false;
+    std::string training_directory;
+    std::string training_load_path;
     std::vector<RuntimeIntent> runtime_intents;
 };
 

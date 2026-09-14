@@ -21,6 +21,7 @@
 #endif
 
 #include <filesystem>
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <string>
@@ -398,6 +399,24 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             !runtime.set_preview_enabled(actions.preview_enabled)) {
             app_message = "ROI 预览通道切换失败。";
         }
+
+        try {
+        if (actions.training_stop_requested || emergency_pressed) {
+            runtime.stop_input_training();
+        } else if (actions.training_start_requested) {
+            // 按需新建独占目录；单调时刻仅用于名称，不作为跨机时间证据。
+            const auto suffix = std::chrono::steady_clock::now().time_since_epoch().count();
+            const auto directory = std::filesystem::u8path(actions.training_directory) /
+                ("input-" + std::to_string(suffix));
+            app_message = runtime.start_input_training(directory, input_device)
+                ? "输入记录已开始；不启动检测或武装输出，KMBOX位移语义仍未实机验证。"
+                : "输入记录未启动：请检查已连接的KMBOX、目录权限及现有记录状态。";
+        } else if (actions.training_load_requested) {
+            app_message = runtime.load_input_training(std::filesystem::u8path(actions.training_load_path))
+                ? "正在后台回看原始输入记录；不连接设备、不发送输出。"
+                : "回看未启动：请先结束当前记录，并检查输入Run目录。";
+        }
+        } catch (...) { app_message = "输入记录路径无效或资源不足；未启动新的记录。"; }
 
         if (actions.workspace_action != model_workspace::Action::NONE) {
             if (actions.workspace_action == model_workspace::Action::START_COLLECTION &&

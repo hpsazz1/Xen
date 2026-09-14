@@ -3,6 +3,7 @@
 #include "log/log.h"
 #include "runtime/runtime_internal.h"
 #include "runtime/aim_frame_internal.h"
+#include "runtime/input_training_internal.h"
 #include "auto_stop/auto_stop_worker.h"
 #include "trigger/trigger_worker.h"
 #include "recoil/recoil_worker.h"
@@ -70,6 +71,8 @@ struct Runtime::Impl {
     std::atomic<std::shared_ptr<RecoilWorker>> recoil_worker;
     std::optional<RecoilArchiveConfig> recoil_archive_config;
     std::atomic<std::shared_ptr<RecoilBatchArchive>> recoil_archive;
+    std::atomic<std::shared_ptr<input_training::Session>> training;
+    std::shared_ptr<IMouseController> training_device;
     std::shared_ptr<MotionLedger> motion_ledger;
     std::unordered_map<std::string, std::shared_ptr<const RecoilProfile>> recoil_profiles;
     // 只在启动时写入，并受snapshot_mutex保护；就绪提示按当前武器查询。
@@ -1100,7 +1103,15 @@ struct Runtime::Impl {
         }
     }
 
+    void stop_training() noexcept {
+        // 先冻结设备水位，再让后台排空；不发送任何软件按键或鼠标命令。
+        if (training_device) training_device->set_input_report_subscription(false);
+        if (auto session = training.load()) session->stop();
+        training_device.reset();
+    }
+
     void release_modules() noexcept {
+        stop_training();
         if (auto worker = trigger_worker.exchange(std::shared_ptr<TriggerWorker>{})) {
             worker->stop();
             std::lock_guard lock(snapshot_mutex);
@@ -1562,6 +1573,7 @@ RuntimeSnapshot Runtime::snapshot() const noexcept {
     try {
         std::lock_guard<std::mutex> lock(impl_->snapshot_mutex);
         auto result = impl_->current_snapshot;
+        if (auto session = impl_->training.load()) result.training = session->snapshot();
         if (auto archive = impl_->recoil_archive.load()) result.recoil_archive = archive->snapshot();
         if (auto trigger = impl_->trigger_worker.load()) {
             result.trigger = trigger->snapshot(); result.trigger_telemetry_available = true;
@@ -1583,6 +1595,65 @@ RuntimeSnapshot Runtime::snapshot() const noexcept {
     } catch (...) {
         return {};
     }
+}
+
+bool Runtime::start_input_training(const std::filesystem::path& directory,
+                                   std::shared_ptr<IMouseController> input_device) noexcept {
+    if (!impl_) return false;
+    try {
+        std::lock_guard lock(impl_->lifecycle_mutex);
+        if (auto prior = impl_->training.load()) {
+            const auto view = prior->snapshot();
+            if (view && (view->status == input_training::Status::RECORDING ||
+                         view->status == input_training::Status::REPLAYING ||
+                         view->status == input_training::Status::STOP_TIMEOUT)) return false;
+        }
+        impl_->stop_training();
+        auto device = input_device ? std::move(input_device) : impl_->mouse;
+        if (!device || !device->set_input_report_subscription(true)) return false;
+        std::shared_ptr<input_training::Session> session;
+        try {
+            auto source = std::make_shared<runtime::detail::InputTrainingSource>(device);
+            session = std::make_shared<input_training::Session>();
+            if (!session->start(directory, {}, [source] { return source->read(); })) {
+                device->set_input_report_subscription(false);
+                impl_->training.store(session);
+                return false;
+            }
+        } catch (...) {
+            device->set_input_report_subscription(false);
+            return false;
+        }
+        impl_->training_device = std::move(device);
+        impl_->training.store(std::move(session));
+        return true;
+    } catch (...) { return false; }
+}
+
+void Runtime::stop_input_training() noexcept {
+    if (!impl_) return;
+    try {
+        std::lock_guard lock(impl_->lifecycle_mutex);
+        impl_->stop_training();
+    } catch (...) {}
+}
+
+bool Runtime::load_input_training(const std::filesystem::path& directory) noexcept {
+    if (!impl_) return false;
+    try {
+        std::lock_guard lock(impl_->lifecycle_mutex);
+        if (auto prior = impl_->training.load()) {
+            const auto view = prior->snapshot();
+            if (view && (view->status == input_training::Status::RECORDING ||
+                         view->status == input_training::Status::REPLAYING ||
+                         view->status == input_training::Status::STOP_TIMEOUT)) return false;
+        }
+        impl_->stop_training();
+        auto session = std::make_shared<input_training::Session>();
+        const bool loaded = session->load(directory);
+        impl_->training.store(std::move(session));
+        return loaded;
+    } catch (...) { return false; }
 }
 
 bool Runtime::set_preview_enabled(bool enabled) noexcept {

@@ -149,6 +149,39 @@ struct WasdEventBatch {
     bool subscribed = false;
 };
 
+// 原始 monitor 报告不是已标定的物理位移；同包按钮和坐标没有内部先后。
+enum class InputMotionSemantics { UNVERIFIED, RELATIVE_COUNTS };
+struct InputReportEvent {
+    std::uint64_t epoch = 0;
+    std::uint64_t sequence = 0;
+    std::int64_t received_at_steady_ns = 0;
+    bool state_valid = false;
+    bool physical_source_verified = false;
+    InputMotionSemantics motion_semantics = InputMotionSemantics::UNVERIFIED;
+    std::uint8_t mouse_buttons = 0;
+    std::uint8_t wasd_mask = 0;
+    std::uint8_t keyboard_modifiers = 0;
+    std::array<std::uint8_t, 10> keyboard_usages{};
+    std::int16_t raw_x = 0;
+    std::int16_t raw_y = 0;
+    std::int16_t raw_wheel = 0;
+    std::array<std::uint8_t, 20> raw_report{};
+    std::size_t datagram_size = 0;
+};
+struct InputReportCursor { std::uint64_t epoch = 0; std::uint64_t sequence = 0; };
+struct InputReportBatch {
+    std::array<InputReportEvent, 256> events{};
+    std::size_t count = 0;
+    bool gap = false;
+    std::uint64_t dropped_count = 0;
+    bool subscribed = false;
+    bool frozen = false;
+    bool source_loss_verifiable = false;
+    InputMonitorStatus status = InputMonitorStatus::CLOSED;
+    std::uint64_t epoch = 0;
+    std::uint64_t final_sequence = 0;
+};
+
 class IMouseController {
 public:
     virtual ~IMouseController() = default;
@@ -176,6 +209,12 @@ public:
     virtual KeyboardReceipt cleanup_wasd_keyboard() noexcept { return {}; }
     virtual bool set_wasd_event_subscription(bool) noexcept { return false; }
     virtual bool read_wasd_events(WasdEventCursor&, WasdEventBatch& batch) noexcept {
+        batch = {}; return false;
+    }
+    // 单一采集owner，独立游标可重复读取；false/freeze固定尾水位并保留可读数据。
+    virtual bool set_input_report_subscription(bool) noexcept { return false; }
+    virtual bool freeze_input_reports() noexcept { return false; }
+    virtual bool read_input_reports(InputReportCursor&, InputReportBatch& batch) noexcept {
         batch = {}; return false;
     }
     virtual void close() noexcept = 0;
