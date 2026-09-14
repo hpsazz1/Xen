@@ -4,21 +4,19 @@ param(
     [Parameter(Mandatory)][string]$RunDirectory,
     [switch]$ReuseRunDirectory,
     [switch]$Repeatable,
-    [switch]$NoCapture,
     [string]$Executable,
     [string]$ConfigPath,
     [ValidateSet('stationary', 'no_counter', 'counter')][string]$Baseline = 'counter',
-    [ValidateRange(1, 30)][int]$Shots = 8,
-    [ValidateRange(0, 2000)][int]$FireDelayMs = 0,
+    [ValidateRange(1, 30)][int]$Shots = 20,
+    [ValidateRange(0, 2000)][int]$FireDelayMs = 300,
+    [ValidateRange(0, 5000)][int]$FireIntervalMs = 0,
     [bool]$MoveDuringFireDelay = $true,
-    [ValidateScript({ $_ -eq 0 -or ($_ -ge 280 -and $_ -le 650) })][int]$ShotIntervalMs = 280,
     [ValidateSet('A', 'D')][string]$Direction = 'A',
-    [ValidateRange(1, 500)][int]$MoveMs = 120,
-    [ValidateRange(1, 200)][int]$CounterHoldMs = 30,
-    [ValidateRange(0, 200)][int]$CounterDelayMs = 0,
-    [ValidateRange(1, 200)][int]$BrakeWindowMs = 60,
+    [ValidateRange(1, 500)][int]$MoveMs = 300,
+    [ValidateRange(1, 200)][int]$CounterHoldMs = 5,
+    [ValidateRange(0, 200)][int]$CounterDelayMs = 50,
     [ValidateRange(0, 20)][int]$ShotAfterReleaseMs = 0,
-    [ValidateRange(1, 20)][int]$ShotHoldMs = 5,
+    [ValidateRange(1, 2000)][int]$ShotHoldMs = 5,
     [ValidateRange(0, 10)][int]$LateToleranceMs = 5,
     [switch]$AllowPhysicalOutput,
     [string]$Confirm,
@@ -90,7 +88,7 @@ function Assert-ProbeStopped([string]$Binary) {
     }
 }
 function Assert-OwnedRun($Existing) {
-    if ($Existing.schema_version -notin @(1, 2, 3) -or $Existing.status -ne 'PREPARED_NOT_LAUNCHED' -or
+    if ($Existing.schema_version -notin @(1, 2, 3, 4) -or $Existing.status -ne 'PREPARED_NOT_LAUNCHED' -or
         $Existing.plan -cne $planPath -or $Existing.run_id -cne [IO.Path]::GetFileName($runPath)) { throw '不是本工具绑定目录。' }
     if ($Existing.schema_version -ge 2 -and ($Existing.owner -cne 'XEN_AUTO_STOP_COUNTERPULSE' -or
         $Existing.run_directory -cne $runPath)) { throw '目录所有权无效。' }
@@ -98,7 +96,9 @@ function Assert-OwnedRun($Existing) {
     if ([IO.Path]::GetFileName($Existing.script) -notmatch '^invoke_auto_stop_counterpulse(-r[0-9]+)?\.ps1$') { throw '原入口身份无效。' }
     foreach ($name in @('executable', 'config', 'plan', 'script')) {
         Assert-PlainPath $Existing.$name
-        if ($name -eq 'plan' -and $Existing.schema_version -eq 3) { continue }
+        if ($name -eq 'plan' -and ($Existing.schema_version -eq 3 -or ($Existing.schema_version -eq 4 -and $Existing.repeatable))) { continue }
+        # 显式Prepare允许正式程序/入口升级后重新绑定；配置与计划仍按原绑定核对。
+        if ($name -in @('executable', 'script')) { continue }
         if ((Get-Digest $Existing.$name) -cne $Existing.($name + '_sha256')) { throw '原目录绑定已变化。' }
     }
     # 旧 schema 的入口没有共享锁；迁移前还须排除仍运行的绑定探针。
@@ -209,27 +209,53 @@ try {
         $binary = (Resolve-Path -LiteralPath $Executable).Path
         $config = (Resolve-Path -LiteralPath $ConfigPath).Path
         if (-not [IO.File]::Exists($binary) -or -not [IO.File]::Exists($config)) { throw '需要有效文件。' }
-        $plan = [ordered]@{ capture_enabled = [bool](-not $NoCapture); baseline = $Baseline; shots = $Shots; shot_interval_ms = $ShotIntervalMs; fire_delay_ms = $FireDelayMs; move_during_fire_delay = $MoveDuringFireDelay;
-            move_ms = $MoveMs; counter_hold_ms = $CounterHoldMs; counter_delay_ms = $CounterDelayMs; brake_window_ms = $BrakeWindowMs; shot_after_release_ms = $ShotAfterReleaseMs; shot_hold_ms = $ShotHoldMs;
+        # 非反向基线没有反向等待；仅调整未由用户指定的默认值。
+        if ($Baseline -ne 'counter' -and -not $PSBoundParameters.ContainsKey('CounterDelayMs')) { $CounterDelayMs = 0 }
+        $plan = [ordered]@{ schema_version = 2; capture_enabled = $false; baseline = $Baseline; shots = $Shots; fire_delay_ms = $FireDelayMs; fire_interval_ms = $FireIntervalMs; move_during_fire_delay = $MoveDuringFireDelay;
+            move_ms = $MoveMs; counter_hold_ms = $CounterHoldMs; counter_delay_ms = $CounterDelayMs; shot_after_release_ms = $ShotAfterReleaseMs; shot_hold_ms = $ShotHoldMs;
             late_tolerance_ms = $LateToleranceMs; direction = $(if ($Direction -eq 'A') { 2 } else { 8 }) }
         if (-not $exists) { $null = New-Item -ItemType Directory -Path $runPath }
         $lockPath = Join-Path $runPath '.counterpulse.lock'
         Assert-PlainPath $lockPath
         $runLock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
         foreach ($leaf in @('task.json', 'plan.json', 'TASK.md', 'CONSUMED')) { Assert-PlainPath (Join-Path $runPath $leaf) }
-        if ($exists) { Assert-OwnedRun (Get-Content -LiteralPath $taskPath -Raw -Encoding UTF8 | ConvertFrom-Json) }
+        if ($exists) {
+            $existingTask = Get-Content -LiteralPath $taskPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            Assert-OwnedRun $existingTask
+            if (-not $PSBoundParameters.ContainsKey('Repeatable')) { $Repeatable = ($existingTask.schema_version -eq 3 -or ($existingTask.schema_version -eq 4 -and $existingTask.repeatable)) }
+        }
         $resultPath = Join-Path $runPath 'result'
         Assert-ResultTree $resultPath
         $candidatePlan = Join-Path $runPath ('plan.' + [Guid]::NewGuid().ToString('N') + '.candidate.json')
+        if ($exists) {
+            # 正式解析器处理JSONC与版本迁移，不能用正则剥注释或将旧参数带入新计划。
+            Invoke-Probe $binary @('--migrate-plan', $planPath, '--output', $candidatePlan) $false
+            $inherited = Get-Content -LiteralPath $candidatePlan -Raw -Encoding UTF8 | ConvertFrom-Json
+            $fields = [ordered]@{ Baseline='baseline'; Shots='shots'; FireDelayMs='fire_delay_ms'; FireIntervalMs='fire_interval_ms';
+                MoveDuringFireDelay='move_during_fire_delay'; MoveMs='move_ms'; CounterHoldMs='counter_hold_ms';
+                CounterDelayMs='counter_delay_ms'; ShotAfterReleaseMs='shot_after_release_ms';
+                ShotHoldMs='shot_hold_ms'; LateToleranceMs='late_tolerance_ms'; Direction='direction' }
+            foreach ($parameter in $fields.Keys) {
+                $field = $fields[$parameter]
+                if (-not $PSBoundParameters.ContainsKey($parameter)) { $plan[$field] = $inherited.$field }
+            }
+            if ($PSBoundParameters.ContainsKey('Baseline') -and $Baseline -ne 'counter' -and
+                -not $PSBoundParameters.ContainsKey('CounterDelayMs')) { $plan['counter_delay_ms'] = 0 }
+            foreach ($parameter in $fields.Keys) {
+                $value = $plan[$fields[$parameter]]
+                if ($parameter -eq 'Direction') { $value = if ($value -eq 2) { 'A' } else { 'D' } }
+                Set-Variable -Name $parameter -Value $value
+            }
+        }
         Write-Json $candidatePlan $plan
-        Invoke-Probe $binary @('--plan', $candidatePlan, '--dry-run') $false
+        Invoke-Probe $binary @('--plan', $candidatePlan, '--dry-run', '--require-current-plan') $false
         # 所有验证通过之后才移除上组结果，并重新武装用户前台的一次性命令。
         if (Test-Path -LiteralPath $resultPath) { Remove-Item -LiteralPath $resultPath -Recurse -Force }
         $consumed = Join-Path $runPath 'CONSUMED'
         if (Test-Path -LiteralPath $consumed) { Remove-Item -LiteralPath $consumed -Force }
         Move-Item -LiteralPath $candidatePlan -Destination $planPath -Force
         $candidatePlan = $null
-        $task = [ordered]@{ schema_version = $(if ($Repeatable) { 3 } else { 2 }); owner = 'XEN_AUTO_STOP_COUNTERPULSE'; run_directory = $runPath; status = 'PREPARED_NOT_LAUNCHED'; run_id = [IO.Path]::GetFileName($runPath);
+        $task = [ordered]@{ schema_version = 4; repeatable = [bool]$Repeatable; owner = 'XEN_AUTO_STOP_COUNTERPULSE'; run_directory = $runPath; status = 'PREPARED_NOT_LAUNCHED'; run_id = [IO.Path]::GetFileName($runPath);
             executable = $binary; config = $config; plan = $planPath; script = $scriptPath;
             executable_sha256 = (Get-Digest $binary); config_sha256 = (Get-Digest $config);
             plan_sha256 = (Get-Digest $planPath); script_sha256 = (Get-Digest $scriptPath) }
@@ -240,31 +266,25 @@ try {
         if ($CredentialDirectory) {
             $launch += ' -CredentialDirectory ' + (Quote-PS ([IO.Path]::GetFullPath($CredentialDirectory))) + ' -Scope ' + $Scope
         }
-        $behavior = if ($Baseline -eq 'stationary') { '原地静止基线，不发送A/D移动；人物须事先静止并固定瞄准。' } else { '移动与急停测试；会发送A/D移动。' }
-        if ($Baseline -ne 'stationary') {
-            $action = if ($Baseline -eq 'no_counter') { '仅松键，不按反向键' } else { "反向轻点$($CounterHoldMs)ms（ACK计时）" }
-            $releaseTiming = $ShotAfterReleaseMs -gt 0 -or $FireDelayMs -gt 0 -or $CounterDelayMs -gt 0
-            $timing = if ($releaseTiming) {
-                if ($ShotAfterReleaseMs -eq 0) { '最后方向键UP ACK后立即计划开枪，不额外等待' }
-                else { "最后方向键UP ACK后$($ShotAfterReleaseMs)ms计划开枪" }
-            } else { "移动UP ACK后$($BrakeWindowMs)ms计划开枪" }
-            $recovery = if ($ShotIntervalMs -eq 0) { "按动作完成接续，不设最小枪间隔" } else { "枪间至少$($ShotIntervalMs)ms，ACK耗时计入实际枪间隔" }
-            $behavior = "首枪原地，随后每次按$Direction 移动$($MoveMs)ms；收到该键UP ACK后等待$($CounterDelayMs)ms，再$action；$timing。$recovery；松键后开枪迟到超过$($LateToleranceMs)ms则拒绝该组。固定瞄准，不人为按方向或射击键。"
-            if ($FireDelayMs -gt 0 -and -not $MoveDuringFireDelay) {
-                $behavior = "首枪原地；上一枪左键UP ACK后静止等待$($FireDelayMs)ms，然后按$Direction保持$($MoveMs)ms（DOWN ACK起计）；松键ACK后等$($CounterDelayMs)ms，再$action；$timing。重复至$Shots 发。"
-            } elseif ($FireDelayMs -gt 0) {
-                $behavior = "首枪原地；上一枪左键UP ACK后开始$($FireDelayMs)ms间隔，立刻按$Direction，方向键从DOWN ACK起至少保持$($MoveMs)ms。间隔与保持时间都满足后才松$Direction，即等待两者结束时刻的较晚者；收到该键UP ACK后等待$($CounterDelayMs)ms，再$action；$timing。单发完成后继续同一流程。固定瞄准，不人为按方向或射击键。"
-            }
-        }
-        $cadence = if ($ShotIntervalMs -eq 0) { "动作完成后接续下一次移动；实际枪间隔由移动、反向轻点、松键后等待和命令耗时决定" } else { "最小射击间隔$($ShotIntervalMs)ms；该间隔仅为候选" }
-        $observation = if ($NoCapture) { '不采集图像，以人工观察判断；长组前面的弹着点可能消失，请连续观察' } else { '长组前面的弹着点可能消失，请连续观察，图像逐帧保存' }
-        $reuseInstructions = if ($Repeatable) {
-            "本目录允许重复手动Launch，无需再次Prepare。编辑plan.json中的move_during_fire_delay（true=射后等待与移动并行；false=先等完射后间隔再移动），以及move_ms（正向键最少保持，1..500ms）、counter_delay_ms（正向键UP ACK后到反向键DOWN的等待，0..200ms）、counter_hold_ms（反向键实际短按时长，1..200ms）、shot_after_release_ms（最后方向键UP ACK后到单发的等待，0..20ms；新时序模式下0表示立即开枪）、fire_delay_ms（上一枪松左键后在正向移动期间等待，1..2000ms；0保留旧时序）和shots（子弹数，1..30）。本次准备值为移动$($MoveMs)ms、松正向键后等待$($CounterDelayMs)ms、反向键实际短按$($CounterHoldMs)ms、松键后$($ShotAfterReleaseMs)ms、移动期间等待$($FireDelayMs)ms、$Shots 发；执行以本次读取并验证的plan.json为准。每次Launch冻结execution-plan.json，运行中编辑原plan不改变本轮。新计划验证通过后会覆盖上次result；失败不自动重试。每次仅用户手动触发一组，开始正式对比时另建目录。"
+        $action = if ($Baseline -eq 'no_counter') { '仅松键，不按反向键' } else { "反向轻点$($CounterHoldMs)ms（ACK计时）" }
+        $timing = if ($ShotAfterReleaseMs -eq 0) { '最后方向键UP ACK后立即计划开枪' } else { "最后方向键UP ACK后$($ShotAfterReleaseMs)ms计划开枪" }
+        $behavior = if ($Baseline -eq 'stationary') {
+            "原地静止基线，不发送A/D移动；上一轮左键UP ACK后等待$($FireDelayMs)ms，再计划开火。"
+        } elseif ($MoveDuringFireDelay) {
+            "首轮原地；上一轮左键UP ACK后开始$($FireDelayMs)ms间隔，立刻按$Direction，方向键从DOWN ACK起至少保持$($MoveMs)ms。间隔与保持时间都满足后才松键，即等待两者结束时刻的较晚者；收到该键UP ACK后等待$($CounterDelayMs)ms，再$action；$timing。"
         } else {
-            '参数探索可通过Prepare -ReuseRunDirectory复用本目录；验证新计划后替换参数并清理上次result和CONSUMED。每次Prepare后仍须用户手动运行本TASK中的同一Launch命令，不会自动重试。开始正式对比时另建目录。'
+            "首轮原地；上一轮左键UP ACK后静止等待$($FireDelayMs)ms，然后按$Direction保持$($MoveMs)ms；收到该键UP ACK后等待$($CounterDelayMs)ms，再$action；$timing。"
+        }
+        $behavior += "各动作迟到超过$($LateToleranceMs)ms则拒绝该组；固定瞄准，不人为按方向或射击键。"
+        $observation = '默认不采集图像；自动保存输入训练原始报告和评价。接收域换键评分不代表人物停稳，命令ACK不代表实际开火或弹着稳定'
+        $cadence = "每次左键按住$($ShotHoldMs)ms（DOWN ACK起计）；fire_interval_ms=$($FireIntervalMs)ms是相邻左键DOWN提交的最小间隔，不是精确周期。额外冷却等待在下一轮移动开始前完成，避免急停后再补等；0表示不添加此间隔。fire_delay_ms仍表示上一轮松左键ACK后的等待"
+        $reuseInstructions = if ($Repeatable) {
+            '本目录允许重复手动Launch，无需再次Prepare或打包。直接复用绑定的正式脚本和Executable路径，不复制程序、DLL或模型。编辑plan.json：shots（开火次数1..30，不代表实际子弹数）、fire_delay_ms（0..2000ms）、fire_interval_ms（0..5000ms，相邻DOWN提交最小间隔；0为关闭）、move_during_fire_delay（true为等待与移动并行，false为先等待再移动）、move_ms（1..500ms）、counter_delay_ms（0..200ms）、counter_hold_ms（1..200ms）、shot_after_release_ms（0..20ms，0即立即计划开枪）、shot_hold_ms（1..2000ms，1000即按住1秒）、late_tolerance_ms（0..10ms）及baseline/direction。schema_version固定2，capture_enabled固定false，不接受旧shot_interval_ms/brake_window_ms。每次Launch冻结execution-plan.json，运行中编辑原文件仅影响下一组。验证通过后覆盖上组result；失败不自动重试。正式对比另建目录。'
+        } else {
+            '参数探索可通过Prepare -ReuseRunDirectory复用本目录；新计划验证通过后替换参数并清理上次result和CONSUMED。每次Prepare后仍由用户前台触发Launch。固定正式文件不复制打包；需要重复调参时Prepare -Repeatable。'
         }
         $manualMode = if ($Repeatable) { '仅用户在当前前台每次手动执行一组，可重复启动' } else { '仅用户在当前前台执行一次' }
-        $markdown = "# 反向轻点人工Run`n`n状态：PREPARED_NOT_LAUNCHED。$manualMode；会发送真实开火输入。`n`n$behavior`n`n请先确认测试场景、源焦点、独占设备和紫色弹着点显示；End或人工输入取消。`n`n``````powershell`n$launch`n```````n`n一组$Shots 发；$observation。$cadence；结果不代表已经稳定。结果目录：result。`n`n$reuseInstructions`n`n迁移旧目录后仅使用本TASK中的新入口。`n"
+        $markdown = "# 反向轻点人工Run`n`n状态：PREPARED_NOT_LAUNCHED。$manualMode；会发送真实开火输入。`n`n$behavior`n`n请先确认测试场景、源焦点和独占设备；End或人工输入取消。`n`n``````powershell`n$launch`n```````n`n一组$Shots 次开火；$observation。$cadence；结果不代表已经稳定。结果目录：result。`n`n$reuseInstructions`n`n迁移旧目录后仅使用本TASK中的新入口。`n"
         [IO.File]::WriteAllText((Join-Path $runPath 'TASK.md'), $markdown, (New-Object Text.UTF8Encoding($false)))
         Write-Output 'PREPARED_NOT_LAUNCHED；未发送设备输入。'
     } else {
@@ -274,10 +294,12 @@ try {
         Assert-PlainPath $lockPath
         $runLock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
         $task = Get-Content -LiteralPath $taskPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ($task.schema_version -notin @(1, 2, 3) -or $task.status -ne 'PREPARED_NOT_LAUNCHED' -or
+        if ($task.schema_version -ne 4) { $script:FailureCode = 'LEGACY_RUN_REQUIRES_PREPARE'; throw '旧Run须重新Prepare，未触发设备。' }
+        if ($task.schema_version -ne 4 -or $task.status -ne 'PREPARED_NOT_LAUNCHED' -or
             $task.plan -cne $planPath -or $task.script -cne $scriptPath) { throw 'Run绑定无效。' }
         if ($task.schema_version -ge 2 -and ($task.owner -cne 'XEN_AUTO_STOP_COUNTERPULSE' -or $task.run_directory -cne $runPath)) { throw 'Run所有权无效。' }
-        $isRepeatable = $task.schema_version -eq 3
+        if ($task.repeatable -isnot [bool]) { throw '重复运行标记须为布尔值。' }
+        $isRepeatable = [bool]$task.repeatable
         if ($isRepeatable -and $task.repeatable -ne $true) { throw '重复运行绑定无效。' }
         foreach ($name in @('executable', 'config', 'plan', 'script')) {
             Assert-PlainPath $task.$name
@@ -307,7 +329,7 @@ try {
                 } finally { $reader.Dispose() }
                 $candidatePlan = Join-Path $runPath ('plan.' + [Guid]::NewGuid().ToString('N') + '.candidate.json')
                 [IO.File]::WriteAllBytes($candidatePlan, $planBytes)
-                Invoke-Probe $task.executable @('--plan', $candidatePlan, '--dry-run') $false
+                Invoke-Probe $task.executable @('--plan', $candidatePlan, '--dry-run', '--require-current-plan') $false
             } catch {
                 $script:FailureCode = 'PLAN_VALIDATION_FAILED'
                 throw '本轮计划校验失败，保留上次结果。'
@@ -323,7 +345,7 @@ try {
         $marker.Dispose()
         [Console]::WriteLine('请将游戏切到前台并松开移动键和鼠标按钮；等待首个键态报告时可单独轻按松开Shift，不按方向键或鼠标；人物须事先静止并固定瞄准。下方实时显示就绪阶段。')
         Invoke-Probe $task.executable @('--config', $task.config, '--plan', $executionPlan, '--output', $output,
-            '--allow-physical-output', '--confirm', 'AUTO_STOP_COUNTERPULSE') $true
+            '--allow-physical-output', '--confirm', 'AUTO_STOP_COUNTERPULSE', '--require-current-plan') $true
         Write-Output '本次有界Run结束；请回收result及人工观察，不能自动认定停稳。'
     }
 } catch {

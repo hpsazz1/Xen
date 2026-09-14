@@ -17,6 +17,8 @@
 #include "auto_stop_probe/counterpulse_internal.h"
 #include "auto_stop_probe/readiness_internal.h"
 #include "auto_stop_probe/preroll_internal.h"
+#include "auto_stop_probe/training_evaluation_internal.h"
+#include "runtime/input_training_internal.h"
 #include "source_context/source_context.h"
 
 namespace {
@@ -134,9 +136,32 @@ struct Evidence {
     }
 };
 struct Resources {
-    std::unique_ptr<IMouseController> mouse;
+    std::shared_ptr<IMouseController> mouse;
     source_context::SourceContextClient focus;
     ~Resources() { focus.stop(); if (mouse) mouse->close(); cleanup_finished.store(true); }
+};
+// 复用生产适配器；独立订阅保留真实monitor包，不把输出ACK写成物理输入。
+class MonitorTraining {
+public:
+    MonitorTraining(std::shared_ptr<IMouseController> mouse, const std::filesystem::path& directory)
+        : mouse_(std::move(mouse)) {
+        if (!mouse_->set_input_report_subscription(true)) throw std::runtime_error("输入报告订阅失败");
+        auto source = std::make_shared<runtime::detail::InputTrainingSource>(mouse_);
+        if (!session_.start(directory, {}, [source] { return source->read(); })) {
+            mouse_->freeze_input_reports();
+            throw std::runtime_error("输入报告归档启动失败");
+        }
+    }
+    ~MonitorTraining() { stop(); }
+    void stop() noexcept { mouse_->freeze_input_reports(); session_.stop(); }
+    bool recording() const noexcept {
+        const auto state = session_.snapshot();
+        return state && state->status == input_training::Status::RECORDING;
+    }
+    Json report() const { return training_snapshot_json(*session_.snapshot(), "KMBOX_MONITOR"); }
+private:
+    std::shared_ptr<IMouseController> mouse_;
+    input_training::Session session_;
 };
 void write_json(const std::filesystem::path& path, const Json& report) {
     auto temporary = path; temporary += ".writing";
@@ -165,32 +190,70 @@ int main(int argc, char** argv) {
         if (created) write_json(output / "startup.json", {{"stage", stage}, {"readiness", readiness}, {"capture", capture_diagnostic}});
     };
     try {
-        std::string config_path, plan_path, confirmation;
-        bool dry = false, allowed = false, capture_check = false;
+        std::string config_path, plan_path, confirmation, evaluation_path, migration_path;
+        bool dry = false, allowed = false, capture_check = false, current_plan = false;
         std::set<std::string> seen;
         if (argc == 2 && std::string(argv[1]) == "--help") {
-            std::cout << "单组1至30发反向时长测试：--plan JSON --dry-run；真实运行另需--config INI --output NEW_DIR "
+            std::cout << "单组1至30次开火按住测试：--plan JSON --dry-run；真实运行另需--config INI --output NEW_DIR "
                          "--allow-physical-output --confirm AUTO_STOP_COUNTERPULSE。需源焦点、全松与独占设备，End/Ctrl+C取消。\n"
-                         "纯采集诊断：--plan JSON --config INI --output NEW_DIR --capture-check；不连接键鼠，拒绝物理授权。\n";
+                         "离线重评：--evaluate-result RESULT_JSON --output NEW_DIR；不连接设备。\n"
+                         "计划迁移：--migrate-plan OLD_JSON --output NEW_JSON；不连接设备。\n"
+                         "旧计划纯采集诊断：--plan JSON --config INI --output NEW_DIR --capture-check。\n";
             return 0;
         }
         for (int i = 1; i < argc; ++i) {
             const std::string option = argv[i];
             if (!seen.insert(option).second) throw std::runtime_error("参数重复");
             if (option == "--dry-run") dry = true;
+            else if (option == "--require-current-plan") current_plan = true;
             else if (option == "--capture-check") capture_check = true;
             else if (option == "--allow-physical-output") allowed = true;
             else if (i + 1 < argc && option == "--plan") plan_path = argv[++i];
             else if (i + 1 < argc && option == "--config") config_path = argv[++i];
             else if (i + 1 < argc && option == "--output") output = argv[++i];
             else if (i + 1 < argc && option == "--confirm") confirmation = argv[++i];
+            else if (i + 1 < argc && option == "--evaluate-result") evaluation_path = argv[++i];
+            else if (i + 1 < argc && option == "--migrate-plan") migration_path = argv[++i];
             else throw std::runtime_error("无效参数");
+        }
+        if (!migration_path.empty()) {
+            if (dry || capture_check || allowed || current_plan || !evaluation_path.empty() ||
+                !confirmation.empty() || !config_path.empty() || !plan_path.empty() || output.empty())
+                throw std::runtime_error("计划迁移参数冲突");
+            if (std::filesystem::file_size(migration_path) > 16384 || std::filesystem::exists(output))
+                throw std::runtime_error("计划过大或输出已存在");
+            std::ifstream file(migration_path);
+            auto migrated = parse_counterpulse_plan(Json::parse(file, nullptr, true, true));
+            if (migrated.schema_version != 2 && migrated.baseline == "stationary")
+                migrated.fire_delay_ms = std::max(1, migrated.shot_interval_ms - migrated.shot_hold_ms);
+            migrated.schema_version = 2;
+            migrated.capture_enabled = false;
+            migrated.shot_interval_ms = 0;
+            const auto normalized = counterpulse_plan_json(migrated);
+            (void)parse_counterpulse_plan(normalized);
+            write_json(output, normalized);
+            return 0;
+        }
+        if (!evaluation_path.empty()) {
+            if (dry || capture_check || allowed || current_plan || !confirmation.empty() || !config_path.empty() ||
+                !plan_path.empty() || output.empty()) throw std::runtime_error("离线重评参数冲突");
+            if (std::filesystem::file_size(evaluation_path) > 4 * 1024 * 1024)
+                throw std::runtime_error("命令报告过大");
+            std::ifstream file(evaluation_path);
+            const auto commands = Json::parse(file);
+            if (!std::filesystem::create_directory(output)) throw std::runtime_error("重评需要新目录");
+            created = true;
+            const auto evaluation = evaluate_counterpulse_training(commands, output / "command-training");
+            write_json(output / "training-evaluation.json", {{"schema_version", 1},
+                {"command_ack", evaluation}, {"monitor", nullptr}, {"physical_output", false}});
+            return evaluation.value("success", false) ? 0 : 2;
         }
         std::ifstream input(plan_path);
         if (!input || std::filesystem::file_size(plan_path) > 16384) throw std::runtime_error("计划不可读或过大");
         // 仅人工计划允许JSONC注释；字段和时序边界仍由正式解析器严格校验。
         const auto document = Json::parse(input, nullptr, true, true);
         const auto plan = parse_counterpulse_plan(document);
+        if (current_plan && plan.schema_version != 2) throw std::runtime_error("正式入口只接受版本2计划");
         if (dry) {
             if (capture_check || allowed || !confirmation.empty() || !output.empty() || !config_path.empty()) throw std::runtime_error("dry-run不接受输出授权或配置");
             std::cout << "计划有效；未连接设备或采集，未产生任何输入。\n"; return 0;
@@ -289,8 +352,10 @@ int main(int argc, char** argv) {
         } else {
             capture_diagnostic = {{"enabled", false}, {"reason", "DISABLED_BY_PLAN"}};
         }
+        std::unique_ptr<MonitorTraining> training;
         auto cancel = [&]() -> std::string {
             if (stopped.load() || std::filesystem::exists(output / "STOP")) return "USER_STOP";
+            if (training && !training->recording()) return "INPUT_TRAINING_STOPPED";
             const auto focus = resources.focus.snapshot();
             if (!focus.available || !focus.focused || focus.session_id != focus_session) return "SOURCE_FOCUS";
             if (!cleanup_finished.load()) {
@@ -333,8 +398,11 @@ int main(int argc, char** argv) {
             }
         }
         progress("EXECUTION");
+        if (document.value("schema_version", 0) == 2)
+            training = std::make_unique<MonitorTraining>(resources.mouse, output / "monitor-training");
         execution_entered = true;
         auto report = execute_counterpulse(*resources.mouse, plan, cancel, {}, true);
+        if (training) training->stop();
         resources.mouse->close();
         cleanup_finished.store(true);
         report["command_timeout_ms"] = config.mouse.kmbox_command_timeout_ms;
@@ -346,6 +414,16 @@ int main(int argc, char** argv) {
         // 无采集模式只保存命令结果；不创建采集源，不等待图像或执行图像门禁。
         progress(evidence ? "SAVE_EVIDENCE" : "SAVE_RESULT");
         write_json(output / "result.json", report);
+        if (training) {
+            const auto command_evaluation = evaluate_counterpulse_training(report, output / "command-training");
+            const auto monitor_evaluation = training->report();
+            write_json(output / "training-evaluation.json", {{"schema_version", 1},
+                {"command_ack", command_evaluation}, {"monitor", monitor_evaluation},
+                {"game_shot_stability", nullptr}, {"scene_settled", nullptr}});
+            report["training_archive_success"] = command_evaluation.value("success", false) &&
+                monitor_evaluation.value("success", false);
+            write_json(output / "result.json", report);
+        }
         if (evidence) {
             const auto post_end = Clock::now() + std::chrono::milliseconds(std::max(300, plan.cycle_budget_ms()));
             while (Clock::now() < post_end && cancel().empty()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -362,7 +440,8 @@ int main(int argc, char** argv) {
         }
         write_json(output / "result.json", report);
         std::cout << "组结束，执行结果已保存；停稳效果由人工观察判断。\n";
-        return report.value("success", false) && (!plan.capture_enabled || report.value("capture_complete", false)) ? 0 : 2;
+        return report.value("success", false) && report.value("training_archive_success", true) &&
+            (!plan.capture_enabled || report.value("capture_complete", false)) ? 0 : 2;
     } catch (...) {
         if (created) {
             try { write_json(output / "failure.json", {{"success", false},

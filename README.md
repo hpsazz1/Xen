@@ -23,28 +23,49 @@ Capture → Detector → Aim → Runtime SafetyGate → Mouse
 | Mouse/Input | Win32 SendInput、KMBOX NET、MAKCU；键盘和鼠标热键监听 |
 | Tools | Sender、Runtime Benchmark、Mouse Benchmark、人工验收与发布脚本 |
 
-反向轻点标定使用独立 `auto_stop_counterpulse` 目标和
-[`scripts/invoke_auto_stop_counterpulse.ps1`](scripts/invoke_auto_stop_counterpulse.ps1)：Prepare默认生成一次性计划，
-用户前台Launch后执行单组1至30发、可配置间隔，支持静止/无反向/固定反向时长比较。先停止生产Runtime；
-源焦点、全松和设备独占不足时拒绝，End/Ctrl+C或人工方向/鼠标按钮输入取消，不自动重试。
-`-NoCapture` 关闭图像采集、截图及断帧检查，由用户人工观察；仍记录命令与实际参数。
-启用捕获时沿用配置的CPU图像源，射前检查1000帧/384MiB容量（建议320 ROI）；ACK不代表停稳。
-移动组枪间隔是恢复下限；`-ShotAfterReleaseMs 5` 表示最后方向键释放ACK后5ms计划单发，
-未启用新时序字段时兼容原移动松键固定观察窗。该模式下 `-ShotIntervalMs 0` 不设最小枪间隔，
-上一枪左键释放完成后立即开始下一次移动；`-MoveMs 500` 支持500ms移动。各动作迟到单独检查。
-启用图像时，20发650ms首末至少12.35秒，
-弹着点会陆续消失，须连续观察或查看逐帧证据。
-日常调参可在 Prepare 时指定 `-Repeatable`，之后直接编辑同目录 `plan.json` 并重复手动运行同一Launch命令。
-计划文件支持行末 `// 中文说明` 和块注释（JSONC），注释不参与参数计算；结果中的计划仍保存为标准JSON。
-`move_during_fire_delay` 默认true：射后等待期间保持移动；false：先等完 `fire_delay_ms`，再开始 `move_ms` 移动，之后急停开枪。
-主要参数：`move_ms` 为正向最小保持时间，`fire_delay_ms` 为单发左键UP ACK起的射击间隔，A在此期间保持，二者并行满足后释放A。
-`counter_delay_ms` 是A释放ACK后到按D之前的等待，`counter_hold_ms` 才是D实际点按时长；二者不可混淆。
-`shot_after_release_ms` 为D释放ACK后等待，新模式设0即立即单发；`shots` 为子弹数（1至30）。
-每次启动先固定本次参数副本并验证，再覆盖上一组result；中途修改原文件只影响下一组。不会自动重试。
-`-ReuseRunDirectory` 用于准备/迁移已有目录，运行中拒绝更新；正式比较试验另建目录。
-[`scripts/analyze_auto_stop_impacts.py`](scripts/analyze_auto_stop_impacts.py) 离线分析必须提供实际颜色/ROI/几何容差，
-移动背景可采用独立背景ROI平移配准；结果仅表示本场景几何，不自动应用生产参数。
+自动移动、反向轻点和开枪测试使用正式 `auto_stop_counterpulse` 目标及
+[`scripts/invoke_auto_stop_counterpulse.ps1`](scripts/invoke_auto_stop_counterpulse.ps1)。
+Prepare 直接绑定已构建程序和配置路径，不复制程序、模型或 DLL；加 `-Repeatable` 后，日常只编辑
+同目录 `plan.json` 并由用户重复启动 TASK.md 中的 Launch 命令，无需重新打包。
+程序或脚本更新后重新 Prepare 绑定身份；旧 Run 不能直接用新入口 Launch。
 
+新计划 schema 2 使用显式的释放后时序，删除 `ShotIntervalMs`、`BrakeWindowMs`、`NoCapture`：
+默认不采图，记录命令以及原始 KMBOX 输入报告。保留必要的动作参数：
+
+| 参数 | 默认值 | 含义 |
+|---|---:|---|
+| `Shots` | 20 | 一组开火按住次数，1～30；不等于实际子弹数 |
+| `MoveMs` | 300 | 正向键最短保持时间，ms |
+| `FireDelayMs` | 300 | 上一枪左键释放 ACK 后的等待，ms |
+| `MoveDuringFireDelay` | true | 等待时同时移动；false 表示等完再移动 |
+| `CounterDelayMs` | 50 | 原方向释放 ACK 至反向按下的等待，ms |
+| `CounterHoldMs` | 5 | 反向键保持时间，ms |
+| `ShotAfterReleaseMs` | 0 | 最后方向键释放 ACK 至开枪的等待，ms |
+| `ShotHoldMs` | 5 | 左键按下 ACK 至松开的保持时间，1～2000ms，可设1000支持蓄力输入 |
+| `FireIntervalMs` | 0 | 相邻开火按下命令提交的最小间隔，0～5000ms；0不额外限制 |
+| `LateToleranceMs` | 5 | 调度迟到容差，ms，不是停稳阈值 |
+| `Baseline` / `Direction` | counter / A | 静止、无反向或反向对照，以及正向键 |
+
+开火间隔等待放在下一轮移动前；实际周期还受动作、ACK与调度耗时影响，不承诺游戏中的精确射速。
+长按开火计入整组40秒预算，超限配置拒绝；按住期间取消仍须松开左键。全零等待不会退回旧固定窗；静止对照仍需正的射后等待。JSONC 支持中文注释，未知或过时字段拒绝。
+每组启动冻结 `execution-plan.json`；运行中改配置只影响下一组。Repeatable 延续同目录覆盖上一组
+`result` 的约定，需要保留对比证据时先另存结果或使用新 Run 目录。
+源焦点、全松和设备独占不足时拒绝，End/Ctrl+C或人工方向/鼠标按钮输入取消，不自动重试。
+真实运行必须由用户前台触发并保留 `-AllowPhysicalOutput -Confirm AUTO_STOP_COUNTERPULSE`。
+
+结束后 `result/training-evaluation.json` 分别记录命令 ACK 域和 KMBOX monitor 域的换键评价、
+按住段与数据完整性，复用生产 `input_training::Session`。原始档案位于 `command-training` 和
+`monitor-training`，可在辅助页离线回看。参考换键分类只评价输入间隙/重叠，不代表实际停稳或子弹稳定。
+monitor 未回显软件动作时不会用命令记录冒充监听证据；未知 X/Y 语义仍不积分为真实轨迹。
+
+已有 `result.json` 可用同一正式程序离线重评，不接设备，不需要配置或物理授权：
+
+```powershell
+& '<正式程序目录>\auto_stop_counterpulse.exe' --evaluate-result '<已完成Run>\result\result.json' --output '<不存在的重评目录>'
+```
+
+[`scripts/analyze_auto_stop_impacts.py`](scripts/analyze_auto_stop_impacts.py) 仍用于独立的已有图像证据，
+不把输入评价分数当作游戏弹着或停稳测量。
 不同 Provider 使用各自匹配的 ONNX Runtime 发行包和独立构建目录。请求严格后端时不会静默回退
 到 CPU。固定 shape TensorRT 可启用 CUDA Graph；DirectML/OpenVINO 保持独立运行库闭包。
 

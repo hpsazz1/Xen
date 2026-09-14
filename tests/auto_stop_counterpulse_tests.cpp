@@ -418,6 +418,135 @@ void failures_stop_and_cleanup() {
           if (++calls > 20) throw std::runtime_error("测试异常"); return {}; }, m.clock());
       require(r["failure"] == "EXECUTION_EXCEPTION" && !m.left && !m.held && m.cleanup_calls == 1, "异常也必须归零"); }
 }
+void schema2_release_timing() {
+    for (const auto* baseline : {"counter", "no_counter"}) for (const bool parallel : {false, true})
+        for (const int delay : {0, 300}) {
+        const auto p = parse_counterpulse_plan(Json{{"schema_version", 2}, {"baseline", baseline},
+            {"shots", 3}, {"fire_delay_ms", delay}, {"move_during_fire_delay", parallel},
+            {"counter_delay_ms", 0}, {"shot_after_release_ms", 0}});
+        require(p.uses_release_timing() && !p.capture_enabled && p.shot_interval_ms == 0,
+            "版本2即使全部等待为零也必须使用释放锚点且默认不采集");
+        const auto serialized = counterpulse_plan_json(p);
+        require(serialized["schema_version"] == 2 && !serialized.contains("shot_interval_ms") &&
+            !serialized.contains("brake_window_ms"), "版本2序列化必须移除旧参数");
+        require(parse_counterpulse_plan(serialized).cycle_budget_ms() == p.cycle_budget_ms(),
+            "版本2序列化往返不能改变时序预算");
+        Fake m; const auto r = execute_counterpulse(m, p, {}, m.clock());
+        require(r["success"] && m.downs == 3 && !m.left && !m.held && m.cleanup_calls == 1,
+            "版本2有界移动射击须完整完成并清理");
+        for (const auto& cycle : r["cycles"]) {
+            require(!cycle.contains("brake_window_ms") && cycle["shot_anchor_ack_ns"] == cycle["shot_deadline_ns"],
+                "零等待必须立即使用最后松键ACK，不暴露或使用旧刹车窗");
+            for (const auto& c : r["commands"])
+                if (c["shot_index"] == cycle["shot_index"] && c["kind"] == "left_button" && c["value"] == 1)
+                    require(c["submit_ns"] == cycle["shot_anchor_ack_ns"], "零等待的实际单发提交不能回退固定窗");
+        }
+    }
+    const auto stationary = parse_counterpulse_plan(Json{{"schema_version", 2}, {"baseline", "stationary"},
+        {"shots", 3}, {"fire_delay_ms", 300}});
+    Fake m; const auto r = execute_counterpulse(m, stationary, {}, m.clock());
+    require(r["success"] && m.downs == 3 && m.keyboards == std::vector<int>{0} &&
+        r["timing_model"] == "STATIONARY_UP_ACK_DELAY", "版本2静止基线只按左键释放ACK等待，不发移动");
+    std::int64_t previous_up = 0;
+    for (const auto& c : r["commands"]) {
+        if (c["kind"] != "left_button" || c["shot_index"] == 0) continue;
+        if (c["value"] == 0) previous_up = c["ack_received_ns"];
+        else if (c["shot_index"] != 1)
+            require(c["submit_ns"].get<std::int64_t>() - previous_up == 300000000,
+                "静止下一发从实际左键UP ACK等满指定间隔");
+    }
+    require(stationary.cycle_budget_ms() == 305, "静止预算只含左键保持与射后等待");
+    { Fake canceled; canceled.physical_at_ms = 100;
+      const auto stopped = execute_counterpulse(canceled, stationary, {}, canceled.clock());
+      require(stopped["failure"] == "PHYSICAL_INPUT_CANCELED" && canceled.downs == 1 &&
+          !canceled.left && !canceled.held && canceled.cleanup_calls == 1,
+          "版本2静止等待期间真实输入仍须及时取消并清理"); }
+    { Fake unknown; unknown.unknown_keyboard_call = 3;
+      const auto zero = parse_counterpulse_plan(Json{{"schema_version", 2}, {"shots", 3}});
+      const auto stopped = execute_counterpulse(unknown, zero, {}, unknown.clock());
+      require(stopped["failure"] == "COMMAND_NOT_ACKNOWLEDGED" && unknown.downs == 1 &&
+          !unknown.left && !unknown.held && unknown.cleanup_calls == 1,
+          "版本2零等待不能绕过正向UP未知ACK，必须停止并归零");
+      require(std::find(unknown.keyboards.begin(), unknown.keyboards.end(), 8) == unknown.keyboards.end(),
+          "版本2正向释放未确认不得发送反向按键"); }
+    const auto bounded = parse_counterpulse_plan(Json{{"schema_version", 2}, {"shots", 30},
+        {"fire_delay_ms", 1000}, {"move_ms", 500}, {"counter_hold_ms", 200}, {"shot_after_release_ms", 20}});
+    require(bounded.cycle_budget_ms() == 1225, "并行等待预算取最大值且完整计入反向和释放后等待");
+    Fake slow; slow.latency_ms = 40;
+    const auto stopped = execute_counterpulse(slow, bounded, {}, slow.clock());
+    require(!stopped["success"].get<bool>() && slow.downs < 30 && !slow.left && !slow.held && slow.cleanup_calls == 1,
+        "版本2累计ACK超预算仍必须取消清理，不能挤压时序或补射");
+    for (const auto& patch : {Json{{"schema_version", 1}}, Json{{"schema_version", 3}}, Json{{"schema_version", 2.5}},
+        Json{{"shot_interval_ms", 0}}, Json{{"brake_window_ms", 60}}, Json{{"capture_enabled", true}},
+        Json{{"baseline", "stationary"}, {"fire_delay_ms", 0}}, Json{{"fire_delay_ms", 2001}},
+        Json{{"shots", 30}, {"fire_delay_ms", 1000}, {"move_ms", 500}, {"move_during_fire_delay", false}},
+        Json{{"shots", 30}, {"fire_delay_ms", 2000}}, Json{{"shots", 31}}, Json{{"shot_hold_ms", 0}},
+        Json{{"move_ms", 0}}, Json{{"counter_hold_ms", 0}}, Json{{"counter_delay_ms", 201}},
+        Json{{"baseline", "no_counter"}, {"counter_delay_ms", 1}}, Json{{"direction", 3}},
+        Json{{"shot_after_release_ms", 21}}, Json{{"late_tolerance_ms", 11}}, Json{{"unknown", 1}}}) {
+        Json invalid{{"schema_version", 2}}; invalid.update(patch);
+        bool rejected = false; try { parse_counterpulse_plan(invalid); } catch (...) { rejected = true; }
+        require(rejected, "版本2必须拒绝旧参数、版本错误和超范围计划");
+    }
+}
+void schema2_weapon_hold_and_interval() {
+    for (const auto* baseline : {"counter", "no_counter", "stationary"})
+        for (const int interval : {0, 500, 1500, 5000}) {
+        const auto p = parse_counterpulse_plan(Json{{"schema_version", 2}, {"baseline", baseline},
+            {"shots", 3}, {"shot_hold_ms", 1000}, {"fire_interval_ms", interval}, {"fire_delay_ms", 100}});
+        require(counterpulse_plan_json(p)["fire_interval_ms"] == interval,
+            "武器DOWN最小间隔必须写入正式计划并在执行中保留");
+        Fake m; const auto r = execute_counterpulse(m, p, {}, m.clock());
+        require(r["success"] && m.downs == 3 && !m.left && !m.held && m.cleanup_calls == 1,
+            "一秒开火保持必须完成全部周期并纳入最后一发的全程预算");
+        std::int64_t previous_down = 0, previous_up = 0, down_ack = 0;
+        for (const auto& c : r["commands"]) {
+            if (c["shot_index"] == 0) continue;
+            const auto submit = c["submit_ns"].get<std::int64_t>();
+            if (c["kind"] == "wasd" && c["value"] == p.direction)
+                require(submit == std::max(previous_up, previous_down + interval * 1000000LL),
+                    "移动组必须先等到前DOWN的最小间隔，再开始完整移动");
+            if (c["kind"] != "left_button") continue;
+            if (c["value"] == 1) {
+                if (previous_down) {
+                    require(submit - previous_down >= interval * 1000000LL,
+                        "相邻DOWN实际提交不能早于武器最小间隔");
+                    if (p.baseline == "stationary")
+                        require(submit == std::max(previous_up + 100000000, previous_down + interval * 1000000LL),
+                            "静止组取UP射后等待与DOWN最小间隔的较晚时刻");
+                }
+                previous_down = submit; down_ack = c["ack_received_ns"];
+            } else {
+                require(submit - down_ack == 1000000000,
+                    "每次左键从DOWN ACK完整保持一秒，不能仅改报告值");
+                previous_up = c["ack_received_ns"];
+            }
+        }
+        if (p.baseline != "stationary") for (const auto& cycle : r["cycles"])
+            require(cycle["shot_deadline_ns"] == cycle["shot_anchor_ack_ns"],
+                "武器冷却等待不得追加在最后方向键松开之后");
+    }
+    const auto long_hold = parse_counterpulse_plan(Json{{"schema_version", 2}, {"shots", 3}, {"shot_hold_ms", 2000}});
+    { Fake m; const auto r = execute_counterpulse(m, long_hold, {}, m.clock());
+      require(r["success"] && m.downs == 3 && !m.left && !m.held,
+          "两秒保持上限仍须包括末枪保持，不能被旧固定三秒预算截断"); }
+    { Fake m; m.physical_at_ms = 500;
+      const auto r = execute_counterpulse(m, long_hold, {}, m.clock());
+      require(r["failure"] == "PHYSICAL_INPUT_CANCELED" && m.downs == 1 && !m.left && !m.held && m.cleanup_calls == 1,
+          "长开火保持期间真实输入取消仍须立即松左键和方向键");
+      require(m.time < Clock::time_point(std::chrono::seconds(11)), "取消不能等到两秒保持结束才清理"); }
+    require(parse_counterpulse_plan(Json{{"schema_version", 2}, {"baseline", "stationary"},
+        {"shots", 20}, {"shot_hold_ms", 1999}, {"fire_delay_ms", 1}}).shot_hold_ms == 1999,
+        "接近40秒但仍含末枪保持的合法计划应可解析");
+    for (const auto& invalid : {Json{{"schema_version", 2}, {"shot_hold_ms", 2001}},
+        Json{{"schema_version", 2}, {"fire_interval_ms", 5001}}, Json{{"schema_version", 2}, {"fire_interval_ms", -1}},
+        Json{{"schema_version", 2}, {"shots", 30}, {"fire_interval_ms", 2000}},
+        Json{{"schema_version", 2}, {"baseline", "stationary"}, {"shots", 20}, {"shot_hold_ms", 2000}, {"fire_delay_ms", 1}},
+        Json{{"shot_hold_ms", 21}}, Json{{"fire_interval_ms", 0}}}) {
+        bool rejected = false; try { parse_counterpulse_plan(invalid); } catch (...) { rejected = true; }
+        require(rejected, "必须拒绝武器参数越界、含末枪超40秒以及旧版本新增参数或超过20ms保持");
+    }
+}
 void invalid_plans() {
     for (const auto& json : {Json{{"counter_delay_ms", 201}}, Json{{"baseline", "stationary"}, {"counter_delay_ms", 50}}, Json{{"fire_delay_ms", 300}}, Json{{"fire_delay_ms", 2001}},
         Json{{"move_during_fire_delay", 0}}, Json{{"move_during_fire_delay", "false"}}, Json{{"move_during_fire_delay", nullptr}},
@@ -441,7 +570,7 @@ void invalid_plans() {
 }
 }
 int main() {
-    try { fire_delay_before_moving(); delayed_reverse_tap_then_fire(); fire_delay_while_moving(); immediate_movement_cycles(); shot_after_direction_release(); matched_brake_window(); successful_and_baselines(); configurable_stationary_intervals(); failures_stop_and_cleanup(); invalid_plans(); }
+    try { schema2_weapon_hold_and_interval(); schema2_release_timing(); fire_delay_before_moving(); delayed_reverse_tap_then_fire(); fire_delay_while_moving(); immediate_movement_cycles(); shot_after_direction_release(); matched_brake_window(); successful_and_baselines(); configurable_stationary_intervals(); failures_stop_and_cleanup(); invalid_plans(); }
     catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
     std::cout << "反冲纯fake专项通过：时序、基线、预算、取消、未知ACK、清理及参数拒绝\n";
 }
