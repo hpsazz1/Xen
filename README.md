@@ -27,6 +27,7 @@ Capture → Detector → Aim → Runtime SafetyGate → Mouse
 [`scripts/invoke_auto_stop_counterpulse.ps1`](scripts/invoke_auto_stop_counterpulse.ps1)。
 Prepare 直接绑定已构建程序和配置路径，不复制程序、模型或 DLL；加 `-Repeatable` 后，日常只编辑
 同目录 `plan.json` 并由用户重复启动 TASK.md 中的 Launch 命令，无需重新打包。
+Prepare 同时生成 `start-test.bat`、`edit-config.bat` 和 `PARAMETERS.md`；参数文件带中文说明，双击编辑、保存后双击启动即可。
 程序或脚本更新后重新 Prepare 绑定身份；旧 Run 不能直接用新入口 Launch。
 
 新计划 schema 2 使用显式的释放后时序，删除 `ShotIntervalMs`、`BrakeWindowMs`、`NoCapture`：

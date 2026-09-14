@@ -58,6 +58,33 @@ function Show-Startup([string]$Directory, [string]$Previous) {
 }
 function Get-Digest([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash }
 function Quote-PS([string]$Value) { "'" + $Value.Replace("'", "''") + "'" }
+# 注释只由固定字段说明生成；值仍由JSON序列化器转义。
+$planHelp = [ordered]@{
+    schema_version='固定为2，新版动作与评价契约。'; capture_enabled='固定false，不采集图像。';
+    baseline='counter反向轻点；no_counter仅松键；stationary原地开火。';
+    shots='开火次数1..30，不代表实际子弹数。';
+    fire_delay_ms='上一轮左键UP ACK后的等待0..2000ms；与移动是否并行由下一开关决定。';
+    fire_interval_ms='相邻左键DOWN提交的最小间隔0..5000ms；0关闭。冷却在下一轮移动前，不是精确周期。';
+    move_during_fire_delay='true等待与移动并行；false先等待再移动。';
+    move_ms='正向键DOWN ACK起最少保持1..500ms。';
+    counter_hold_ms='反向键实际保持1..200ms。'; counter_delay_ms='正向UP ACK至反向DOWN的等待0..200ms；非counter必须0。';
+    shot_after_release_ms='最后方向键UP ACK至计划开火的等待0..20ms；0立即计划开火。';
+    shot_hold_ms='左键DOWN ACK起保持1..2000ms；1000即按住1秒。';
+    late_tolerance_ms='动作调度迟到容差0..10ms。'; direction='2表示A，8表示D。'
+}
+function Write-CommentedPlan([string]$Path, $Value) {
+    $lines = New-Object 'Collections.Generic.List[string]'
+    $lines.Add('{')
+    $keys = @($Value.Keys)
+    for ($index = 0; $index -lt $keys.Count; $index++) {
+        $key = $keys[$index]
+        $lines.Add('  // ' + $planHelp[$key])
+        $suffix = if ($index + 1 -lt $keys.Count) { ',' } else { '' }
+        $lines.Add('  "' + $key + '": ' + (ConvertTo-Json -InputObject $Value[$key] -Compress) + $suffix)
+    }
+    $lines.Add('}')
+    [IO.File]::WriteAllText($Path, ($lines -join "`r`n") + "`r`n", (New-Object Text.UTF8Encoding($false)))
+}
 function Write-Json([string]$Path, $Value) {
     [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding($false)))
 }
@@ -218,7 +245,7 @@ try {
         $lockPath = Join-Path $runPath '.counterpulse.lock'
         Assert-PlainPath $lockPath
         $runLock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
-        foreach ($leaf in @('task.json', 'plan.json', 'TASK.md', 'CONSUMED')) { Assert-PlainPath (Join-Path $runPath $leaf) }
+        foreach ($leaf in @('task.json', 'plan.json', 'TASK.md', 'CONSUMED', 'start-test.bat', 'edit-config.bat', 'launch-test.ps1', 'PARAMETERS.md')) { Assert-PlainPath (Join-Path $runPath $leaf) }
         if ($exists) {
             $existingTask = Get-Content -LiteralPath $taskPath -Raw -Encoding UTF8 | ConvertFrom-Json
             Assert-OwnedRun $existingTask
@@ -247,7 +274,7 @@ try {
                 Set-Variable -Name $parameter -Value $value
             }
         }
-        Write-Json $candidatePlan $plan
+        Write-CommentedPlan $candidatePlan $plan
         Invoke-Probe $binary @('--plan', $candidatePlan, '--dry-run', '--require-current-plan') $false
         # 所有验证通过之后才移除上组结果，并重新武装用户前台的一次性命令。
         if (Test-Path -LiteralPath $resultPath) { Remove-Item -LiteralPath $resultPath -Recurse -Force }
@@ -266,6 +293,29 @@ try {
         if ($CredentialDirectory) {
             $launch += ' -CredentialDirectory ' + (Quote-PS ([IO.Path]::GetFullPath($CredentialDirectory))) + ' -Scope ' + $Scope
         }
+        # BAT不嵌入绝对路径或参数，避免cmd再次解释路径中的%、!和&。
+        $launchScript = "# 仅用户在前台触发；真实输入确认字符串不是凭据。`r`n" + $launch + "`r`nif (-not `$?) { exit 1 }`r`nexit 0`r`n"
+        [IO.File]::WriteAllText((Join-Path $runPath 'launch-test.ps1'), $launchScript, (New-Object Text.UTF8Encoding($true)))
+        $startBat = '@echo off' + "`r`n" + 'setlocal DisableDelayedExpansion' + "`r`n" +
+            '"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0launch-test.ps1"' + "`r`n" +
+            'set "testExitCode=%errorlevel%"' + "`r`n" + 'pause' + "`r`n" + 'exit /b %testExitCode%' + "`r`n"
+        $editBat = '@echo off' + "`r`n" + 'setlocal DisableDelayedExpansion' + "`r`n" +
+            '"%SystemRoot%\System32\notepad.exe" "%~dp0plan.json"' + "`r`n"
+        [IO.File]::WriteAllText((Join-Path $runPath 'start-test.bat'), $startBat, [Text.Encoding]::ASCII)
+        [IO.File]::WriteAllText((Join-Path $runPath 'edit-config.bat'), $editBat, [Text.Encoding]::ASCII)
+        $parameterLines = New-Object 'Collections.Generic.List[string]'
+        $parameterLines.Add('# 参数说明')
+        $parameterLines.Add('')
+        $parameterLines.Add('双击edit-config.bat编辑plan.json，保存后关闭记事本，再由用户前台双击start-test.bat。启动会发送真实移动与开火输入。')
+        $parameterLines.Add('Repeatable模式每次启动冻结本轮计划，编辑只影响下一轮；成功校验后覆盖上一组result。正式比较请另存证据。')
+        $parameterLines.Add('以下数值是本次Prepare实际采用值；之后手工编辑以plan.json为准。')
+        $parameterLines.Add('')
+        $parameterLines.Add('| 字段 | 本次Prepare实际值 | 含义 |')
+        $parameterLines.Add('|---|---|---|')
+        foreach ($key in $plan.Keys) {
+            $parameterLines.Add('| ' + $key + ' | ' + (ConvertTo-Json -InputObject $plan[$key] -Compress) + ' | ' + $planHelp[$key] + ' |')
+        }
+        [IO.File]::WriteAllText((Join-Path $runPath 'PARAMETERS.md'), ($parameterLines -join "`r`n") + "`r`n", (New-Object Text.UTF8Encoding($false)))
         $action = if ($Baseline -eq 'no_counter') { '仅松键，不按反向键' } else { "反向轻点$($CounterHoldMs)ms（ACK计时）" }
         $timing = if ($ShotAfterReleaseMs -eq 0) { '最后方向键UP ACK后立即计划开枪' } else { "最后方向键UP ACK后$($ShotAfterReleaseMs)ms计划开枪" }
         $behavior = if ($Baseline -eq 'stationary') {
@@ -284,7 +334,7 @@ try {
             '参数探索可通过Prepare -ReuseRunDirectory复用本目录；新计划验证通过后替换参数并清理上次result和CONSUMED。每次Prepare后仍由用户前台触发Launch。固定正式文件不复制打包；需要重复调参时Prepare -Repeatable。'
         }
         $manualMode = if ($Repeatable) { '仅用户在当前前台每次手动执行一组，可重复启动' } else { '仅用户在当前前台执行一次' }
-        $markdown = "# 反向轻点人工Run`n`n状态：PREPARED_NOT_LAUNCHED。$manualMode；会发送真实开火输入。`n`n$behavior`n`n请先确认测试场景、源焦点和独占设备；End或人工输入取消。`n`n``````powershell`n$launch`n```````n`n一组$Shots 次开火；$observation。$cadence；结果不代表已经稳定。结果目录：result。`n`n$reuseInstructions`n`n迁移旧目录后仅使用本TASK中的新入口。`n"
+        $markdown = "# 反向轻点人工Run`n`n状态：PREPARED_NOT_LAUNCHED。$manualMode；会发送真实开火输入。`n`n$behavior`n`n请先确认测试场景、源焦点和独占设备；End或人工输入取消。`n`n``````powershell`n$launch`n```````n`n一组$Shots 次开火；$observation。$cadence；结果不代表已经稳定。结果目录：result。`n`n$reuseInstructions`n`n快捷入口：start-test.bat启动本轮，edit-config.bat编辑plan.json；字段说明见PARAMETERS.md。`n`n迁移旧目录后仅使用本TASK中的新入口。`n"
         [IO.File]::WriteAllText((Join-Path $runPath 'TASK.md'), $markdown, (New-Object Text.UTF8Encoding($false)))
         Write-Output 'PREPARED_NOT_LAUNCHED；未发送设备输入。'
     } else {

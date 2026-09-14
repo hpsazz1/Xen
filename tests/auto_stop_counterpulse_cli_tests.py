@@ -9,6 +9,12 @@ import subprocess
 import tempfile
 
 
+def read_generated_json(path):
+    # Prepare只生成独立整行注释；通用JSONC接受/拒绝由正式CLI回归验证。
+    text = path.read_text(encoding='utf-8-sig')
+    return json.loads('\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('//')))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--executable', default=os.environ.get('XEN_COUNTERPULSE_EXE'))
@@ -58,7 +64,7 @@ def main():
             evaluated = subprocess.run([str(Path(args.executable).resolve()), '--evaluate-result',
                 str(command_report), '--output', str(evaluation_dir)], capture_output=True, timeout=10)
             assert evaluated.returncode == 0, '正式离线重评必须通过'
-            evaluation = json.loads((evaluation_dir / 'training-evaluation.json').read_text(encoding='utf-8-sig'))
+            evaluation = read_generated_json(evaluation_dir / 'training-evaluation.json')
             assert evaluation['physical_output'] is False and evaluation['monitor'] is None
             ack = evaluation['command_ack']
             assert ack['source'] == 'COMMAND_ACK' and ack['time_domain'] == 'LOCAL_STEADY_COMMAND_ACK'
@@ -105,8 +111,8 @@ def main():
             assert not (run / 'result').exists()
             assert not (run / 'CONSUMED').exists()
             assert not (run / 'config.ini').exists()
-            task = json.loads((run / 'task.json').read_text(encoding='utf-8-sig'))
-            plan = json.loads((run / 'plan.json').read_text(encoding='utf-8-sig'))
+            task = read_generated_json(run / 'task.json')
+            plan = read_generated_json(run / 'plan.json')
             # 纯采集模式不允许混入物理授权；拒绝发生在加载配置与设备之前。
             for extra in [('--allow-physical-output',), ('--confirm', 'AUTO_STOP_COUNTERPULSE'), ('--dry-run',)]:
                 diagnostic = root / 'capture-must-not-exist'
@@ -114,6 +120,18 @@ def main():
                     '--plan', str(run / 'plan.json'), '--config', str(config), '--output', str(diagnostic), *extra],
                     capture_output=True, timeout=10)
                 assert rejected.returncode != 0 and not diagnostic.exists()
+            for leaf in ('start-test.bat', 'edit-config.bat', 'launch-test.ps1', 'PARAMETERS.md'):
+                assert (run / leaf).is_file()
+            start_bat = (run / 'start-test.bat').read_text(encoding='ascii')
+            edit_bat = (run / 'edit-config.bat').read_text(encoding='ascii')
+            assert 'DisableDelayedExpansion' in start_bat and '"%~dp0launch-test.ps1"' in start_bat
+            assert 'DisableDelayedExpansion' in edit_bat and '"%~dp0plan.json"' in edit_bat
+            assert r'%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe' in start_bat
+            assert r'%SystemRoot%\System32\notepad.exe' in edit_bat
+            assert 'set "testExitCode=%errorlevel%"' in start_bat and 'exit /b %testExitCode%' in start_bat
+            assert '-Mode Launch' not in start_bat and '-AllowPhysicalOutput' not in start_bat
+            assert '// ' in (run / 'plan.json').read_text(encoding='utf-8-sig')
+            assert '| shot_hold_ms | 5 |' in (run / 'PARAMETERS.md').read_text(encoding='utf-8-sig')
             assert task['status'] == 'PREPARED_NOT_LAUNCHED'
             assert task['schema_version'] == 4
             assert plan['schema_version'] == 2
@@ -127,26 +145,26 @@ def main():
             slow = root / 'slow-stationary'
             invoke('-Mode', 'Prepare', '-RunDirectory', slow, '-Executable', args.executable,
                 '-ConfigPath', config, '-Baseline', 'stationary', '-Shots', 7, '-FireDelayMs', 600, ok=True)
-            slow_plan = json.loads((slow / 'plan.json').read_text(encoding='utf-8-sig'))
+            slow_plan = read_generated_json(slow / 'plan.json')
             assert slow_plan['shots'] == 7 and slow_plan['fire_delay_ms'] == 600
             assert '600ms' in (slow / 'TASK.md').read_text(encoding='utf-8-sig')
             slower = root / 'slower-stationary'
             invoke('-Mode', 'Prepare', '-RunDirectory', slower, '-Executable', args.executable,
                 '-ConfigPath', config, '-Baseline', 'stationary', '-Shots', 7, '-FireDelayMs', 650, ok=True)
-            assert json.loads((slower / 'plan.json').read_text(encoding='utf-8-sig'))['fire_delay_ms'] == 650
+            assert read_generated_json(slower / 'plan.json')['fire_delay_ms'] == 650
             assert '650ms' in (slower / 'TASK.md').read_text(encoding='utf-8-sig')
             movement = root / 'matched-no-counter'
             invoke('-Mode', 'Prepare', '-RunDirectory', movement, '-Executable', args.executable,
                 '-ConfigPath', config, '-Baseline', 'no_counter', '-Shots', 7, '-FireDelayMs', 650,
                 '-CounterDelayMs', 0, '-ShotAfterReleaseMs', 6, ok=True)
-            movement_plan = json.loads((movement / 'plan.json').read_text(encoding='utf-8-sig'))
+            movement_plan = read_generated_json(movement / 'plan.json')
             assert movement_plan['baseline'] == 'no_counter' and movement_plan['shot_after_release_ms'] == 6
             movement_task = (movement / 'TASK.md').read_text(encoding='utf-8-sig')
             assert '6ms' in movement_task and '迟到超过5ms' in movement_task
             long_run = root / 'twenty-counter'
             invoke('-Mode', 'Prepare', '-RunDirectory', long_run, '-Executable', args.executable,
                 '-ConfigPath', config, '-Shots', 20, '-FireDelayMs', 650, '-CounterHoldMs', 25, ok=True)
-            long_plan = json.loads((long_run / 'plan.json').read_text(encoding='utf-8-sig'))
+            long_plan = read_generated_json(long_run / 'plan.json')
             assert long_plan['shots'] == 20 and long_plan['counter_hold_ms'] == 25
             # 复用只 Prepare，不触发任何设备。验证失败时上组证据必须完整保留。
             reusable_args = ('-Mode', 'Prepare', '-RunDirectory', long_run, '-Executable', args.executable,
@@ -201,18 +219,18 @@ def main():
                     os.rmdir(junction)
             invoke(*reusable_args, ok=True)
             assert not result_dir.exists() and not (long_run / 'CONSUMED').exists()
-            updated = json.loads((long_run / 'plan.json').read_text(encoding='utf-8-sig'))
+            updated = read_generated_json(long_run / 'plan.json')
             assert updated['counter_hold_ms'] == 15 and updated['shot_after_release_ms'] == 5
             assert '最后方向键UP ACK后5ms' in (long_run / 'TASK.md').read_text(encoding='utf-8-sig')
             assert 'ReuseRunDirectory' in (long_run / 'TASK.md').read_text(encoding='utf-8-sig')
             invoke(*reusable_args, ok=True)
             # schema4正式文件升级后允许显式Prepare重新绑定，日常Launch仍严格验哈希。
-            upgraded_task = json.loads((long_run / 'task.json').read_text(encoding='utf-8-sig'))
+            upgraded_task = read_generated_json(long_run / 'task.json')
             upgraded_task['executable_sha256'] = 'PREVIOUS_EXECUTABLE'
             upgraded_task['script_sha256'] = 'PREVIOUS_SCRIPT'
             (long_run / 'task.json').write_text(json.dumps(upgraded_task), encoding='utf-8')
             invoke(*reusable_args, ok=True)
-            rebound = json.loads((long_run / 'task.json').read_text(encoding='utf-8-sig'))
+            rebound = read_generated_json(long_run / 'task.json')
             assert rebound['executable_sha256'] == hashlib.sha256(Path(args.executable).read_bytes()).hexdigest().upper()
             assert rebound['script_sha256'] == hashlib.sha256(script.read_bytes()).hexdigest().upper()
             # 原配置完整性仍是迁移门禁，失败必须保留计划。
@@ -230,8 +248,8 @@ def main():
                    '-ConfigPath', config, '-ReuseRunDirectory')
             assert list(foreign.iterdir()) == [foreign / 'keep.txt']
             # schema 1 的已绑定目录可显式迁移；迁移仍要求原文件哈希匹配。
-            legacy_task = json.loads((long_run / 'task.json').read_text(encoding='utf-8-sig'))
-            legacy_plan = json.loads((long_run / 'plan.json').read_text(encoding='utf-8-sig'))
+            legacy_task = read_generated_json(long_run / 'task.json')
+            legacy_plan = read_generated_json(long_run / 'plan.json')
             legacy_plan.pop('schema_version')
             legacy_plan.pop('fire_interval_ms')
             legacy_plan.update(move_ms=5, fire_delay_ms=0, shot_interval_ms=280, brake_window_ms=60, shot_after_release_ms=5)
@@ -245,16 +263,16 @@ def main():
             (long_run / 'task.json').write_text(json.dumps(legacy_task), encoding='utf-8')
             invoke('-Mode', 'Prepare', '-RunDirectory', long_run, '-Executable', args.executable,
                 '-ConfigPath', config, '-ReuseRunDirectory', ok=True)
-            inherited_plan = json.loads((long_run / 'plan.json').read_text(encoding='utf-8-sig'))
+            inherited_plan = read_generated_json(long_run / 'plan.json')
             assert inherited_plan['move_ms'] == 5 and inherited_plan['fire_delay_ms'] == 0
             assert inherited_plan['shot_after_release_ms'] == 5 and inherited_plan['fire_interval_ms'] == 0
             assert 'shot_interval_ms' not in inherited_plan and 'brake_window_ms' not in inherited_plan
-            assert json.loads((long_run / 'task.json').read_text(encoding='utf-8-sig'))['schema_version'] == 4
+            assert read_generated_json(long_run / 'task.json')['schema_version'] == 4
             action_args = ('-Mode', 'Prepare', '-RunDirectory', long_run, '-Executable', args.executable,
                            '-ConfigPath', config, '-ReuseRunDirectory', '-Shots', 20,
                            '-FireDelayMs', 300, '-MoveMs', 500, '-CounterHoldMs', 15)
             invoke(*action_args, '-ShotAfterReleaseMs', 5, ok=True)
-            action_plan = json.loads((long_run / 'plan.json').read_text(encoding='utf-8-sig'))
+            action_plan = read_generated_json(long_run / 'plan.json')
             assert action_plan['capture_enabled'] is False
             assert 'shot_interval_ms' not in action_plan and action_plan['move_ms'] == 500
             assert action_plan['counter_hold_ms'] == 15 and action_plan['shot_after_release_ms'] == 5
@@ -272,7 +290,7 @@ def main():
                 invoke(*action_args, *removed)
                 assert (long_run / 'plan.json').read_bytes() == valid_action_plan
             invoke(*action_args, '-ShotAfterReleaseMs', 0, ok=True)
-            assert json.loads((long_run / 'plan.json').read_text(encoding='utf-8-sig'))['shot_after_release_ms'] == 0
+            assert read_generated_json(long_run / 'plan.json')['shot_after_release_ms'] == 0
             overflow = root / 'overflow'
             invoke('-Mode', 'Prepare', '-RunDirectory', overflow, '-Executable', args.executable,
                 '-ConfigPath', config, '-Shots', 31, '-FireDelayMs', 650)
@@ -280,16 +298,19 @@ def main():
             held_run = root / 'long-fire-hold'
             invoke('-Mode', 'Prepare', '-RunDirectory', held_run, '-Executable', args.executable,
                 '-ConfigPath', config, '-Shots', 3, '-ShotHoldMs', 1000, '-FireIntervalMs', 2000, ok=True)
-            held_plan = json.loads((held_run / 'plan.json').read_text(encoding='utf-8-sig'))
+            held_plan = read_generated_json(held_run / 'plan.json')
             assert held_plan['shot_hold_ms'] == 1000 and held_plan['fire_interval_ms'] == 2000
             held_task = (held_run / 'TASK.md').read_text(encoding='utf-8-sig')
             assert '左键按住1000ms' in held_task and 'fire_interval_ms=2000ms' in held_task
             assert '不是精确周期' in held_task and '下一轮移动开始前' in held_task
             invoke('-Mode', 'Prepare', '-RunDirectory', held_run, '-Executable', args.executable,
                 '-ConfigPath', config, '-ReuseRunDirectory', '-MoveMs', 10, ok=True)
-            held_migrated = json.loads((held_run / 'plan.json').read_text(encoding='utf-8-sig'))
+            held_migrated = read_generated_json(held_run / 'plan.json')
             assert held_migrated['shot_hold_ms'] == 1000 and held_migrated['fire_interval_ms'] == 2000
             assert held_migrated['move_ms'] == 10
+            parameters = (held_run / 'PARAMETERS.md').read_text(encoding='utf-8-sig')
+            assert '| shot_hold_ms | 1000 |' in parameters and '| fire_interval_ms | 2000 |' in parameters
+            assert '| move_ms | 10 |' in parameters
             for index, extra in enumerate([('-ShotHoldMs', 0), ('-ShotHoldMs', 2001), ('-FireIntervalMs', -1), ('-FireIntervalMs', 5001)]):
                 invalid_hold = root / ('invalid-hold-' + str(index))
                 invoke('-Mode', 'Prepare', '-RunDirectory', invalid_hold, '-Executable', args.executable,
@@ -299,7 +320,7 @@ def main():
             invoke('-Mode', 'Prepare', '-RunDirectory', single, '-Executable', args.executable,
                 '-ConfigPath', config, '-Shots', 1, '-FireDelayMs', 300,
                 '-MoveMs', 300, '-CounterDelayMs', 50, '-CounterHoldMs', 5, '-ShotAfterReleaseMs', 0, ok=True)
-            assert json.loads((single / 'plan.json').read_text(encoding='utf-8-sig'))['shots'] == 1
+            assert read_generated_json(single / 'plan.json')['shots'] == 1
             single_task = (single / 'TASK.md').read_text(encoding='utf-8-sig')
             assert '上一轮左键UP ACK后开始300ms间隔' in single_task and '较晚者' in single_task
             assert 'UP ACK后等待50ms' in single_task and '反向轻点5ms' in single_task
@@ -344,7 +365,7 @@ def main():
     $snapshot = $Arguments[[Array]::IndexOf($Arguments, '--plan') + 1]
     $output = $Arguments[[Array]::IndexOf($Arguments, '--output') + 1]
     if ((Test-Path -LiteralPath (Join-Path $runPath 'edit-during-mock'))) {
-        $edited = Get-Content -LiteralPath $planPath -Raw | ConvertFrom-Json
+        $edited = (Get-Content -LiteralPath $planPath -Encoding UTF8 | Where-Object { -not $_.TrimStart().StartsWith('//') }) -join "`n" | ConvertFrom-Json
         $edited.move_ms = 123
         Write-Json $planPath $edited
     }
@@ -361,11 +382,11 @@ def main():
                     replacement = 'if ($false) { throw "MOCK_SESSION_ONLY" }'
                 source = source[:span['start']] + replacement + source[span['end']:]
             harness.write_bytes(source.encode('utf-8-sig'))
-            repeat_run = root / 'repeatable'
+            repeat_run = root / "repeatable % ! & ' 中文"
             invoke('-Mode', 'Prepare', '-RunDirectory', repeat_run, '-Executable', args.executable,
                 '-ConfigPath', config, '-Repeatable', '-MoveMs', 300, '-CounterDelayMs', 50, '-CounterHoldMs', 5,
                 '-ShotAfterReleaseMs', 0, '-FireDelayMs', 300, '-Shots', 20, entry=harness, ok=True)
-            repeat_task = json.loads((repeat_run / 'task.json').read_text(encoding='utf-8-sig'))
+            repeat_task = read_generated_json(repeat_run / 'task.json')
             assert repeat_task['schema_version'] == 4 and repeat_task['repeatable'] is True
             launch = ('-Mode', 'Launch', '-RunDirectory', repeat_run,
                       '-AllowPhysicalOutput', '-Confirm', 'AUTO_STOP_COUNTERPULSE')
@@ -378,8 +399,11 @@ def main():
                 assert not (repeat_run / 'mock-calls').exists()
                 assert not (repeat_run / 'result').exists() and not (repeat_run / 'CONSUMED').exists()
             (repeat_run / 'task.json').write_text(json.dumps(repeat_task), encoding='utf-8')
-            invoke(*launch, entry=harness, ok=True)
-            repeat_plan = json.loads((repeat_run / 'plan.json').read_text(encoding='utf-8-sig'))
+            shortcut = subprocess.run([shell, '-NoProfile', '-File', str(repeat_run / 'launch-test.ps1')],
+                                      capture_output=True, timeout=30)
+            assert shortcut.returncode == 0, '带特殊字符路径的生成PS快捷入口须可调用物理桩'
+
+            repeat_plan = read_generated_json(repeat_run / 'plan.json')
             repeat_plan['move_ms'] = 200
             repeat_plan['counter_hold_ms'] = 40
             repeat_plan['counter_delay_ms'] = 60
@@ -388,11 +412,11 @@ def main():
             (repeat_run / 'plan.json').write_text(json.dumps(repeat_plan), encoding='utf-8')
             (repeat_run / 'edit-during-mock').write_text('edit', encoding='utf-8')
             invoke(*launch, entry=harness, ok=True)
-            executed = json.loads((repeat_run / 'result' / 'plan.json').read_text(encoding='utf-8-sig'))
+            executed = read_generated_json(repeat_run / 'result' / 'plan.json')
             assert executed['move_ms'] == 200 and executed['counter_hold_ms'] == 40
             assert executed['fire_delay_ms'] == 700 and executed['shots'] == 30
             assert executed['counter_delay_ms'] == 60 and executed['shot_after_release_ms'] == 0
-            assert json.loads((repeat_run / 'plan.json').read_text(encoding='utf-8-sig'))['move_ms'] == 123
+            assert read_generated_json(repeat_run / 'plan.json')['move_ms'] == 123
             assert (repeat_run / 'execution-plan.json').read_bytes() == (repeat_run / 'result' / 'plan.json').read_bytes()
             assert (repeat_run / 'mock-calls').read_text(encoding='utf-8-sig').splitlines() == ['once', 'once']
             previous = (repeat_run / 'result' / 'plan.json').read_bytes()
