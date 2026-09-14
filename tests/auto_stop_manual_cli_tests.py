@@ -14,6 +14,18 @@ def main():
         assert (p.returncode == 0) == good, (p.returncode, p.stderr.decode('utf-8', 'replace'))
     with tempfile.TemporaryDirectory(prefix='xen-manual-cli-') as temp:
         root = Path(temp)
+        baseline = root/'baseline'
+        run('--derive-defaults','--output',baseline)
+        defaults=json.loads((baseline/'default-baseline.json').read_text(encoding='utf-8'))
+        plan=json.loads((baseline/'plan.json').read_text(encoding='utf-8'))
+        assert defaults['source']=='FORMULA_ONLY_NO_MANUAL_DATA'
+        assert defaults['settings_source']=='REFERENCE_INITIAL_ASSUMPTIONS'
+        assert [plan[k] for k in ['move_ms','counter_hold_ms','shot_after_release_ms','fire_delay_ms']]==[182,72,2,13]
+        run('--plan',baseline/'plan.json','--dry-run','--require-current-plan')
+        run('--derive-defaults','--output',baseline,good=False)
+        for flag in ['--allow-physical-output','--capture-check','--record-manual','--dry-run','--require-current-plan']:
+            run('--derive-defaults','--output',root/'bad-defaults',flag,good=False)
+            assert not (root/'bad-defaults').exists()
         recording = root / 'recording'
         raw = recording / 'raw'
         raw.mkdir(parents=True)
@@ -53,6 +65,10 @@ def main():
         assert (raw/'events-0.csv').read_bytes()==data
         changed=dict(settings, fire_sample_delay_ms=30)
         override=root/'override.json';override.write_text(json.dumps(changed),encoding='utf-8')
+        run('--derive-defaults','--output',root/'changed-defaults','--sampling-settings',override)
+        changed_defaults=json.loads((root/'changed-defaults'/'default-baseline.json').read_text(encoding='utf-8'))
+        assert changed_defaults['candidate_plan']['fire_delay_ms']==25
+        assert changed_defaults['settings_source']=='USER_SUPPLIED_ASSUMPTIONS'
         run('--evaluate-manual',recording,'--output',root/'override-result','--sampling-settings',override)
         other=json.loads((root/'override-result'/'sampling-analysis.json').read_text(encoding='utf-8'))
         assert other['original_sampling_settings']==settings and other['sampling_settings_overridden'] is True
@@ -74,6 +90,10 @@ def main():
         invalid_report=json.loads((root/'invalid-result'/'sampling-analysis.json').read_text(encoding='utf-8'))
         assert invalid_report['archive_complete'] is False
         assert invalid_report['calibration_envelope']['fit_status']=='EVIDENCE_INCOMPLETE'
+        labels['recording_usable']=False
+        (recording/'labels.json').write_text(json.dumps(labels),encoding='utf-8')
+        run('--evaluate-manual',recording,'--output',root/'user-excluded',good=False)
+        assert not (root/'user-excluded').exists()
         (raw/'events-0.csv').unlink()
         run('--evaluate-manual',recording,'--output',root/'broken',good=False)
         assert not (root/'broken').exists()

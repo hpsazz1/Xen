@@ -24,6 +24,7 @@
 #include "auto_stop_probe/counterpulse_hud.h"
 #include "auto_stop_probe/manual_recording_internal.h"
 #include "auto_stop_probe/manual_labels_internal.h"
+#include "auto_stop_probe/default_baseline_internal.h"
 #include "runtime/input_training_internal.h"
 #include "source_context/source_context.h"
 
@@ -262,7 +263,7 @@ int main(int argc, char** argv) {
     };
     try {
         std::string config_path, plan_path, confirmation, evaluation_path, migration_path, sampling_path, hud_path, manual_path;
-        bool dry = false, allowed = false, capture_check = false, current_plan = false, manual = false;
+        bool dry = false, allowed = false, capture_check = false, current_plan = false, manual = false, derive_defaults = false;
         int recording_duration_ms = 120000;
         std::set<std::string> seen;
         if (argc == 2 && std::string(argv[1]) == "--help") {
@@ -272,6 +273,7 @@ int main(int argc, char** argv) {
                          "采样校准：--sampling-settings JSONC；真实运行显示模型HUD，dry-run与离线重评不打开HUD。\n"
                          "人工监听：--record-manual --config INI --output NEW_DIR --sampling-settings JSONC；只读KMBOX，默认120秒。\n"
                          "人工重评：--evaluate-manual RECORD_DIR --output NEW_DIR；可传--sampling-settings比较新参数。\n"
+                         "公式基线：--derive-defaults --output NEW_DIR；可传--sampling-settings重算，假设与推导分别保存，不连接设备。\n"
                          "常驻显示：--show-hud SAMPLING_ANALYSIS_JSON；只显示已保存数据，关闭窗口退出。\n"
                          "计划迁移：--migrate-plan OLD_JSON --output NEW_JSON；不连接设备。\n"
                          "旧计划纯采集诊断：--plan JSON --config INI --output NEW_DIR --capture-check。\n";
@@ -285,6 +287,7 @@ int main(int argc, char** argv) {
             else if (option == "--capture-check") capture_check = true;
             else if (option == "--allow-physical-output") allowed = true;
             else if (option == "--record-manual") manual = true;
+            else if (option == "--derive-defaults") derive_defaults = true;
             else if (i + 1 < argc && option == "--plan") plan_path = argv[++i];
             else if (i + 1 < argc && option == "--config") config_path = argv[++i];
             else if (i + 1 < argc && option == "--output") output = argv[++i];
@@ -302,7 +305,7 @@ int main(int argc, char** argv) {
             }
             else throw std::runtime_error("无效参数");
         }
-        if (int(manual) + int(!manual_path.empty()) + int(!hud_path.empty()) + int(!migration_path.empty()) + int(!evaluation_path.empty()) > 1)
+        if (int(derive_defaults) + int(manual) + int(!manual_path.empty()) + int(!hud_path.empty()) + int(!migration_path.empty()) + int(!evaluation_path.empty()) > 1)
             throw std::runtime_error("入口模式冲突");
         if (!manual && seen.contains("--recording-duration-ms")) throw std::runtime_error("录制时长仅用于人工录制");
         if (!hud_path.empty()) {
@@ -343,6 +346,19 @@ int main(int argc, char** argv) {
             std::ifstream settings_file(sampling_path);
             sampling_settings = parse_sampling_settings(Json::parse(settings_file, nullptr, true, true));
         }
+        if (derive_defaults) {
+            if (dry || allowed || capture_check || current_plan || !confirmation.empty() || !config_path.empty() ||
+                !plan_path.empty() || output.empty()) throw std::runtime_error("公式基线仅接受新输出目录和可选采样设置");
+            auto baseline = derive_default_baseline(sampling_settings);
+            baseline["settings_source"] = sampling_path.empty() ? "REFERENCE_INITIAL_ASSUMPTIONS" : "USER_SUPPLIED_ASSUMPTIONS";
+            if (!std::filesystem::create_directory(output)) throw std::runtime_error("公式基线必须使用新目录");
+            created = true;
+            write_json(output / "sampling-settings.json", baseline.at("sampling_settings"));
+            write_json(output / "plan.json", baseline.at("candidate_plan"));
+            write_json(output / "default-baseline.json", baseline);
+            std::cout << "公式基线已保存：模型参数为待校准假设，动作时序为模型推导值；未读取人工素材或连接设备。\n";
+            return 0;
+        }
         if (manual || !manual_path.empty()) {
             if (allowed || !confirmation.empty() || capture_check || current_plan || !plan_path.empty())
                 throw std::runtime_error("人工监听与重评拒绝物理输出参数");
@@ -357,6 +373,7 @@ int main(int argc, char** argv) {
                 created = true; stage = "MANUAL_RECORDING";
                 write_json(output / "sampling-settings.json", sampling_settings_json(sampling_settings));
                 write_json(output / "labels.json", {{"schema_version", 1}, {"recording_id", output.filename().string()},
+                    {"recording_usable", true},
                     {"qualified_shot_ranges", Json::array()}, {"rejected_shot_ranges", Json::array()},
                     {"note", "仅按用户明确反馈填写，未标记不是合格"}});
                 SetConsoleCtrlHandler(control, TRUE);
@@ -378,6 +395,9 @@ int main(int argc, char** argv) {
                 return recorded.archive.value("success", false) && hud.status().value("success", false) ? 0 : 2;
             }
             if (dry || !config_path.empty() || output.empty()) throw std::runtime_error("人工重评参数冲突");
+            const auto labels = read_bounded_json(std::filesystem::path(manual_path) / "labels.json", 16384);
+            if (!labels.value("recording_usable", true))
+                throw std::runtime_error("用户已排除此录制，不可用于参数校准或复测提案");
             const auto original = read_bounded_json(std::filesystem::path(manual_path) / "sampling-settings.json", 16384);
             if (sampling_path.empty()) sampling_settings = parse_sampling_settings(original);
             const auto original_analysis = read_bounded_json(std::filesystem::path(manual_path) / "sampling-analysis.json");
@@ -387,7 +407,7 @@ int main(int argc, char** argv) {
             analysis["original_sampling_settings"] = original;
             analysis["sampling_settings_overridden"] = !sampling_path.empty();
             describe_manual_quality(analysis);
-            analysis = apply_manual_labels(std::move(analysis), read_bounded_json(std::filesystem::path(manual_path) / "labels.json", 16384));
+            analysis = apply_manual_labels(std::move(analysis), labels);
             if (!std::filesystem::create_directory(output)) throw std::runtime_error("人工重评必须使用新目录");
             created = true;
             write_analysis_files(output, analysis);

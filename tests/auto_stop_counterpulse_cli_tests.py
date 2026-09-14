@@ -127,6 +127,13 @@ exit 0
             assert '--evaluate-manual' in analyze_text and '--require-current-plan' in analyze_text
             assert "Mode='Prepare'" in analyze_text and "Mode='Launch'" not in analyze_text
             report.write_text(json.dumps(dict(source='KMBOX_MONITOR', analysis_mode='MANUAL_RECEIVE_INPUT_MODEL')), encoding='utf-8')
+            excluded_recording = sequential_run / 'manual-recordings' / 'excluded-latest'
+            excluded_recording.mkdir()
+            excluded_report = excluded_recording / 'sampling-analysis.json'
+            excluded_report.write_bytes(report.read_bytes())
+            os.utime(excluded_report, (1900000000, 1900000000))
+            excluded_labels = excluded_recording / 'labels.json'
+            excluded_labels.write_text(json.dumps({'recording_usable': False, 'exclusion_reason': '用户指出HUD问题导致数据不准确'}), encoding='utf-8')
             auto_result = sequential_run / 'result'
             auto_result.mkdir()
             (auto_result / 'sampling-analysis.json').write_text('{}', encoding='utf-8')
@@ -158,6 +165,12 @@ $code = 0
             assert len(reviews) == 1 and not (reviews[0] / 'test').exists()
             evaluate_args = read_generated_json(reviews[0] / 'mock-evaluate.json')
             assert evaluate_args[:2] == ['--evaluate-manual', str(report.parent)]
+            assert excluded_report.exists(), '排除推荐不删除诊断报告'
+            saved_labels = excluded_labels.read_bytes()
+            excluded_labels.write_bytes(b' ' * (16 * 1024 + 1))
+            invoke(entry=analyze_entry)
+            assert len(list((sequential_run / 'manual-reviews').iterdir())) == 1, '超限标签须在分析进程之前拒绝'
+            excluded_labels.write_bytes(saved_labels)
             candidate = read_generated_json(sequential_run / 'plan.json')
             candidate.update(shots=8, fire_delay_ms=310, fire_interval_ms=550, move_during_fire_delay=False,
                 move_ms=280, counter_hold_ms=23, counter_delay_ms=3, shot_after_release_ms=2,
@@ -212,6 +225,50 @@ $code = 0
             assert read_generated_json(Path(selected[1]))['settings']['fire_sample_delay_ms'] == 47
             hud_entry.write_bytes(original_hud)
             analyze_entry.write_bytes(analyze_original)
+            (sequential_run / 'task.json').write_bytes(original_task)
+            # 默认方案独立于人工数据；只模拟推导进程，正式Prepare及dry-run不接设备。
+            defaults_entry = sequential_run / 'prepare-default-test.ps1'
+            assert (sequential_run / 'prepare-default-test.bat').is_file()
+            defaults_original = defaults_entry.read_bytes()
+            defaults_text = defaults_original.decode('utf-8-sig')
+            assert 'prepare_default_test_sha256' in defaults_text
+            start = defaults_text.index(process_start)
+            end = defaults_text.index(process_end, start) + len(process_end)
+            defaults_stub = """$null = [IO.Directory]::CreateDirectory($output)
+[IO.File]::WriteAllText((Join-Path $output 'mock-derive.json'), (ConvertTo-Json -InputObject @($arguments)))
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'mock-default-plan.json') -Destination (Join-Path $output 'plan.json')
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'mock-default-settings.json') -Destination (Join-Path $output 'sampling-settings.json')
+'{"derived":{},"assumptions":{}}' | Set-Content -LiteralPath (Join-Path $output 'default-baseline.json')
+$code = 0
+"""
+            defaults_text = (defaults_text[:start] + defaults_stub + defaults_text[end:]).replace(session_guard, 'if ($false)')
+            defaults_entry.write_bytes(defaults_text.encode('utf-8-sig'))
+            default_binding = json.loads(original_task.decode('utf-8-sig'))
+            default_binding['prepare_default_test_sha256'] = hashlib.sha256(defaults_entry.read_bytes()).hexdigest().upper()
+            (sequential_run / 'task.json').write_text(json.dumps(default_binding), encoding='utf-8')
+            (sequential_run / 'mock-default-plan.json').write_text(json.dumps(candidate), encoding='utf-8')
+            seed = read_generated_json(sequential_run / 'sampling-settings.json')
+            seed['fire_sample_delay_ms'] = 19
+            (sequential_run / 'mock-default-settings.json').write_text(json.dumps(seed), encoding='utf-8')
+            excluded_labels.write_bytes(b' ' * (16 * 1024 + 1))  # 若默认入口读取人工记录会失败。
+            invoke(entry=defaults_entry, ok=True)
+            default_runs = list((sequential_run / 'default-baselines').iterdir())
+            assert len(default_runs) == 1
+            default_run = default_runs[0]
+            assert read_generated_json(default_run / 'mock-derive.json') == ['--derive-defaults', '--output', str(default_run)]
+            assert read_generated_json(default_run / 'test' / 'plan.json') == candidate
+            assert read_generated_json(default_run / 'test' / 'sampling-settings.json') == seed
+            assert read_generated_json(default_run / 'test' / 'task.json')['status'] == 'PREPARED_NOT_LAUNCHED'
+            assert not (default_run / 'test' / 'result').exists()
+            assert all((default_run / 'test' / name).exists() for name in ('edit-config.bat', 'edit-sampling.bat', 'start-test.bat'))
+            inherited = (default_run / 'test' / 'prepare-default-test.ps1').read_text(encoding='utf-8-sig')
+            assert "credential''s directory'" in inherited and "$originalScope = 'LocalMachine'" in inherited
+            override = sequential_run / 'mock-default-settings.json'
+            invoke('-SamplingSettingsPath', override, entry=defaults_entry, ok=True)
+            second = next(item for item in (sequential_run / 'default-baselines').iterdir() if item != default_run)
+            assert read_generated_json(second / 'mock-derive.json')[-2:] == ['--sampling-settings', str(override)]
+            defaults_entry.write_bytes(defaults_original)
+            excluded_labels.write_bytes(saved_labels)
             (sequential_run / 'task.json').write_bytes(original_task)
             sequential_plan = read_generated_json(sequential_run / 'plan.json')
             sequential_plan['move_during_fire_delay'] = False

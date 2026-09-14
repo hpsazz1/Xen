@@ -8,6 +8,8 @@
 namespace auto_stop_probe_detail {
 // 人工标签只指定接收记录中的样本范围；不从现有绿色评分推断标签。
 inline Json apply_manual_labels(Json analysis, const Json& labels) {
+    if (!labels.value("recording_usable", true))
+        throw std::runtime_error("用户已排除此录制，不可用于参数校准或复测提案");
     if (!labels.is_object() || labels.value("schema_version", 0) != 1 ||
         labels.at("recording_id") != analysis.at("recording_id"))
         throw std::runtime_error("人工标签未绑定本次录制");

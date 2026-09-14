@@ -285,7 +285,7 @@ try {
         $lockPath = Join-Path $runPath '.counterpulse.lock'
         Assert-PlainPath $lockPath
         $runLock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
-        foreach ($leaf in @('task.json', 'plan.json', 'TASK.md', 'CONSUMED', 'start-test.bat', 'edit-config.bat', 'launch-test.ps1', 'PARAMETERS.md', 'open-report.bat', 'open-report.ps1', 'sampling-settings.json', 'execution-sampling-settings.json', 'edit-sampling.bat', 'start-recording.bat', 'record-manual.ps1', 'show-hud.bat', 'show-hud.ps1', 'manual-recordings', 'analyze-recording.ps1', 'analyze-recording.bat', 'manual-reviews')) { Assert-PlainPath (Join-Path $runPath $leaf) }
+        foreach ($leaf in @('task.json', 'plan.json', 'TASK.md', 'CONSUMED', 'start-test.bat', 'edit-config.bat', 'launch-test.ps1', 'PARAMETERS.md', 'open-report.bat', 'open-report.ps1', 'sampling-settings.json', 'execution-sampling-settings.json', 'edit-sampling.bat', 'start-recording.bat', 'record-manual.ps1', 'show-hud.bat', 'show-hud.ps1', 'manual-recordings', 'analyze-recording.ps1', 'analyze-recording.bat', 'manual-reviews', 'prepare-default-test.ps1', 'prepare-default-test.bat', 'default-baselines')) { Assert-PlainPath (Join-Path $runPath $leaf) }
         if ($exists) {
             $existingTask = Get-Content -LiteralPath $taskPath -Raw -Encoding UTF8 | ConvertFrom-Json
             Assert-OwnedRun $existingTask
@@ -368,7 +368,7 @@ try {
         if ((Get-FileHash -LiteralPath $task.$name -Algorithm SHA256).Hash -cne $task.($name + '_sha256')) { throw '绑定文件已变化，请重新Prepare。' }
     }
     Assert-LocalPlain $PSCommandPath
-    $hashField = if ($action -eq 'record') { 'record_manual_sha256' } elseif ($action -eq 'analyze') { 'analyze_recording_sha256' } else { 'show_hud_sha256' }
+    $hashField = if ($action -eq 'record') { 'record_manual_sha256' } elseif ($action -eq 'analyze') { 'analyze_recording_sha256' } elseif ($action -eq 'defaults') { 'prepare_default_test_sha256' } else { 'show_hud_sha256' }
     if ((Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash -cne $task.$hashField) { throw '录制或查看入口已变化。' }
     if ($action -eq 'record') {
         $settings = Join-Path $PSScriptRoot 'sampling-settings.json'; Assert-LocalPlain $settings
@@ -382,6 +382,18 @@ try {
         # 原生入口只创建本轮目录；父目录由入口准备，旧轮次始终保留。
         $null = [IO.Directory]::CreateDirectory($base)
         Assert-LocalPlain $base
+    } elseif ($action -eq 'defaults') {
+        $base = Join-Path $PSScriptRoot 'default-baselines'; Assert-LocalPlain $base
+        $null = [IO.Directory]::CreateDirectory($base); Assert-LocalPlain $base
+        $output = Join-Path $base ((Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N'))
+        Assert-LocalPlain $output
+        if (Test-Path -LiteralPath $output) { throw '本次默认推导目录已存在。' }
+        $arguments = @('--derive-defaults', '--output', $output)
+        if ($SamplingSettingsPath) {
+            $settings = [IO.Path]::GetFullPath($SamplingSettingsPath); Assert-LocalPlain $settings
+            if ((Get-Item -LiteralPath $settings).Length -gt 64KB) { throw '模型设置超限。' }
+            $arguments += @('--sampling-settings', $settings)
+        }
     } elseif ($action -eq 'analyze') {
         $base = Join-Path $PSScriptRoot 'manual-recordings'; Assert-LocalPlain $base
         $reports = New-Object 'Collections.Generic.List[string]'
@@ -390,6 +402,18 @@ try {
             foreach ($directory in [IO.Directory]::EnumerateDirectories($base)) {
                 if (++$count -gt 1000) { throw '人工记录目录超过分析预算。' }
                 Assert-LocalPlain $directory
+                $labelsPath = Join-Path $directory 'labels.json'; Assert-LocalPlain $labelsPath
+                if ([IO.File]::Exists($labelsPath)) {
+                    if ((Get-Item -LiteralPath $labelsPath).Length -gt 16KB) { throw '录制标签超过预算。' }
+                    $labels = Get-Content -LiteralPath $labelsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                    if ($labels.PSObject.Properties.Name -contains 'recording_usable') {
+                        if ($labels.recording_usable -isnot [bool]) { throw '录制标签recording_usable必须为布尔值。' }
+                        if (-not $labels.recording_usable) {
+                            [Console]::WriteLine('已按用户标记排除录制，不用于参数推荐：' + (Split-Path -Leaf $directory))
+                            continue
+                        }
+                    }
+                }
                 $candidate = Join-Path $directory 'sampling-analysis.json'; Assert-LocalPlain $candidate
                 if (-not [IO.File]::Exists($candidate) -or (Get-Item -LiteralPath $candidate).Length -gt 64MB) { continue }
                 try { $value = Get-Content -LiteralPath $candidate -Raw -Encoding UTF8 | ConvertFrom-Json } catch { continue }
@@ -480,14 +504,26 @@ try {
             [Console]::WriteLine('计划未通过正式校验，原值保留；请再次编辑，不会生成或启动测试。')
         }
         $plan = Get-Content -LiteralPath $editable -Raw -Encoding UTF8 | ConvertFrom-Json
+        $reviewAnalysis = Join-Path $output 'sampling-analysis.json'; Assert-LocalPlain $reviewAnalysis
+        if ((Get-Item -LiteralPath $reviewAnalysis).Length -gt 64MB) { throw '重评报告超过预算。' }
+        $usedSettings = (Get-Content -LiteralPath $reviewAnalysis -Raw -Encoding UTF8 | ConvertFrom-Json).settings
+    } elseif ($action -eq 'defaults') {
+        [Console]::WriteLine('默认基线推导目录：' + $output)
+        [Console]::WriteLine('推导值与待校准假设：' + (Join-Path $output 'default-baseline.json'))
+        $planPath = Join-Path $output 'plan.json'; Assert-LocalPlain $planPath
+        $settingsPath = Join-Path $output 'sampling-settings.json'; Assert-LocalPlain $settingsPath
+        if ((Get-Item -LiteralPath $planPath).Length -gt 16KB -or (Get-Item -LiteralPath $settingsPath).Length -gt 64KB) { throw '默认推导参数超过预算。' }
+        & $task.executable --plan $planPath --dry-run --require-current-plan
+        if ($LASTEXITCODE -ne 0) { throw '默认推导计划未通过正式校验。' }
+        $plan = Get-Content -LiteralPath $planPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $usedSettings = Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    }
+    if ($action -in @('analyze', 'defaults')) {
         foreach ($field in @('schema_version','baseline','capture_enabled','shots','fire_delay_ms','fire_interval_ms','move_during_fire_delay','move_ms','counter_hold_ms','counter_delay_ms','shot_after_release_ms','shot_hold_ms','late_tolerance_ms','direction')) {
             if ($plan.PSObject.Properties.Name -notcontains $field) { throw '候选计划字段缺失。' }
         }
         if ($plan.schema_version -ne 2 -or $plan.capture_enabled -ne $false -or $plan.move_during_fire_delay -isnot [bool] -or $plan.direction -notin @(2,8)) { throw '候选计划契约无效。' }
         $testDirectory = Join-Path $output 'test'; Assert-LocalPlain $testDirectory
-        $reviewAnalysis = Join-Path $output 'sampling-analysis.json'; Assert-LocalPlain $reviewAnalysis
-        if ((Get-Item -LiteralPath $reviewAnalysis).Length -gt 64MB) { throw '重评报告超过预算。' }
-        $usedSettings = (Get-Content -LiteralPath $reviewAnalysis -Raw -Encoding UTF8 | ConvertFrom-Json).settings
         if ($null -eq $usedSettings) { throw '重评报告缺少实际模型设置；未生成测试。' }
         $prepare = @{ Mode='Prepare'; RunDirectory=$testDirectory; Repeatable=$true; Executable=$task.executable; ConfigPath=$task.config;
             Baseline=$plan.baseline; Shots=$plan.shots; FireDelayMs=$plan.fire_delay_ms; FireIntervalMs=$plan.fire_interval_ms;
@@ -500,28 +536,31 @@ try {
         if (-not $?) { throw '候选Prepare失败；未启动设备。' }
         $usedSettings | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $testDirectory 'sampling-settings.json') -Encoding UTF8
         [Console]::WriteLine('编辑动作参数：' + (Join-Path $testDirectory 'edit-config.bat'))
+        [Console]::WriteLine('编辑模型参数：' + (Join-Path $testDirectory 'edit-sampling.bat'))
         [Console]::WriteLine('仅用户前台启动：' + (Join-Path $testDirectory 'start-test.bat'))
     }
     exit 0
 } catch {
-    if ($action -eq 'analyze') { [Console]::Error.WriteLine('人工素材离线分析或候选准备未完成：' + $_.Exception.Message) }
+    if ($action -in @('analyze', 'defaults')) { [Console]::Error.WriteLine('离线分析或测试准备未完成：' + $_.Exception.Message) }
     else { [Console]::Error.WriteLine('人工录制或HUD查看未启动/未完成；检查前台会话、绑定文件和报告是否存在。') }
     exit 1
 }
 '@
-        foreach ($entry in @(@('record-manual.ps1', 'record', 'start-recording.bat'), @('show-hud.ps1', 'show', 'show-hud.bat'), @('analyze-recording.ps1', 'analyze', 'analyze-recording.bat'))) {
+        foreach ($entry in @(@('record-manual.ps1', 'record', 'start-recording.bat'), @('show-hud.ps1', 'show', 'show-hud.bat'), @('analyze-recording.ps1', 'analyze', 'analyze-recording.bat'), @('prepare-default-test.ps1', 'defaults', 'prepare-default-test.bat'))) {
             $body = '$action = ' + (Quote-PS $entry[1]) + "`r`n" + $manualCommon
-            if ($entry[1] -eq 'analyze') {
+            if ($entry[1] -in @('analyze', 'defaults')) {
                 $credentialPath = if ($CredentialDirectory) { [IO.Path]::GetFullPath($CredentialDirectory) } else { '' }
                 $body = '$originalCredentialDirectory = ' + (Quote-PS $credentialPath) + "`r`n" +
                     '$originalScope = ' + (Quote-PS $Scope) + "`r`n" + $body
             }
+            if ($entry[1] -eq 'defaults') { $body = 'param([string]$SamplingSettingsPath)' + "`r`n" + $body }
             [IO.File]::WriteAllText((Join-Path $runPath $entry[0]), $body, (New-Object Text.UTF8Encoding($true)))
             [IO.File]::WriteAllText((Join-Path $runPath $entry[2]), $startBat.Replace('launch-test.ps1', $entry[0]), [Text.Encoding]::ASCII)
         }
         $task.record_manual_sha256 = Get-Digest (Join-Path $runPath 'record-manual.ps1')
         $task.show_hud_sha256 = Get-Digest (Join-Path $runPath 'show-hud.ps1')
         $task.analyze_recording_sha256 = Get-Digest (Join-Path $runPath 'analyze-recording.ps1')
+        $task.prepare_default_test_sha256 = Get-Digest (Join-Path $runPath 'prepare-default-test.ps1')
         Write-Json $taskPath $task
         # 查看入口只在用户手动调用时打开已存在的报告；失败Run也可保留诊断报告。
         $reportScript = @'
@@ -557,6 +596,8 @@ try {
         $parameterLines.Add('')
         $parameterLines.Add('人工练习：start-recording.bat仅监听KMBOX人工输入，不发送动作；每次在manual-recordings创建独立记录，最多采集120秒，HUD保持至用户关闭。show-hud.bat从result、manual-recordings及manual-reviews重开修改时间最新的采样报告，显示该报告模型参数；隐藏或关闭查看器不触发真实输入。')
         $parameterLines.Add('素材转动作：用户前台打开analyze-recording.bat，仅从manual-recordings选择最新有效人工报告，按当前sampling-settings.json离线重评到独立manual-reviews目录，保留原始录制。查看间隔和不支持原因后，选择候选编辑editable-plan.json；超界和负值保留供人工修改，不自动截断。保存后正式程序dry-run校验，通过才Prepare本次review/test，输入0仅分析。新测试沿用本次重评实际模型设置和原CredentialDirectory/Scope。显示edit-config.bat/start-test.bat完整路径供用户前台启动，绝不自动Launch，也不复制程序包。')
+        $parameterLines.Add('录制排除：人工记录labels.json中的recording_usable=false表示不用于参数推荐，分析入口会跳过并提示；缺少此字段沿用可用默认值。原始记录和诊断报告保留，show-hud仍可查看。')
+        $parameterLines.Add('默认基线：前台打开prepare-default-test.bat，用参考seed推导模型和动作参数，不读取人工录制或当前模型覆盖。default-baselines/独立ID下的default-baseline.json区分推导值与待校准假设；test子目录提供edit-config.bat、edit-sampling.bat和start-test.bat，只准备不启动。需要按自行编辑模型重新推导时，在PowerShell前台调用prepare-default-test.ps1 -SamplingSettingsPath "模型JSONC绝对路径"；每次创建独立目录，保留原方案。')
         $parameterLines.Add('三步调试：双击edit-config.bat编辑plan.json并保存；由用户前台双击start-test.bat启动；结束后双击open-report.bat查看报告。启动会发送真实移动与开火输入。')
         $parameterLines.Add('Repeatable模式每次启动冻结本轮计划，编辑只影响下一轮；成功校验后覆盖上一组result。正式比较请另存证据。')
         $parameterLines.Add('报告是基于ACK回执与输入模型的采样分析，不是游戏速度、实际子弹或命中率测量；失败Run已生成的报告仍可查看。')
