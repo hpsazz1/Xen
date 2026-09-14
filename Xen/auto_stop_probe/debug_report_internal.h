@@ -21,6 +21,8 @@ inline std::string render_counterpulse_debug_report(const Json& analysis) {
 <h2>本次模型和采样参数</h2><pre id="settings" class="panel"></pre>
 <h2>本次动作参数</h2><pre id="plan" class="panel"></pre>
 <h2>人工标记与参数约束</h2><pre id="labels" class="panel"></pre>
+<h2>人工操作间隔（毫秒）</h2><div id="intervals" class="panel scroll"></div>
+<h2>自动复测候选与不支持原因</h2><pre id="proposals" class="panel"></pre>
 <details><summary>原始分析数据与来源</summary><pre id="raw"></pre></details>
 <script id="data" type="application/json">)HTML") + data + R"HTML(</script><script>
 const a=JSON.parse(document.getElementById('data').textContent),$=id=>document.getElementById(id);
@@ -34,6 +36,9 @@ $('quality').textContent=(a.quality_issues||[]).length?'数据质量：'+a.quali
 $('counts').textContent=`记录 ${a.shot_count||0} 次按住，${a.first_sample_count||0} 个首发模型样本，${a.held_sample_count||0} 个持续按住模型样本。`;
 $('settings').textContent=JSON.stringify(a.settings,null,2);$('plan').textContent=JSON.stringify(a.actual_plan,null,2);$('raw').textContent=JSON.stringify(a,null,2);
 $('labels').textContent=a.calibration_envelope?JSON.stringify({ranges:a.human_labels,bounds:a.calibration_envelope},null,2):'尚未提供人工标记；模型评分不会自动成为合格标签。';
+const metrics=a.operation_intervals?.metrics;
+if(metrics)table('intervals',['操作','有效数','平均','波动','最小','最大'],Object.entries(metrics).map(([key,m])=>[m.label||key,m.count,f(m.mean_ms),f(m.stddev_ms),f(m.min_ms),f(m.max_ms)]));else $('intervals').textContent='本报告没有人工操作间隔。';
+$('proposals').textContent=a.manual_plan_proposals?JSON.stringify(a.manual_plan_proposals,null,2):'请从人工录制分析生成候选。';
 const shots=a.shots||[];
 shots.forEach((s,i)=>{const o=document.createElement('option');o.value=i;o.textContent=`第 ${s.ordinal} 次`; $('attempt').append(o)});
 table('shots',['尝试','按住实测/计划 ms','相邻按下间隔 ms','按下时模型','首发采样模型'],shots.map(s=>[s.ordinal,`${f(s.observed_hold_ms)} / ${f(s.planned_hold_ms)}`,f(s.previous_down_submit_interval_ms),label(s.down_model),label(s.samples?.[0])]));

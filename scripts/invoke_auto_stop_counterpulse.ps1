@@ -285,7 +285,7 @@ try {
         $lockPath = Join-Path $runPath '.counterpulse.lock'
         Assert-PlainPath $lockPath
         $runLock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
-        foreach ($leaf in @('task.json', 'plan.json', 'TASK.md', 'CONSUMED', 'start-test.bat', 'edit-config.bat', 'launch-test.ps1', 'PARAMETERS.md', 'open-report.bat', 'open-report.ps1', 'sampling-settings.json', 'execution-sampling-settings.json', 'edit-sampling.bat', 'start-recording.bat', 'record-manual.ps1', 'show-hud.bat', 'show-hud.ps1', 'manual-recordings')) { Assert-PlainPath (Join-Path $runPath $leaf) }
+        foreach ($leaf in @('task.json', 'plan.json', 'TASK.md', 'CONSUMED', 'start-test.bat', 'edit-config.bat', 'launch-test.ps1', 'PARAMETERS.md', 'open-report.bat', 'open-report.ps1', 'sampling-settings.json', 'execution-sampling-settings.json', 'edit-sampling.bat', 'start-recording.bat', 'record-manual.ps1', 'show-hud.bat', 'show-hud.ps1', 'manual-recordings', 'analyze-recording.ps1', 'analyze-recording.bat', 'manual-reviews')) { Assert-PlainPath (Join-Path $runPath $leaf) }
         if ($exists) {
             $existingTask = Get-Content -LiteralPath $taskPath -Raw -Encoding UTF8 | ConvertFrom-Json
             Assert-OwnedRun $existingTask
@@ -368,7 +368,7 @@ try {
         if ((Get-FileHash -LiteralPath $task.$name -Algorithm SHA256).Hash -cne $task.($name + '_sha256')) { throw '绑定文件已变化，请重新Prepare。' }
     }
     Assert-LocalPlain $PSCommandPath
-    $hashField = if ($action -eq 'record') { 'record_manual_sha256' } else { 'show_hud_sha256' }
+    $hashField = if ($action -eq 'record') { 'record_manual_sha256' } elseif ($action -eq 'analyze') { 'analyze_recording_sha256' } else { 'show_hud_sha256' }
     if ((Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash -cne $task.$hashField) { throw '录制或查看入口已变化。' }
     if ($action -eq 'record') {
         $settings = Join-Path $PSScriptRoot 'sampling-settings.json'; Assert-LocalPlain $settings
@@ -382,18 +382,45 @@ try {
         # 原生入口只创建本轮目录；父目录由入口准备，旧轮次始终保留。
         $null = [IO.Directory]::CreateDirectory($base)
         Assert-LocalPlain $base
+    } elseif ($action -eq 'analyze') {
+        $base = Join-Path $PSScriptRoot 'manual-recordings'; Assert-LocalPlain $base
+        $reports = New-Object 'Collections.Generic.List[string]'
+        if ([IO.Directory]::Exists($base)) {
+            $count = 0
+            foreach ($directory in [IO.Directory]::EnumerateDirectories($base)) {
+                if (++$count -gt 1000) { throw '人工记录目录超过分析预算。' }
+                Assert-LocalPlain $directory
+                $candidate = Join-Path $directory 'sampling-analysis.json'; Assert-LocalPlain $candidate
+                if (-not [IO.File]::Exists($candidate) -or (Get-Item -LiteralPath $candidate).Length -gt 64MB) { continue }
+                try { $value = Get-Content -LiteralPath $candidate -Raw -Encoding UTF8 | ConvertFrom-Json } catch { continue }
+                if ($value.source -ceq 'KMBOX_MONITOR' -and $value.analysis_mode -ceq 'MANUAL_RECEIVE_INPUT_MODEL') { $reports.Add($candidate) }
+            }
+        }
+        if (-not $reports.Count) { throw '没有有效人工采样报告；先完成一次人工记录，不使用自动测试result。' }
+        $report = $reports | Sort-Object { [IO.File]::GetLastWriteTimeUtc($_) } -Descending | Select-Object -First 1
+        $recordDirectory = Split-Path -Parent $report
+        $settings = Join-Path $PSScriptRoot 'sampling-settings.json'; Assert-LocalPlain $settings
+        if ((Get-Item -LiteralPath $settings).Length -gt 64KB) { throw '模型设置超限。' }
+        $reviews = Join-Path $PSScriptRoot 'manual-reviews'; Assert-LocalPlain $reviews
+        $null = [IO.Directory]::CreateDirectory($reviews); Assert-LocalPlain $reviews
+        $output = Join-Path $reviews ((Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N'))
+        Assert-LocalPlain $output
+        if (Test-Path -LiteralPath $output) { throw '本次重评目录已存在。' }
+        $arguments = @('--evaluate-manual', $recordDirectory, '--output', $output, '--sampling-settings', $settings)
     } else {
         $reports = New-Object 'Collections.Generic.List[string]'
         $report = Join-Path $PSScriptRoot 'result/sampling-analysis.json'; Assert-LocalPlain $report
         if ([IO.File]::Exists($report)) { $reports.Add($report) }
-        $base = Join-Path $PSScriptRoot 'manual-recordings'; Assert-LocalPlain $base
-        if ([IO.Directory]::Exists($base)) {
-            $count = 0
-            foreach ($directory in [IO.Directory]::EnumerateDirectories($base)) {
-                if (++$count -gt 1000) { throw '人工记录目录超过查看预算。' }
-                Assert-LocalPlain $directory
-                $candidate = Join-Path $directory 'sampling-analysis.json'; Assert-LocalPlain $candidate
-                if ([IO.File]::Exists($candidate)) { $reports.Add($candidate) }
+        $count = 0
+        foreach ($reportRoot in @('manual-recordings', 'manual-reviews')) {
+            $base = Join-Path $PSScriptRoot $reportRoot; Assert-LocalPlain $base
+            if ([IO.Directory]::Exists($base)) {
+                foreach ($directory in [IO.Directory]::EnumerateDirectories($base)) {
+                    if (++$count -gt 1000) { throw '人工记录及重评目录超过查看预算。' }
+                    Assert-LocalPlain $directory
+                    $candidate = Join-Path $directory 'sampling-analysis.json'; Assert-LocalPlain $candidate
+                    if ([IO.File]::Exists($candidate)) { $reports.Add($candidate) }
+                }
             }
         }
         if (-not $reports.Count) { throw '没有可查看的采样报告，请先完成一次人工记录或测试。' }
@@ -410,20 +437,91 @@ try {
     $stdout = $child.StandardOutput.ReadToEndAsync(); $stderr = $child.StandardError.ReadToEndAsync()
     # 人工录制由程序120秒上限停止采集；HUD可继续显示，用户关闭才退出，不进行超时kill。
     $child.WaitForExit(); $code = $child.ExitCode; $child.Dispose()
-    if ($code -ne 0) { throw '录制或查看失败，请检查本次记录。' }
+    if ($code -ne 0) { throw '录制、查看或离线分析未完成，请检查本次记录。' }
+    if ($action -eq 'analyze') {
+        [Console]::WriteLine('离线分析目录：' + $output)
+        [Console]::WriteLine('图文报告：' + (Join-Path $output 'debug-report.html'))
+        Start-Process -FilePath (Join-Path $output 'debug-report.html') | Out-Null
+        $proposalsPath = Join-Path $output 'manual-plan-proposals.json'; Assert-LocalPlain $proposalsPath
+        if ((Get-Item -LiteralPath $proposalsPath).Length -gt 64MB) { throw '候选计划超过预算。' }
+        $proposals = Get-Content -LiteralPath $proposalsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $groups = @($proposals.groups)
+        if ($groups.Count -gt 100) { throw '候选分组超过预算。' }
+        $candidates = New-Object 'Collections.Generic.List[object]'
+        [Console]::WriteLine((@($proposals.reasons) -join '；'))
+        foreach ($group in $groups) {
+            if ($null -eq $group.candidate_plan) {
+                [Console]::WriteLine('不支持自动动作：' + [string]$group.baseline + '；' + (@($group.reasons) -join '；'))
+                [Console]::WriteLine((@($group.validation_errors) -join '；'))
+            }
+            $proposal = if ($null -ne $group.candidate_plan) { $group.candidate_plan } else { $group.proposed_plan }
+            if ($null -ne $proposal) {
+                $candidates.Add($proposal)
+                [Console]::WriteLine(('候选 {0}：{1}，方向 {2}，样本 {3}' -f $candidates.Count, $group.baseline, $group.direction, $group.samples))
+                if ($null -eq $group.candidate_plan) { [Console]::WriteLine('须人工修改后通过校验：' + (@($group.validation_errors) -join '；')) }
+            }
+        }
+        if (-not $candidates.Count) { [Console]::WriteLine('原操作无法直接映射，均值已保留；仅保存分析，没有启动设备。'); exit 0 }
+        $selection = Read-Host '输入候选编号生成可编辑测试目录，输入0仅保留分析'
+        $choice = 0
+        if (-not [int]::TryParse($selection, [ref]$choice) -or $choice -lt 0 -or $choice -gt $candidates.Count) { throw '候选编号无效；未生成或启动测试。' }
+        if ($choice -eq 0) { exit 0 }
+        $editable = Join-Path $output 'editable-plan.json'; Assert-LocalPlain $editable
+        $candidates[$choice - 1] | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $editable -Encoding UTF8
+        while ($true) {
+            [Console]::WriteLine('可编辑计划：' + $editable)
+            Start-Process -FilePath 'notepad.exe' -ArgumentList ('"' + $editable + '"') | Out-Null
+            $answer = Read-Host '保存并关闭编辑器后按回车校验；输入0仅保留分析和编辑文件'
+            if ($answer -eq '0') { exit 0 }
+            Assert-LocalPlain $editable
+            if ((Get-Item -LiteralPath $editable).Length -gt 16KB) { throw '编辑计划超过预算。' }
+            & $task.executable --plan $editable --dry-run --require-current-plan
+            if ($LASTEXITCODE -eq 0) { break }
+            [Console]::WriteLine('计划未通过正式校验，原值保留；请再次编辑，不会生成或启动测试。')
+        }
+        $plan = Get-Content -LiteralPath $editable -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($field in @('schema_version','baseline','capture_enabled','shots','fire_delay_ms','fire_interval_ms','move_during_fire_delay','move_ms','counter_hold_ms','counter_delay_ms','shot_after_release_ms','shot_hold_ms','late_tolerance_ms','direction')) {
+            if ($plan.PSObject.Properties.Name -notcontains $field) { throw '候选计划字段缺失。' }
+        }
+        if ($plan.schema_version -ne 2 -or $plan.capture_enabled -ne $false -or $plan.move_during_fire_delay -isnot [bool] -or $plan.direction -notin @(2,8)) { throw '候选计划契约无效。' }
+        $testDirectory = Join-Path $output 'test'; Assert-LocalPlain $testDirectory
+        $reviewAnalysis = Join-Path $output 'sampling-analysis.json'; Assert-LocalPlain $reviewAnalysis
+        if ((Get-Item -LiteralPath $reviewAnalysis).Length -gt 64MB) { throw '重评报告超过预算。' }
+        $usedSettings = (Get-Content -LiteralPath $reviewAnalysis -Raw -Encoding UTF8 | ConvertFrom-Json).settings
+        if ($null -eq $usedSettings) { throw '重评报告缺少实际模型设置；未生成测试。' }
+        $prepare = @{ Mode='Prepare'; RunDirectory=$testDirectory; Repeatable=$true; Executable=$task.executable; ConfigPath=$task.config;
+            Baseline=$plan.baseline; Shots=$plan.shots; FireDelayMs=$plan.fire_delay_ms; FireIntervalMs=$plan.fire_interval_ms;
+            MoveDuringFireDelay=$plan.move_during_fire_delay; Direction=$(if ($plan.direction -eq 2) { 'A' } else { 'D' });
+            MoveMs=$plan.move_ms; CounterHoldMs=$plan.counter_hold_ms; CounterDelayMs=$plan.counter_delay_ms;
+            ShotAfterReleaseMs=$plan.shot_after_release_ms; ShotHoldMs=$plan.shot_hold_ms; LateToleranceMs=$plan.late_tolerance_ms;
+            Scope=$originalScope }
+        if ($originalCredentialDirectory) { $prepare.CredentialDirectory = $originalCredentialDirectory }
+        & $task.script @prepare
+        if (-not $?) { throw '候选Prepare失败；未启动设备。' }
+        $usedSettings | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $testDirectory 'sampling-settings.json') -Encoding UTF8
+        [Console]::WriteLine('编辑动作参数：' + (Join-Path $testDirectory 'edit-config.bat'))
+        [Console]::WriteLine('仅用户前台启动：' + (Join-Path $testDirectory 'start-test.bat'))
+    }
     exit 0
 } catch {
-    [Console]::Error.WriteLine('人工录制或HUD查看未启动/未完成；检查前台会话、绑定文件和报告是否存在。')
+    if ($action -eq 'analyze') { [Console]::Error.WriteLine('人工素材离线分析或候选准备未完成：' + $_.Exception.Message) }
+    else { [Console]::Error.WriteLine('人工录制或HUD查看未启动/未完成；检查前台会话、绑定文件和报告是否存在。') }
     exit 1
 }
 '@
-        foreach ($entry in @(@('record-manual.ps1', 'record', 'start-recording.bat'), @('show-hud.ps1', 'show', 'show-hud.bat'))) {
+        foreach ($entry in @(@('record-manual.ps1', 'record', 'start-recording.bat'), @('show-hud.ps1', 'show', 'show-hud.bat'), @('analyze-recording.ps1', 'analyze', 'analyze-recording.bat'))) {
             $body = '$action = ' + (Quote-PS $entry[1]) + "`r`n" + $manualCommon
+            if ($entry[1] -eq 'analyze') {
+                $credentialPath = if ($CredentialDirectory) { [IO.Path]::GetFullPath($CredentialDirectory) } else { '' }
+                $body = '$originalCredentialDirectory = ' + (Quote-PS $credentialPath) + "`r`n" +
+                    '$originalScope = ' + (Quote-PS $Scope) + "`r`n" + $body
+            }
             [IO.File]::WriteAllText((Join-Path $runPath $entry[0]), $body, (New-Object Text.UTF8Encoding($true)))
             [IO.File]::WriteAllText((Join-Path $runPath $entry[2]), $startBat.Replace('launch-test.ps1', $entry[0]), [Text.Encoding]::ASCII)
         }
         $task.record_manual_sha256 = Get-Digest (Join-Path $runPath 'record-manual.ps1')
         $task.show_hud_sha256 = Get-Digest (Join-Path $runPath 'show-hud.ps1')
+        $task.analyze_recording_sha256 = Get-Digest (Join-Path $runPath 'analyze-recording.ps1')
         Write-Json $taskPath $task
         # 查看入口只在用户手动调用时打开已存在的报告；失败Run也可保留诊断报告。
         $reportScript = @'
@@ -457,7 +555,8 @@ try {
         $parameterLines = New-Object 'Collections.Generic.List[string]'
         $parameterLines.Add('# 参数说明')
         $parameterLines.Add('')
-        $parameterLines.Add('人工练习：start-recording.bat仅监听KMBOX人工输入，不发送动作；每次在manual-recordings创建独立记录，最多采集120秒，HUD保持至用户关闭。show-hud.bat重开最近采样报告；隐藏或关闭查看器不触发真实输入。')
+        $parameterLines.Add('人工练习：start-recording.bat仅监听KMBOX人工输入，不发送动作；每次在manual-recordings创建独立记录，最多采集120秒，HUD保持至用户关闭。show-hud.bat从result、manual-recordings及manual-reviews重开修改时间最新的采样报告，显示该报告模型参数；隐藏或关闭查看器不触发真实输入。')
+        $parameterLines.Add('素材转动作：用户前台打开analyze-recording.bat，仅从manual-recordings选择最新有效人工报告，按当前sampling-settings.json离线重评到独立manual-reviews目录，保留原始录制。查看间隔和不支持原因后，选择候选编辑editable-plan.json；超界和负值保留供人工修改，不自动截断。保存后正式程序dry-run校验，通过才Prepare本次review/test，输入0仅分析。新测试沿用本次重评实际模型设置和原CredentialDirectory/Scope。显示edit-config.bat/start-test.bat完整路径供用户前台启动，绝不自动Launch，也不复制程序包。')
         $parameterLines.Add('三步调试：双击edit-config.bat编辑plan.json并保存；由用户前台双击start-test.bat启动；结束后双击open-report.bat查看报告。启动会发送真实移动与开火输入。')
         $parameterLines.Add('Repeatable模式每次启动冻结本轮计划，编辑只影响下一轮；成功校验后覆盖上一组result。正式比较请另存证据。')
         $parameterLines.Add('报告是基于ACK回执与输入模型的采样分析，不是游戏速度、实际子弹或命中率测量；失败Run已生成的报告仍可查看。')

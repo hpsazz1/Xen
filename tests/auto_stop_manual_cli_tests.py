@@ -40,6 +40,17 @@ def main():
         assert report['calibration_envelope']['settings_applied'] is False
         assert report['calibration_envelope']['fit_status']=='INSUFFICIENT_LABEL_CLASSES'
         assert report['archive_complete'] is True and (output/'debug-report.html').is_file()
+        assert report['feedback']['shooting']['hold_count']==1
+        assert report['feedback']['baseline']['default_sampling']['clean_shot_speed_ratio']==.34
+        assert (output/'operation-intervals.json').is_file() and (output/'manual-plan-proposals.json').is_file()
+        assert json.loads((output/'operation-intervals.json').read_text(encoding='utf-8'))['recording_id']=='recording'
+        assert report['manual_plan_proposals']['recording_id']=='recording'
+        assert report['operation_intervals']['metrics']['hold_A']['mean_ms']==100
+        assert report['operation_intervals']['metrics']['fire_hold']['mean_ms']==5
+        assert report['operation_intervals']['metrics']['release_to_fire']['mean_ms']==90
+        assert report['manual_plan_proposals']['groups'][0]['candidate_plan'] is None
+        assert report['manual_plan_proposals']['groups'][0]['mean_ms']['shot_after_release_ms']==90
+        assert (raw/'events-0.csv').read_bytes()==data
         changed=dict(settings, fire_sample_delay_ms=30)
         override=root/'override.json';override.write_text(json.dumps(changed),encoding='utf-8')
         run('--evaluate-manual',recording,'--output',root/'override-result','--sampling-settings',override)

@@ -56,7 +56,8 @@ def main():
             sequential_config = root / 'sequential-private.ini'
             sequential_config.write_text('[source_context]\nenabled=true\n', encoding='utf-8')
             sequential_args = ('-Mode', 'Prepare', '-RunDirectory', sequential_run, '-Executable', args.executable,
-                               '-ConfigPath', sequential_config, '-Repeatable')
+                               '-ConfigPath', sequential_config, '-Repeatable', '-CredentialDirectory',
+                               root / "credential's directory", '-Scope', 'LocalMachine')
             invoke(*sequential_args, ok=True)
             # 新入口仅通过进程启动桩验证；绝不执行真实人工监听或打开HUD。
             manual_entry = sequential_run / 'record-manual.ps1'
@@ -116,6 +117,101 @@ exit 0
             assert len(list((sequential_run / 'manual-recordings').iterdir())) == 2
             sequential_config.write_bytes(saved_config)
             manual_entry.write_bytes(original_manual); hud_entry.write_bytes(original_hud)
+            (sequential_run / 'task.json').write_bytes(original_task)
+            # 离线素材入口：仅模拟分析进程和前台编辑器，Prepare/dry-run使用正式程序。
+            analyze_entry = sequential_run / 'analyze-recording.ps1'
+            assert (sequential_run / 'analyze-recording.bat').is_file()
+            analyze_original = analyze_entry.read_bytes()
+            analyze_text = analyze_original.decode('utf-8-sig')
+            assert 'analyze_recording_sha256' in analyze_text
+            assert '--evaluate-manual' in analyze_text and '--require-current-plan' in analyze_text
+            assert "Mode='Prepare'" in analyze_text and "Mode='Launch'" not in analyze_text
+            report.write_text(json.dumps(dict(source='KMBOX_MONITOR', analysis_mode='MANUAL_RECEIVE_INPUT_MODEL')), encoding='utf-8')
+            auto_result = sequential_run / 'result'
+            auto_result.mkdir()
+            (auto_result / 'sampling-analysis.json').write_text('{}', encoding='utf-8')
+            process_end = '$child.WaitForExit(); $code = $child.ExitCode; $child.Dispose()'
+            start = analyze_text.index(process_start)
+            end = analyze_text.index(process_end, start) + len(process_end)
+            fixture_process = """$null = [IO.Directory]::CreateDirectory($output)
+[IO.File]::WriteAllText((Join-Path $output 'mock-evaluate.json'), (ConvertTo-Json -InputObject @($arguments)))
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'mock-proposals.json') -Destination (Join-Path $output 'manual-plan-proposals.json')
+$used = Get-Content -LiteralPath $settings -Raw | ConvertFrom-Json
+@{settings=$used} | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $output 'sampling-analysis.json')
+$code = 0
+"""
+            mocked = (analyze_text[:start] + fixture_process + analyze_text[end:]).replace(session_guard, 'if ($false)')
+            editor = "Start-Process -FilePath 'notepad.exe' -ArgumentList ('\"' + $editable + '\"') | Out-Null"
+            assert editor in mocked
+            mocked = mocked.replace(editor, "# 测试不打开编辑器")
+            mocked = mocked.replace("Start-Process -FilePath (Join-Path $output 'debug-report.html') | Out-Null", '# 测试不打开浏览器')
+            mocked = "function Read-Host { param($prompt) if ($prompt.StartsWith('输入候选')) { '1' } else { '' } }\n" + mocked
+            analyze_entry.write_bytes(mocked.encode('utf-8-sig'))
+            binding = json.loads(original_task.decode('utf-8-sig'))
+            binding['analyze_recording_sha256'] = hashlib.sha256(analyze_entry.read_bytes()).hexdigest().upper()
+            (sequential_run / 'task.json').write_text(json.dumps(binding), encoding='utf-8')
+            fixture = sequential_run / 'mock-proposals.json'
+            fixture.write_text(json.dumps({'groups': [{'baseline': 'unsupported', 'candidate_plan': None,
+                'proposed_plan': None, 'reasons': ['合成不支持原因']}]}), encoding='utf-8')
+            invoke(entry=analyze_entry, ok=True)
+            reviews = list((sequential_run / 'manual-reviews').iterdir())
+            assert len(reviews) == 1 and not (reviews[0] / 'test').exists()
+            evaluate_args = read_generated_json(reviews[0] / 'mock-evaluate.json')
+            assert evaluate_args[:2] == ['--evaluate-manual', str(report.parent)]
+            candidate = read_generated_json(sequential_run / 'plan.json')
+            candidate.update(shots=8, fire_delay_ms=310, fire_interval_ms=550, move_during_fire_delay=False,
+                move_ms=280, counter_hold_ms=23, counter_delay_ms=3, shot_after_release_ms=2,
+                shot_hold_ms=12, late_tolerance_ms=7, direction=8)
+            fixture.write_text(json.dumps({'groups': [{'baseline': 'counter', 'direction': 'D', 'samples': 4,
+                'candidate_plan': candidate, 'proposed_plan': candidate}]}), encoding='utf-8')
+            invoke(entry=analyze_entry, ok=True)
+            reviews = list((sequential_run / 'manual-reviews').iterdir())
+            assert len(reviews) == 2
+            prepared = next(item / 'test' for item in reviews if (item / 'test').is_dir())
+            assert read_generated_json(prepared / 'plan.json') == candidate, '候选全部参数须传到正式Prepare'
+            prepared_task = read_generated_json(prepared / 'task.json')
+            assert prepared_task['executable'] == binding['executable'] and prepared_task['config'] == binding['config']
+            assert prepared_task['status'] == 'PREPARED_NOT_LAUNCHED' and prepared_task['repeatable'] is True
+            nested_analyze = (prepared / 'analyze-recording.ps1').read_text(encoding='utf-8-sig')
+            assert "credential''s directory'" in nested_analyze and "$originalScope = 'LocalMachine'" in nested_analyze
+            assert read_generated_json(prepared / 'sampling-settings.json') == read_generated_json(sequential_run / 'sampling-settings.json')
+            assert (prepared / 'edit-config.bat').is_file() and (prepared / 'start-test.bat').is_file()
+            assert not (prepared / 'result').exists()
+            # 超界提案必须保留原值进入编辑，不可clamp；选择0退出仍不Prepare。
+            invalid_candidate = dict(candidate, counter_delay_ms=-5)
+            fixture.write_text(json.dumps({'groups': [{'baseline': 'counter', 'direction': 'D', 'samples': 4,
+                'candidate_plan': None, 'proposed_plan': invalid_candidate,
+                'reasons': ['重叠动作'], 'validation_errors': ['counter_delay_ms不能为负']}]}), encoding='utf-8')
+            cancelled = "$script:editPrompts = 0\n" + mocked.replace("else { '' }",
+                "else { $script:editPrompts++; if ($script:editPrompts -eq 1) { '' } else { '0' } }")
+            analyze_entry.write_bytes(cancelled.encode('utf-8-sig'))
+            binding['analyze_recording_sha256'] = hashlib.sha256(analyze_entry.read_bytes()).hexdigest().upper()
+            (sequential_run / 'task.json').write_text(json.dumps(binding), encoding='utf-8')
+            invoke(entry=analyze_entry, ok=True)
+            pending = [item for item in (sequential_run / 'manual-reviews').iterdir()
+                       if (item / 'editable-plan.json').exists() and not (item / 'test').exists()]
+            assert len(pending) == 1 and read_generated_json(pending[0] / 'editable-plan.json')['counter_delay_ms'] == -5
+            # 常驻查看必须包含离线重评，使用报告冻结的参数，不回退到原始录制。
+            review_report = pending[0] / 'sampling-analysis.json'
+            reviewed = read_generated_json(review_report)
+            reviewed['settings']['fire_sample_delay_ms'] = 47
+            review_report.write_text(json.dumps(reviewed), encoding='utf-8')
+            os.utime(review_report, (2000000000, 2000000000))
+            nested = pending[0] / 'test' / 'raw'
+            nested.mkdir(parents=True)
+            nested_report = nested / 'sampling-analysis.json'
+            nested_report.write_text('{}', encoding='utf-8')
+            os.utime(nested_report, (2100000000, 2100000000))
+            hud_mock = original_hud.decode('utf-8-sig').replace(session_guard, 'if ($false)').replace(process_start, stub_start)
+            hud_entry.write_bytes(hud_mock.encode('utf-8-sig'))
+            binding['show_hud_sha256'] = hashlib.sha256(hud_entry.read_bytes()).hexdigest().upper()
+            (sequential_run / 'task.json').write_text(json.dumps(binding), encoding='utf-8')
+            invoke(entry=hud_entry, ok=True)
+            selected = read_generated_json(sequential_run / 'mock-hud.json')
+            assert selected == ['--show-hud', str(review_report)], '重评须优先旧录制，且不能递归选中test/raw'
+            assert read_generated_json(Path(selected[1]))['settings']['fire_sample_delay_ms'] == 47
+            hud_entry.write_bytes(original_hud)
+            analyze_entry.write_bytes(analyze_original)
             (sequential_run / 'task.json').write_bytes(original_task)
             sequential_plan = read_generated_json(sequential_run / 'plan.json')
             sequential_plan['move_during_fire_delay'] = False

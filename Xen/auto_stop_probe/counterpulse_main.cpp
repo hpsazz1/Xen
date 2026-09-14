@@ -18,6 +18,7 @@
 #include "auto_stop_probe/readiness_internal.h"
 #include "auto_stop_probe/preroll_internal.h"
 #include "auto_stop_probe/training_evaluation_internal.h"
+#include "auto_stop_probe/hud_feedback_internal.h"
 #include "auto_stop_probe/sampling_analysis_internal.h"
 #include "auto_stop_probe/debug_report_internal.h"
 #include "auto_stop_probe/counterpulse_hud.h"
@@ -178,8 +179,13 @@ void write_json(const std::filesystem::path& path, const Json& report) {
     if (!MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
         throw std::runtime_error("报告原子保存失败");
 }
-void write_analysis_files(const std::filesystem::path& directory, const Json& analysis) {
+void write_analysis_files(const std::filesystem::path& directory, Json analysis) {
+    analysis["feedback"] = summarize_hud_feedback(analysis, parse_sampling_settings(analysis.at("settings")));
+    if (analysis.contains("operation_intervals")) analysis["operation_intervals"]["recording_id"] = analysis.value("recording_id", "");
+    if (analysis.contains("manual_plan_proposals")) analysis["manual_plan_proposals"]["recording_id"] = analysis.value("recording_id", "");
     write_json(directory / "sampling-analysis.json", analysis);
+    if (analysis.contains("operation_intervals")) write_json(directory / "operation-intervals.json", analysis["operation_intervals"]);
+    if (analysis.contains("manual_plan_proposals")) write_json(directory / "manual-plan-proposals.json", analysis["manual_plan_proposals"]);
     const auto path = directory / "debug-report.html";
     auto temporary = path; temporary += ".writing";
     {

@@ -1,6 +1,8 @@
 #ifndef AUTO_STOP_MANUAL_RECORDING_INTERNAL_H
 #define AUTO_STOP_MANUAL_RECORDING_INTERNAL_H
 #include "auto_stop_probe/manual_sampling_internal.h"
+#include "auto_stop_probe/manual_intervals_internal.h"
+#include "auto_stop_probe/manual_plan_internal.h"
 #include "auto_stop_probe/counterpulse_hud.h"
 #include "auto_stop_probe/training_evaluation_internal.h"
 #include "runtime/input_training_internal.h"
@@ -22,11 +24,15 @@ struct ManualRecordingResult { Json analysis, archive; };
 inline Json finalize_manual_archive(const std::filesystem::path& raw_directory,
     const SamplingSettings& settings, std::int64_t stopped_at_ns) {
     ManualSamplingAccumulator model(settings);
+    ManualIntervalsAccumulator intervals;
+    ManualPlanBuilder plans;
     input_training::ArchiveSummary archive;
     std::string error;
     std::int64_t last = 0;
     if (!input_training::visit_archive(raw_directory, [&](const input_training::Event& event) {
         model.consume(event);
+        intervals.consume(event);
+        plans.consume(event);
         last = std::max(last, event.received_at_ns);
     }, archive, error)) throw std::runtime_error("人工原始归档未完成，不能生成最终采样报告");
     if (stopped_at_ns < last || stopped_at_ns < 0 || stopped_at_ns > INT64_MAX - 100000000000LL)
@@ -41,6 +47,9 @@ inline Json finalize_manual_archive(const std::filesystem::path& raw_directory,
         archive.events != 0 && !archive.dropped && !archive.trailing_gap &&
         analysis.value("invalid_events", 0ULL) == 0 && analysis.value("gap_count", 0ULL) == 0;
     analysis["finalized_from_persisted_raw"] = true;
+    analysis["operation_intervals"] = intervals.snapshot();
+    analysis["manual_plan_proposals"] = plans.finish();
+    analysis["manual_plan_proposals"]["source_archive_complete"] = analysis["archive_complete"];
     return analysis;
 }
 // 只有显式人工入口调用；工厂配置固定禁用软件输入，既有独占租约继续生效。

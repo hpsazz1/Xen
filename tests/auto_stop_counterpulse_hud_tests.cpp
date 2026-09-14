@@ -49,11 +49,12 @@ Json external_snapshot() {
             {"estimated_speed", 0.17}, {"classification", "WITHIN_MODEL_THRESHOLD"}}}};
     for (int i = 1; i <= 40; ++i) {
         const auto ratio = (i % 7) * 0.3;
-        output["timings"].push_back({{"ordinal", i}, {"delta_ms", (i % 9 - 4) * 2.0}, {"grade", "EXCELLENT"}});
+        output["timings"].push_back({{"ordinal", i}, {"delta_ms", (i % 9 - 4) * 10.0}, {"grade", "EXCELLENT"}});
         output["shots"].push_back({{"ordinal", i}, {"down_model", output["current_model"]},
             {"samples", Json::array({Json{{"kind", "FIRST_MODEL_SAMPLE"}, {"time_ns", 1},
                 {"valid", true}, {"speed_ratio", ratio}, {"classification", ratio <= 1 ? "WITHIN_MODEL_THRESHOLD" : "MICRO"}}})}});
     }
+    output["shots"].back()["samples"][0]["time_ns"] = INT64_MAX / 2;
     return output;
 }
 void snapshot(HWND window, const std::filesystem::path& path) {
@@ -129,12 +130,14 @@ int main(int argc, char** argv) {
             CounterpulseHud hud(SamplingSettings{}, true);
             wait_state(hud, "VISIBLE");
             window = FindWindowW(L"XenCounterpulseReadOnlyHud", nullptr);
-            RECT client{}; require(GetClientRect(window, &client) && client.right == 900 && client.bottom == 280,
-                "双面板HUD客户区必须保持900×280");
+            RECT client{}; require(GetClientRect(window, &client) && client.right == 1100 && client.bottom == 430,
+                "双面板HUD客户区须容纳完整统计和默认/当前参数");
             require((GetWindowLongPtrW(window, GWL_STYLE) & WS_SYSMENU) != 0 &&
                 (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TRANSPARENT) == 0,
                 "常驻HUD必须保留可点击关闭按钮，不能由透传样式吞掉操作");
             auto data = external_snapshot(); hud.publish(data); wait_snapshot(hud, 1);
+            require(hud.status()["valid_first_plot_count"] == 32,
+                "外部已到期快照的源时钟不能与本机uptime比较后丢掉最后样本");
             std::wstring title(static_cast<std::size_t>(GetWindowTextLengthW(window)) + 1, L'\0');
             GetWindowTextW(window, title.data(), static_cast<int>(title.size()));
             require(title.find(L"manual-input-20260915-014523-a1b2c3d4") == 0,
@@ -152,6 +155,15 @@ int main(int argc, char** argv) {
             hud.finish(Json{{"success", true}}); wait_state(hud, "FINISHED_VISIBLE");
             std::this_thread::sleep_for(std::chrono::milliseconds(120));
             require(!hud.closed() && IsWindowVisible(window), "finish后必须持续保留反馈而不是自行关闭");
+            const auto stationary = hud.status();
+            std::this_thread::sleep_for(std::chrono::milliseconds(180));
+            const auto later = hud.status();
+            std::cerr << "停止快照paint: " << stationary["paint_count"] << " -> " << later["paint_count"] << '\n';
+            require(later["paint_count"] == stationary["paint_count"],
+                "相同停止快照静置不能持续重画，否则背景和图表可能反复闪烁");
+            hud.publish(data); wait_snapshot(hud, 3);
+            require(hud.status()["title_updates"] == stationary["title_updates"],
+                "相同录制ID不得重复更新标题触发非客户区重绘");
             if (!snapshot_path.empty()) snapshot(window, snapshot_path);
             PostMessageW(window, WM_SYSCOMMAND, SC_CLOSE, 0);
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
