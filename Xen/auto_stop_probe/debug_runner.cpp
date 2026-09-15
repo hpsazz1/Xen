@@ -29,32 +29,10 @@
 #include "source_context/source_context.h"
 
 #include "auto_stop_probe/debug_runner.h"
+#include "auto_stop_probe/debug_resources_internal.h"
 #include "auto_stop_probe/capture_evidence_internal.h"
 namespace auto_stop_probe_detail {
 namespace {
-// 复用生产适配器；独立订阅保留真实monitor包，不把输出ACK写成物理输入。
-class MonitorTraining {
-public:
-    MonitorTraining(std::shared_ptr<IMouseController> mouse, const std::filesystem::path& directory)
-        : mouse_(std::move(mouse)) {
-        if (!mouse_->set_input_report_subscription(true)) throw std::runtime_error("输入报告订阅失败");
-        auto source = std::make_shared<runtime::detail::InputTrainingSource>(mouse_);
-        if (!session_.start(directory, {}, [source] { return source->read(); })) {
-            mouse_->freeze_input_reports();
-            throw std::runtime_error("输入报告归档启动失败");
-        }
-    }
-    ~MonitorTraining() { stop(); }
-    void stop() noexcept { mouse_->freeze_input_reports(); session_.stop(); }
-    bool recording() const noexcept {
-        const auto state = session_.snapshot();
-        return state && state->status == input_training::Status::RECORDING;
-    }
-    Json report() const { return training_snapshot_json(*session_.snapshot(), "KMBOX_MONITOR"); }
-private:
-    std::shared_ptr<IMouseController> mouse_;
-    input_training::Session session_;
-};
 void write_json(const std::filesystem::path& path, const Json& report) {
     auto temporary = path; temporary += ".writing";
     {
@@ -120,9 +98,9 @@ Json run_debug(const DebugRunRequest& request, const DebugRunCallbacks& callback
     const auto output = request.output;
     auto config = request.config;
     const auto document = request.plan;
-    const auto sampling_settings = request.sampling_settings.empty() ? SamplingSettings{} : parse_sampling_settings(request.sampling_settings);
+    auto sampling_settings = SamplingSettings{};
     auto hud = request.hud;
-    bool local_canceled = false, cleanup_finished = false, created = false, execution_entered = false;
+    bool local_canceled = false, cleanup_finished = false, created = false, execution_entered = false, subscription_entered = false;
     const auto is_canceled = [&] { return local_canceled || (callbacks.canceled && callbacks.canceled()) ||
         (hud && (hud->closed() || hud->stop_requested())); };
     std::string stage = "VALIDATION", failure_reason;
@@ -134,6 +112,7 @@ Json run_debug(const DebugRunRequest& request, const DebugRunCallbacks& callback
         if (callbacks.publish) callbacks.publish(snapshot);
     };
     try {
+        if (!request.sampling_settings.empty()) sampling_settings = parse_sampling_settings(request.sampling_settings);
         if (is_canceled()) throw std::runtime_error("任务已取消");
         if (request.mode != DebugRunMode::Counterpulse) {
             if (request.allow_physical_output || !request.confirmation.empty()) throw std::runtime_error("离线及录制拒绝物理授权");
@@ -224,18 +203,20 @@ Json run_debug(const DebugRunRequest& request, const DebugRunCallbacks& callback
         if (!request.allow_physical_output || request.confirmation != "AUTO_STOP_COUNTERPULSE" || !request.device)
             throw std::runtime_error("需要本轮双授权及独占设备");
         const auto plan = parse_counterpulse_plan(document);
-        if (config.mouse.backend != MouseBackend::KMBOX_NET ||
-            config.mouse.kmbox_connect_timeout_ms > 2000) throw std::runtime_error("设备或命令超时不适用");
-        config.mouse.kmbox_command_timeout_ms = std::min(config.mouse.kmbox_command_timeout_ms, 100);
+        if (config.mouse.backend != MouseBackend::KMBOX_NET) throw std::runtime_error("设备类型不适用");
+        // 注入设备已经建立连接；沿用其实际超时，不修改副本冒充重配。
+        if (!std::filesystem::create_directory(output)) throw std::runtime_error("需要不存在的输出目录");
+        created = true;
+        write_json(output / "plan.json", document);
+        progress("SOURCE_CONFIGURATION");
         // 凭据仅进内存，既有生产配置的启用状态不被写回。
         auto source_config = config.source_context;
         source_config.enabled = true;
         if (const char* token = std::getenv("XEN_SOURCE_CONTEXT_TOKEN")) source_config.token = token;
-        if (source_config.token.empty() || source_config.host.empty() || source_config.port == 0)
+        if (source_config.token.empty() || source_config.host.empty() || source_config.port == 0) {
+            failure_reason = "SOURCE_CONFIGURATION_MISSING";
             throw std::runtime_error("缺少源焦点配置或进程环境凭据");
-        if (!std::filesystem::create_directory(output)) throw std::runtime_error("需要不存在的输出目录");
-        created = true;
-        write_json(output / "plan.json", document);
+        }
         struct Resources { std::shared_ptr<IMouseController> mouse; source_context::SourceContextClient focus; ~Resources() { focus.stop(); } } resources;
         resources.mouse = request.device;
         progress("SOURCE_START");
@@ -266,8 +247,10 @@ Json run_debug(const DebugRunRequest& request, const DebugRunCallbacks& callback
             progress("READINESS");
             throw std::runtime_error("未就绪或已取消");
         }
+        subscription_entered = true;
         progress("EVENT_SUBSCRIPTION");
-        if (!resources.mouse->set_wasd_event_subscription(true)) throw std::runtime_error("原始输入事件不可用");
+        DebugWasdSubscription wasd_subscription(*resources.mouse);
+        if (!wasd_subscription.start()) throw std::runtime_error("原始输入事件不可用");
         std::unique_ptr<Evidence> evidence;
         if (plan.capture_enabled) {
             progress("CAPTURE_OPEN");
@@ -328,7 +311,18 @@ Json run_debug(const DebugRunRequest& request, const DebugRunCallbacks& callback
         auto report = execute_counterpulse(*resources.mouse, plan, cancel, {}, true,
             [&](const Json& command) { if (hud) hud->observe(command); });
         report["sampling_settings"] = sampling_settings_json(sampling_settings);
-        if (training) training->stop();
+        if (training) {
+            progress("MONITOR_TRAINING_STOP");
+            try { finish_monitor_training(*training); }
+            catch (const DebugRunFailure&) {
+                failure_reason = "MONITOR_TRAINING_STOP_TIMEOUT";
+                throw;
+            }
+        }
+        if (!wasd_subscription.finish()) {
+            failure_reason = "WASD_SUBSCRIPTION_STOP_FAILED";
+            throw std::runtime_error("WASD订阅未结束");
+        }
 
         cleanup_finished = true;
         report["command_timeout_ms"] = config.mouse.kmbox_command_timeout_ms;
@@ -392,9 +386,17 @@ Json run_debug(const DebugRunRequest& request, const DebugRunCallbacks& callback
         if (callbacks.publish) callbacks.publish(report);
         return report;
     } catch (...) {
-        if (created) { try { write_json(output / "failure.json",{{"success",false},{"reason",failure_reason.empty() ? stage + "_FAILED" : failure_reason},
-            {"stage",stage},{"readiness",readiness},{"capture",capture_diagnostic},{"execution_entered",execution_entered}}); } catch (...) {} }
-        throw std::runtime_error("原生调试任务未完成；检查本组诊断，不能认定设备已释放");
+        const auto reason = failure_reason.empty() ? stage + "_FAILED" : failure_reason;
+        const bool output_not_started = request.mode == DebugRunMode::Counterpulse && !subscription_entered && !execution_entered &&
+            (stage == "VALIDATION" || stage == "SOURCE_CONFIGURATION" || stage == "SOURCE_START" || stage == "READINESS");
+        if (created) { try { write_json(output / "failure.json",{{"success",false},{"reason",reason},
+            {"stage",stage},{"readiness",readiness},{"capture",capture_diagnostic},{"execution_entered",execution_entered},
+            {"output_not_started",output_not_started}}); } catch (...) {} }
+        // 仅输出本模块固定原因和阶段，绝不拼接捕获的原异常或配置值。
+        const char* description = stage == "SOURCE_CONFIGURATION" ? "源焦点配置缺失或不可用" :
+            stage == "SOURCE_START" ? "源焦点服务启动失败" : stage == "READINESS" ? "源焦点或输入未就绪" :
+            stage == "VALIDATION" ? "调试参数校验未通过" : "原生调试任务未完成";
+        throw DebugRunFailure(std::string(description) + "：" + reason + " [" + stage + "]", output_not_started);
     }
 }
 }

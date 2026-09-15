@@ -6,6 +6,8 @@
 #endif
 #include "counterpulse_hud.h"
 #include "hud_feedback_internal.h"
+#include "config/ui_palette.h"
+#include <future>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -32,7 +34,20 @@ public:
     std::atomic<bool> visible{true};
     std::atomic<bool> ending{false}, execution_success{false}, closing{false};
     std::atomic<std::int64_t> finished_at{0};
-    const bool external;
+    std::atomic<bool> external;
+    const bool persistent;
+    std::atomic<bool> task_active{true}, shown{false}, model_enabled{true};
+    std::atomic<std::uint64_t> close_requests{0};
+    std::atomic<UiTheme> desired_theme, applied_theme;
+    std::atomic<bool> frame_theme_applied{false};
+    struct Reset {
+        sampling_detail::SamplingSettings settings;
+        bool external = false, model = true;
+        std::uint64_t close_sequence = 0;
+        std::promise<bool> accepted;
+        std::atomic<bool> canceled{false};
+    };
+    std::atomic<std::shared_ptr<Reset>> reset_pending;
     struct PublishedSnapshot { Json value; unsigned version; };
     std::atomic<std::shared_ptr<const PublishedSnapshot>> pending_snapshot;
     std::atomic<std::shared_ptr<const Json>> latest_analysis;
@@ -59,7 +74,12 @@ public:
     std::wstring window_title;
     Json commands = Json::array();
 
-    explicit Impl(const sampling_detail::SamplingSettings& value, bool external_snapshots) : external(external_snapshots), settings(value) {
+    explicit Impl(const sampling_detail::SamplingSettings& value, bool external_snapshots,
+            bool persistent_window, UiTheme theme, bool initially_visible)
+        : external(external_snapshots), persistent(persistent_window), desired_theme(theme),
+          applied_theme(theme), settings(value) {
+        visible = initially_visible;
+        if (persistent) { task_active = false; recording = false; ending = true; }
         worker = std::jthread([this] { run(); });
     }
     ~Impl() { closing.store(true); if (worker.joinable()) worker.join(); }
@@ -149,6 +169,21 @@ public:
         std::wostringstream out; out << std::fixed << std::setprecision(precision) << value.get<double>(); return out.str();
     }
     void refresh() {
+        if (auto reset = reset_pending.exchange({})) {
+            if (reset->canceled.load() || reset->close_sequence != close_requests.load()) { reset->accepted.set_value(false); return; }
+            settings = reset->settings; external = reset->external; model_enabled = reset->model;
+            commands = Json::array(); written = 0; consumed = 0; lost = 0;
+            pending_snapshot.store(nullptr); latest_analysis.store(nullptr);
+            snapshots = 0; snapshots_displayed = 0; snapshots_superseded = 0;
+            displayed = {{"shots",Json::array()},{"timings",Json::array()},{"current_model",{{"valid",false}}}};
+            deltas.clear(); ratios.clear(); window_closed = false; stop_recording = false;
+            recording = true; task_active = true; ending = false; finished_at = 0;
+            execution_success = false; monitor_source = reset->external;
+            last_analysis_published_ns = 0;
+            SetWindowTextW(window,L"Xen 调试 HUD"); window_title = L"Xen 调试 HUD";
+            state = 1;
+            reset->accepted.set_value(!reset->canceled.load());
+        }
         unsigned displayed_version = 0;
         auto index = consumed.load(std::memory_order_relaxed);
         const auto end = written.load(std::memory_order_acquire);
@@ -186,7 +221,7 @@ public:
                 recording.store(displayed.value("recording", true));
                 monitor_source.store(displayed.value("source", "") == "KMBOX_MONITOR");
             }
-        } else {
+        } else if (model_enabled.load() && (!persistent || task_active.load() || !commands.empty())) {
             displayed = analyze_counterpulse_live_sampling(Json{{"commands", commands}}, settings, now);
             displayed["feedback"] = summarize_hud_feedback(displayed, settings);
         }
@@ -237,7 +272,7 @@ public:
             << L"平均快慢 " << number(timing["mean_ms"]) << L" ms   波动 σ " << number(timing["stddev_ms"]) << L" ms\n"
             << L"最早 " << number(timing["min_ms"]) << L" / 最晚 " << number(timing["max_ms"]) << L" ms   优秀率 " << number(timing["excellent_percent"]) << L"%\n"
             << L"次数 " << number(timing["count"], 0) << L"   有效 " << number(timing["valid_count"], 0)
-            << L"   青≤2ms / 绿≤10ms / 早黄 / 晚红";
+            << L"   蓝≤2ms / 绿≤10ms / 早黄 / 晚红";
         right << L"开枪模型稳定  ·  统计全部有效采样 / 柱图近32首样本\n"
             << L"最近 " << number(shooting["latest_ratio"], 2) << L"x  误差 "
             << number(shooting["latest_error"].is_number() ? Json(shooting["latest_error"].get<double>() * 100) : Json(nullptr), 0) << L"%"
@@ -266,22 +301,37 @@ public:
         if (current.value("valid", false) && current["speed_ratio"].is_number()) bottom << L" q=" << std::setprecision(2) << current["speed_ratio"].get<double>();
         if (lost.load()) bottom << L"  |  显示缺口 " << lost.load();
         bottom << L"\n没有实测游戏速度；q 为模型速度/模型阈值，样本不等于子弹，图形不另设评分标准。";
+        if (persistent && commands.empty() && snapshots.load() == 0 && !task_active.load()) {
+            left.str(L""); left << L"Xen 调试 HUD\n等待任务；当前没有有效输入样本。";
+            right.str(L""); right << L"显示层已打开\n显示窗口不会连接设备或开始采集。";
+            bottom.str(L""); bottom << L"空闲 · 关闭只结束本次显示；隐藏不会停止任务。";
+        } else if (!model_enabled.load()) {
+            left.str(L""); left << L"独立射击时序\n已观察命令 " << commands.size() << L" 条；详细ACK时序见调试页报告。";
+            right.str(L""); right << L"独立射击时序\n本组不提供停稳模型判断；实际子弹数未知。";
+            ratios.clear(); deltas.clear();
+            bottom.str(L""); bottom << L"COMMAND_ACK_PROXY · 不运行停稳模型；实际子弹数未知。";
+            parameters.str(L"");
+        }
         const bool changed = left_title != left.str() || right_title != right.str() || footer != bottom.str() || parameter_text != parameters.str() ||
             previous_deltas != deltas || previous_ratios != ratios;
         left_title = left.str(); right_title = right.str(); footer = bottom.str();
         parameter_text = parameters.str();
         if (stop_button) {
-            const bool enabled = recording.load() && !stop_recording.load();
+            const bool enabled = task_active.load() && recording.load() && !stop_recording.load();
             if ((IsWindowEnabled(stop_button) != FALSE) != enabled) EnableWindow(stop_button, enabled);
         }
         if (displayed_version) snapshots_displayed.store(displayed_version);
         if (ending.load()) state.store(2);
         if (changed) InvalidateRect(window, nullptr, FALSE);
     }
+    COLORREF color(unsigned int token) const noexcept {
+        const auto rgb = xen_ui::themed_rgb(applied_theme.load(),token);
+        return RGB((rgb >> 16) & 255,(rgb >> 8) & 255,rgb & 255);
+    }
     void paint(HWND hwnd, HDC dc) const noexcept {
         RECT rect{}; GetClientRect(hwnd, &rect);
-        const auto brush = CreateSolidBrush(RGB(20, 25, 35)); FillRect(dc, &rect, brush); DeleteObject(brush);
-        SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(230, 240, 245));
+        const auto brush = CreateSolidBrush(color(xen_ui::kSurface)); FillRect(dc, &rect, brush); DeleteObject(brush);
+        SetBkMode(dc, TRANSPARENT); SetTextColor(dc, color(xen_ui::kInk));
         const auto previous = SelectObject(dc, font);
         RECT left{14, 8, 540, 110}, right{562, 8, 1090, 110}, bottom{14, 377, 1090, 428};
         RECT parameters{14, 310, 1090, 372};
@@ -298,11 +348,11 @@ public:
             }
             const auto y = [&](double value) { return bars ? top + height - static_cast<int>(value / maximum * height) :
                 top + height / 2 - static_cast<int>(std::clamp(value, -100.0, 100.0) / maximum * (height / 2)); };
-            const auto grid = CreatePen(PS_SOLID, 1, RGB(74, 82, 99)); const auto saved_pen = SelectObject(dc, grid);
+            const auto grid = CreatePen(PS_SOLID, 1, color(xen_ui::kBorderStrong)); const auto saved_pen = SelectObject(dc, grid);
             MoveToEx(dc, x, y(bars ? 1.0 : 0.0), nullptr); LineTo(dc, x + width, y(bars ? 1.0 : 0.0));
             SelectObject(dc, saved_pen); DeleteObject(grid);
             if (bars && std::abs(default_threshold_q - 1) >= 1e-9) {
-                const auto line = CreatePen(PS_DOT, 1, RGB(109, 183, 244)); const auto old = SelectObject(dc, line);
+                const auto line = CreatePen(PS_DOT, 1, color(xen_ui::kAccentStrong)); const auto old = SelectObject(dc, line);
                 MoveToEx(dc, x, y(default_threshold_q), nullptr); LineTo(dc, x + width, y(default_threshold_q));
                 SelectObject(dc, old); DeleteObject(line);
             }
@@ -311,10 +361,10 @@ public:
                 const auto& point = points[i]; const int px = x + (points.size() == 1 ? width / 2 :
                     static_cast<int>(i * (width - 10) / (points.size() - 1)) + 5);
                 const double rounded = std::round(point.value * 10) / 10;
-                const COLORREF color = !point.valid ? RGB(118, 124, 138) : !bars ?
-                    (std::abs(rounded) <= 2 ? RGB(94, 234, 212) : std::abs(rounded) <= 10 ? RGB(74, 222, 128) :
-                        rounded < 0 ? RGB(251, 191, 36) : RGB(248, 113, 113)) : RGB(74, 222, 128);
-                const auto pen = CreatePen(PS_SOLID, 2, color); const auto old_pen = SelectObject(dc, pen);
+                const COLORREF point_color = !point.valid ? color(xen_ui::kMutedInk) : !bars ?
+                    (std::abs(rounded) <= 2 ? color(xen_ui::kAccentStrong) : std::abs(rounded) <= 10 ? color(xen_ui::kSuccess) :
+                        rounded < 0 ? color(xen_ui::kWarning) : color(xen_ui::kDanger)) : color(xen_ui::kSuccess);
+                const auto pen = CreatePen(PS_SOLID, 2, point_color); const auto old_pen = SelectObject(dc, pen);
                 if (bars && point.valid) {
                     const auto segment = [&](double low, double high, COLORREF fill_color) {
                         if (high < low || (high == low && high != 0)) return;
@@ -322,9 +372,9 @@ public:
                         if (bar.top == bar.bottom) --bar.top;
                         const auto fill = CreateSolidBrush(fill_color); FillRect(dc, &bar, fill); DeleteObject(fill);
                     };
-                    segment(0, std::min(point.value, 1.0), RGB(74, 222, 128));
-                    if (point.value > 1) segment(1, std::min(point.value, 1.5), RGB(251, 191, 36));
-                    if (point.value > 1.5) segment(1.5, point.value, RGB(248, 113, 113));
+                    segment(0, std::min(point.value, 1.0), color(xen_ui::kSuccess));
+                    if (point.value > 1) segment(1, std::min(point.value, 1.5), color(xen_ui::kWarning));
+                    if (point.value > 1.5) segment(1.5, point.value, color(xen_ui::kDanger));
                 } else if (point.valid) {
                     if (linked) { MoveToEx(dc, previous_point.x, previous_point.y, nullptr); LineTo(dc, px, y(point.value)); }
                     Ellipse(dc, px - 2, y(point.value) - 2, px + 3, y(point.value) + 3);
@@ -343,7 +393,7 @@ public:
             const wchar_t* legend = bars ? (std::abs(default_threshold_q - 1) < 1e-9 ? L"当前=默认阈比参考 q=1" : L"实线 当前q=1 / 蓝虚线 默认阈比") : L"上+100ms偏晚 / 下−100ms偏早";
             TextOutW(dc, x + 190, top - 22, legend, static_cast<int>(wcslen(legend)));
         };
-        plot(deltas, 18, false); plot(ratios, 568, true);
+        plot(deltas, 18, false); if (model_enabled.load()) plot(ratios, 568, true);
         SelectObject(dc, previous);
     }
     void present(HWND hwnd, HDC target) noexcept {
@@ -375,6 +425,19 @@ public:
             if (self->stop_button) EnableWindow(self->stop_button, FALSE);
             return 0;
         }
+        if (message == WM_DRAWITEM && wparam == 1001) {
+            const auto& item = *reinterpret_cast<DRAWITEMSTRUCT*>(lparam);
+            const auto fill = CreateSolidBrush(self->color(xen_ui::kFieldSurface));
+            FillRect(item.hDC,&item.rcItem,fill); DeleteObject(fill);
+            const auto border = CreateSolidBrush(self->color(xen_ui::kBorderStrong));
+            FrameRect(item.hDC,&item.rcItem,border); DeleteObject(border);
+            SetBkMode(item.hDC,TRANSPARENT);
+            SetTextColor(item.hDC,self->color((item.itemState & ODS_DISABLED) ? xen_ui::kMutedInk : xen_ui::kInk));
+            const auto old = SelectObject(item.hDC,self->font);
+            RECT text = item.rcItem;
+            DrawTextW(item.hDC,self->persistent ? L"停止任务" : L"停止录制",-1,&text,DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            SelectObject(item.hDC,old); return TRUE;
+        }
         if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
         if (message == WM_ERASEBKGND) return 1;
         if (message == WM_PRINTCLIENT) { self->present(hwnd, reinterpret_cast<HDC>(wparam)); return 0; }
@@ -383,7 +446,13 @@ public:
             PAINTSTRUCT paint{}; const auto dc = BeginPaint(hwnd, &paint);
             self->present(hwnd, dc); EndPaint(hwnd, &paint); return 0;
         }
-        if (message == WM_CLOSE) { self->stop_recording.store(true); self->closing.store(true); return 0; }
+        if (message == WM_CLOSE) {
+            ++self->close_requests;
+            self->stop_recording.store(true);
+            if (self->persistent) { self->window_closed = true; self->visible = false; ShowWindow(hwnd,SW_HIDE); self->shown = false; }
+            else self->closing.store(true);
+            return 0;
+        }
         return DefWindowProcW(hwnd, message, wparam, lparam);
     }
     void run() noexcept {
@@ -400,23 +469,39 @@ public:
             constexpr DWORD extended = WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED;
             RECT size{0, 0, 1100, 430};
             if (!AdjustWindowRectEx(&size, style, FALSE, extended)) throw std::runtime_error("HUD尺寸不可用");
-            window = CreateWindowExW(extended, type.lpszClassName, L"Xen 输入训练反馈 · 关闭窗口结束展示", style,
+            window = CreateWindowExW(extended, type.lpszClassName, persistent ? L"Xen 调试 HUD" : L"Xen 输入训练反馈 · 关闭窗口结束展示", style,
                 20, 20, size.right - size.left, size.bottom - size.top, nullptr, nullptr, instance, this);
             if (!window) throw std::runtime_error("HUD窗口不可用");
-            if (external) {
-                stop_button = CreateWindowExW(WS_EX_NOACTIVATE, L"BUTTON", L"停止录制", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            if (external || persistent) {
+                stop_button = CreateWindowExW(WS_EX_NOACTIVATE, L"BUTTON", persistent ? L"停止任务" : L"停止录制", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                     982, 402, 104, 24, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1001)), instance, nullptr);
                 if (!stop_button) throw std::runtime_error("HUD停止按钮不可用");
                 SendMessageW(stop_button, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
             }
             if (!SetLayeredWindowAttributes(window, 0, 240, LWA_ALPHA) ||
-                !SetWindowPos(window, HWND_TOPMOST, 20, 20, size.right - size.left, size.bottom - size.top, SWP_NOACTIVATE | SWP_SHOWWINDOW))
+                !SetWindowPos(window, HWND_TOPMOST, 20, 20, size.right - size.left, size.bottom - size.top, SWP_NOACTIVATE | (visible.load() ? SWP_SHOWWINDOW : 0)))
                 throw std::runtime_error("HUD显示不可用");
             state.store(1);
-            bool shown = true;
+            shown = visible.load();
+            bool theme_initialized = false;
             while (!closing.load()) {
+                const auto next_theme = desired_theme.load();
+                if (!theme_initialized || next_theme != applied_theme.load()) {
+                    theme_initialized = true; applied_theme = next_theme;
+                    // DWM只处理窗口框；GDI客户区和按钮使用共享Xen调色板。
+                    const auto dwm = LoadLibraryW(L"dwmapi.dll");
+                    if (dwm) {
+                        using SetAttribute = HRESULT(WINAPI*)(HWND,DWORD,LPCVOID,DWORD);
+                        const auto set = reinterpret_cast<SetAttribute>(GetProcAddress(dwm,"DwmSetWindowAttribute"));
+                        const BOOL dark = next_theme == UiTheme::DARK;
+                        frame_theme_applied = set && SUCCEEDED(set(window,20,&dark,sizeof(dark)));
+                        FreeLibrary(dwm);
+                    }
+                    InvalidateRect(window,nullptr,FALSE);
+                    if (stop_button) InvalidateRect(stop_button,nullptr,FALSE);
+                }
                 const bool desired = visible.load();
-                if (shown != desired) { ShowWindow(window, desired ? SW_SHOWNOACTIVATE : SW_HIDE); shown = desired; }
+                if (shown.load() != desired) { ShowWindow(window, desired ? SW_SHOWNOACTIVATE : SW_HIDE); shown = desired; }
                 MSG message;
                 while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
                     TranslateMessage(&message); DispatchMessageW(&message);
@@ -427,14 +512,48 @@ public:
         } catch (...) { state.store(3); }
         if (window) DestroyWindow(window);
         if (font) DeleteObject(font);
-        window_closed.store(true);
+        window_closed.store(true); shown = false;
     }
 };
-CounterpulseHud::CounterpulseHud(const sampling_detail::SamplingSettings& settings, bool external_snapshots)
-    : impl_(std::make_unique<Impl>(settings, external_snapshots)) {}
+CounterpulseHud::CounterpulseHud(const sampling_detail::SamplingSettings& settings, bool external_snapshots,
+        bool persistent_window, UiTheme theme, bool initially_visible)
+    : impl_(std::make_unique<Impl>(settings, external_snapshots,persistent_window,theme,initially_visible)) {}
 CounterpulseHud::~CounterpulseHud() = default;
 std::shared_ptr<const Json> CounterpulseHud::latest_analysis() const noexcept { return impl_->latest_analysis.load(); }
-void CounterpulseHud::set_visible(bool value) noexcept { impl_->visible.store(value); }
+void CounterpulseHud::set_visible(bool value) noexcept {
+    if (value && impl_->persistent) impl_->window_closed = false;
+    impl_->visible.store(value);
+}
+void CounterpulseHud::set_theme(UiTheme value) noexcept { impl_->desired_theme = value; }
+bool CounterpulseHud::task_active() const noexcept { return impl_->task_active.load(); }
+bool CounterpulseHud::failed() const noexcept { return impl_->state.load() == 3; }
+std::uint64_t CounterpulseHud::close_sequence() const noexcept { return impl_->close_requests.load(); }
+bool CounterpulseHud::visible() const noexcept { return impl_->shown.load() && !impl_->window_closed.load(); }
+bool CounterpulseHud::begin_session(const sampling_detail::SamplingSettings& settings,
+        bool external_snapshots, bool model_enabled) noexcept {
+    try {
+        if (impl_->closing || impl_->state == 3) return false;
+        auto reset = std::make_shared<Impl::Reset>(); reset->settings = settings;
+        reset->external = external_snapshots; reset->model = model_enabled;
+        reset->close_sequence = impl_->close_requests.load();
+        auto accepted = reset->accepted.get_future();
+        std::shared_ptr<Impl::Reset> empty;
+        if (!impl_->reset_pending.compare_exchange_strong(empty,reset)) return false;
+        if (accepted.wait_for(std::chrono::seconds(1)) == std::future_status::ready) return accepted.get();
+        // 超时窗口不再参与后组；取消未消费重置，已消费者亦在返回后退出，避免迟到重置污染后组。
+        reset->canceled = true;
+        impl_->reset_pending.compare_exchange_strong(reset,{});
+        impl_->state = 3; impl_->closing = true;
+        return false;
+    } catch (...) { return false; }
+}
+void CounterpulseHud::end_session() noexcept {
+    impl_->task_active = false; impl_->recording = false;
+    std::int64_t zero = 0;
+    impl_->finished_at.compare_exchange_strong(zero,std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+    impl_->ending = true;
+}
 void CounterpulseHud::observe(const Json& command) noexcept { impl_->enqueue(command); }
 void CounterpulseHud::publish(const Json& snapshot) noexcept { impl_->publish_snapshot(snapshot); }
 bool CounterpulseHud::closed() const noexcept { return impl_->window_closed.load(); }
@@ -445,6 +564,7 @@ void CounterpulseHud::finish(const Json& report) noexcept {
     impl_->finished_at.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
     impl_->ending.store(true);
+    impl_->task_active = false; impl_->recording = false;
 }
 Json CounterpulseHud::status() const {
     const auto value = impl_->state.load();
@@ -453,9 +573,13 @@ Json CounterpulseHud::status() const {
     return {{"state", value == 0 ? "STARTING" : value == 1 ? "VISIBLE" : value == 2 ? "FINISHED_VISIBLE" : "FAILED"},
         {"success", value != 0 && value != 3 && impl_->lost.load() == 0}, {"dropped_commands", impl_->lost.load()},
         {"queued_commands", written - consumed}, {"source", impl_->monitor_source.load() ? "KMBOX_MONITOR" : "COMMAND_ACK_PROXY"},
-        {"external_snapshots", impl_->external}, {"snapshots_received", impl_->snapshots.load()},
+        {"external_snapshots", impl_->external.load()}, {"snapshots_received", impl_->snapshots.load()},
         {"snapshots_displayed", impl_->snapshots_displayed.load()}, {"snapshots_superseded", impl_->snapshots_superseded.load()},
-        {"closed", impl_->window_closed.load()},
+        {"closed", impl_->window_closed.load()}, {"visible",visible()},
+        {"persistent_window",impl_->persistent},{"task_active",impl_->task_active.load()},
+        {"theme",impl_->applied_theme.load() == UiTheme::DARK ? "DARK" : "LIGHT"},
+        {"background_rgb",xen_ui::themed_rgb(impl_->applied_theme.load(),xen_ui::kSurface)},
+        {"frame_theme_applied",impl_->frame_theme_applied.load()},
         {"recording", impl_->external && impl_->recording.load()}, {"stop_requested", impl_->stop_recording.load()},
         {"paint_count", impl_->paint_count.load()}, {"title_updates", impl_->title_updates.load()},
         {"valid_first_plot_count", impl_->valid_first_plot_count.load()},

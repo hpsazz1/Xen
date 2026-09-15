@@ -185,8 +185,6 @@ struct DebugPanel::Impl {
     void controls(const Snapshot* s, OverlayActions& actions) {
         const bool idle = !s || !s->busy;
         if (input("结果根目录", request.output_root, "每组使用独立目录，保留原始Run；准备和报告由后台执行。")) changed();
-        if (request.mode != Mode::FIRE_TEST && ImGui::Checkbox("常驻 HUD", &request.show_hud)) changed(false);
-        tip("显示原生非激活HUD；模型结论不代表真实停稳。隐藏继续任务，关闭HUD请求停止。");
         if (button("校验计划", "仅校验实验参数，不连接或输出设备。", idle)) send(Action::VALIDATE, actions);
         ImGui::SameLine();
         if (button("保存新计划", "在结果目录中保存新计划，不覆盖生产配置。", idle)) send(Action::SAVE_PLAN, actions);
@@ -196,7 +194,7 @@ struct DebugPanel::Impl {
         const bool ready = s && s->state == State::PREPARED && !edited &&
             !prepared_id.empty() && prepared_id == s->prepared_id && prepared_mode == request.mode;
         const bool physical = request.mode == Mode::COUNTERPULSE || request.mode == Mode::FIRE_TEST;
-        if (physical) ImGui::TextWrapped("启动前须停止 Runtime 和输入记录，并确认已有 KMBOX 连接的实际命令超时不超过100 ms、连接超时不超过2000 ms。参数需在设置中保存；已有连接不会被草稿重配，重新连接后再准备。设备清理未知时禁止启动。");
+        if (physical) ImGui::TextWrapped("启动前须停止 Runtime 和输入记录，使用已有独占 KMBOX 连接。按实际ACK与时序检查执行，不以配置的最大等待时间拒绝启动；设备清理未知时仍禁止启动。");
         if (physical) {
         ImGui::BeginDisabled(!ready);
         ImGui::Checkbox("允许本次真实物理输出", &allow);
@@ -227,8 +225,10 @@ void DebugPanel::render_status(const Snapshot* s, OverlayActions& actions) noexc
         if (button("停止当前调试任务", "直接请求取消；停止中仍等待设备清理，取消不等于释放确认。", s && s->busy))
             impl_->send(Action::CANCEL, actions);
         ImGui::SameLine();
-        if (button(s && s->hud_visible ? "隐藏 HUD" : "显示 HUD", "只改变HUD可见性；隐藏不会停止任务。", s && (s->busy || s->result)))
-            impl_->send(s->hud_visible ? Action::HIDE_HUD : Action::SHOW_HUD, actions);
+        bool show_hud = s && s->hud_requested;
+        if (ImGui::Checkbox("显示 HUD",&show_hud)) impl_->send(show_hud ? Action::SHOW_HUD : Action::HIDE_HUD,actions);
+        tip("空闲即可打开，与Xen使用相同主题；结束后保留。取消勾选只隐藏，关闭HUD窗口会请求停止当前任务。显示本身不连接设备。");
+        if (s && !s->hud_message.empty()) ImGui::TextWrapped("%s",s->hud_message.c_str());
         ImGui::Separator();
     } catch (...) { ImGui::TextUnformatted("调试快照无法显示。"); }
 }

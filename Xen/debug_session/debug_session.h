@@ -35,6 +35,8 @@ struct Snapshot {
     State state = State::IDLE;
     bool busy = false, physical = false, hud_visible = false, cleanup_unknown = false;
     bool repeat_ready = false;
+    bool hud_requested = false;
+    std::string hud_message;
     std::uint64_t generation = 0;
     std::string message, report_directory, prepared_id;
     Json plan, sampling;
@@ -71,6 +73,7 @@ public:
     bool load_inputs(Runtime& runtime, const std::string& directory) noexcept;
     // 仅完成线程的回收；UI可每帧调用，不等待仍在工作的任务。
     void poll() noexcept;
+    void set_theme(UiTheme theme) noexcept;
     void request_shutdown() noexcept;
 private:
     struct Impl;

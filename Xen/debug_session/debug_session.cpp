@@ -75,6 +75,10 @@ Json request_plan(const Request& request) {
         {"shot_after_release_ms",18},{"shot_hold_ms",5},{"late_tolerance_ms",5},{"direction",2}});
 }
 Json request_sampling(const Request& request) {
+    if (request.mode == Mode::FIRE_TEST) {
+        SamplingSettings settings; settings.hud_enabled = false;
+        return sampling_settings_json(settings); // 原地点射不以其他页面的模型草稿作为准入条件。
+    }
     if ((request.mode == Mode::EVALUATE_MANUAL || request.mode == Mode::EVALUATE_COMMANDS) && !request.override_sampling)
         return Json::object();
     if (request.sampling_text.empty() && (request.mode == Mode::EVALUATE_MANUAL ||
@@ -105,10 +109,6 @@ void admit(const Context& context, Mode mode) {
         throw std::runtime_error("已有设备未就绪或未持有独占职责");
     if (context.config.mouse.backend != MouseBackend::KMBOX_NET)
         throw std::runtime_error("该测试仅支持已有KMBOX NET连接");
-    if (physical_mode(mode) && (context.config.mouse.kmbox_command_timeout_ms > 100 || context.config.mouse.kmbox_connect_timeout_ms > 2000))
-        throw std::runtime_error("当前连接命令超时" + std::to_string(context.config.mouse.kmbox_command_timeout_ms) +
-            "ms、连接超时" + std::to_string(context.config.mouse.kmbox_connect_timeout_ms) +
-            "ms；测试要求分别不超过100ms/2000ms，请在设置中保存后重新准备");
     if (context.device->left_button_faulted() || context.device->left_button_cleanup_required())
         throw std::runtime_error("左键清理尚未确认，不能开始新任务");
 }
@@ -120,6 +120,9 @@ struct Session::Impl {
     std::atomic_bool canceled{false};
     std::atomic<std::shared_ptr<CounterpulseHud>> hud;
     std::mutex hud_mutex;
+    std::atomic<bool> hud_requested{false};
+    std::uint64_t observed_hud_close_sequence = 0;
+    std::atomic<UiTheme> hud_theme{UiTheme::LIGHT};
     bool shutting_down = false;
     std::uint64_t generation = 0;
     struct Prepared {
@@ -137,6 +140,16 @@ struct Session::Impl {
         std::shared_ptr<CounterpulseHud> previous;
         { std::lock_guard lock(hud_mutex); previous = hud.exchange(std::move(next)); }
         // 最后引用只在调用本方法的后台线程释放；UI借用在同一短锁内结束。
+    }
+
+    std::shared_ptr<CounterpulseHud> ensure_hud() {
+        std::lock_guard lock(hud_mutex);
+        auto current = hud.load();
+        if (!current) {
+            current = std::make_shared<CounterpulseHud>(SamplingSettings{},false,true,hud_theme.load(),hud_requested.load());
+            hud.store(current);
+        }
+        return current;
     }
 
     template<class F> void update(F&& fn) {
@@ -162,6 +175,14 @@ struct Session::Impl {
         try {
             worker = std::async(std::launch::async, [this, current, physical, fn = std::forward<F>(fn)]() mutable {
                 try { fn(); }
+                catch (const DebugRunFailure& error) {
+                    update([&](Snapshot& s) {
+                        if (s.generation != current) return;
+                        if (!error.output_not_started && physical) s.cleanup_unknown = true;
+                        s.state = s.cleanup_unknown ? State::CLEANUP_UNKNOWN : (canceled ? State::CANCELED : State::FAILED);
+                        s.message = error.what();
+                    });
+                }
                 catch (...) {
                     // 原始异常可能含外部文件内容，界面只发布固定原因；详细原生报告也须脱敏。
                     update([&](Snapshot& s) {
@@ -197,16 +218,31 @@ struct Session::Impl {
         task.recording_duration_ms = work.request.recording_duration_ms;
         task.candidate_index = static_cast<std::size_t>(work.request.candidate_index);
         task.allow_physical_output = allow; task.confirmation = confirmation;
-        // 旧HUD的析构可能join；替换只在后台线程进行。
-        replace_hud();
-        if (work.request.mode == Mode::MANUAL_RECORDING || (physical_mode(work.request.mode) && work.sampling.value("hud_enabled",false))) {
-            task.hud = std::make_shared<CounterpulseHud>(parse_sampling_settings(work.sampling),
-                work.request.mode != Mode::COUNTERPULSE);
-            task.hud->set_visible(work.request.show_hud);
-            replace_hud(task.hud);
+        // GUI窗口独立于每组任务存活；新组只重置模型，绝不借换组销毁常驻窗口。
+        if (uses_device(work.request.mode)) {
+            std::uint64_t reset_close_sequence = 0;
+            try {
+                task.hud = ensure_hud();
+                reset_close_sequence = task.hud->close_sequence();
+                const bool model_enabled = work.request.mode != Mode::FIRE_TEST;
+                if (!task.hud->begin_session(parse_sampling_settings(work.sampling),
+                        work.request.mode == Mode::MANUAL_RECORDING,model_enabled))
+                    throw std::runtime_error("HUD状态重置失败");
+                task.hud->set_visible(hud_requested.load());
+            } catch (...) {
+                if (task.hud && task.hud->close_sequence() != reset_close_sequence) canceled = true;
+                task.hud.reset();
+                update([](Snapshot& s) { s.hud_message = "HUD不可用；物理测试仍按原有输入与时序检查执行"; });
+                if (work.request.mode == Mode::MANUAL_RECORDING)
+                    throw DebugRunFailure("人工模型录制需要可用的原生HUD反馈通道；未开始录制",true);
+            }
         }
+        struct EndHudSession {
+            std::shared_ptr<CounterpulseHud> hud;
+            ~EndHudSession() { if (hud) hud->end_session(); }
+        } end_hud{task.hud};
         update([&](Snapshot& s) { s.state = State::RUNNING; s.report_directory = task.output.string();
-            s.hud_visible = task.hud && work.request.show_hud; s.message = "任务执行中；可随时停止"; });
+            s.message = "任务执行中；可随时停止"; });
         Json result;
         try { result = run_debug(task, {[this] { return canceled.load(); }, [this](const Json& value) {
             // 原生端只发布阶段或有界事件；最终完整对象仅一次进入结果快照。
@@ -227,7 +263,11 @@ struct Session::Impl {
                     else s.message += "检查源端与设备输入状态：" + reason;
                 } else if (!stage.empty()) s.message = "任务阶段：" + stage + "；可点击停止当前调试任务";
             });
-        }}); } catch (...) {
+        }}); } catch (const DebugRunFailure& error) {
+            if (uses_device(work.request.mode) && !error.output_not_started)
+                update([](Snapshot& s) { s.cleanup_unknown = true; });
+            throw;
+        } catch (...) {
             if (uses_device(work.request.mode)) update([](Snapshot& s) { s.cleanup_unknown = true; });
             throw;
         }
@@ -285,8 +325,22 @@ void Session::poll() noexcept {
         {
             std::lock_guard lock(impl_->hud_mutex);
             if (auto hud = impl_->hud.load()) {
-                if (auto live = hud->latest_analysis(); live && live != snapshot()->live)
-                    impl_->update([&](Snapshot& s) { s.live = live; });
+                const auto close_sequence = hud->close_sequence();
+                if (close_sequence != impl_->observed_hud_close_sequence) {
+                    impl_->observed_hud_close_sequence = close_sequence;
+                    if (snapshot()->busy) impl_->canceled = true;
+                }
+                if (hud->closed()) impl_->hud_requested = false;
+                const bool requested = impl_->hud_requested.load();
+                const bool visible = hud->visible();
+                const std::string feedback = hud->failed() ? "HUD窗口创建或显示失败；显示故障不替代设备执行结果" :
+                    hud->closed() ? "HUD已关闭；运行中的任务正在响应停止请求" : visible ? "HUD已显示；结束后保留" :
+                    requested ? "正在显示HUD" : "HUD已隐藏；隐藏不会停止任务";
+                if (snapshot()->hud_visible != visible || snapshot()->hud_requested != requested || snapshot()->hud_message != feedback)
+                    impl_->update([&](Snapshot& s) { s.hud_visible = visible; s.hud_requested = requested; s.hud_message = feedback; });
+                if (snapshot()->busy && hud->task_active())
+                    if (auto live = hud->latest_analysis(); live && live != snapshot()->live)
+                        impl_->update([&](Snapshot& s) { s.live = live; });
             }
         }
         if (impl_->shutting_down && !impl_->busy() && impl_->hud.load()) {
@@ -296,6 +350,11 @@ void Session::poll() noexcept {
             });
         }
     } catch (...) {}
+}
+void Session::set_theme(UiTheme theme) noexcept {
+    impl_->hud_theme = theme;
+    std::lock_guard lock(impl_->hud_mutex);
+    if (auto hud = impl_->hud.load()) hud->set_theme(theme);
 }
 void Session::request_shutdown() noexcept { impl_->shutting_down = true; cancel("应用关闭，正在清理"); poll(); }
 void Session::cancel(const std::string& reason) noexcept {
@@ -355,9 +414,14 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
     try {
         if (action == Action::CANCEL) { cancel(); return true; }
         if (action == Action::SHOW_HUD || action == Action::HIDE_HUD) {
-            { std::lock_guard lock(impl_->hud_mutex);
-              if (auto hud = impl_->hud.load()) hud->set_visible(action == Action::SHOW_HUD); }
-            impl_->update([&](Snapshot& s) { s.hud_visible = action == Action::SHOW_HUD; });
+            if (impl_->shutting_down) return false;
+            const bool desired = action == Action::SHOW_HUD;
+            impl_->hud_requested = desired;
+            set_theme(context.config.ui.theme);
+            if (desired) impl_->ensure_hud()->set_visible(true);
+            else { std::lock_guard lock(impl_->hud_mutex); if (auto hud = impl_->hud.load()) hud->set_visible(false); }
+            impl_->update([&](Snapshot& s) { s.hud_requested = desired;
+                s.hud_message = desired ? "正在显示HUD；显示不会连接设备或开始任务" : "HUD已隐藏；任务继续"; });
             return true;
         }
         const auto reject = [&](const char* message) {

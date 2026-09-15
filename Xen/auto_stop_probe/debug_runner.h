@@ -6,9 +6,17 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <stdexcept>
 
 namespace auto_stop_probe_detail {
 class CounterpulseHud;
+class DebugRunFailure : public std::runtime_error {
+public:
+    DebugRunFailure(const std::string& reason, bool not_started)
+        : std::runtime_error(reason), output_not_started(not_started) {}
+    // 仅物理执行在任何订阅和执行之前的明确阶段失败可为true。
+    const bool output_not_started;
+};
 enum class DebugRunMode { Counterpulse, ManualRecording, EvaluateManual, EvaluateCommands, DeriveDefaults, DeriveManualPlan };
 struct DebugRunRequest {
     DebugRunMode mode = DebugRunMode::Counterpulse;

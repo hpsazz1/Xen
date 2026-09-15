@@ -1,3 +1,9 @@
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <Windows.h>
+#ifdef ERROR
+#undef ERROR
+#endif
 #include "debug_session/debug_session.h"
 #include "runtime/runtime.h"
 #include <atomic>
@@ -83,6 +89,42 @@ Context context_for(const std::shared_ptr<FakeDevice>& device = {}) {
     context.config.mouse.kmbox_command_timeout_ms = 50;
     return context;
 }
+void test_idle_hud_show() {
+    Session session; Context context; Request request;
+    const auto before = session.snapshot();
+    require(session.dispatch(Action::SHOW_HUD,request,context),"空闲显示HUD请求未接收");
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    HWND window = nullptr;
+    while (std::chrono::steady_clock::now() < deadline) {
+        session.poll(); window = FindWindowW(L"XenCounterpulseReadOnlyHud",nullptr);
+        if (window && IsWindowVisible(window)) break;
+        std::this_thread::sleep_for(5ms);
+    }
+    require(window && IsWindowVisible(window),"空闲SHOW_HUD只改了快照，没有创建真实可见HUD");
+    require(!session.busy() && session.snapshot()->generation == before->generation &&
+        session.snapshot()->state == before->state && session.snapshot()->prepared_id.empty(),
+        "空闲显示HUD不得创建调试任务或准备身份");
+    const auto wait_visible = [&](bool visible) {
+        const auto until = std::chrono::steady_clock::now() + 2s;
+        do { session.poll();
+            if (session.snapshot()->hud_visible == visible && (IsWindowVisible(window) != FALSE) == visible) return;
+            std::this_thread::sleep_for(5ms);
+        } while (std::chrono::steady_clock::now() < until);
+        throw std::runtime_error("HUD实际可见状态未同步到Session");
+    };
+    session.dispatch(Action::HIDE_HUD,request,context); wait_visible(false);
+    session.dispatch(Action::SHOW_HUD,request,context); wait_visible(true);
+    require(FindWindowW(L"XenCounterpulseReadOnlyHud",nullptr) == window,"空闲隐藏/显示不应创建第二窗口");
+    PostMessageW(window,WM_CLOSE,0,0); wait_visible(false);
+    require(!session.snapshot()->hud_requested,"用户关闭HUD必须取消显示开关");
+    session.dispatch(Action::SHOW_HUD,request,context); wait_visible(true);
+    require(!session.busy() && session.snapshot()->generation == before->generation,
+        "关闭复开HUD不得启动任务或改变准备身份");
+    session.set_theme(UiTheme::DARK);
+    session.request_shutdown(); wait_idle(session);
+    require(!IsWindow(window),"Session关闭必须销毁其持久窗口");
+}
+
 void test_documents_and_frozen_prepare(const std::filesystem::path& root) {
     Session session;
     Request request;
@@ -148,16 +190,16 @@ void test_fire_start_block_is_visible(const std::filesystem::path& root) {
     request.output_root = utf8(root / "start-blocked");
     auto device = std::make_shared<FakeDevice>();
     auto context = context_for(device);
-    context.config.mouse.kmbox_command_timeout_ms = 300;
+    context.runtime_idle = false;
     require(session.dispatch(Action::PREPARE,request,context), "准备未提交");
     wait_idle(session);
     require(session.snapshot()->state == State::PREPARED, "离线准备应保留可审阅计划");
-    require(session.snapshot()->message.find("100ms") != std::string::npos,
-        "300ms连接准备后未显示100ms启动限制，用户只能在点击后遇到拒绝");
+    require(session.snapshot()->message.find("Runtime") != std::string::npos,
+        "生产Runtime运行期间准备未显示实际职责冲突");
     const auto id = session.snapshot()->prepared_id;
-    require(!session.dispatch(Action::START,request,context,id,true,physical_confirmation()), "超时配置未拒绝");
+    require(!session.dispatch(Action::START,request,context,id,true,physical_confirmation()), "生产职责冲突未拒绝");
     require(device->outputs == 0 && device->opens == 0 && device->subscriptions == 0, "被拒绝启动触碰设备");
-    context.config.mouse.kmbox_command_timeout_ms = 50;
+    context.runtime_idle = true;
     require(!session.dispatch(Action::START,request,context,"stale",true,physical_confirmation()), "旧身份未拒绝");
     require(session.snapshot()->message.find("重新准备") != std::string::npos, "过期身份拒绝没有具体说明");
     session.request_shutdown(); wait_idle(session);
@@ -211,21 +253,21 @@ void test_repeat_admission_and_invalidation(const std::filesystem::path& root) {
     require(!session.snapshot()->repeat_ready && !session.repeat(context), "离线模板被当成物理重复模板");
 
     request.mode = Mode::FIRE_TEST;
-    context.config.mouse.kmbox_command_timeout_ms = 300;
-    require(session.dispatch(Action::PREPARE, request, context), "超时模板准备未提交");
+    context.cleanup_known = false;
+    require(session.dispatch(Action::PREPARE, request, context), "清理未知模板准备未提交");
     wait_idle(session);
-    require(!session.snapshot()->repeat_ready && !session.repeat(context), "300ms连接形成了有效重复模板");
-    context.config.mouse.kmbox_command_timeout_ms = 50;
+    require(!session.snapshot()->repeat_ready && !session.repeat(context), "清理未知形成了有效重复模板");
+    context.cleanup_known = true;
     require(session.dispatch(Action::PREPARE, request, context), "有效模板准备未提交");
     wait_idle(session);
     require(session.snapshot()->repeat_ready, "有效物理准备没有发布重复模板");
     context.config.keyboard.debug_test_enabled = false;
     require(!session.repeat(context), "关闭开关仍接受重复任务");
     context.config.keyboard.debug_test_enabled = true;
-    context.config.mouse.kmbox_command_timeout_ms = 300;
-    require(!session.repeat(context), "重复启动没有复核当前300ms连接");
-    require(session.snapshot()->message.find("100ms") != std::string::npos, "重复超时拒绝缺少具体限制");
-    context.config.mouse.kmbox_command_timeout_ms = 50;
+    context.runtime_idle = false;
+    require(!session.repeat(context), "重复启动没有复核当前生产职责");
+    require(session.snapshot()->message.find("Runtime") != std::string::npos, "职责冲突拒绝缺少具体说明");
+    context.runtime_idle = true;
     auto changed = context; changed.device = std::make_shared<FakeDevice>();
     require(!session.repeat(changed), "设备身份变化仍可使用原重复模板");
     changed = context; changed.config.mouse.allow_send_input = false;
@@ -369,6 +411,31 @@ int main() {
     const auto root = std::filesystem::temp_directory_path() /
         ("xen-debug-session-tests-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     try {
+        {
+            Session session;
+            auto device = std::make_shared<FakeDevice>();
+            auto context = context_for(device);
+            context.config.mouse.kmbox_command_timeout_ms = 300;
+            context.config.mouse.kmbox_connect_timeout_ms = 5000;
+            context.config.keyboard.debug_test_enabled = true;
+            context.config.source_context.host.clear(); context.config.source_context.port = 0;
+            Request request; request.mode = Mode::FIRE_TEST; request.show_hud = false;
+            request.sampling_text = "invalid-model-draft";
+            request.output_root = utf8(root / "existing-connection-timeout");
+            require(session.dispatch(Action::PREPARE,request,context), "现有连接准备请求未接收");
+            wait_idle(session);
+            require(session.snapshot()->repeat_ready,
+                "已连接设备被ACK最大等待或历史连接超时配置拒绝，未测实际时序就禁止测试");
+            require(session.repeat(context), "有效已有设备快捷键启动仍被配置超时拒绝");
+            wait_idle(session);
+            require(session.snapshot()->state == State::FAILED && !session.snapshot()->cleanup_unknown,
+                "尚未输出的源配置失败不应锁死为设备清理未知");
+            require(session.snapshot()->message.find("源") != std::string::npos,
+                "尚未输出的失败必须显示具体源配置原因");
+            require(device->outputs == 0 && device->opens == 0 && device->closes == 0,
+                "无源配置且取消的测试不得真实输出或重建设备");
+        }
+        test_idle_hud_show();
         test_documents_and_frozen_prepare(root);
         test_cancel_prepare(root);
         test_fire_start_block_is_visible(root);

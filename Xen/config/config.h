@@ -2,6 +2,7 @@
 #define CONFIG_H
 
 #include <string>
+#include "config/ui_theme.h"
 
 #include "aim/aim.h"
 #include "auto_stop/auto_stop.h"
@@ -22,10 +23,7 @@ struct RuntimeConfig {
     bool enable_performance_probes = false;
 };
 
-enum class UiTheme {
-    LIGHT,
-    DARK,
-};
+
 
 // 六页紧凑布局在该尺寸下仍能保证安全按钮、表单和状态信息不互相遮挡。
 inline constexpr int kMinimumUiWidth = 820;

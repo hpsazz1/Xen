@@ -5,6 +5,7 @@
 #undef ERROR
 #endif
 #include "auto_stop_probe/counterpulse_hud.h"
+#include "config/ui_palette.h"
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -84,7 +85,18 @@ void snapshot(HWND window, const std::filesystem::path& path) {
     file.write(reinterpret_cast<const char*>(&header), sizeof(header));
     file.write(reinterpret_cast<const char*>(&info.bmiHeader), sizeof(info.bmiHeader));
     file.write(reinterpret_cast<const char*>(pixels.data()), static_cast<std::streamsize>(pixels.size()));
+}// 通过真实窗口客户区像素核对主题，不把期望字段当作已经绘制。
+COLORREF background_pixel(HWND window) {
+    const auto dc = GetDC(window); require(dc != nullptr,"窗口DC不可用");
+    const auto memory = CreateCompatibleDC(dc); const auto bitmap = CreateCompatibleBitmap(dc,1100,430);
+    require(memory && bitmap,"像素核对资源不可用");
+    const auto previous = SelectObject(memory,bitmap);
+    const bool painted = PrintWindow(window,memory,PW_CLIENTONLY) != FALSE;
+    const auto pixel = GetPixel(memory,4,4);
+    SelectObject(memory,previous); DeleteObject(bitmap); DeleteDC(memory); ReleaseDC(window,dc);
+    require(painted && pixel != CLR_INVALID,"主题客户区像素不可读"); return pixel;
 }
+
 }
 int main(int argc, char** argv) {
     try {
@@ -182,6 +194,44 @@ int main(int argc, char** argv) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             require(hud.closed() && !IsWindow(window), "用户关闭路径必须关闭窗口并通知owner结束保留");
         }
+        {
+            CounterpulseHud hud(SamplingSettings{},false,true,UiTheme::LIGHT);
+            wait_state(hud,"FINISHED_VISIBLE");
+            window = FindWindowW(L"XenCounterpulseReadOnlyHud",nullptr);
+            require(window && hud.visible() && !hud.status()["task_active"].get<bool>(),"空闲持久HUD不得伪装正在执行任务");
+            const auto rgb_color = [](unsigned int rgb) { return RGB((rgb >> 16) & 255,(rgb >> 8) & 255,rgb & 255); };
+            require(background_pixel(window) == rgb_color(xen_ui::themed_rgb(UiTheme::LIGHT,xen_ui::kSurface)),
+                "浅色HUD客户区没有使用Xen共享背景色");
+            require(hud.begin_session(SamplingSettings{},true),"主题截图的合成反馈状态重置失败");
+            auto theme_data = external_snapshot(); theme_data["recording_id"] = "synthetic-theme-preview-no-device";
+            hud.publish(theme_data); wait_snapshot(hud,1); hud.end_session(); wait_state(hud,"FINISHED_VISIBLE");
+            if (!snapshot_path.empty()) { auto path = snapshot_path; path.replace_filename(path.stem().string()+"-light.bmp"); snapshot(window,path); }
+            hud.set_theme(UiTheme::DARK);
+            const auto theme_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+            while (hud.status()["theme"] != "DARK" && std::chrono::steady_clock::now() < theme_deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            require(background_pixel(window) == rgb_color(xen_ui::themed_rgb(UiTheme::DARK,xen_ui::kSurface)),
+                "深色HUD客户区没有跟随Xen主题切换");
+            if (!snapshot_path.empty()) { auto path = snapshot_path; path.replace_filename(path.stem().string()+"-dark.bmp"); snapshot(window,path); }
+            require(hud.begin_session(SamplingSettings{},false),"持久HUD新组重置失败");
+            hud.observe(command("wasd",2,1));
+            PostMessageW(window,WM_CLOSE,0,0);
+            const auto close_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+            while (!hud.closed() && std::chrono::steady_clock::now() < close_deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            require(hud.closed() && hud.stop_requested() && !hud.visible() && IsWindow(window),
+                "GUI关闭HUD须隐藏窗口并锁存当前任务停止，不能等同设备释放");
+            hud.set_visible(true);
+            require(hud.stop_requested(),"立即复开不得清除仍在退出任务的停止请求");
+            hud.end_session();
+            require(hud.begin_session(SamplingSettings{},false),"结束后新组模型重置失败");
+            require(!hud.stop_requested() && hud.status()["dropped_commands"] == 0,
+                "只有新组边界才能清理旧模型队列和停止请求");
+            hud.finish(Json{{"success",false}}); wait_state(hud,"FINISHED_VISIBLE");
+            require(hud.visible(),"失败组结束后HUD也须保持用户的显示选择");
+            require(GetForegroundWindow() == foreground,"持久HUD主题切换和复开不得夺取前台");
+        }
+        require(!IsWindow(window),"持久HUD析构后窗口和UI线程必须回收");
         std::cout << "HUD真实窗口专项通过：仅合成ACK、非激活置顶、排空、结束保留与析构关闭\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

@@ -59,7 +59,15 @@ void check_foreground_start() {
         io.AddMouseButtonEvent(0,false); return frame();
     };
     frame(); frame();
-    auto action = click("准备");
+    auto action = click("显示 HUD");
+    expect(action.debug_action == debug_session::Action::SHOW_HUD && !action.debug_plan_edited &&
+        !action.debug_allow_physical_output,"空闲HUD开关须交付显示动作，不改草稿或授予物理输出");
+    snapshot.hud_requested = true; frame();
+    action = click("显示 HUD");
+    expect(action.debug_action == debug_session::Action::HIDE_HUD && !action.debug_plan_edited,
+        "同一HUD开关应取消显示，不能重复提交任务");
+    snapshot.hud_requested = false; frame();
+    action = click("准备");
     expect(action.debug_action == debug_session::Action::PREPARE && action.debug_plan_edited, "准备按钮必须发出原生准备动作并使旧重复模板失效");
     snapshot.state = debug_session::State::PREPARED;
     snapshot.physical = true; snapshot.generation = 1; snapshot.prepared_id = "ui-prepared-1";

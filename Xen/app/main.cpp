@@ -359,6 +359,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     };
 
     while (overlay.pump_messages(true)) {
+        debug_workspace.set_theme(config.ui.theme);
         debug_workspace.poll();
         if (runtime_stop_job.valid() && runtime_stop_job.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
             runtime_stop_job.get();
