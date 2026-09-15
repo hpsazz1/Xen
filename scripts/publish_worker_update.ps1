@@ -10,6 +10,7 @@
     [string]$PackageNotesPath = '',
     [string]$ManualAcceptancePath = '',
     [string]$SourceContextExecutable = '',
+    [switch]$IncludeLauncher,
     [switch]$ChangesOnly
 )
 
@@ -138,6 +139,9 @@ foreach ($route in $manifest.runtimes) {
 }
 $workerRelative = "runtimes/$Runtime/Xen.exe"
 $overrides = @{ $workerRelative = $workerPath }
+if ($IncludeLauncher) {
+    $overrides['XenLauncher.exe'] = Resolve-UpdateFile (Join-Path $buildRoot 'Release\XenLauncher.exe')
+}
 if ($sourceToolPath) { $overrides[$sourceToolRelative] = $sourceToolPath }
 if ($ChangesOnly -and ($ConfigPath -or $WorkspaceSettingsPath)) {
     throw '差量暂存禁止替换用户配置或工作区设置。'

@@ -57,6 +57,7 @@ try {
     $buildRoot = Join-Path $runRoot 'build'
     Write-UpdateFixture (Join-Path $buildRoot 'Release\Xen.exe') 'updated-worker-fixture'
     Write-UpdateFixture (Join-Path $buildRoot 'Release\xen_source_context.exe') 'updated-source-context-fixture'
+    Write-UpdateFixture (Join-Path $buildRoot 'Release\XenLauncher.exe') 'new-launcher-with-current-config'
     $identityPath = Join-Path $buildRoot 'xen-build-identity.json'
     $identity = [ordered]@{ schema = 1; source_root = $sourceRoot; git_commit = $commit; git_dirty = $false; runtime = 'nvidia' }
     Write-UpdateFixture $identityPath ($identity | ConvertTo-Json)
@@ -69,6 +70,7 @@ try {
         $backends = if ($runtime -eq 'nvidia') { @('cpu', 'cuda', 'tensorrt') } else { @($runtime) }
         $routes += [ordered]@{ id = $runtime; executable = $relative; backends = @($backends) }
     }
+    Write-UpdateFixture (Join-Path $baseRoot 'XenLauncher.exe') 'old-launcher-with-old-config'
     Write-UpdateFixture (Join-Path $baseRoot 'config.ini') '[fixture]'
     Write-UpdateFixture (Join-Path $baseRoot 'cache/model-workspace/settings.json') '{}'
     Write-UpdateFixture (Join-Path $baseRoot 'tools/acceptance/PACKAGE-NOTES.md') 'old package notes'
@@ -105,6 +107,12 @@ try {
             Assert-UpdateTest (($record | ConvertTo-Json -Compress) -ceq ($oldRecord | ConvertTo-Json -Compress)) "继承记录原样保留 $($record.path)"
         }
     }
+    $launcherParameters = $parameters.Clone()
+    $launcherParameters.IncludeLauncher = $true
+    $launcherParameters.OutputDirectory = Join-Path $runRoot 'launcher-update'
+    & $publisher @launcherParameters
+    Assert-ProductionManifest $launcherParameters.OutputDirectory
+    Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $launcherParameters.OutputDirectory 'XenLauncher.exe') -Raw) -ceq 'new-launcher-with-current-config') '配置消费者启动器随Worker更新'
     $existingRejected = $false
     try { & $publisher @parameters } catch { $existingRejected = $true }
     Assert-UpdateTest $existingRejected '已有正式目标拒绝覆盖'

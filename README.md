@@ -640,3 +640,5 @@ UI 和 CLI 共用当前用户 `%LOCALAPPDATA%/Xen/recoil-tuner-usage-v1` 用途�
 ## 技术栈
 
 C++20、CMake、ONNX Runtime、OpenCV、spdlog、SimpleIni、Dear ImGui、nlohmann/json。
+
+配置校验变更的差量发布应使用 `publish_worker_delta.ps1 -IncludeLauncher`，同时更新主程序与启动器，避免启动器保留旧配置规则。
