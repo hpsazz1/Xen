@@ -198,7 +198,7 @@ void require_page_table(const char* table_name) {
 }
 
 // 此程序不构造 Runtime、InputRouter、Keyboard、Mouse 或 Workspace。
-// 仅使用 STOPPED 快照渲染生产 Overlay，并保存本进程窗口；动作不被执行。
+// 仅使用合成快照渲染生产 Overlay，并保存本进程窗口；动作不被执行。
 int wmain(int argc, wchar_t** argv) {
     try {
         require(argc >= 2, "用法：model_workspace_ui_preview.exe <截图目录> [--minimum] [--dark]");
@@ -254,7 +254,7 @@ int wmain(int argc, wchar_t** argv) {
         settings.weights_path = "E:/示例模型/teacher.pt";
         settings.model_path = "E:/示例模型/teacher.onnx";
         model_workspace::Snapshot workspace;
-        workspace.message = "无设备窗口验收：仅使用停止快照，所有动作均不执行。";
+        workspace.message = "无设备窗口验收：仅使用合成快照，所有动作均不执行。";
         workspace.job_state = "NOT_STARTED";
         workspace.environment_ready = false;
         workspace.weights_ready = false;
@@ -320,6 +320,27 @@ int wmain(int argc, wchar_t** argv) {
         ImGui::SetScrollY(content, 0); frame(); frame();
         require_page_table("auto_stop_form");
         save_window(capture, output / "auxiliary-top.png");
+        // 运行中阻断仍仅为合成快照，不构造 Runtime 或执行任何输出意图。
+        const auto original_runtime = runtime;
+        runtime.state = RuntimeState::RUNNING;
+        runtime.auto_stop.status = AutoStopStatus::READY;
+        runtime.auto_stop.telemetry_available = true;
+        runtime.auto_stop.independent_trigger_enabled = true;
+        runtime.auto_stop.block_reason = AutoStopBlockReason::SOURCE_TIMING_INVALID;
+        runtime.auto_stop.source_focused = true;
+        runtime.auto_stop.target_available = false;
+        auto* stop_panel = preview_window("auto_stop_panel");
+        ImGui::SetScrollY(content, 0);
+        ImGui::SetScrollY(stop_panel, 0);
+        frame(); frame();
+        require(capture.text.find("阻断原因：源帧时钟映射无效") != std::string::npos &&
+                capture.text.find("源机时钟服务不可用或映射尚未建立") != std::string::npos,
+                "运行中急停阻断及排查提示必须进入生产界面");
+        require(stop_panel->Scroll.y == 0 && content->Scroll.y == 0,
+                "急停阻断首屏证据不得滚动后截取");
+        save_window(capture, output / "auxiliary-blocked.png");
+        runtime = original_runtime;
+        frame(); frame();
         auto focus_item = [&](const char* label, ImGuiWindow* window, const char* table = nullptr) {
             const auto id = table ? ImHashStr(label, 0, window->GetID(table)) : window->GetID(label);
             input.down = false; input.focus_window = window; input.focus_id = id; frame();
@@ -374,7 +395,7 @@ int wmain(int argc, wchar_t** argv) {
         ImGui::SetScrollY(content, 0); frame(); frame();
         save_window(capture, output / "auxiliary-side-button.png");
         focus_item("暂停本次会话", preview_window("auto_stop_panel"));
-        require_tooltip(capture, "预计完成不代表停稳或允许开火");
+        require_tooltip(capture, "预计完成不是观察停稳");
         save_window(capture, output / "auxiliary-stop-help.png");
         auto* trigger_panel = preview_window("trigger_panel");
         ImGui::ScrollToRect(content, trigger_panel->Rect(), ImGuiScrollFlags_AlwaysCenterY);
@@ -383,15 +404,21 @@ int wmain(int argc, wchar_t** argv) {
         save_window(capture, output / "auxiliary-trigger.png");
         ImGui::SetScrollY(trigger_panel, trigger_panel->ScrollMax.y); frame(); frame();
         save_window(capture, output / "auxiliary-trigger-bottom.png");
-        focus_item("打开弹道编辑与优化", content);
-        require_tooltip(capture, "不会自动加载、激活或执行曲线");
-        save_window(capture, output / "recoil-editor-help.png");
         const auto override_rect = focus_item("##recoil_trial", content, "recoil_settings");
         auto* settings_table = ImGui::GetCurrentContext()->Tables.GetByKey(content->GetID("recoil_settings"));
         require(settings_table != nullptr, "固定版本覆盖表单不存在");
         input.position = {settings_table->OuterRect.Min.x + 20, override_rect.GetCenter().y}; frame(); frame();
         require_tooltip(capture, "保存配置后持续有效");
         save_window(capture, output / "recoil-override-help.png");
+        // 弹道工具已迁至调试页，先完成辅助页覆盖配置检查，再按生产导航进入。
+        select_page(6);
+        content = preview_window("content");
+        ImGui::SetScrollY(content, 0); frame(); frame();
+        focus_item("弹道工具", content, "debug_tabs");
+        input.down = true; frame(); input.down = false; frame(); frame();
+        focus_item("打开弹道编辑与优化", content);
+        require_tooltip(capture, "不会自动加载、激活或执行曲线");
+        save_window(capture, output / "recoil-editor-help.png");
         activate_view_item("打开弹道编辑与优化");
         require(capture.text.find("先加载已有曲线") != std::string::npos, "编辑器没有按要求展开");
         activate_view_item("加载覆盖文件");
@@ -421,7 +448,7 @@ int wmain(int argc, wchar_t** argv) {
         { std::ifstream file(fixture_path, std::ios::binary); const std::string after{
               std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
           require(after == fixture_text, "UI预览修改了磁盘曲线"); }
-        select_page(6);
+        select_page(7);
         content = preview_window("content");
         ImGui::SetScrollY(content, 0); frame(); frame();
         require_page_table("mouse_form");

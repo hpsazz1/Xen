@@ -2953,6 +2953,46 @@ struct Overlay::Impl {
         ImGui::TextWrapped("停止运行后可编辑并保存参数；下次启动生效。");
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         begin_config_panel("auto_stop_panel", "自动急停", 300.0f);
+        const char* status = "已关闭";
+        switch (snapshot.auto_stop.status) {
+            case AutoStopStatus::DISABLED: status = "已关闭"; break;
+            case AutoStopStatus::UNSUPPORTED_BACKEND: status = "需要 KMBOX NET"; break;
+            case AutoStopStatus::UNBOUND: status = "未绑定允许键"; break;
+            case AutoStopStatus::AWAITING_VALIDATION: status = "待设备与制动验证"; break;
+            case AutoStopStatus::PAUSED: status = "已暂停"; break;
+            case AutoStopStatus::READY: status = "等待快捷键与目标"; break;
+            case AutoStopStatus::WAITING_INPUT: status = "等待有效输入"; break;
+            case AutoStopStatus::MASKED: status = "已屏蔽保持（未估算制动）"; break;
+            case AutoStopStatus::BRAKING: status = "制动中"; break;
+            case AutoStopStatus::ESTIMATED: status = "制动预计完成，松开允许键恢复移动"; break;
+            case AutoStopStatus::CANCELED: status = "已取消"; break;
+            case AutoStopStatus::FAULT: status = "故障，需检查清理状态"; break;
+        }
+        ImGui::TextWrapped("会话：%s", status);
+        if (snapshot.auto_stop.independent_trigger_enabled) {
+            ImGui::TextWrapped("阻断原因：%s", AutoStopBlockReasonName(snapshot.auto_stop.block_reason));
+            if (!snapshot.auto_stop.source_focused)
+                ImGui::TextWrapped("等待源机焦点：请检查设置中的源状态桥接与源机前台游戏。");
+            if (snapshot.auto_stop.block_reason == AutoStopBlockReason::SOURCE_TIMING_INVALID)
+                ImGui::TextWrapped("源机时钟服务不可用或映射尚未建立，请检查源机时钟服务与连接状态。");
+            else if (!snapshot.auto_stop.target_available)
+                ImGui::TextWrapped("等待新鲜目标：需要有效源时钟及50毫秒内的配置目标检测。");
+        }
+        if (snapshot.auto_stop.telemetry_available) {
+            if (snapshot.auto_stop.use_counterpulse_timing)
+                ImGui::Text("运行急停时序：反向 %dms / 释放后 %dms", snapshot.auto_stop.counter_hold_ms,
+                    snapshot.auto_stop.shot_after_release_ms);
+            if (snapshot.auto_stop.status == AutoStopStatus::FAULT)
+                ImGui::TextWrapped("故障锁存仍保留；检查清理状态后停止并重新启动。");
+            if (snapshot.auto_stop.cleanup_unknown)
+                ImGui::TextWrapped("设备清理尚未确认；控制状态未知。");
+        } else {
+            ImGui::TextWrapped("本次会话暂无制动执行记录。");
+        }
+        ImGui::TextWrapped("预计完成仅表示制动计划结束，不代表实测停稳或允许开火。");
+        if (snapshot.auto_stop.status == AutoStopStatus::MASKED)
+            ImGui::TextWrapped("方向重叠或制动历史不可用：已阻止方向键继续输入，保持至松开急停键；未执行反向制动，可能仍有惯性滑行。");
+        ImGui::Separator();
         ImGui::TextWrapped("按住快捷键且准星进入人物完整检测范围时制动；无需开启自动扳机，不使用扳机缩小区域。");
         ImGui::TextWrapped("准星进入人物范围用于首次触发；接管WASD后，制动途中和保持期间的离框、目标消失或换向都不会解除。松开允许键恢复移动；失焦、救援和输入异常仍会安全释放。");
         ImGui::TextWrapped("面向单方向及相邻双键移动；自动急停与物理输出安全急停相互独立。");
@@ -2996,43 +3036,6 @@ struct Overlay::Impl {
         }
         ImGui::EndDisabled();
         show_help_tooltip("仅调整本次会话；暂停会取消当前请求，恢复不会重放旧请求。预计完成不是观察停稳；只有显式估计联动才将其作为扳机的一项条件。");
-        const char* status = "已关闭";
-        switch (snapshot.auto_stop.status) {
-            case AutoStopStatus::DISABLED: status = "已关闭"; break;
-            case AutoStopStatus::UNSUPPORTED_BACKEND: status = "需要 KMBOX NET"; break;
-            case AutoStopStatus::UNBOUND: status = "未绑定允许键"; break;
-            case AutoStopStatus::AWAITING_VALIDATION: status = "待设备与制动验证"; break;
-            case AutoStopStatus::PAUSED: status = "已暂停"; break;
-            case AutoStopStatus::READY: status = "等待快捷键与目标"; break;
-            case AutoStopStatus::WAITING_INPUT: status = "等待有效输入"; break;
-            case AutoStopStatus::MASKED: status = "已屏蔽保持（未估算制动）"; break;
-            case AutoStopStatus::BRAKING: status = "制动中"; break;
-            case AutoStopStatus::ESTIMATED: status = "制动预计完成，松开允许键恢复移动"; break;
-            case AutoStopStatus::CANCELED: status = "已取消"; break;
-            case AutoStopStatus::FAULT: status = "故障，需检查清理状态"; break;
-        }
-        ImGui::TextWrapped("会话：%s", status);
-        if (snapshot.auto_stop.telemetry_available) {
-            if (snapshot.auto_stop.use_counterpulse_timing)
-                ImGui::Text("运行急停时序：反向 %dms / 释放后 %dms", snapshot.auto_stop.counter_hold_ms,
-                    snapshot.auto_stop.shot_after_release_ms);
-            if (snapshot.auto_stop.status == AutoStopStatus::FAULT)
-                ImGui::TextWrapped("故障锁存仍保留；检查清理状态后停止并重新启动。");
-            if (snapshot.auto_stop.cleanup_unknown)
-                ImGui::TextWrapped("设备清理尚未确认；控制状态未知。");
-        } else {
-            ImGui::TextWrapped("本次会话暂无制动执行记录。");
-        }
-        ImGui::TextWrapped("预计完成仅表示制动计划结束，不代表实测停稳或允许开火。");
-        if (snapshot.auto_stop.status == AutoStopStatus::MASKED)
-            ImGui::TextWrapped("方向重叠或制动历史不可用：已阻止方向键继续输入，保持至松开急停键；未执行反向制动，可能仍有惯性滑行。");
-        if (snapshot.auto_stop.independent_trigger_enabled) {
-            ImGui::TextWrapped("当前条件：%s", AutoStopBlockReasonName(snapshot.auto_stop.block_reason));
-            if (!snapshot.auto_stop.source_focused)
-                ImGui::TextWrapped("等待源机焦点：请检查设置中的源状态桥接与源机前台游戏。");
-            if (!snapshot.auto_stop.target_available)
-                ImGui::TextWrapped("等待新鲜目标：需要有效源时钟及50毫秒内的配置目标检测。");
-        }
         end_config_panel();
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         render_trigger_config(snapshot, app_config, can_edit, key_active);
