@@ -5254,10 +5254,15 @@ struct Aim::Impl {
                 }
             }
         }
-        // 缺少独立来源时，保留 R 状态但复用基础 PI 对当前点的输出方向资格。
-        const float residual_eligible_pi = background_role
+        // 独立背景且启用延迟补偿时，PI只纠正已计入世界预览/在途库存的
+        // 执行位置，运动由下方M承担。关闭补偿时没有完整世界预览，保留
+        // 原反馈职责；缺测仍用源位置方向。抑制份额由既有anti-windup回写。
+        const float residual_position_direction = background_role
+            ? (residual_position_request > 0.0f ? 1.0f : (residual_position_request < 0.0f ? -1.0f : 0.0f))
+            : x_error_direction;
+        const float residual_eligible_pi = background_role && !config.enable_delay_compensation
             ? filtered_x
-            : x_error_direction * std::max(0.0f, x_error_direction * filtered_x);
+            : residual_position_direction * std::max(0.0f, residual_position_direction * filtered_x);
         if (residual_role) {
             applied_maintenance_request_x = nominal_request;
             motion_compensated_x = residual_eligible_pi + nominal_request;
