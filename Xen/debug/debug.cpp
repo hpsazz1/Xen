@@ -363,6 +363,9 @@ std::string auto_stop_metadata_json(const AutoStopConfig& config,
     std::ostringstream output;
     output << "{\"schema\":2,\"enabled\":" << bool_name(config.enabled)
            << ",\"activation_virtual_key\":" << config.activation_virtual_key
+           << ",\"strategy\":\"" << (config.use_counterpulse_timing ? "H40_COUNTERPULSE" : "LEGACY_ESTIMATED") << '"'
+           << ",\"counter_hold_ms\":" << config.counter_hold_ms
+           << ",\"shot_after_release_ms\":" << config.shot_after_release_ms
            << ",\"status\":\"" << AutoStopStatusName(snapshot.status)
            << "\",\"device_protocol_available\":"
            << bool_name(snapshot.device_protocol_available)
@@ -376,6 +379,14 @@ std::string auto_stop_metadata_json(const AutoStopConfig& config,
         else output << "null";
     };
     metric("request_id", snapshot.request_id, snapshot.requests != 0);
+    const auto stop_stamp = [&](const char* name, std::int64_t value) {
+        output << ",\"" << name << "\":";
+        if (snapshot.telemetry_available && snapshot.use_counterpulse_timing && value > 0)
+            output << '"' << value << '"';
+        else output << "null";
+    };
+    stop_stamp("counter_release_ack_steady_ns", snapshot.counter_release_ack_ns);
+    stop_stamp("completion_ready_steady_ns", snapshot.completion_ready_ns);
     metric("requests", snapshot.requests, true);
     metric("completed", snapshot.completed, true);
     metric("canceled", snapshot.canceled, true);
@@ -420,6 +431,7 @@ std::string trigger_metadata_json(const TriggerConfig& config,
     };
     field("hold_virtual_key", config.hold_virtual_key);
     field("require_stop", config.require_stop);
+    field("allow_estimated_stop", config.allow_estimated_stop);
     field("fire_delay_ms", config.fire_delay_ms);
     field("shot_interval_ms", config.shot_interval_ms);
     field("press_duration_ms", config.press_duration_ms);

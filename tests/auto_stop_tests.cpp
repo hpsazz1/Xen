@@ -12,6 +12,42 @@ void expect(bool value, const char* message) {
 
 int main() {
     constexpr std::int64_t base = 1000000000, ms = 1000000;
+    for (const std::uint8_t direction : {1, 2, 4, 8, 3, 9, 6, 12}) {
+        AutoStopConfig h40; h40.use_counterpulse_timing = true;
+        AutoStopController c(h40); WasdInputHistory history;
+        c.observe(history.observe(0, 1, 1, base), base);
+        c.observe(history.observe(direction, 1, 2, base + ms), base + ms);
+        auto d = c.request(1, base + 2 * ms);
+        expect(d.phase == AutoStopPhase::WAITING_ACK && d.desired_mask == 0,
+            "H40先提交全零，不注入测试正向移动");
+        d = c.acknowledge(1, d.command_id, 0, base + 3 * ms);
+        const auto inverse = static_cast<std::uint8_t>(((direction & 1) << 2) | ((direction & 4) >> 2) |
+            ((direction & 2) << 2) | ((direction & 8) >> 2));
+        expect(d.phase == AutoStopPhase::WAITING_ACK && d.desired_mask == inverse &&
+            d.axis_deadline_ns == std::array<std::int64_t, 2>{}, "全零ACK后按真实方向反向，反向ACK前无hold期限");
+        expect(c.tick(base + 70 * ms).phase == AutoStopPhase::WAITING_ACK,
+            "反向ACK迟到不能按提交时刻提前释放");
+        d = c.acknowledge(1, d.command_id, inverse, base + 80 * ms);
+        expect(c.tick(base + 120 * ms - 1).phase == AutoStopPhase::BRAKING,
+            "反向ACK加40ms之前必须保持");
+        d = c.tick(base + 120 * ms);
+        expect(d.phase == AutoStopPhase::WAITING_ACK && d.desired_mask == 0,
+            "反向ACK加40ms请求全零释放");
+        expect(c.tick(base + 180 * ms).phase == AutoStopPhase::WAITING_ACK,
+            "最终全零未ACK不能开始18ms或提供完成资格");
+        d = c.acknowledge(1, d.command_id, 0, base + 200 * ms);
+        expect(d.phase == AutoStopPhase::SETTLING && d.completion_ready_ns == base + 218 * ms,
+            "最终全零ACK后单独等待18ms");
+        auto canceled = c;
+        canceled.cancel(1, base + 205 * ms);
+        expect(canceled.tick(base + 218 * ms).phase == AutoStopPhase::CANCELLED,
+            "18ms等待期间取消不能恢复完成");
+        expect(c.tick(base + 218 * ms - 1).phase == AutoStopPhase::SETTLING,
+            "18ms等待未到不能完成");
+        d = c.tick(base + 218 * ms);
+        expect(d.phase == AutoStopPhase::COMPLETE_ESTIMATED && !d.fire_permitted && d.desired_mask == 0,
+            "40+18仅完成估计，不伪造真实停稳观察或左键");
+    }
     {
         WasdInputHistory history;
         expect(!history.observe(2, 1, 1, base).input_continuous, "首次持键不得冒充连续历史");

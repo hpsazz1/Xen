@@ -104,19 +104,26 @@ struct Fixture {
     std::function<void()> focus_hook;
     std::atomic<std::uint64_t> context_generation{0};
     std::atomic<bool> context_required{false}, context_valid{false};
+    std::atomic<bool> timing_required{false}, timing_valid{false};
+    std::atomic<int> shot_hold_ms{60}, fire_interval_ms{600};
+    std::atomic<std::uint64_t> estimated_id{0};
     std::function<void()> context_hook;
+    std::function<void()> estimated_hook;
     TriggerWorker worker{mouse, arbiter, [&] { return permitted.load(); }, [&] {
         if (focus_hook) focus_hook(); return focused.load();
     }, [&] { return std::uint64_t(++ids); }, [&](std::uint64_t) { ++requests; return true; },
         [&](std::uint64_t) { ++cancellations; }, [&] {
             if (context_hook) context_hook();
-            return TriggerContext{context_generation.load(), context_required.load(), context_valid.load()};
-        }};
-    bool start(bool stop=false, int age=50, int cleanup_budget_ms=1000, int press_ms=10, bool fire_enabled=true) {
+            return TriggerContext{context_generation.load(), context_required.load(), context_valid.load(),
+                timing_required.load(), timing_valid.load(), shot_hold_ms.load(), fire_interval_ms.load()};
+        }, [&] { if (estimated_hook) estimated_hook(); return estimated_id.load(); }};
+    bool start(bool stop=false, int age=50, int cleanup_budget_ms=1000, int press_ms=10, bool fire_enabled=true,
+        bool estimated=false) {
         TriggerConfig cfg;
         cfg.enabled=true; cfg.hold_virtual_key=5; cfg.fire_delay_ms=0;
         cfg.fire_enabled = fire_enabled;
         cfg.max_observation_age_ms=age; cfg.require_stop=stop;
+        cfg.allow_estimated_stop = estimated;
         cfg.press_duration_ms=press_ms; cfg.shot_interval_ms=120;
         if (!worker.start(cfg, cleanup_budget_ms)) return false;
         // 必须先取得健康的真实释放，不能启动即按住开火。
@@ -190,6 +197,58 @@ void final_revalidation() {
     permission.permitted=false; permission.fire();
     expect(until([&] { return permission.worker.snapshot().reason == TriggerReason::PERMISSION; }), "失去许可应拒绝");
     expect(permission.mouse->count(true)==0, "无许可无down"); permission.worker.stop();
+}
+void estimated_stop_callback_and_revalidation() {
+    Fixture f;
+    expect(f.start(true, 1000, 1000, 100, true, true), "估计策略worker启动");
+    f.fire();
+    expect(until([&] { return f.worker.snapshot().reason == TriggerReason::STOP_UNVERIFIED; }),
+        "估计回调为空时等待资格");
+    expect(f.requests == 0 && f.ids == 0 && f.mouse->count(true) == 0, "估计策略不申请显式租约");
+    f.estimated_id = 77;
+    expect(until([&] { return f.worker.firing_signal().confirmed_down; }), "独立估计资格就绪允许DOWN");
+    expect(f.worker.snapshot().estimated_stop_request_id == 77, "运行快照保存独立急停id");
+    f.estimated_id = 0;
+    expect(until([&] { return f.mouse->count(false) == 1 && !f.worker.firing_signal().confirmed_down; }),
+        "估计资格撤销立即UP并归零开火信号");
+    f.worker.stop();
+    expect(f.requests == 0 && f.cancellations == 0, "扳机不申请或取消独立急停");
+
+    Fixture rejected;
+    rejected.estimated_id = 88;
+    std::atomic<bool> at_gate{true};
+    rejected.estimated_hook = [&] {
+        if (rejected.arbiter->snapshot().sources[static_cast<std::size_t>(OutputArbiterSource::TRIGGER)].acquired &&
+            at_gate.exchange(false)) rejected.estimated_id = 0;
+    };
+    expect(rejected.start(true, 1000, 1000, 100, true, true), "估计资格二检回归启动"); rejected.fire();
+    expect(until([&] {
+        for (const auto& event : rejected.worker.execution_log().events)
+            if (event.button_action == TriggerButtonAction::DOWN && !event.backend_called &&
+                std::string_view(event.rejection_reason) == "stop_unverified") return true;
+        return false;
+    }), "拿门后撤销估计资格必须记为未发送");
+    rejected.worker.stop();
+    expect(rejected.mouse->count(true) == 0 && rejected.mouse->count(false) == 0,
+        "二检撤销不发送DOWN也不伪造UP");
+}
+void timing_change_at_down_revalidation() {
+    Fixture f;
+    f.context_generation = 1; f.timing_required = f.timing_valid = true;
+    std::atomic<bool> change_at_gate{true};
+    f.context_hook = [&] {
+        if (f.arbiter->snapshot().sources[static_cast<std::size_t>(OutputArbiterSource::TRIGGER)].acquired &&
+            change_at_gate.exchange(false)) f.shot_hold_ms = 80;
+    };
+    expect(f.start(false, 1000), "仅武器时序上下文二检启动"); f.fire();
+    expect(until([&] {
+        for (const auto& event : f.worker.execution_log().events)
+            if (event.button_action == TriggerButtonAction::DOWN && !event.backend_called &&
+                std::string_view(event.rejection_reason) == "context_changed") return true;
+        return false;
+    }), "二检即使代际漏增也拒绝变化的点射标量");
+    f.worker.stop();
+    expect(f.mouse->count(true) == 0, "不要求GSI身份仍须检查武器时序变更");
 }
 void context_change_at_down_revalidation() {
     for (const bool invalid : {false, true}) {
@@ -434,6 +493,7 @@ void exception_uses_bounded_cleanup() {
 
 }
 int main() {
+    estimated_stop_callback_and_revalidation(); timing_change_at_down_revalidation();
     fire_disabled_no_output_or_receipt();
     autonomous_cleanup(); unknown_and_late_ack(); final_revalidation(); unverified_stop_and_contention();
     context_change_at_down_revalidation(); context_change_releases_held_button();

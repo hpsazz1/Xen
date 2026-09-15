@@ -117,8 +117,15 @@ std::array<double, 2> direction(std::uint8_t mask) noexcept {
 }
 }
 bool AutoStopController::active() const noexcept {
-    return decision_.phase == AutoStopPhase::WAITING_ACK || decision_.phase == AutoStopPhase::BRAKING;
+    return decision_.phase == AutoStopPhase::WAITING_ACK || decision_.phase == AutoStopPhase::BRAKING ||
+        decision_.phase == AutoStopPhase::SETTLING;
 }
+AutoStopController::AutoStopController(const AutoStopConfig& config) noexcept
+    : counterpulse_(config.use_counterpulse_timing),
+      timing_valid_(config.counter_hold_ms >= 1 && config.counter_hold_ms <= 200 &&
+          config.shot_after_release_ms >= 0 && config.shot_after_release_ms <= 200),
+      counter_hold_ns_(std::int64_t(config.counter_hold_ms) * 1000000),
+      after_release_ns_(std::int64_t(config.shot_after_release_ms) * 1000000) {}
 bool AutoStopController::resume_after_masked_hold(
         const WasdMotionIntent& intent, std::int64_t released_at_ns) noexcept {
     if (decision_.phase != AutoStopPhase::COMPLETE_ESTIMATED ||
@@ -160,7 +167,7 @@ void AutoStopController::invalidate() noexcept {
 }
 bool AutoStopController::advance(std::int64_t now_ns) noexcept {
     if (now_ns <= 0 || now_ns < time_ns_) { invalidate(); return false; }
-    if (synchronized_ && time_ns_ != 0) {
+    if (!counterpulse_ && synchronized_ && time_ns_ != 0) {
         const auto target = direction(output_started_ ? applied_mask_ : input_.held_mask);
         const double dt = double(now_ns - time_ns_) / 1e9;
         for (int axis = 0; axis < 2; ++axis) {
@@ -251,6 +258,15 @@ AutoStopDecision AutoStopController::request(std::uint64_t id, std::int64_t now_
     request_watermark_ = id;
     if (!advance(now_ns) || !synchronized_) { invalidate(); return decision_; }
     decision_.request_id = id;
+    decision_.completion_ready_ns = 0;
+    if (counterpulse_) {
+        if (!timing_valid_ || input_.held_mask == 0) { invalidate(); return decision_; }
+        counter_mask_ = static_cast<std::uint8_t>(((input_.held_mask & 1) << 2) | ((input_.held_mask & 4) >> 2) |
+            ((input_.held_mask & 2) << 2) | ((input_.held_mask & 8) >> 2));
+        initial_zero_ = true;
+        issue(0);
+        return decision_;
+    }
     std::uint8_t mask = 0;
     if (state_[0] > 0) mask |= 4; else if (state_[0] < 0) mask |= 1;
     if (state_[1] > 0) mask |= 2; else if (state_[1] < 0) mask |= 8;
@@ -263,6 +279,14 @@ AutoStopDecision AutoStopController::tick(std::int64_t now_ns) noexcept {
         return decision_;
     }
     if (!advance(now_ns)) return decision_;
+    if (decision_.phase == AutoStopPhase::SETTLING) {
+        if (now_ns >= decision_.completion_ready_ns) {
+            decision_.phase = AutoStopPhase::COMPLETE_ESTIMATED;
+            masked_hold_model_valid_ = synchronized_;
+            synchronized_ = false;
+        }
+        return decision_;
+    }
     if (decision_.phase != AutoStopPhase::BRAKING) return decision_;
     auto mask = applied_mask_;
     if (decision_.axis_deadline_ns[0] && now_ns >= decision_.axis_deadline_ns[0]) mask = static_cast<std::uint8_t>(mask & ~5U);
@@ -277,7 +301,19 @@ AutoStopDecision AutoStopController::acknowledge(std::uint64_t id, std::uint64_t
     if (!advance(now_ns)) return decision_;
     output_started_ = true;
     applied_mask_ = mask;
+    if (counterpulse_ && initial_zero_) {
+        initial_zero_ = false;
+        issue(counter_mask_);
+        return decision_;
+    }
     if (mask == 0) {
+        if (counterpulse_) {
+            if (now_ns > std::numeric_limits<std::int64_t>::max() - after_release_ns_) { invalidate(); return decision_; }
+            decision_.phase = AutoStopPhase::SETTLING;
+            decision_.axis_deadline_ns = {};
+            decision_.completion_ready_ns = now_ns + after_release_ns_;
+            return tick(now_ns);
+        }
         decision_.phase = AutoStopPhase::COMPLETE_ESTIMATED;
         decision_.axis_deadline_ns = {};
         // 真实剩余速度未知。正常路径仍需物理释放；仅有完整输出归还
@@ -286,7 +322,12 @@ AutoStopDecision AutoStopController::acknowledge(std::uint64_t id, std::uint64_t
         synchronized_ = false;
     } else {
         decision_.phase = AutoStopPhase::BRAKING;
-        deadlines(now_ns);
+        if (counterpulse_) {
+            if (now_ns > std::numeric_limits<std::int64_t>::max() - counter_hold_ns_) { invalidate(); return decision_; }
+            decision_.axis_deadline_ns = {};
+            if (mask & 5) decision_.axis_deadline_ns[0] = now_ns + counter_hold_ns_;
+            if (mask & 10) decision_.axis_deadline_ns[1] = now_ns + counter_hold_ns_;
+        } else deadlines(now_ns);
     }
     return decision_;
 }

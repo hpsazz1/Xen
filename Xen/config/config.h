@@ -92,6 +92,10 @@ struct AppConfig {
     source_context::SourceContextConfig source_context;
     RecoilConfig recoil;
     weapon::GsiConfig gsi;
+    // 独立于弹道启用；启动时读取一次，运行中固定版本。
+    bool weapon_timing_enabled = false;
+    std::string weapon_timing_file = "cache/recoil/weapon-timing.json";
+    std::string weapon_timing_manual_id;
     LogConfig log = [] {
         LogConfig value;
         value.global_level = LogLevel::INFO;

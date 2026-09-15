@@ -120,6 +120,7 @@ TriggerDecision TriggerController::result(TriggerTime now) const noexcept {
 TriggerDecision TriggerController::release(TriggerReason reason, TriggerTime now) noexcept {
     candidate_valid_ = false;
     state_.region = TriggerRegion::NONE;
+    state_.estimated_stop_request_id = 0;
     state_.reason = reason;
     TriggerDecision decision;
     if (state_.button_may_be_down && pending_ != TriggerButtonAction::UP) {
@@ -154,9 +155,18 @@ TriggerDecision TriggerController::cancel(TriggerReason reason, TriggerTime now)
 std::optional<TriggerDecision> TriggerController::check_context(const TriggerPermit& permit, TriggerTime now) noexcept {
     const auto previous = state_.context;
     state_.context = permit.context;
-    const bool changed = previous.required != permit.context.required ||
+    const bool timing_required = config_.fire_mode == TriggerFireMode::SINGLE && permit.context.timing_required;
+    const bool timing_changed = config_.fire_mode == TriggerFireMode::SINGLE &&
+        (previous.timing_required != permit.context.timing_required ||
+        (timing_required && (previous.generation != permit.context.generation ||
+            previous.timing_valid != permit.context.timing_valid || previous.shot_hold_ms != permit.context.shot_hold_ms ||
+            previous.fire_interval_ms != permit.context.fire_interval_ms)));
+    const bool changed = timing_changed || previous.required != permit.context.required ||
         (permit.context.required && (previous.generation != permit.context.generation || previous.valid != permit.context.valid));
-    const bool available = !permit.context.required || (permit.context.valid && permit.context.generation != 0);
+    const bool available = (!permit.context.required || (permit.context.valid && permit.context.generation != 0)) &&
+        (!timing_required || (permit.context.timing_valid && permit.context.generation != 0 &&
+            permit.context.shot_hold_ms >= 1 && permit.context.shot_hold_ms <= 500 &&
+            permit.context.fire_interval_ms >= permit.context.shot_hold_ms && permit.context.fire_interval_ms <= 2000));
     if (!changed && available) return std::nullopt;
     auto decision = cancel(available ? TriggerReason::CONTEXT_CHANGED : TriggerReason::CONTEXT_UNAVAILABLE, now);
     // 变化当次已观察到健康释放时可作为新边沿起点；失效期间的释放不能武装恢复后的上下文。
@@ -265,7 +275,14 @@ TriggerDecision TriggerController::tick(const TriggerPermit& permit, TriggerTime
     if (!release_seen_) return release(TriggerReason::WAIT_RELEASE, now);
     if (!candidate_valid_) return release(TriggerReason::NO_CANDIDATE, now);
     if (now >= observation_expires_) return release(TriggerReason::STALE, now);
-    if (config_.require_stop && state_.stop_request_id) {
+    if (config_.require_stop && config_.allow_estimated_stop && pending_ != TriggerButtonAction::UP) {
+        const bool qualified = permit.stop_estimated_qualified && permit.estimated_stop_request_id != 0;
+        if (state_.button_may_be_down && (!qualified ||
+            state_.estimated_stop_request_id != permit.estimated_stop_request_id))
+            return release(TriggerReason::STOP_EXPIRED, now);
+        state_.estimated_stop_request_id = qualified ? permit.estimated_stop_request_id : 0;
+    }
+    if (config_.require_stop && !config_.allow_estimated_stop && state_.stop_request_id) {
         stop_expires_ = permit.stop_expires_at;
         stop_release_deadline_ = permit.stop_release_deadline;
         const bool qualified = permit.stop_observed_qualified && permit.stop_request_id == state_.stop_request_id &&
@@ -287,7 +304,7 @@ TriggerDecision TriggerController::tick(const TriggerPermit& permit, TriggerTime
         }
         return result(now);
     }
-    if (config_.require_stop && state_.stop_request_id == 0) {
+    if (config_.require_stop && !config_.allow_estimated_stop && state_.stop_request_id == 0) {
         if (permit.next_stop_request_id == 0 || permit.next_stop_request_id <= last_stop_id_) {
             state_.phase = TriggerPhase::WAIT_STOP; state_.reason = TriggerReason::STOP_UNVERIFIED; return result(now);
         }
@@ -302,8 +319,11 @@ TriggerDecision TriggerController::tick(const TriggerPermit& permit, TriggerTime
     if (now < qualified_at_ + Ms(config_.fire_delay_ms)) {
         state_.phase = TriggerPhase::QUALIFYING; state_.reason = TriggerReason::DELAY; return result(now);
     }
-    if (config_.require_stop && !(permit.stop_observed_qualified && permit.stop_request_id == state_.stop_request_id &&
-        permit.stop_observation_epoch == state_.observation_epoch && permit.stop_expires_at > now && permit.stop_release_deadline > now)) {
+    const bool stop_qualified = config_.allow_estimated_stop ?
+        (permit.stop_estimated_qualified && permit.estimated_stop_request_id != 0) :
+        (permit.stop_observed_qualified && permit.stop_request_id == state_.stop_request_id &&
+            permit.stop_observation_epoch == state_.observation_epoch && permit.stop_expires_at > now && permit.stop_release_deadline > now);
+    if (config_.require_stop && !stop_qualified) {
         state_.phase = TriggerPhase::WAIT_STOP; state_.reason = TriggerReason::STOP_UNVERIFIED; return result(now);
     }
     if (now < cooldown_until_) { state_.phase = TriggerPhase::COOLDOWN; state_.reason = TriggerReason::COOLDOWN; return result(now); }
@@ -320,6 +340,12 @@ TriggerDecision TriggerController::tick(const TriggerPermit& permit, TriggerTime
         state_.faulted = true; state_.phase = TriggerPhase::FAULT; state_.reason = TriggerReason::COUNTER_EXHAUSTED; return result(now);
     }
     pending_ = TriggerButtonAction::DOWN;
+    state_.firing_context = state_.context;
+    state_.firing_context_available = true;
+    const bool weapon_timing = config_.fire_mode == TriggerFireMode::SINGLE && permit.context.timing_required;
+    active_hold_ms_ = config_.fire_mode == TriggerFireMode::AUTOMATIC ? config_.max_hold_ms :
+        weapon_timing ? permit.context.shot_hold_ms : config_.press_duration_ms;
+    active_interval_ms_ = weapon_timing ? permit.context.fire_interval_ms : config_.shot_interval_ms;
     unconfirmed_down_ = true;
     pending_at_ = now;
     state_.command_id = ++next_command_id_;
@@ -334,7 +360,11 @@ TriggerDecision TriggerController::tick(const TriggerPermit& permit, TriggerTime
 
 TriggerDecision TriggerController::acknowledge(const TriggerReceipt& receipt, TriggerTime now) noexcept {
     if (pending_ == TriggerButtonAction::NONE || receipt.command_id != state_.command_id || receipt.action != pending_) return result(now);
-    const bool valid_time = now >= last_now_ && receipt.completed_at >= pending_at_ && receipt.completed_at <= now;
+    const auto submitted_at = receipt.submitted_at == TriggerTime{} ? receipt.completed_at : receipt.submitted_at;
+    const auto protocol_ack_at = receipt.protocol_ack_received_at == TriggerTime{} ?
+        receipt.completed_at : receipt.protocol_ack_received_at;
+    const bool valid_time = now >= last_now_ && receipt.completed_at >= pending_at_ && receipt.completed_at <= now &&
+        submitted_at >= pending_at_ && submitted_at <= protocol_ack_at && protocol_ack_at <= receipt.completed_at;
     last_now_ = std::max(last_now_, now);
     if (!valid_time || receipt.status == TriggerReceiptStatus::UNKNOWN) {
         state_.faulted = true;
@@ -358,16 +388,17 @@ TriggerDecision TriggerController::acknowledge(const TriggerReceipt& receipt, Tr
     if (action == TriggerButtonAction::DOWN) {
         unconfirmed_down_ = false;
         state_.phase = TriggerPhase::HELD;
-        cooldown_until_ = receipt.completed_at + Ms(config_.shot_interval_ms);
-        held_until_ = receipt.completed_at + Ms(config_.fire_mode == TriggerFireMode::SINGLE ? config_.press_duration_ms : config_.max_hold_ms);
+        cooldown_until_ = submitted_at + Ms(active_interval_ms_);
+        // 与人工点射测试工具一致；连续扫射仍保持既有后端完成相位。
+        held_until_ = (config_.fire_mode == TriggerFireMode::SINGLE ? protocol_ack_at : receipt.completed_at) + Ms(active_hold_ms_);
         if (now >= observation_expires_) return release(TriggerReason::STALE, now);
-        if (config_.require_stop && (now >= stop_expires_ || now >= stop_release_deadline_))
+        if (config_.require_stop && !config_.allow_estimated_stop && (now >= stop_expires_ || now >= stop_release_deadline_))
             return release(TriggerReason::STOP_EXPIRED, now);
         if (now >= held_until_) return release(TriggerReason::RELEASED, now);
     } else {
         // 取消抢在 down 回执之前时，不能把可能已开火的事务当成没有冷却。
         // up 完成是可证明的保守参考；过期 down 回执不会推进新事务。
-        if (unconfirmed_down_) cooldown_until_ = std::max(cooldown_until_, receipt.completed_at + Ms(config_.shot_interval_ms));
+        if (unconfirmed_down_) cooldown_until_ = std::max(cooldown_until_, receipt.completed_at + Ms(active_interval_ms_));
         unconfirmed_down_ = false;
         state_.button_may_be_down = false;
         state_.phase = state_.faulted ? TriggerPhase::FAULT : TriggerPhase::COOLDOWN;

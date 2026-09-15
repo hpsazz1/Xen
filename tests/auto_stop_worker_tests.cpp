@@ -57,7 +57,10 @@ public:
     }
     KeyboardReceipt set_wasd_keyboard(std::uint8_t mask) noexcept override {
         std::unique_lock<std::mutex> lock(mutex); software.push_back(mask); current_software = mask;
+        software_started.push_back(Clock::now());
+        if (mask != 0 && reverse_ack_delay_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(reverse_ack_delay_ms));
         auto result = acknowledged();
+        software_ack.push_back(result.protocol_ack_received_at);
         if (software_fail_at == software.size()) result.disposition = KeyboardDisposition::APPLICATION_UNKNOWN;
         auto callback = software.size() == 1 ? after_first_software : std::function<void()>{};
         lock.unlock();
@@ -109,6 +112,8 @@ public:
     std::mutex mutex;
     std::deque<WasdEvent> events;
     std::vector<int> software, masks;
+    std::vector<Clock::time_point> software_started, software_ack;
+    int reverse_ack_delay_ms = 0;
     std::array<bool, 256> extra_keys{};
     std::uint64_t sequence = 0, delivered_sequence = 0;
     std::uint8_t held = 0, installed_masks = 0, current_software = 0;
@@ -133,6 +138,76 @@ int main() {
     try {
         const AutoStopConfig config{true, 5};
         {
+            auto fake = std::make_shared<Fake>(); fake->reverse_ack_delay_ms = 25;
+            std::atomic<std::uint64_t> id{0};
+            AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+                [&] { return ++id; }, [] { return true; });
+            auto h40 = config; h40.use_counterpulse_timing = true;
+            require(worker.start(h40), "H40生产worker回归启动");
+            ready(worker, fake);
+            worker.publish_target(Clock::now() + std::chrono::seconds(1));
+            wait_for([&] { return worker.snapshot().completion_ready_ns != 0; });
+            const auto settling = worker.snapshot();
+            require(settling.use_counterpulse_timing && settling.counter_hold_ms == 40 && settling.shot_after_release_ms == 18 &&
+                settling.completion_ready_ns - settling.counter_release_ack_ns == 18000000,
+                "生产快照明确H40与最终zero ACK加18ms截止");
+            while (clock_ns() < settling.completion_ready_ns) {
+                const auto before = clock_ns();
+                const auto completion = worker.estimated_completion_id();
+                if (clock_ns() < settling.completion_ready_ns && before < settling.completion_ready_ns)
+                    require(completion == 0, "18ms到期前不能发布独立完成id");
+                std::this_thread::yield();
+            }
+            wait_for([&] { return worker.estimated_completion_id() != 0; });
+            { std::lock_guard<std::mutex> lock(fake->mutex);
+              require(fake->software == std::vector<int>({0, 4, 0}), "H40只发zero反向zero，不注入正向移动或循环");
+              require(fake->software_started[2] - fake->software_ack[1] >= std::chrono::milliseconds(40),
+                  "反向ACK迟到后仍完整等待40ms才发zero"); }
+            worker.stop();
+            require(fake->released(), "H40停止归还全部屏蔽及软件键");
+        }
+        for (int revoke = 0; revoke < 3; ++revoke) {
+            auto fake = std::make_shared<Fake>(); std::atomic<std::uint64_t> id{0};
+            AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+                [&] { return ++id; }, [] { return true; });
+            auto h40 = config; h40.use_counterpulse_timing = true; h40.shot_after_release_ms = 150;
+            require(worker.start(h40), "H40等待期取消回归启动"); ready(worker, fake);
+            worker.publish_target(Clock::now() + std::chrono::seconds(1));
+            wait_for([&] { return worker.snapshot().completion_ready_ns != 0; });
+            if (revoke == 0) worker.set_paused(true);
+            if (revoke == 1) { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
+            if (revoke == 2) {
+                { std::lock_guard<std::mutex> lock(fake->mutex); fake->cleanup_fails = true; }
+                worker.cancel(worker.snapshot().request_id);
+            }
+            wait_for([&] { return worker.snapshot().canceled != 0; });
+            require(worker.estimated_completion_id() == 0 && worker.snapshot().completed == 0,
+                "等待期暂停/松键/清理故障不能提升为完成");
+            if (revoke == 2) require(worker.snapshot().cleanup_unknown, "未知清理保留债务");
+            worker.stop();
+        }
+        for (int revoke = 0; revoke < 3; ++revoke) {
+            auto fake = std::make_shared<Fake>();
+            std::atomic<std::uint64_t> id{0};
+            AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+                [&] { return ++id; }, [] { return true; });
+            require(worker.start(config), "独立估计资格回归启动");
+            ready(worker, fake);
+            require(worker.estimated_completion_id() == 0, "尚未完成不能提供估计资格");
+            worker.publish_target(Clock::now() + std::chrono::seconds(1));
+            wait_for([&] { return worker.snapshot().status == AutoStopStatus::ESTIMATED; });
+            const auto completed_id = worker.estimated_completion_id();
+            require(completed_id != 0 && completed_id == worker.snapshot().request_id && !worker.snapshot().fire_permitted,
+                "独立完成提供对应id，不能伪造严格观察开火资格");
+            if (revoke == 0) worker.cancel(completed_id);
+            if (revoke == 1) worker.set_paused(true);
+            if (revoke == 2) { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
+            require(worker.estimated_completion_id() == 0, "取消、暂停、允许键松开必须立即撤销估计资格");
+            wait_for([&] { return fake->released(); });
+            worker.stop();
+            require(worker.estimated_completion_id() == 0, "停止后估计资格保持归零");
+        }
+        {
             auto fake = std::make_shared<Fake>();
             std::atomic<std::uint64_t> id{0};
             AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
@@ -156,6 +231,7 @@ int main() {
             wait_for([&] { return worker.snapshot().status == AutoStopStatus::MASKED; });
             require(worker.snapshot().requests == 1 && worker.snapshot().completed == 0 &&
                 !worker.snapshot().fire_permitted, "仅屏蔽不是估算停稳，不得授予开火");
+            require(worker.estimated_completion_id() == 0, "仅屏蔽不能提供估计完成id");
             const auto masked_reports = fake->reports();
             require(!masked_reports.empty() && std::all_of(masked_reports.begin(), masked_reports.end(),
                 [](int mask) { return mask == 0; }), "模型不可用时只能发送零软件报告");
@@ -655,6 +731,7 @@ int main() {
                 "制动独占必须与普通锁竞争区分");
             wait_for([&] { return worker.snapshot().status == AutoStopStatus::ESTIMATED; });
             worker.cancel(999);
+            require(worker.estimated_completion_id() == 0, "显式请求完成不能冒充独立锁存估计资格");
             fake->physical(1);
             wait_for([&] { return fake->drained(); });
             std::this_thread::sleep_for(std::chrono::milliseconds(5));

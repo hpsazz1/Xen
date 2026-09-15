@@ -2,6 +2,7 @@
 #include "recoil/recoil_store.h"
 #include "recoil/recoil_calibration_io.h"
 #include "recoil_tuner/recoil_tuner.h"
+#include "weapon/weapon_timing.h"
 
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
@@ -125,6 +126,112 @@ struct RecoilPanel::Impl {
     std::string calibration_output = new_output_directory("calibration");
     std::string calibration_request_file, calibration_command;
     std::string calibration_prepared_identity;
+
+    weapon::TimingCatalog timing_catalog = weapon::default_timing_catalog();
+    std::string timing_loaded_path, timing_path_draft, timing_status;
+    std::size_t timing_selected = 0;
+    bool timing_loaded = false, timing_valid = false, timing_dirty = false;
+
+    void load_timing(const std::string& path) {
+        // 仅首次展开、应用路径或显式重载访问磁盘；失败也缓存，避免每帧重试。
+        timing_loaded = true;
+        timing_loaded_path = timing_path_draft = path;
+        timing_valid = false;
+        timing_dirty = false;
+        std::error_code ec;
+        const auto file = std::filesystem::u8path(path);
+        const bool exists = std::filesystem::exists(file, ec);
+        if (path.empty() || ec) { timing_status = "资料路径不可用，请修正路径后重新载入。"; return; }
+        if (!exists) {
+            timing_catalog = weapon::default_timing_catalog();
+            timing_valid = true;
+            timing_status = path == "cache/recoil/weapon-timing.json" ?
+                "默认资料文件尚不存在，运行可直接使用33项内置实测资料；保存可生成独立资料文件。" :
+                "自定义资料文件不存在，以下仅为内置草稿。必须先保存资料再启动运行，否则启动将拒绝。";
+        } else {
+            timing_valid = weapon::load_timing_catalog(file, timing_catalog, timing_status);
+            if (timing_valid) timing_status = "已载入资料；界面编辑不会热改当前运行快照。";
+        }
+    }
+
+    void timing_settings(const RuntimeSnapshot& snapshot, AppConfig& config, bool can_edit) {
+        if (!ImGui::CollapsingHeader("共享武器点射节奏", ImGuiTreeNodeFlags_DefaultOpen)) return;
+        if (!timing_loaded || timing_loaded_path != config.weapon_timing_file) load_timing(config.weapon_timing_file);
+        ImGui::TextWrapped("仅用于自动扳机的点射节奏，独立于压枪开关；不改变持续扫射、弹道时间轴或急停参数。修改配置和资料在下一次启动运行时生效。");
+        ImGui::TextWrapped("当前GSI武器：%s（%s）", snapshot.weapon_snapshot.canonical_id.empty() ? "未知" : snapshot.weapon_snapshot.canonical_id.c_str(),
+            weapon::status_name(snapshot.weapon_snapshot.status));
+        const auto& active_timing = snapshot.trigger.context;
+        if (snapshot.state == RuntimeState::RUNNING && snapshot.trigger_telemetry_available &&
+            active_timing.timing_required && active_timing.timing_valid && active_timing.valid &&
+            active_timing.generation != 0 && !active_timing.timing_weapon_id.empty()) {
+            ImGui::TextWrapped("运行实际点射资料：%.*s / r%llu；按住 %dms，按下间隔 %dms。",
+                static_cast<int>(active_timing.timing_weapon_id.size()), active_timing.timing_weapon_id.data(),
+                static_cast<unsigned long long>(active_timing.timing_catalog_revision),
+                active_timing.shot_hold_ms, active_timing.fire_interval_ms);
+        } else ImGui::TextWrapped("运行点射资料：当前未启用或上下文无效，不可作为开火依据；下方为配置草稿。");
+        {
+            DisabledScope disabled(!can_edit);
+            if (form("weapon_timing_settings")) {
+                row("启用武器点射资料", "自动扳机点射读取所选武器的按住时长和提交间隔；不要求开启压枪。未知、失效或未启用的武器资料不能沿用上一把武器。");
+                ImGui::Checkbox("##weapon_timing_enabled", &config.weapon_timing_enabled);
+                row("资料文件", "回车应用路径并加载资料；只在首次、路径应用和手动重载时读盘。默认cache/recoil/weapon-timing.json缺失可直接使用内置33项，自定义路径缺失必须先保存。损坏文件不静默回退。");
+                if (ImGui::InputText("##weapon_timing_file", &timing_path_draft, ImGuiInputTextFlags_EnterReturnsTrue)) {
+                    config.weapon_timing_file = timing_path_draft;
+                    load_timing(config.weapon_timing_file);
+                }
+                row("武器选择", "自动按GSI上下文选择；手选是你对当前武器的明确声明，换枪时须同步调整。启用GSI时手选仍须与有效GSI武器一致；R8不能激活。使用全局保存配置保存选择。");
+                const char* selection = config.weapon_timing_manual_id.empty() ? "GSI自动识别" : config.weapon_timing_manual_id.c_str();
+                if (ImGui::BeginCombo("##weapon_timing_manual", selection)) {
+                    if (ImGui::Selectable("GSI自动识别", config.weapon_timing_manual_id.empty())) config.weapon_timing_manual_id.clear();
+                    if (timing_valid) for (const auto& profile : timing_catalog.profiles) {
+                        DisabledScope unavailable(!profile.enabled || profile.canonical_id == "revolver");
+                        if (ImGui::Selectable(profile.canonical_id.data(), config.weapon_timing_manual_id == profile.canonical_id))
+                            config.weapon_timing_manual_id = profile.canonical_id;
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::EndTable();
+            }
+            if (ImGui::Button("重新载入武器资料")) load_timing(config.weapon_timing_file);
+            help("丢弃本区未保存的参数编辑并重读当前文件；运行中禁用，不更改已有报告。");
+        }
+        if (!timing_status.empty()) ImGui::TextWrapped("%s", timing_status.c_str());
+        if (!timing_valid) return;
+        ImGui::Text("资料版本：%llu；来源：%s%s", static_cast<unsigned long long>(timing_catalog.revision),
+            weapon::timing_catalog_source().data(), timing_dirty ? "；有未保存编辑" : "");
+        if (ImGui::BeginCombo("查看/编辑武器", timing_catalog.profiles[timing_selected].canonical_id.data())) {
+            for (std::size_t i = 0; i < timing_catalog.profiles.size(); ++i)
+                if (ImGui::Selectable(timing_catalog.profiles[i].canonical_id.data(), timing_selected == i)) timing_selected = i;
+            ImGui::EndCombo();
+        }
+        help("只切换下面的资料编辑对象，不改变自动扳机实际选用的武器。运行中仍可查看各武器资料。");
+        auto& profile = timing_catalog.profiles[timing_selected];
+        {
+            DisabledScope disabled(!can_edit);
+            if (form("weapon_timing_profile")) {
+                row("按住时长 / ms", "范围1至500ms。左键DOWN确认到请求UP的目标时长；取消和清理优先。该数值不是人类反应时间或游戏实际击发时刻。");
+                timing_dirty |= ImGui::InputInt("##weapon_timing_hold", &profile.shot_hold_ms);
+                row("按下间隔 / ms", "须大于按住时长且不超过2000ms。两次左键DOWN提交之间的最小间隔；与急停和目标资格等待并行取最晚到期，不在松开后再等完整间隔。实际值可因调度延后。");
+                timing_dirty |= ImGui::InputInt("##weapon_timing_interval", &profile.fire_interval_ms);
+                ImGui::EndTable();
+            }
+            const bool valid = weapon::valid_timing_catalog(timing_catalog);
+            if (!valid) ImGui::TextWrapped("参数无效：按住须为1至500ms，间隔须大于按住且不超过2000ms。保存前须修正。");
+            DisabledScope invalid(!valid || timing_catalog.revision == std::numeric_limits<std::uint64_t>::max());
+            if (ImGui::Button("保存武器点射资料")) {
+                auto saved = timing_catalog;
+                ++saved.revision;
+                if (weapon::save_timing_catalog(std::filesystem::u8path(config.weapon_timing_file), saved, timing_status)) {
+                    timing_catalog = saved;
+                    timing_dirty = false;
+                    timing_status = "资料已原子保存；下次启动运行读取新版本。启用、路径和手选项请使用全局保存配置。";
+                }
+            }
+            help("校验后原子替换资料文件并递增版本；失败保留原文件。只保存共享点射参数，不发布或修改压枪弹道。");
+        }
+        if (profile.canonical_id == "revolver") ImGui::TextWrapped("R8仅保留原始数据，延迟击发模型未启用；不能选择为活动武器。");
+        ImGui::TextWrapped("这些值是人工测试的点射节奏，不代表游戏循环射速、后坐力已复位或真实停稳证明；随机波动仍未启用。");
+    }
 
     void prepare_panel(const AppConfig& config) {
         const bool show_calibration = ImGui::TreeNode("校准此版本");
@@ -497,6 +604,7 @@ void RecoilPanel::render(const RuntimeSnapshot& snapshot, AppConfig& config, boo
         if (impl_->job.valid() && impl_->job.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) impl_->report = impl_->job.get();
         ImGui::Separator(); ImGui::TextUnformatted("压枪与弹道优化");
         ImGui::TextWrapped("运行中不能编辑或发布；GSI自动匹配活动曲线，下面的草稿不会热改执行版本。");
+        impl_->timing_settings(snapshot, config, can_edit);
         if (!snapshot.recoil_archive.acquisition_run_id.empty()) {
             const auto& a = snapshot.recoil_archive;
             ImGui::TextWrapped("射击归档：%s；完整 %llu / 不完整 %llu；%s", a.available ? "可用" : "不可用",

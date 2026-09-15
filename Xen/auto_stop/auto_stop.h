@@ -10,6 +10,8 @@ struct AutoStopConfig {
     bool enabled = false;
     int activation_virtual_key = 0;
     std::vector<int> release_virtual_keys{0x31, 0x32, 0x33, 0x34, 0x35, 0x51};
+    bool use_counterpulse_timing = false;
+    int counter_hold_ms = 40, shot_after_release_ms = 18;
 };
 
 enum class AutoStopStatus {
@@ -52,6 +54,9 @@ inline const char* AutoStopBlockReasonName(AutoStopBlockReason reason) noexcept 
 const char* AutoStopStatusName(AutoStopStatus status) noexcept;
 
 struct AutoStopSnapshot {
+    bool use_counterpulse_timing = false;
+    int counter_hold_ms = 0, shot_after_release_ms = 0;
+    std::int64_t counter_release_ack_ns = 0, completion_ready_ns = 0;
     AutoStopStatus status = AutoStopStatus::DISABLED;
     // 软件协议能力不能证明目标固件行为或角色已经停稳。
     bool device_protocol_available = false;
@@ -72,8 +77,7 @@ struct AutoStopSnapshot {
     std::uint64_t arbiter_wait_samples = 0;
 };
 
-// 首批只发布能力与未满足条件，不产生物理操作。后续以有证据的
-// 制动计划替换 AWAITING_VALIDATION，不能用固定等待时间伪造停稳。
+// 能力检查不产生物理操作；时序估计与严格停稳观察保持独立。
 AutoStopSnapshot assess_auto_stop_availability(
     const AutoStopConfig& config, bool kmbox_backend,
     bool protocol_available, bool paused) noexcept;
@@ -94,7 +98,7 @@ struct WasdMotionIntent {
     std::int64_t received_at_ns = 0;
 };
 
-enum class AutoStopPhase { IDLE, WAITING_ACK, BRAKING, COMPLETE_ESTIMATED, CANCELLED, INVALID };
+enum class AutoStopPhase { IDLE, WAITING_ACK, BRAKING, COMPLETE_ESTIMATED, CANCELLED, INVALID, SETTLING };
 struct AutoStopDecision {
     AutoStopPhase phase = AutoStopPhase::IDLE;
     std::uint64_t request_id = 0;
@@ -104,11 +108,14 @@ struct AutoStopDecision {
     std::array<std::int64_t, 2> axis_deadline_ns{};
     bool estimated = true;
     bool fire_permitted = false;
+    std::int64_t completion_ready_ns = 0;
 };
 
-// 纯状态机，不接触设备。候选230/180/110ms是本轮现象拟合，未完成校准。
+// 纯状态机，不接触设备。旧230/180/110ms模型保留回退；H40仅迁移ACK时序，均非速度观察。
 class AutoStopController {
 public:
+    AutoStopController() noexcept = default;
+    explicit AutoStopController(const AutoStopConfig& config) noexcept;
     AutoStopDecision observe(const WasdMotionIntent& intent, std::int64_t now_ns) noexcept;
     AutoStopDecision request(std::uint64_t request_id, std::int64_t now_ns) noexcept;
     AutoStopDecision cancel(std::uint64_t request_id, std::int64_t now_ns) noexcept;
@@ -134,6 +141,9 @@ private:
     bool synchronized_ = false;
     bool output_started_ = false;
     bool masked_hold_model_valid_ = false;
+    bool counterpulse_ = false, timing_valid_ = true, initial_zero_ = false;
+    std::uint8_t counter_mask_ = 0;
+    std::int64_t counter_hold_ns_ = 40000000, after_release_ns_ = 18000000;
 };
 
 class WasdInputHistory {

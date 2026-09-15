@@ -62,6 +62,8 @@ public:
     void cancel(std::uint64_t request_id) noexcept;
     void set_paused(bool paused) noexcept;
     AutoStopSnapshot snapshot() const noexcept;
+    // 只返回独立四键接管仍有效的估计完成id，不是观察停稳证明。
+    std::uint64_t estimated_completion_id() const noexcept;
     // 检测线程发布不可变目标事实；无目标/失败发布零期限，旧帧不能自行续期。
     // 目标仅准入；四键接管后制动与保持都锁存至松键或安全撤销，软件制动最多500ms。
     void publish_target(std::chrono::steady_clock::time_point valid_until,

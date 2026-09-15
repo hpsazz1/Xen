@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <optional>
+#include <string_view>
 #include <vector>
 #include "detector/detector.h"
 
@@ -34,6 +35,8 @@ struct TriggerConfig {
     int fire_delay_ms = 20, shot_interval_ms = 120, press_duration_ms = 20;
     int max_hold_ms = 300, max_observation_age_ms = 50;
     bool require_stop = false;
+    // 显式估计策略不替代严格观察资格，也不创建观察租约。
+    bool allow_estimated_stop = false;
     TriggerFireMode fire_mode = TriggerFireMode::SINGLE;
     std::vector<int> person_class_ids{0}, head_class_ids{1}, general_class_ids;
 };
@@ -56,6 +59,12 @@ struct TriggerObservation {
 struct TriggerContext {
     std::uint64_t generation = 0;
     bool required = false, valid = false;
+    // 点射资料与来源上下文使用同一代际；连续扫射不读取此节奏。
+    bool timing_required = false, timing_valid = false;
+    int shot_hold_ms = 0, fire_interval_ms = 0;
+    // 运行期间不可变；武器名仅引用共享目录的静态ID，不持有临时字符串。
+    std::uint64_t timing_catalog_revision = 0;
+    std::string_view timing_weapon_id;
 };
 
 struct TriggerPermit {
@@ -66,6 +75,8 @@ struct TriggerPermit {
     std::uint64_t next_stop_request_id = 0;
     std::uint64_t stop_request_id = 0, stop_observation_epoch = 0;
     bool stop_observed_qualified = false;
+    bool stop_estimated_qualified = false;
+    std::uint64_t estimated_stop_request_id = 0;
     TriggerTime stop_expires_at{};
     // Runtime 已预留清理预算的期限；并非物理硬实时归还保证。
     TriggerTime stop_release_deadline{};
@@ -77,9 +88,13 @@ struct TriggerSnapshot {
     TriggerRegion region = TriggerRegion::NONE;
     std::uint64_t candidate_id = 0, observation_epoch = 0, observation_sequence = 0;
     std::uint64_t command_id = 0, stop_request_id = 0;
+    std::uint64_t estimated_stop_request_id = 0;
     float normalized_margin = 0.0f;
     bool button_may_be_down = false, faulted = false;
     TriggerContext context;
+    // DOWN决策锁存，后续上下文变化导致UP时仍可追溯原发参数。
+    TriggerContext firing_context;
+    bool firing_context_available = false;
 };
 
 struct TriggerDecision {
@@ -96,6 +111,10 @@ struct TriggerReceipt {
     TriggerButtonAction action = TriggerButtonAction::NONE;
     TriggerReceiptStatus status = TriggerReceiptStatus::UNKNOWN;
     TriggerTime completed_at{};
+    // 实际后端提交时刻；旧调用未提供时以 ACK 保守起算间隔。
+    TriggerTime submitted_at{};
+    // 点射按住从协议ACK起算；旧回执缺省时使用后端完成时刻保守兼容。
+    TriggerTime protocol_ack_received_at{};
 };
 
 // 单线程纯状态机。所有方法的 now 必须处于同一单调时间域；不访问设备或睡眠。
@@ -126,6 +145,8 @@ private:
     bool config_valid_ = true, candidate_valid_ = false, release_seen_ = false, unconfirmed_down_ = false;
     float center_x_ = 0.0f, center_y_ = 0.0f;
     int roi_width_ = 0, roi_height_ = 0;
+    // 当前 DOWN 的不可变快照，直到其 UP 清理结束仍用于保守冷却。
+    int active_hold_ms_ = 0, active_interval_ms_ = 0;
 };
 
 #endif

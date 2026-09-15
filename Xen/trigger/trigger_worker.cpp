@@ -16,6 +16,7 @@ public:
     std::function<bool(std::uint64_t)> request_stop;
     std::function<void(std::uint64_t)> cancel_stop;
     std::function<TriggerContext()> context;
+    std::function<std::uint64_t()> estimated_stop;
     TriggerConfig config;
     TriggerController controller;
     std::atomic<std::shared_ptr<const TriggerObservation>> latest;
@@ -82,12 +83,16 @@ public:
         p.focused = focused();
         if (context) p.context = context();
         const auto current = controller.snapshot();
-        if (allocate_stop_id && config.require_stop && current.region != TriggerRegion::NONE &&
+        if (config.require_stop && config.allow_estimated_stop && estimated_stop) {
+            p.estimated_stop_request_id = estimated_stop();
+            p.stop_estimated_qualified = p.estimated_stop_request_id != 0;
+        }
+        if (allocate_stop_id && config.require_stop && !config.allow_estimated_stop && current.region != TriggerRegion::NONE &&
             current.stop_request_id == 0 && reserved_stop_id == 0 && p.enabled && p.healthy &&
             p.held && p.armed && p.focused && !p.physical_left_down && !current.faulted)
             reserved_stop_id = next_id();
         p.next_stop_request_id = reserved_stop_id;
-        // 当前AutoStop只有ESTIMATED，不能构造观察停稳许可。
+        // 估计与观察分别传递；估计策略不占用显式急停租约。
         return p;
     }
     bool observation_still_current(const TriggerDecision& decision, TriggerTime now) {
@@ -156,14 +161,24 @@ public:
                     const auto fresh = permit();
                     const auto revalidated_at = TriggerClock::now();
                     const auto& decided_context = decision.snapshot.context;
+                    const bool timing_valid = config.fire_mode != TriggerFireMode::SINGLE ||
+                        (fresh.context.timing_required == decided_context.timing_required &&
+                         (!fresh.context.timing_required || (fresh.context.timing_valid && decided_context.timing_valid &&
+                          fresh.context.generation == decided_context.generation &&
+                          fresh.context.shot_hold_ms == decided_context.shot_hold_ms &&
+                          fresh.context.fire_interval_ms == decided_context.fire_interval_ms)));
                     const bool context_valid = fresh.context.required == decided_context.required &&
+                        timing_valid &&
                         (!fresh.context.required || (fresh.context.valid && decided_context.valid &&
                             fresh.context.generation != 0 && fresh.context.generation == decided_context.generation));
                     context_changed = !context_valid;
-                    const bool stop_valid = !config.require_stop || (fresh.stop_observed_qualified &&
+                    const bool stop_valid = !config.require_stop || (config.allow_estimated_stop ?
+                        (fresh.stop_estimated_qualified && fresh.estimated_stop_request_id != 0 &&
+                         fresh.estimated_stop_request_id == decision.snapshot.estimated_stop_request_id) :
+                        (fresh.stop_observed_qualified &&
                         fresh.stop_request_id == decision.snapshot.stop_request_id &&
                         fresh.stop_observation_epoch == decision.snapshot.observation_epoch &&
-                        fresh.stop_expires_at > revalidated_at && fresh.stop_release_deadline > revalidated_at);
+                        fresh.stop_expires_at > revalidated_at && fresh.stop_release_deadline > revalidated_at));
                     eligible = config.fire_enabled && fresh.enabled && fresh.armed && fresh.healthy && fresh.held && fresh.focused &&
                         !fresh.physical_left_down && !canceled.load() && !stopping.load() &&
                         context_valid && stop_valid && observation_still_current(decision, revalidated_at);
@@ -173,11 +188,13 @@ public:
                 if (eligible) {
                     event.backend_called = true;
                     event.call_started_at = TriggerClock::now();
+                    receipt.submitted_at = event.call_started_at;
                     if (!down) ++cleanup_attempts;
                     const auto result = mouse->set_left_button(down);
                     event.observed_at = TriggerClock::now();
                     event.backend_completed_at = result.backend_completed_at;
                     event.protocol_ack_received_at = result.protocol_ack_received_at;
+                    receipt.protocol_ack_received_at = result.protocol_ack_received_at;
                     const bool valid_time = result.backend_completed_at != TriggerTime{} &&
                         result.backend_completed_at >= event.call_started_at && result.backend_completed_at <= event.observed_at &&
                         result.protocol_ack_received_at != TriggerTime{} &&
@@ -308,13 +325,14 @@ TriggerWorker::TriggerWorker(std::shared_ptr<IMouseController> mouse,
     std::shared_ptr<AutoStopOutputArbiter> arbiter, std::function<bool()> permission,
     std::function<bool()> focused, std::function<std::uint64_t()> next_stop_id,
     std::function<bool(std::uint64_t)> request_stop, std::function<void(std::uint64_t)> cancel_stop,
-    std::function<TriggerContext()> context)
+    std::function<TriggerContext()> context, std::function<std::uint64_t()> estimated_stop)
     : impl_(std::make_unique<Impl>()) {
     impl_->mouse = std::move(mouse); impl_->arbiter = std::move(arbiter);
     impl_->permission = std::move(permission); impl_->focused = std::move(focused);
     impl_->next_id = std::move(next_stop_id); impl_->request_stop = std::move(request_stop);
     impl_->cancel_stop = std::move(cancel_stop);
     impl_->context = std::move(context);
+    impl_->estimated_stop = std::move(estimated_stop);
 }
 TriggerWorker::~TriggerWorker() { stop(); }
 bool TriggerWorker::start(const TriggerConfig& config, int cleanup_budget_ms) noexcept {

@@ -257,7 +257,134 @@ void fire_disabled_preserves_qualification_and_stop() {
     expect(active.configure(cfg), "UP明确确认后才能应用不开枪配置");
 }
 
+void weapon_timing_submission_and_cleanup() {
+    auto cfg = config(); cfg.fire_delay_ms = 0; cfg.max_observation_age_ms = 5000;
+    auto p = context_permit(1); p.context.timing_required = p.context.timing_valid = true;
+    p.context.shot_hold_ms = 60; p.context.fire_interval_ms = 600;
+    const auto arm_weapon = [&](TriggerController& c) {
+        expect(c.configure(cfg), "武器点射配置应通过");
+        auto released = p; released.held = false; c.tick(released, at(0));
+    };
+    TriggerController c; arm_weapon(c);
+    const auto down = c.observe(frame(1), p, at(1));
+    expect(down.button_action == TriggerButtonAction::DOWN, "首发不等待虚构的武器间隔");
+    c.acknowledge({down.command_id, down.button_action, TriggerReceiptStatus::ACKNOWLEDGED, at(11), at(3)}, at(11));
+    expect(c.tick(p, at(70)).button_action == TriggerButtonAction::NONE, "按住60ms由ACK而非提交起算");
+    auto up = c.tick(p, at(71));
+    expect(up.button_action == TriggerButtonAction::UP, "ACK加60ms才请求松开");
+    ack(c, up, 72);
+    expect(c.observe(frame(602, 2), p, at(602)).snapshot.reason == TriggerReason::COOLDOWN,
+        "提交3ms加600ms前不能下发第二次按下");
+    auto second = c.tick(p, at(603));
+    expect(second.button_action == TriggerButtonAction::DOWN, "下一DOWN取提交加间隔，不把ACK延迟叠加");
+
+    TriggerController waiting; arm_weapon(waiting);
+    auto d = waiting.observe(frame(1), p, at(1));
+    waiting.acknowledge({d.command_id, d.button_action, TriggerReceiptStatus::ACKNOWLEDGED, at(11), at(3)}, at(11));
+    up = waiting.tick(p, at(71));
+    expect(waiting.observe(frame(650, 2), p, at(650)).button_action == TriggerButtonAction::NONE,
+        "间隔虽到UP未确认仍不能新DOWN");
+    ack(waiting, up, 651);
+    d = waiting.tick(p, at(652));
+    expect(d.button_action == TriggerButtonAction::DOWN && waiting.tick(p, at(652)).button_action == TriggerButtonAction::NONE,
+        "延误后仅发一次，不能补发积压枪");
+
+    TriggerController legacy; arm_weapon(legacy);
+    d = legacy.observe(frame(1), p, at(1)); ack(legacy, d, 11);
+    up = legacy.tick(p, at(71)); ack(legacy, up, 72);
+    expect(legacy.observe(frame(603, 2), p, at(603)).button_action == TriggerButtonAction::NONE &&
+        legacy.tick(p, at(611)).button_action == TriggerButtonAction::DOWN,
+        "旧回执缺少提交时间时使用ACK保守兼容");
+
+    TriggerController changed; arm_weapon(changed);
+    d = changed.observe(frame(1), p, at(1));
+    auto next = p; next.context.generation = 2; next.context.fire_interval_ms = 100;
+    up = changed.tick(next, at(2));
+    expect(up.button_action == TriggerButtonAction::UP, "在途换时序先清理旧DOWN");
+    ack(changed, up, 3);
+    next.held = false; changed.tick(next, at(4)); next.held = true;
+    expect(changed.observe(frame(103, 2), next, at(103)).snapshot.reason == TriggerReason::COOLDOWN,
+        "旧DOWN未确认时使用旧600ms快照，不被新100ms缩短");
+    expect(changed.tick(next, at(603)).button_action == TriggerButtonAction::DOWN, "旧冷却完成后才采用新资料");
+
+    TriggerController invalid; arm_weapon(invalid);
+    auto invalid_p = p; invalid_p.context.shot_hold_ms = 601;
+    expect(invalid.observe(frame(1), invalid_p, at(1)).snapshot.reason == TriggerReason::CONTEXT_UNAVAILABLE,
+        "时序不合法拒绝开火，不能回退全局较短时序");
+    TriggerController receipt_time; arm_weapon(receipt_time);
+    d = receipt_time.observe(frame(1), p, at(1));
+    auto rejected = receipt_time.acknowledge({d.command_id, d.button_action, TriggerReceiptStatus::ACKNOWLEDGED, at(3), at(4)}, at(4));
+    expect(rejected.button_action == TriggerButtonAction::UP && rejected.snapshot.faulted,
+        "提交晚于ACK的回执锁故障并清理");
+
+    TriggerController protocol; arm_weapon(protocol);
+    d = protocol.observe(frame(1), p, at(1));
+    protocol.acknowledge({d.command_id,d.button_action,TriggerReceiptStatus::ACKNOWLEDGED,at(11),at(3),at(5)},at(11));
+    expect(protocol.tick(p,at(64)).button_action == TriggerButtonAction::NONE &&
+        protocol.tick(p,at(65)).button_action == TriggerButtonAction::UP,
+        "点射60ms从协议ACK5ms起算，不叠加后端完成到11ms的延迟");
+    for (const int invalid_ack : {2,12}) {
+        TriggerController invalid_protocol; arm_weapon(invalid_protocol);
+        d = invalid_protocol.observe(frame(1),p,at(1));
+        rejected = invalid_protocol.acknowledge({d.command_id,d.button_action,TriggerReceiptStatus::ACKNOWLEDGED,
+            at(11),at(3),at(invalid_ack)},at(11));
+        expect(rejected.button_action == TriggerButtonAction::UP && rejected.snapshot.faulted,
+            "协议ACK必须在提交和后端完成之间，否则故障清理");
+    }
+
+    cfg.fire_mode = TriggerFireMode::AUTOMATIC;
+    TriggerController automatic; arm_weapon(automatic);
+    d = automatic.observe(frame(1), invalid_p, at(1)); ack(automatic, d, 2);
+    expect(d.button_action == TriggerButtonAction::DOWN && automatic.tick(invalid_p, at(62)).button_action == TriggerButtonAction::NONE &&
+        automatic.tick(invalid_p, at(302)).button_action == TriggerButtonAction::UP,
+        "连续扫射忽略点射资料且保留max_hold释放期限");
+    TriggerController automatic_protocol; arm_weapon(automatic_protocol);
+    d = automatic_protocol.observe(frame(1),invalid_p,at(1));
+    automatic_protocol.acknowledge({d.command_id,d.button_action,TriggerReceiptStatus::ACKNOWLEDGED,at(11),at(3),at(5)},at(11));
+    expect(automatic_protocol.tick(invalid_p,at(305)).button_action == TriggerButtonAction::NONE &&
+        automatic_protocol.tick(invalid_p,at(311)).button_action == TriggerButtonAction::UP,
+        "连续扫射仍从后端完成11ms起算300ms，不受点射协议ACK相位调整影响");
+}
+
+void estimated_stop_is_explicit_and_parallel() {
+    auto cfg = config(); cfg.fire_delay_ms = 0; cfg.max_observation_age_ms = 5000;
+    cfg.require_stop = cfg.allow_estimated_stop = true;
+    TriggerController c; arm(c, cfg);
+    auto p = permit(); p.next_stop_request_id = 41;
+    auto d = c.observe(frame(1), p, at(1));
+    expect(d.stop_action == TriggerStopAction::NONE && d.snapshot.reason == TriggerReason::STOP_UNVERIFIED,
+        "估计策略缺少资格等待但不申请观察租约");
+    p.stop_estimated_qualified = true; p.estimated_stop_request_id = 70;
+    d = c.tick(p, at(2));
+    expect(d.button_action == TriggerButtonAction::DOWN && d.snapshot.estimated_stop_request_id == 70,
+        "显式估计策略记录独立request id后开火");
+    ack(c, d, 3);
+    auto up = c.tick(p, at(23));
+    expect(c.tick(p, at(24)).snapshot.reason == TriggerReason::COMMAND_PENDING,
+        "正常UP待确认不把已经清理的估计id误判为停稳失效");
+    ack(c, up, 25);
+    p.estimated_stop_request_id = 71;
+    expect(c.observe(frame(120, 2), p, at(120)).snapshot.reason == TriggerReason::COOLDOWN,
+        "新的独立急停已完成仍须等待上一发间隔");
+    d = c.tick(p, at(123));
+    expect(d.button_action == TriggerButtonAction::DOWN && d.stop_action == TriggerStopAction::NONE,
+        "间隔与独立急停并行到期，不追加一段急停等待");
+    ack(c, d, 124);
+    p.stop_estimated_qualified = false;
+    up = c.tick(p, at(125));
+    expect(up.button_action == TriggerButtonAction::UP && up.stop_action == TriggerStopAction::NONE &&
+        up.snapshot.reason == TriggerReason::STOP_EXPIRED, "HELD估计资格失效立刻UP且不取消不属于扳机的急停");
+
+    cfg.allow_estimated_stop = false;
+    TriggerController strict; arm(strict, cfg);
+    p.stop_estimated_qualified = true;
+    d = strict.observe(frame(1), p, at(1));
+    expect(d.stop_action == TriggerStopAction::REQUEST && strict.tick(p, at(2)).button_action == TriggerButtonAction::NONE,
+        "严格模式不能拿估计完成冒充观察停稳");
+}
+
 int main() {
+    weapon_timing_submission_and_cleanup(); estimated_stop_is_explicit_and_parallel();
     fire_disabled_preserves_qualification_and_stop();
     geometry_and_timing(); association(); permissions_and_receipts(); stop_and_automatic();
     weapon_context_cancels_qualification(); weapon_context_invalidity_and_held_cleanup();

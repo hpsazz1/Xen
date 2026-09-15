@@ -1202,6 +1202,55 @@ void test_feature_combinations_round_trip() {
     std::filesystem::remove(path, ignored);
 }
 
+void test_shared_weapon_timing_config() {
+    const auto directory = make_temp_test_directory("weapon_timing");
+    if (directory.empty()) { expect(false, "武器配置隔离目录"); return; }
+    const auto path = directory / "config.ini";
+    AppConfig config, loaded;
+    std::string error;
+    config.weapon_timing_enabled = true;
+    config.weapon_timing_manual_id = "deagle";
+    config.weapon_timing_file = "custom/weapon-timing.json";
+    config.trigger.allow_estimated_stop = true;
+    config.auto_stop.use_counterpulse_timing = true;
+    config.auto_stop.counter_hold_ms = 40;
+    config.auto_stop.shot_after_release_ms = 18;
+    expect(save_app_config(path.string(), config, error) && load_app_config(path.string(), loaded, error) &&
+        loaded.weapon_timing_enabled && loaded.weapon_timing_manual_id == "deagle" &&
+        loaded.weapon_timing_file == config.weapon_timing_file && loaded.trigger.allow_estimated_stop &&
+        loaded.auto_stop.use_counterpulse_timing && loaded.auto_stop.counter_hold_ms == 40 &&
+        loaded.auto_stop.shot_after_release_ms == 18,
+        "共享武器资料独立于压枪关闭且完整往返");
+    config.weapon_timing_manual_id = "revolver";
+    expect(!save_app_config(path.string(), config, error), "R8只留档不能启用");
+    config.weapon_timing_manual_id = "unknown";
+    expect(!save_app_config(path.string(), config, error), "未知手选武器不回退");
+    config.weapon_timing_manual_id.clear();
+    expect(!save_app_config(path.string(), config, error), "自动选择需要GSI");
+    config.weapon_timing_manual_id = "deagle";
+    config.auto_stop.counter_hold_ms = 0;
+    expect(!save_app_config(path.string(), config, error), "H40反向保持不能为0");
+    config.auto_stop.counter_hold_ms = 40;
+    config.auto_stop.shot_after_release_ms = 201;
+    expect(!save_app_config(path.string(), config, error), "H40等待上限保持租约内");
+    { std::ofstream out(path); out << "[weapon_timing]\nenabled=perhaps\n"; }
+    expect(!load_app_config(path.string(), loaded, error), "共享开关严格布尔校验");
+    { std::ofstream out(path); out << "[trigger]\nallow_estimated_stop=perhaps\n"; }
+    expect(!load_app_config(path.string(), loaded, error), "估计策略严格布尔校验");
+    { std::ofstream out(path); out << "[auto_stop]\nuse_counterpulse_timing=perhaps\n"; }
+    expect(!load_app_config(path.string(), loaded, error), "H40策略严格布尔校验");
+    { std::ofstream out(path); out << "[auto_stop]\ncounter_hold_ms=40.5\n"; }
+    expect(!load_app_config(path.string(), loaded, error), "H40时长严格整数校验");
+    { std::ofstream out(path); out << "[trigger]\nenabled=false\n"; }
+    expect(load_app_config(path.string(), loaded, error) && !loaded.weapon_timing_enabled &&
+        !loaded.trigger.allow_estimated_stop && loaded.weapon_timing_manual_id.empty() &&
+        !loaded.auto_stop.use_counterpulse_timing && loaded.auto_stop.counter_hold_ms == 40 &&
+        loaded.auto_stop.shot_after_release_ms == 18,
+        "旧配置不继承调用方已启用共享或估计策略");
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+}
+
 } // namespace
 
 int main() {
@@ -1217,6 +1266,7 @@ int main() {
     test_atomic_save_preserves_existing_file_on_replace_failure();
     test_auto_stop_config();
     test_trigger_and_source_context_config();
+    test_shared_weapon_timing_config();
     test_legacy_keyboard_config();
     test_invalid_config();
     test_complete_aim_config_validation();

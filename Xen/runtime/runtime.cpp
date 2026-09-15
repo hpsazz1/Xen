@@ -8,6 +8,7 @@
 #include "trigger/trigger_worker.h"
 #include "recoil/recoil_worker.h"
 #include "recoil/recoil_store.h"
+#include "weapon/weapon_timing.h"
 #include <unordered_map>
 #include <cstdlib>
 #include "data_collection/data_collection.h"
@@ -352,6 +353,22 @@ struct Runtime::Impl {
         }
         if (config.trigger.enabled) {
             Log::register_module("trigger", LogLevel::INFO);
+            std::shared_ptr<const weapon::TimingCatalog> timing_catalog;
+            if (config.weapon_timing_enabled && config.trigger.fire_mode == TriggerFireMode::SINGLE) {
+                auto catalog = weapon::default_timing_catalog();
+                std::string error;
+                const auto path = std::filesystem::u8path(config.weapon_timing_file);
+                std::error_code path_error;
+                const bool exists = std::filesystem::exists(path, path_error);
+                if (path_error) error = "无法访问资料文件";
+                else if (!exists) error = "指定资料文件不存在，请在后坐力页面保存资料或恢复默认路径";
+                if (path_error || (exists && !weapon::load_timing_catalog(path, catalog, error)) ||
+                    (!exists && config.weapon_timing_file != "cache/recoil/weapon-timing.json")) {
+                    set_error("武器点射资料读取失败：" + error); return false;
+                }
+                timing_catalog = std::make_shared<const weapon::TimingCatalog>(std::move(catalog));
+                LOG_INFO("trigger", "点射使用共享武器资料r{}，启动后固定版本", timing_catalog->revision);
+            }
             auto trigger_config = config.trigger;
             trigger_config.person_class_ids = config.aim.person_class_ids;
             trigger_config.head_class_ids = config.aim.head_class_ids;
@@ -372,28 +389,42 @@ struct Runtime::Impl {
                     return stop && stop->request(id);
                 },
                 [this](std::uint64_t id) { if (auto stop = auto_stop_worker.load()) stop->cancel(id); },
-                [this, previous_weapon = std::string{}, previous_epoch = std::uint64_t{0},
+                [this, timing_catalog, selected = static_cast<const weapon::TimingProfile*>(nullptr),
+                    previous_weapon = std::string{}, previous_epoch = std::uint64_t{0},
                     generation = std::uint64_t{0}, previous_valid = false, exhausted = false]() mutable {
-                    if (!config.gsi.enabled) return TriggerContext{};
+                    if (!config.gsi.enabled && !timing_catalog) return TriggerContext{};
                     if (exhausted) return TriggerContext{generation, true, false};
-                    const auto weapon = gsi_receiver.snapshot();
-                    const bool valid = weapon.valid && weapon.identity_match && !weapon.canonical_id.empty() &&
-                        weapon.source_epoch != 0 && weapon.state == weapon::WeaponState::ACTIVE &&
-                        weapon.ammo_clip && *weapon.ammo_clip > 0 && weapon.valid_until > TriggerClock::now();
+                    const auto weapon = config.gsi.enabled ? gsi_receiver.snapshot() : weapon::WeaponSnapshot{};
+                    const std::string& id = config.weapon_timing_manual_id.empty() || !timing_catalog ?
+                        weapon.canonical_id : config.weapon_timing_manual_id;
+                    const bool valid = !config.gsi.enabled || (weapon.valid && weapon.identity_match && !weapon.canonical_id.empty() &&
+                        weapon.source_epoch != 0 && weapon.state == weapon::WeaponState::ACTIVE && id == weapon.canonical_id &&
+                        weapon.ammo_clip && *weapon.ammo_clip > 0 && weapon.valid_until > TriggerClock::now());
                     // revision/timestamp 的正常心跳不改变会话；身份、连续性或有效性变化持续增代。
-                    if (generation == 0 || weapon.canonical_id != previous_weapon ||
+                    if (generation == 0 || id != previous_weapon ||
                         weapon.source_epoch != previous_epoch || valid != previous_valid) {
                         if (generation == std::numeric_limits<std::uint64_t>::max()) {
                             exhausted = true;
                             return TriggerContext{generation, true, false};
                         }
-                        previous_weapon = weapon.canonical_id;
+                        previous_weapon = id;
+                        selected = timing_catalog ? weapon::find_timing(*timing_catalog, id) : nullptr;
                         previous_epoch = weapon.source_epoch;
                         previous_valid = valid;
                         ++generation;
                     }
-                    return TriggerContext{generation, true, valid};
-                });
+                    TriggerContext result{generation, true, valid};
+                    result.timing_required = timing_catalog != nullptr;
+                    result.timing_catalog_revision = timing_catalog ? timing_catalog->revision : 0;
+                    result.timing_weapon_id = selected ? selected->canonical_id : std::string_view{};
+                    result.timing_valid = selected && selected->enabled;
+                    if (result.timing_valid) {
+                        result.shot_hold_ms = selected->shot_hold_ms;
+                        result.fire_interval_ms = selected->fire_interval_ms;
+                    }
+                    return result;
+                },
+                [this] { auto stop = auto_stop_worker.load(); return stop ? stop->estimated_completion_id() : 0; });
             if (!worker->start(trigger_config)) { set_error("自动扳机启动失败或设备不支持左键"); return false; }
             trigger_worker.store(std::move(worker));
         }

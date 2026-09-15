@@ -81,6 +81,7 @@ public:
     std::uint64_t pending_id = 0, last_request_id = 0, submitted_generation = 0;
     Clock::time_point submitted_at;
     AutoStopSnapshot state;
+    std::uint64_t estimated_id = 0, estimated_generation = 0;
 
     void publish(AutoStopStatus status) {
         std::lock_guard<std::mutex> lock(mutex);
@@ -123,7 +124,7 @@ public:
         WasdInputHistory history;
         WasdMotionIntent intent;
         WasdEventCursor cursor;
-        AutoStopController controller;
+        AutoStopController controller(config);
         InputSnapshot input;
         std::uint64_t active_id = 0, active_generation = 0, active_input_epoch = 0;
         std::uint8_t software_mask = 0, original_mask = 0;
@@ -149,6 +150,16 @@ public:
         auto release_reservation = [&]() {
             if (output.owns_lock()) output.unlock();
             arbiter->auxiliary_pending_.store(false, std::memory_order_release);
+        };
+        const auto mark_estimated = [&]() {
+            if (estimated) return;
+            estimated = true;
+            { std::lock_guard<std::mutex> lock(mutex);
+              estimated_id = independent ? active_id : 0;
+              estimated_generation = active_generation;
+              ++state.completed; state.status = AutoStopStatus::ESTIMATED; }
+            LOG_INFO("auto_stop", "请求{}反向释放及配置等待已完成，仅为估计资格", active_id);
+            release_reservation();
         };
         auto reserve = [&]() {
             if (output.owns_lock()) return true;
@@ -194,6 +205,7 @@ public:
             return success;
         };
         auto cancel_active = [&](bool force_fault, const char* reason, bool normal_activation_release = false) {
+            { std::lock_guard<std::mutex> lock(mutex); estimated_id = 0; }
             AutoStopBlockReason block_reason;
             { std::lock_guard<std::mutex> lock(mutex); block_reason = state.block_reason; }
             LOG_INFO("auto_stop", "取消请求{}，原因={}，阻断={}", active_id, reason,
@@ -387,6 +399,10 @@ public:
                     }
                     if (requested) {
                         active_id = requested;
+                        if (config.use_counterpulse_timing) {
+                            std::lock_guard<std::mutex> lock(mutex);
+                            state.counter_release_ack_ns = state.completion_ready_ns = 0;
+                        }
                         active_input_epoch = intent.epoch;
                         original_mask = intent.held_mask;
                         estimated = false;
@@ -493,21 +509,31 @@ public:
                             const auto result = mouse->set_wasd_keyboard(decision.desired_mask);
                             debt |= result.datagram_sent;
                             receipt(result, started);
-                            if (result.disposition != KeyboardDisposition::ACKNOWLEDGED) cancel_active(true, "keyboard_not_acknowledged");
+                            const auto returned = now_ns();
+                            const auto ack_time = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                result.protocol_ack_received_at.time_since_epoch()).count();
+                            const auto backend_time = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                result.backend_completed_at.time_since_epoch()).count();
+                            const bool ack_valid = !config.use_counterpulse_timing ||
+                                (ack_time >= started && ack_time <= backend_time && backend_time <= returned);
+                            if (result.disposition != KeyboardDisposition::ACKNOWLEDGED || !ack_valid)
+                                cancel_active(true, "keyboard_not_acknowledged");
                             else {
                                 software_mask = decision.desired_mask;
-                                const auto completed = controller.acknowledge(active_id, decision.command_id, software_mask, now_ns());
-                                if (completed.phase == AutoStopPhase::COMPLETE_ESTIMATED) {
-                                    estimated = true;
-                                    LOG_INFO("auto_stop", "请求{}反向软件键释放已确认，进入估算完成，未授予开火", active_id);
-                                    { std::lock_guard<std::mutex> lock(mutex); ++state.completed; state.status = AutoStopStatus::ESTIMATED; }
-                                    // 反向软件键已释放，独立模式锁存全部WASD；目标变化不再撤销。
-                                    // 允许键释放和安全撤销仍归还，500ms限制制动过程与显式请求。
-                                    release_reservation();
+                                const auto completed = controller.acknowledge(active_id, decision.command_id, software_mask,
+                                    config.use_counterpulse_timing ? ack_time : returned);
+                                if (config.use_counterpulse_timing && completed.completion_ready_ns != 0) {
+                                    std::lock_guard<std::mutex> lock(mutex);
+                                    state.counter_release_ack_ns = ack_time;
+                                    state.completion_ready_ns = completed.completion_ready_ns;
                                 }
+                                if (completed.phase == AutoStopPhase::COMPLETE_ESTIMATED) mark_estimated();
                             }
                         }
-                    } else if (estimated) publish(AutoStopStatus::ESTIMATED);
+                    } else if (decision.phase == AutoStopPhase::COMPLETE_ESTIMATED) {
+                        mark_estimated();
+                        publish(AutoStopStatus::ESTIMATED);
+                    }
                 }
                 report_block();
                 std::unique_lock<std::mutex> lock(mutex);
@@ -550,6 +576,13 @@ bool AutoStopWorker::start(const AutoStopConfig& config, int command_timeout_ms)
         if (impl_->running || impl_->thread.joinable() || impl_->fault) return false;
         impl_->config = config;
         impl_->state = {};
+        impl_->state.use_counterpulse_timing = config.use_counterpulse_timing;
+        if (config.use_counterpulse_timing) {
+            if (config.counter_hold_ms < 1 || config.counter_hold_ms > 200 ||
+                config.shot_after_release_ms < 0 || config.shot_after_release_ms > 200) return false;
+            impl_->state.counter_hold_ms = config.counter_hold_ms;
+            impl_->state.shot_after_release_ms = config.shot_after_release_ms;
+        }
         impl_->state.independent_trigger_enabled = static_cast<bool>(impl_->allocate_request);
         impl_->state.focus_required = impl_->state.independent_trigger_enabled;
         if (!config.enabled) return true;
@@ -644,4 +677,17 @@ AutoStopSnapshot AutoStopWorker::snapshot() const noexcept {
         if (impl_->arbiter) result.aim_skips = impl_->arbiter->aim_skips();
         return result;
     } catch (...) { return {}; }
+}
+
+std::uint64_t AutoStopWorker::estimated_completion_id() const noexcept {
+    if (!impl_) return 0;
+    try {
+        InputSnapshot input;
+        if (!impl_->mouse->poll_input(input) || !impl_->permission(input)) return 0;
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        return impl_->running && !impl_->fault && !impl_->state.cleanup_unknown &&
+            impl_->state.status == AutoStopStatus::ESTIMATED && impl_->state.source_focused &&
+            impl_->estimated_generation == impl_->cancel_generation.load() &&
+            !impl_->paused.load() && !impl_->stopping.load() ? impl_->estimated_id : 0;
+    } catch (...) { return 0; }
 }
