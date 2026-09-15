@@ -3,6 +3,7 @@
 #include <WinSock2.h>
 #include <WS2tcpip.h>
 #include "weapon/weapon_internal.h"
+#include "weapon/weapon_catalog.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <atomic>
@@ -75,21 +76,8 @@ bool valid_config(const GsiConfig& c) noexcept {
         (c.allowed_peer_ipv4.empty() ? c.bind_address == "127.0.0.1" : InetPtonA(AF_INET, c.allowed_peer_ipv4.c_str(), &peer) == 1);
 }
 std::string canonical_weapon_id(const std::string& name) {
-    // 精确映射协议武器名，不由子串或RCS是否有曲线猜类型/射击模式。
-    static constexpr std::pair<const char*, const char*> names[] = {
-        {"weapon_ak47", "ak47"}, {"weapon_m4a1", "m4a4"}, {"weapon_m4a1_silencer", "m4a1_s"},
-        {"weapon_aug", "aug"}, {"weapon_sg556", "sg553"}, {"weapon_famas", "famas"}, {"weapon_galilar", "galil"},
-        {"weapon_bizon", "bizon"}, {"weapon_mac10", "mac10"}, {"weapon_mp5sd", "mp5sd"}, {"weapon_mp7", "mp7"},
-        {"weapon_mp9", "mp9"}, {"weapon_p90", "p90"}, {"weapon_ump45", "ump45"}, {"weapon_m249", "m249"},
-        {"weapon_negev", "negev"}, {"weapon_cz75a", "cz75"}, {"weapon_glock", "glock"},
-        {"weapon_hkp2000", "p2000"}, {"weapon_usp_silencer", "usp_s"}, {"weapon_p250", "p250"},
-        {"weapon_fiveseven", "fiveseven"}, {"weapon_tec9", "tec9"}, {"weapon_elite", "dual_berettas"},
-        {"weapon_deagle", "deagle"}, {"weapon_revolver", "revolver"}, {"weapon_awp", "awp"},
-        {"weapon_ssg08", "ssg08"}, {"weapon_scar20", "scar20"}, {"weapon_g3sg1", "g3sg1"},
-        {"weapon_nova", "nova"}, {"weapon_mag7", "mag7"}, {"weapon_sawedoff", "sawedoff"}, {"weapon_xm1014", "xm1014"}
-    };
-    for (const auto& [raw, canonical] : names) if (name == raw) return canonical;
-    return {};
+    const auto* profile = find_gsi_name(name);
+    return profile ? std::string(profile->canonical_id) : std::string{};
 }
 
 namespace detail {

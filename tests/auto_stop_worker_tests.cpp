@@ -141,6 +141,72 @@ int main() {
             legacy.use_counterpulse_timing = false;
             return legacy;
         }();
+        for (bool interrupt_cleanup : {false, true}) {
+            auto fake = std::make_shared<Fake>();
+            std::atomic<std::uint64_t> id{0};
+            AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+                [&] { return ++id; }, [] { return true; });
+            AutoStopConfig cycle{true, 5}; cycle.cycle_enabled = true;
+            require(worker.start(cycle), "持续按键循环回归启动");
+            ready(worker, fake);
+            worker.publish_target(Clock::now() + std::chrono::seconds(2));
+            wait_for([&] { return worker.estimated_completion_id() != 0; });
+            const auto completed_id = worker.estimated_completion_id();
+            require(!worker.resume_movement(completed_id + 1, Clock::now() + std::chrono::seconds(1)),
+                "旧或错误请求不得归还其他周期");
+            if (interrupt_cleanup) {
+                std::lock_guard<std::mutex> lock(fake->mutex); fake->physical_during_cleanup = 8;
+            }
+            const auto deadline = Clock::now() + std::chrono::milliseconds(180);
+            require(worker.resume_movement(completed_id, deadline), "点射释放确认后可投递归还");
+            wait_for([&] { return fake->released(); });
+            if (interrupt_cleanup) {
+                wait_for([&] { return worker.snapshot().release_required; });
+                require(worker.snapshot().cycle_count == 0, "清理期间事件变化不得伪造模型承接");
+            } else {
+                wait_for([&] { return worker.snapshot().cycle_count == 1; });
+                require(worker.snapshot().cycle_moving, "归还成功显示真实移动阶段");
+                require(worker.snapshot().requests == 1, "移动期限前不得立即重接管");
+                wait_for([&] { return worker.snapshot().requests == 2; });
+                require(Clock::now() >= deadline, "按住方向与允许键时按期限发起下一次急停");
+                require(!worker.snapshot().release_required, "成功循环不要求松键重按");
+            }
+            worker.stop();
+        }
+        for (int change = 0; change < 3; ++change) {
+            auto fake = std::make_shared<Fake>();
+            std::atomic<std::uint64_t> id{0};
+            std::atomic<bool> changed{false};
+            AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+                [&] { return ++id; }, [] { return true; }, [&] {
+                    const bool next = changed.load();
+                    return AutoStopWeaponContext{true, !(change == 0 && next),
+                        change == 2 && next ? 2u : 1u, change == 1 && next ? "m4a4" : "ak47"};
+                });
+            require(worker.start(AutoStopConfig{true, 5}), "GSI上下文回归启动");
+            ready(worker, fake);
+            worker.publish_target(Clock::now() + std::chrono::seconds(2));
+            wait_for([&] { return worker.estimated_completion_id() != 0; });
+            changed.store(true);
+            wait_for([&] { return fake->released() && worker.snapshot().canceled == 1; });
+            require(worker.estimated_completion_id() == 0, "武器失效或变化撤销估计资格");
+            require(worker.snapshot().release_required, "武器变化需松键重新触发");
+            if (change == 0) {
+                wait_for([&] { return worker.snapshot().block_reason == AutoStopBlockReason::WEAPON_CONTEXT; });
+                changed.store(false);
+            }
+            fake->physical(0);
+            wait_for([&] { return worker.snapshot().status == AutoStopStatus::READY; });
+            fake->physical(1);
+            wait_for([&] { return fake->drained(); });
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            require(worker.snapshot().requests == 1, "GSI恢复不能在持续按键下再次接管");
+            { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
+            wait_for([&] { return !worker.snapshot().release_required; });
+            { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = true; }
+            wait_for([&] { return worker.snapshot().requests == 2; });
+            worker.stop();
+        }
         {
             auto fake = std::make_shared<Fake>(); fake->reverse_ack_delay_ms = 25;
             std::atomic<std::uint64_t> id{0};

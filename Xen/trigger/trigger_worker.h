@@ -41,7 +41,8 @@ public:
         std::function<bool(std::uint64_t)> request_stop,
         std::function<void(std::uint64_t)> cancel_stop,
         std::function<TriggerContext()> context = {},
-        std::function<std::uint64_t()> estimated_stop = {});
+        std::function<std::uint64_t()> estimated_stop = {},
+        std::function<void(std::uint64_t, TriggerTime)> resume_movement = {});
     ~TriggerWorker();
     // 停止清理的锁准入预算；已在途设备调用另受后端command timeout约束。
     bool start(const TriggerConfig& config, int cleanup_budget_ms = 1000) noexcept;

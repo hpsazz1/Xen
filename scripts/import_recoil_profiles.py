@@ -5,7 +5,28 @@ import hashlib
 import io
 import json
 import math
+import re
 from pathlib import Path
+
+
+def load_weapon_names(data_root):
+    # C++ 与导入器读取同一个目录，不另维护一份 M4A4/M4A1-S 映射。
+    rows = {}
+    for line in (data_root / "assets/weapon_catalog.inc").read_text(encoding="utf-8-sig").splitlines():
+        if not line.strip() or line.lstrip().startswith("//"):
+            continue
+        match = re.fullmatch(r'XEN_WEAPON\("([^"\n]+)", "([^"\n]+)", "([^"\n]+)"\)', line)
+        if not match:
+            raise ValueError("武器名称目录格式无效")
+        canonical, gsi, display = match.groups()
+        for alias in (canonical, gsi, display):
+            key = alias.casefold()
+            if key in rows and rows[key] != canonical:
+                raise ValueError("武器名称目录别名冲突")
+            rows[key] = canonical
+    if not rows:
+        raise ValueError("武器名称目录为空")
+    return rows
 
 
 def convert(raw, entry, manifest, sensitivity):
@@ -62,9 +83,15 @@ def main():
     packaged = script_directory.name.casefold() == "recoil" and script_directory.parent.name.casefold() == "tools"
     data_root = script_directory.parent.parent if packaged else script_directory.parent
     manifest = json.loads((data_root / "assets/recoil/legacy_manifest.json").read_text(encoding="utf-8-sig"))
+    names = load_weapon_names(data_root)
     source = args.source_directory.resolve(strict=True)
     outputs = []
-    for entry in manifest["profiles"]:
+    for original in manifest["profiles"]:
+        entry = dict(original)
+        canonical = names.get(entry["canonical_weapon_id"].casefold())
+        if not canonical:
+            raise ValueError("清单武器名称不在共享目录中")
+        entry["canonical_weapon_id"] = canonical
         file = source / entry["file"]
         if file.is_symlink() or file.resolve().parent != source:
             raise ValueError("不允许导入目录外文件")

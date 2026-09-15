@@ -1,5 +1,6 @@
 #include "recoil/recoil.h"
 #include "recoil/recoil_calibration.h"
+#include "weapon/weapon_catalog.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -67,6 +68,9 @@ bool validate_recoil_profile(const RecoilProfile& p,std::string& error) noexcept
             return reject("校准灵敏度无效");
         if(!p.source.sha256.empty() && !hash(p.source.sha256))return reject("来源SHA256无效");
         if(p.state==RecoilProfileState::CALIBRATED || p.state==RecoilProfileState::ACCEPTED) {
+            const auto canonical = weapon::normalize_weapon_id(p.weapon_id);
+            if (!canonical.empty() && canonical != p.weapon_id)
+                return reject("已校准曲线武器身份使用别名；请以规范ID建立新候选并重新校准，不可直接改写校准证据");
             if(!p.phase_tolerance_ms || !p.calibration.sensitivity || p.calibration.game_build.empty() ||
                 p.calibration.input_path.empty() || p.calibration.conditions.empty() || p.calibration.evidence.empty() ||
                 !hash(p.source.sha256)) return reject("已校准状态缺少条件、相位或证据来源");
@@ -107,14 +111,19 @@ bool load_recoil_profile(std::string_view input,RecoilProfile& output,std::strin
             p.points.push_back({point[0].get<double>(),point[1].get<double>(),point[2].get<double>()});
         }
         if(!validate_recoil_profile(p,error))return false;
+        // 先验证校准身份，再只归一无校准身份约束的候选；不改变历史证据的语义哈希。
+        const auto canonical = weapon::normalize_weapon_id(p.weapon_id);
+        if (!canonical.empty()) p.weapon_id = canonical;
         output=std::move(p);return true;
     } catch(const std::exception& e) {try{error=e.what();}catch(...){}return false;}
       catch(...) {return false;}
 }
 std::string serialize_recoil_profile(const RecoilProfile& p) {
     std::string error;if(!validate_recoil_profile(p,error))throw std::invalid_argument(error);
+    const auto canonical = weapon::normalize_weapon_id(p.weapon_id);
+    const std::string_view weapon_id = canonical.empty() ? std::string_view(p.weapon_id) : canonical;
     Json points=Json::array();for(const auto& point:p.points)points.push_back({point.time_ms,point.x_counts,point.y_counts});
-    Json json={{"schema_version",p.schema_version},{"id",p.id},{"revision",p.revision},{"weapon_id",p.weapon_id},
+    Json json={{"schema_version",p.schema_version},{"id",p.id},{"revision",p.revision},{"weapon_id",weapon_id},
         {"unit",p.unit},{"sample_semantics",p.sample_semantics},{"fire_mode",p.fire_mode},{"state",stage(p.state)},
         {"source",{{"repository",p.source.repository},{"commit",p.source.commit},{"sha256",p.source.sha256},
             {"license",p.source.license},{"source_unit",p.source.source_unit},{"conversion_revision",p.source.conversion_revision},

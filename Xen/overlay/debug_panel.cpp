@@ -1,5 +1,6 @@
 #include "overlay/debug_panel.h"
 #include "overlay/overlay.h"
+#include "weapon/weapon_catalog.h"
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
 #include <algorithm>
@@ -208,10 +209,10 @@ struct DebugPanel::Impl {
             else { request.shot_hold_ms = profile.shot_hold_ms; request.fire_interval_ms = profile.fire_interval_ms; }
             changed();
         };
-        if (ImGui::BeginCombo("带入武器", weapon_id.empty() ? "选择已启用武器" : weapon_id.c_str())) {
+        if (ImGui::BeginCombo("带入武器", weapon_id.empty() ? "选择已启用武器" : weapon::display_name(weapon_id).data())) {
             for (const auto& p : s->timing_catalog.profiles) {
                 ImGui::BeginDisabled(!p.enabled);
-                if (ImGui::Selectable(p.canonical_id.data(), weapon_id == p.canonical_id)) { weapon_id = p.canonical_id; apply(p); }
+                if (ImGui::Selectable(weapon::display_name(p.canonical_id).data(), weapon_id == p.canonical_id)) { weapon_id = p.canonical_id; apply(p); }
                 ImGui::EndDisabled(); tip("显式复制共享表的按住和DOWN间隔到当前页；不改变动作、次数或生产选择，禁用资料不能带入。");
             }
             ImGui::EndCombo();

@@ -17,8 +17,21 @@
 #include <vector>
 
 #include "runtime/runtime.h"
+#include "weapon/weapon_timing.h"
+#include "weapon/weapon_catalog.h"
 
 namespace runtime::detail {
+
+// 急停与扳机共用启动时冻结的实际资料；循环无可用点射资料时不得先接管键盘。
+inline AutoStopWeaponContext auto_stop_weapon_context(const weapon::WeaponSnapshot& current,
+        bool cycle, const weapon::TimingCatalog* catalog, weapon::Clock::time_point now) noexcept {
+    const auto id = weapon::normalize_weapon_id(current.canonical_id);
+    const auto* timing = catalog ? weapon::find_timing(*catalog, id) : nullptr;
+    const bool valid = current.valid && current.identity_match && !id.empty() && current.source_epoch != 0 &&
+        current.state == weapon::WeaponState::ACTIVE && current.ammo_clip && *current.ammo_clip > 0 &&
+        current.valid_until > now && (!cycle || (timing && timing->enabled));
+    return {true, valid, current.source_epoch, id};
+}
 
 inline const char* auto_stop_startup_error(const AutoStopConfig& stop,
         const source_context::SourceContextConfig& source) noexcept {

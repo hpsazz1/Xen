@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <array>
 #include <vector>
+#include <string_view>
 
 // 移动制动配置独立于 Aim；允许键与有效目标可发起制动，不代表武装或开火请求。
 struct AutoStopConfig {
@@ -13,6 +14,7 @@ struct AutoStopConfig {
     // 正式入口统一采用已验收时序；false 仅保留给旧模型回归。
     bool use_counterpulse_timing = true;
     int counter_hold_ms = 40, shot_after_release_ms = 18;
+    bool cycle_enabled = false;
 };
 
 enum class AutoStopStatus {
@@ -28,7 +30,7 @@ enum class AutoStopBlockReason {
     NONE, SOURCE_FOCUS, RELEASE_REQUIRED, INPUT_UNAVAILABLE, INPUT_HISTORY,
     ACTIVATION_NOT_HELD, SAFETY_PERMISSION, PAUSED, MOTION_UNAVAILABLE,
     CONTINUOUS_REQUEST_CONSUMED, NO_TARGET, SOURCE_TIMING_INVALID,
-    SOURCE_UNCERTAINTY, TARGET_STALE, OUTPUT_FAULT, CROSSHAIR_OUTSIDE_TARGET
+    SOURCE_UNCERTAINTY, TARGET_STALE, OUTPUT_FAULT, CROSSHAIR_OUTSIDE_TARGET, WEAPON_CONTEXT
 };
 inline const char* AutoStopBlockReasonName(AutoStopBlockReason reason) noexcept {
     switch (reason) {
@@ -48,13 +50,25 @@ inline const char* AutoStopBlockReasonName(AutoStopBlockReason reason) noexcept 
     case AutoStopBlockReason::TARGET_STALE: return "目标帧已超过50ms有效期";
     case AutoStopBlockReason::OUTPUT_FAULT: return "设备输出故障";
     case AutoStopBlockReason::CROSSHAIR_OUTSIDE_TARGET: return "准星未进入人物范围";
+    case AutoStopBlockReason::WEAPON_CONTEXT: return "GSI武器或点射资料不可用";
     }
     return "未知阻断原因";
 }
 
 const char* AutoStopStatusName(AutoStopStatus status) noexcept;
 
+// 名称只引用共享武器目录的静态存储；有效性由提供方按实时新鲜度判断。
+// 这是武器上下文，不是停稳、开火或逐发时间证明。
+struct AutoStopWeaponContext {
+    bool required = false, valid = false;
+    std::uint64_t generation = 0;
+    std::string_view canonical_id;
+};
+
 struct AutoStopSnapshot {
+    AutoStopWeaponContext weapon_context;
+    bool cycle_moving = false;
+    std::uint64_t cycle_count = 0;
     bool use_counterpulse_timing = false;
     int counter_hold_ms = 0, shot_after_release_ms = 0;
     std::int64_t counter_release_ack_ns = 0, completion_ready_ns = 0;

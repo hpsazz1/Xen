@@ -48,7 +48,8 @@ public:
         std::shared_ptr<AutoStopOutputArbiter> arbiter,
         std::function<bool()> output_permission,
         std::function<std::uint64_t()> allocate_request = {},
-        std::function<bool()> focused = {});
+        std::function<bool()> focused = {},
+        std::function<AutoStopWeaponContext()> weapon_context = {});
     ~AutoStopWorker();
     AutoStopWorker(const AutoStopWorker&) = delete;
     AutoStopWorker& operator=(const AutoStopWorker&) = delete;
@@ -64,6 +65,8 @@ public:
     AutoStopSnapshot snapshot() const noexcept;
     // 只返回独立四键接管仍有效的估计完成id，不是观察停稳证明。
     std::uint64_t estimated_completion_id() const noexcept;
+    // 点射UP确认后投递归还请求；只在worker线程操作设备，not_before前保持真实移动。
+    bool resume_movement(std::uint64_t request_id, std::chrono::steady_clock::time_point not_before) noexcept;
     // 检测线程发布不可变目标事实；无目标/失败发布零期限，旧帧不能自行续期。
     // 目标仅准入；四键接管后制动与保持都锁存至松键或安全撤销，软件制动最多500ms。
     void publish_target(std::chrono::steady_clock::time_point valid_until,

@@ -68,6 +68,8 @@ public:
     std::function<bool()> allowed;
     std::function<std::uint64_t()> allocate_request;
     std::function<bool()> focused;
+    std::function<AutoStopWeaponContext()> weapon_context;
+    bool weapon_context_seen = false;
     Clock::time_point target_until{};
     AutoStopBlockReason target_reason = AutoStopBlockReason::NO_TARGET;
     AutoStopConfig config;
@@ -82,6 +84,8 @@ public:
     Clock::time_point submitted_at;
     AutoStopSnapshot state;
     std::uint64_t estimated_id = 0, estimated_generation = 0;
+    std::uint64_t resume_id = 0, resume_generation = 0;
+    Clock::time_point resume_not_before{}, movement_not_before{};
 
     void publish(AutoStopStatus status) {
         std::lock_guard<std::mutex> lock(mutex);
@@ -92,8 +96,25 @@ public:
             if (key > 0 && key < 256 && input.virtual_keys[key]) return true;
         return false;
     }
+    bool weapon_permission() noexcept {
+        AutoStopWeaponContext incoming;
+        try { if (weapon_context) incoming = weapon_context(); }
+        catch (...) { incoming.required = true; }
+        if (incoming.required && incoming.canonical_id.empty()) incoming.valid = false;
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto previous = state.weapon_context;
+        const bool changed = weapon_context_seen && (previous.required || incoming.required) &&
+            (previous.required != incoming.required || previous.valid != incoming.valid ||
+                previous.generation != incoming.generation || previous.canonical_id != incoming.canonical_id);
+        if (changed) cancel_generation.fetch_add(1, std::memory_order_acq_rel);
+        if (changed || (incoming.required && !incoming.valid)) state.release_required = true;
+        state.weapon_context = incoming;
+        weapon_context_seen = true;
+        return !incoming.required || incoming.valid;
+    }
     bool permission(const InputSnapshot& input) noexcept {
         try {
+            if (!weapon_permission()) return false;
             { std::lock_guard<std::mutex> lock(mutex); if (state.release_required) return false; }
             return allowed && allowed() && input.state_valid && input.status == InputMonitorStatus::READY &&
                 !release_key_held(input) &&
@@ -204,14 +225,15 @@ public:
             }
             return success;
         };
-        auto cancel_active = [&](bool force_fault, const char* reason, bool normal_activation_release = false) {
+        auto cancel_active = [&](bool force_fault, const char* reason, bool normal_activation_release = false,
+                                 bool cycle_resume = false) {
             { std::lock_guard<std::mutex> lock(mutex); estimated_id = 0; }
             AutoStopBlockReason block_reason;
             { std::lock_guard<std::mutex> lock(mutex); block_reason = state.block_reason; }
             LOG_INFO("auto_stop", "取消请求{}，原因={}，阻断={}", active_id, reason,
                 AutoStopBlockReasonName(block_reason));
-            // 只有正常松允许键才允许承接受控输出模型；原始物理历史不补零事件。
-            const bool can_resume = normal_activation_release && independent && estimated && software_mask == 0 &&
+            // 正常松键或点射完成后的循环归还才承接受控输出模型；原始物理历史不补零事件。
+            const bool can_resume = (normal_activation_release || cycle_resume) && independent && estimated && software_mask == 0 &&
                 !force_fault && intent.history_valid && !intent.conflicting && intent.held_mask == held_wasd(input);
             const auto before_cleanup_cursor = cursor;
             if (active_id && !can_resume) controller.cancel(active_id, now_ns());
@@ -227,7 +249,7 @@ public:
                     mouse->read_wasd_events(after_cursor, after_events) && after_events.subscribed && !after_events.gap &&
                     after_events.count == 0 && after_cursor.epoch == before_cleanup_cursor.epoch &&
                     after_cursor.sequence == before_cleanup_cursor.sequence && held_wasd(after_cleanup) == intent.held_mask;
-                if (continuous && !after_cleanup.virtual_keys[config.activation_virtual_key] &&
+                if (continuous && (cycle_resume ? permission(after_cleanup) : !after_cleanup.virtual_keys[config.activation_virtual_key]) &&
                     !after_cleanup.virtual_keys[0x23] && !release_key_held(after_cleanup) && allowed && allowed() &&
                     !paused.load() && !stopping.load() && !arbiter->faulted_.load() &&
                     active_generation == cancel_generation.load() && session_permission(false))
@@ -237,12 +259,16 @@ public:
             const bool retain_release = clean_ok && !force_fault && intent.history_valid && !intent.conflicting &&
                 intent.held_mask == 0 && input.state_valid && input.status == InputMonitorStatus::READY && held_wasd(input) == 0;
             if (retain_release && !resumed) controller.observe(intent, now_ns());
-            if (resumed) LOG_INFO("auto_stop", "允许键释放，键盘归还已确认；保留连续输入以支持再次急停");
+            if (resumed) LOG_INFO("auto_stop", "键盘归还已确认；保留连续输入以支持再次急停");
             // 正常归还不破坏真实事件连续性；无法承接模型时，下次仅屏蔽，不伪造运动历史。
             // 清理期间的事件留给正式游标，下一轮先验证再准入。
             const bool retain_input = normal_activation_release && clean_ok && !force_fault && intent.input_continuous;
             std::lock_guard<std::mutex> lock(mutex);
-            if (active_id) ++state.canceled;
+            if (active_id && !(cycle_resume && resumed)) ++state.canceled;
+            if ((cycle_resume && !resumed) || (config.cycle_enabled && !normal_activation_release && !cycle_resume))
+                state.release_required = true;
+            if (cycle_resume && resumed) ++state.cycle_count;
+            state.cycle_moving = cycle_resume && resumed;
             if (fault || force_fault || !clean_ok) { fault = true; state.status = AutoStopStatus::FAULT; }
             else state.status = paused.load() ? AutoStopStatus::PAUSED : AutoStopStatus::CANCELED;
             active_id = 0;
@@ -251,6 +277,7 @@ public:
             estimated = false;
             mask_only = masked_hold = false;
             if (!retain_release && !resumed && !retain_input) { history.reset(); intent = {}; }
+            return resumed;
         };
         try {
             while (!stopping.load(std::memory_order_acquire)) {
@@ -314,22 +341,29 @@ public:
                     fault = latched_fault = true;
                     state.status = AutoStopStatus::FAULT;
                 }
+                const bool weapon_ready = weapon_permission();
                 const bool session_ready = allocate_request && session_permission(!independent);
                 bool release_required = false;
                 {
                     std::lock_guard<std::mutex> lock(mutex);
-                    if ((!allocate_request || state.source_focused) && input_ok && !release_key_held(input) &&
+                    if (weapon_ready && (!allocate_request || state.source_focused) && input_ok && !release_key_held(input) &&
                         config.activation_virtual_key > 0 && config.activation_virtual_key < 256 &&
                         !input.virtual_keys[config.activation_virtual_key])
                         state.release_required = false;
                     release_required = state.release_required;
                 }
-                const bool request_eligible = session_ready && !release_required && input_ok && permission(input);
+                const bool request_eligible = session_ready && !release_required && input_ok && permission(input) &&
+                    Clock::now() >= movement_not_before;
                 if (!request_eligible) target_consumed = false;
                 {
                     std::lock_guard<std::mutex> lock(mutex);
+                    if (latched_fault || !weapon_ready || release_required || !input_ok || !events_ok ||
+                        paused.load() || config.activation_virtual_key <= 0 || config.activation_virtual_key >= 256 ||
+                        !input.virtual_keys[config.activation_virtual_key] ||
+                        !state.source_focused || !allowed || !allowed()) state.cycle_moving = false;
                     state.block_reason = latched_fault ? AutoStopBlockReason::OUTPUT_FAULT :
                         allocate_request && !state.source_focused ? AutoStopBlockReason::SOURCE_FOCUS :
+                        !weapon_ready ? AutoStopBlockReason::WEAPON_CONTEXT :
                         release_required ? AutoStopBlockReason::RELEASE_REQUIRED :
                         !input_ok ? AutoStopBlockReason::INPUT_UNAVAILABLE :
                         !events_ok || (allocate_request ? !intent.input_continuous : !intent.history_valid) ? AutoStopBlockReason::INPUT_HISTORY :
@@ -345,6 +379,29 @@ public:
                 }
                 if (active_id && independent && !session_ready)
                     cancel_active(false, "source_focus_revoked");
+                std::uint64_t requested_resume = 0, requested_resume_generation = 0;
+                Clock::time_point requested_not_before;
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    requested_resume = resume_id; requested_resume_generation = resume_generation;
+                    requested_not_before = resume_not_before; resume_id = 0;
+                }
+                if (requested_resume && requested_resume == active_id) {
+                    const bool may_resume = config.cycle_enabled && independent && estimated && software_mask == 0 &&
+                        requested_resume_generation == active_generation && active_generation == cancel_generation.load() &&
+                        input_ok && events_ok && intent.input_continuous && intent.epoch == active_input_epoch &&
+                        permission(input) && session_permission(false);
+                    const bool resumed = cancel_active(false, "cycle_resume", false, may_resume);
+                    if (may_resume && resumed) {
+                        target_consumed = false;
+                        movement_not_before = std::max(requested_not_before, Clock::now() + std::chrono::milliseconds(1));
+                    } else {
+                        std::lock_guard<std::mutex> lock(mutex);
+                        state.release_required = true;
+                    }
+                    // 本轮准入条件在归还前取得，下一轮重新读取输入和期限。
+                    continue;
+                }
                 if (active_id && (!input_ok || !events_ok ||
                     (independent && (!intent.input_continuous || intent.epoch != active_input_epoch)) ||
                     (!independent_acquired && !mask_only && !intent.history_valid) || !permission(input) ||
@@ -399,6 +456,7 @@ public:
                     }
                     if (requested) {
                         active_id = requested;
+                        { std::lock_guard<std::mutex> lock(mutex); state.cycle_moving = false; }
                         if (config.use_counterpulse_timing) {
                             std::lock_guard<std::mutex> lock(mutex);
                             state.counter_release_ack_ns = state.completion_ready_ns = 0;
@@ -554,10 +612,12 @@ public:
 
 AutoStopWorker::AutoStopWorker(std::shared_ptr<IMouseController> mouse,
         std::shared_ptr<AutoStopOutputArbiter> arbiter, std::function<bool()> permission,
-        std::function<std::uint64_t()> allocate_request, std::function<bool()> focused)
+        std::function<std::uint64_t()> allocate_request, std::function<bool()> focused,
+        std::function<AutoStopWeaponContext()> weapon_context)
     : impl_(std::make_unique<Impl>(std::move(mouse), std::move(arbiter), std::move(permission))) {
     impl_->allocate_request = std::move(allocate_request);
     impl_->focused = std::move(focused);
+    impl_->weapon_context = std::move(weapon_context);
 }
 void AutoStopWorker::publish_target(std::chrono::steady_clock::time_point valid_until, AutoStopBlockReason reason) noexcept {
     if (!impl_) return;
@@ -576,6 +636,9 @@ bool AutoStopWorker::start(const AutoStopConfig& config, int command_timeout_ms)
         if (impl_->running || impl_->thread.joinable() || impl_->fault) return false;
         impl_->config = config;
         impl_->state = {};
+        impl_->weapon_context_seen = false;
+        impl_->resume_id = 0;
+        impl_->movement_not_before = {};
         impl_->state.use_counterpulse_timing = config.use_counterpulse_timing;
         if (config.use_counterpulse_timing) {
             if (config.counter_hold_ms < 1 || config.counter_hold_ms > 200 ||
@@ -645,6 +708,24 @@ bool AutoStopWorker::request(std::uint64_t id) noexcept {
         impl_->state.request_id = id;
         ++impl_->state.requests;
         impl_->state.status = AutoStopStatus::BRAKING;
+        impl_->wake.notify_all();
+        return true;
+    } catch (...) { return false; }
+}
+bool AutoStopWorker::resume_movement(std::uint64_t request_id, Clock::time_point not_before) noexcept {
+    if (!impl_ || request_id == 0) return false;
+    try {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        const auto now = Clock::now();
+        if (!impl_->running || !impl_->config.cycle_enabled || !impl_->allocate_request || impl_->fault ||
+            impl_->paused.load() || impl_->stopping.load() || impl_->state.cleanup_unknown ||
+            impl_->state.release_required || impl_->state.status != AutoStopStatus::ESTIMATED ||
+            impl_->estimated_id != request_id || impl_->resume_id != 0 ||
+            impl_->estimated_generation != impl_->cancel_generation.load() ||
+            not_before > now + std::chrono::seconds(10)) return false;
+        impl_->resume_id = request_id;
+        impl_->resume_generation = impl_->estimated_generation;
+        impl_->resume_not_before = not_before;
         impl_->wake.notify_all();
         return true;
     } catch (...) { return false; }

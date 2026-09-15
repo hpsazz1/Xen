@@ -7,6 +7,7 @@
 #include "overlay/recoil_panel.h"
 #include "overlay/input_training_panel.h"
 #include "overlay/debug_panel.h"
+#include "weapon/weapon_catalog.h"
 
 #include "log/log.h"
 
@@ -2964,11 +2965,18 @@ struct Overlay::Impl {
             case AutoStopStatus::WAITING_INPUT: status = "等待有效输入"; break;
             case AutoStopStatus::MASKED: status = "已屏蔽保持（未估算制动）"; break;
             case AutoStopStatus::BRAKING: status = "制动中"; break;
-            case AutoStopStatus::ESTIMATED: status = "制动预计完成，松开允许键恢复移动"; break;
+            case AutoStopStatus::ESTIMATED: status = app_config.auto_stop.cycle_enabled ? "制动预计完成，等待点射释放后恢复移动" : "制动预计完成，松开允许键恢复移动"; break;
             case AutoStopStatus::CANCELED: status = "已取消"; break;
             case AutoStopStatus::FAULT: status = "故障，需检查清理状态"; break;
         }
         ImGui::TextWrapped("会话：%s", status);
+        ImGui::TextWrapped("GSI武器：%s（%s）", weapon::display_name(snapshot.weapon_snapshot.canonical_id).data(),
+            weapon::status_name(snapshot.weapon_snapshot.status));
+
+        if (app_config.auto_stop.cycle_enabled) {
+            ImGui::TextWrapped("循环：%s；已归还移动 %llu 次", snapshot.auto_stop.cycle_moving ? "移动中，等待下一轮目标与间隔" : "等待准入、制动或点射",
+                static_cast<unsigned long long>(snapshot.auto_stop.cycle_count));
+        }
         if (snapshot.auto_stop.independent_trigger_enabled) {
             ImGui::TextWrapped("阻断原因：%s", AutoStopBlockReasonName(snapshot.auto_stop.block_reason));
             if (!snapshot.auto_stop.source_focused)
@@ -2994,7 +3002,7 @@ struct Overlay::Impl {
             ImGui::TextWrapped("方向重叠或制动历史不可用：已阻止方向键继续输入，保持至松开急停键；未执行反向制动，可能仍有惯性滑行。");
         ImGui::Separator();
         ImGui::TextWrapped("按住快捷键且准星进入人物完整检测范围时制动；无需开启自动扳机，不使用扳机缩小区域。");
-        ImGui::TextWrapped("准星进入人物范围用于首次触发；接管WASD后，制动途中和保持期间的离框、目标消失或换向都不会解除。松开允许键恢复移动；失焦、救援和输入异常仍会安全释放。");
+        ImGui::TextWrapped("准星进入人物范围用于首次触发；接管WASD后，制动途中和保持期间的离框、目标消失或换向都不会解除。松开允许键恢复移动；循环开启时每次点射释放后也会归还移动。失焦、救援、GSI失效和输入异常仍会安全释放。");
         ImGui::TextWrapped("面向单方向及相邻双键移动；自动急停与物理输出安全急停相互独立。");
         ImGui::BeginDisabled(!can_edit);
         const auto key_active = current_virtual_key_state();
@@ -3005,11 +3013,25 @@ struct Overlay::Impl {
                                  !app_config.auto_stop.enabled);
             toggle_switch("##auto_stop_enabled", &app_config.auto_stop.enabled);
             ImGui::EndDisabled();
+            form_row("移动点射循环", "持续按住方向键及允许键；点射释放确认后解除WASD屏蔽，下一轮按武器间隔重新准入。开启会同时配置点射、估计急停联动、共用允许键、GSI自动选枪及共享资料；GSI身份与连接须已配置。保存不会启动输出。");
+            if (toggle_switch("##auxiliary_cycle", &app_config.auto_stop.cycle_enabled) && app_config.auto_stop.cycle_enabled) {
+                app_config.auto_stop.enabled = true;
+                app_config.trigger.enabled = app_config.trigger.fire_enabled = true;
+                app_config.trigger.require_stop = app_config.trigger.allow_estimated_stop = true;
+                app_config.trigger.fire_mode = TriggerFireMode::SINGLE;
+                app_config.trigger.hold_virtual_key = app_config.auto_stop.activation_virtual_key;
+                app_config.gsi.enabled = app_config.weapon_timing_enabled = true;
+                app_config.weapon_timing_manual_id.clear();
+            }
+            form_row("GSI自动识别", "与弹道和共享武器资料使用同一套名称；身份、地址和认证仍在设置页配置。GSI只提供武器状态，不证明角色已停稳。");
+            toggle_switch("##auxiliary_gsi_enabled", &app_config.gsi.enabled);
             const int key = app_config.auto_stop.activation_virtual_key;
             render_hotkey_row("允许键（按住）", "##auto_stop_activation_key",
                 "按住且准星进入配置人物范围时触发制动，可与瞄准输出、自动扳机共用；禁止 WASD，不能与运行启停或安全急停重复。支持本机及已连接后端的按键，Esc 清空。",
                 HotkeyBindingTarget::AUTO_STOP,
                 key == 0 ? std::vector<int>{} : std::vector<int>{key}, key_active);
+            if (app_config.auto_stop.cycle_enabled)
+                app_config.trigger.hold_virtual_key = app_config.auto_stop.activation_virtual_key;
             render_hotkey_row("释放急停按键", "##auto_stop_release_keys",
                 "任意一个键即取消急停、释放软件按键并解除 WASD 屏蔽。默认数字1至5和Q；重复采集可追加多个键，Esc清空。不能使用WASD或急停允许键。设备失联时无法保证收到按键或确认释放。",
                 HotkeyBindingTarget::AUTO_STOP_RELEASE,

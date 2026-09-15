@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include "weapon/weapon_timing.h"
+#include "weapon/weapon_catalog.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <set>
@@ -33,7 +34,8 @@ bool bounded_integer(const Json& value, int maximum) {
 std::string_view timing_catalog_source() noexcept { return "weapons-user-20260915"; }
 TimingCatalog default_timing_catalog() noexcept { return kDefaults; }
 const TimingProfile* find_timing(const TimingCatalog& catalog, std::string_view id) noexcept {
-    for (const auto& profile : catalog.profiles) if (profile.canonical_id == id) return &profile;
+    const auto canonical = normalize_weapon_id(id);
+    for (const auto& profile : catalog.profiles) if (profile.canonical_id == canonical) return &profile;
     return nullptr;
 }
 bool valid_timing_catalog(const TimingCatalog& catalog) noexcept {
@@ -41,7 +43,7 @@ bool valid_timing_catalog(const TimingCatalog& catalog) noexcept {
     std::array<bool, 33> seen{};
     for (const auto& profile : catalog.profiles) {
         const auto* known = find_timing(kDefaults, profile.canonical_id);
-        if (!known || profile.shot_hold_ms < 1 || profile.shot_hold_ms > 500 ||
+        if (!known || known->canonical_id != profile.canonical_id || profile.shot_hold_ms < 1 || profile.shot_hold_ms > 500 ||
             profile.fire_interval_ms <= profile.shot_hold_ms || profile.fire_interval_ms > 2000 ||
             (profile.canonical_id == "revolver" && profile.enabled)) return false;
         const auto index = static_cast<std::size_t>(known - kDefaults.profiles.data());

@@ -9,6 +9,7 @@
 #include "recoil/recoil_worker.h"
 #include "recoil/recoil_store.h"
 #include "weapon/weapon_timing.h"
+#include "weapon/weapon_catalog.h"
 #include <unordered_map>
 #include <cstdlib>
 #include "data_collection/data_collection.h"
@@ -300,6 +301,21 @@ struct Runtime::Impl {
         debug_samples.reset();
         fps_started = std::chrono::steady_clock::now();
         fps_frame_count = 0;
+        std::shared_ptr<const weapon::TimingCatalog> timing_catalog;
+        if (config.trigger.enabled && config.weapon_timing_enabled && config.trigger.fire_mode == TriggerFireMode::SINGLE) {
+            auto catalog = weapon::default_timing_catalog();
+            std::string error;
+            const auto path = std::filesystem::u8path(config.weapon_timing_file);
+            std::error_code path_error;
+            const bool exists = std::filesystem::exists(path, path_error);
+            if (path_error) error = "无法访问资料文件";
+            else if (!exists) error = "指定资料文件不存在，请在后坐力页面保存资料或恢复默认路径";
+            if (path_error || (exists && !weapon::load_timing_catalog(path, catalog, error)) ||
+                (!exists && config.weapon_timing_file != "cache/recoil/weapon-timing.json")) {
+                set_error("武器点射资料读取失败：" + error); return false;
+            }
+            timing_catalog = std::make_shared<const weapon::TimingCatalog>(std::move(catalog));
+        }
         if (config.auto_stop.enabled || config.trigger.enabled || config.recoil.enabled) output_arbiter = std::make_shared<AutoStopOutputArbiter>();
         if (config.auto_stop.enabled) {
             Log::register_module("auto_stop", LogLevel::INFO);
@@ -323,6 +339,12 @@ struct Runtime::Impl {
                         if (!source.available || !source.focused) { previous_session = 0; return false; }
                         if (source.session_id != previous_session) { previous_session = source.session_id; return false; }
                         return true;
+                    },
+                    [this, timing_catalog] {
+                        if (!config.gsi.enabled) return AutoStopWeaponContext{};
+                        // 可被急停及扳机线程同时读取；使用不可变快照，不维护可变闭包。
+                        return runtime::detail::auto_stop_weapon_context(gsi_receiver.snapshot(),
+                            config.auto_stop.cycle_enabled, timing_catalog.get(), weapon::Clock::now());
                     });
                 if (!worker->start(config.auto_stop, config.mouse.kmbox_command_timeout_ms)) {
                     set_error("启动自动急停调度失败");
@@ -353,25 +375,21 @@ struct Runtime::Impl {
         }
         if (config.trigger.enabled) {
             Log::register_module("trigger", LogLevel::INFO);
-            std::shared_ptr<const weapon::TimingCatalog> timing_catalog;
-            if (config.weapon_timing_enabled && config.trigger.fire_mode == TriggerFireMode::SINGLE) {
-                auto catalog = weapon::default_timing_catalog();
-                std::string error;
-                const auto path = std::filesystem::u8path(config.weapon_timing_file);
-                std::error_code path_error;
-                const bool exists = std::filesystem::exists(path, path_error);
-                if (path_error) error = "无法访问资料文件";
-                else if (!exists) error = "指定资料文件不存在，请在后坐力页面保存资料或恢复默认路径";
-                if (path_error || (exists && !weapon::load_timing_catalog(path, catalog, error)) ||
-                    (!exists && config.weapon_timing_file != "cache/recoil/weapon-timing.json")) {
-                    set_error("武器点射资料读取失败：" + error); return false;
-                }
-                timing_catalog = std::make_shared<const weapon::TimingCatalog>(std::move(catalog));
-                LOG_INFO("trigger", "点射使用共享武器资料r{}，启动后固定版本", timing_catalog->revision);
-            }
+            if (timing_catalog) LOG_INFO("trigger", "点射使用共享武器资料r{}，启动后固定版本", timing_catalog->revision);
             auto trigger_config = config.trigger;
             trigger_config.person_class_ids = config.aim.person_class_ids;
             trigger_config.head_class_ids = config.aim.head_class_ids;
+            std::function<void(std::uint64_t, TriggerTime)> resume_movement;
+            if (config.auto_stop.cycle_enabled) {
+                resume_movement = [this](std::uint64_t id, TriggerTime next_down) {
+                    if (auto stop = auto_stop_worker.load()) {
+                        // 下一轮制动可占用冷却尾段；扳机仍独立守住相邻DOWN最小间隔。
+                        const auto next_brake = next_down - std::chrono::milliseconds(
+                            config.auto_stop.counter_hold_ms + config.auto_stop.shot_after_release_ms);
+                        if (!stop->resume_movement(id, next_brake)) stop->cancel(id);
+                    }
+                };
+            }
             auto worker = std::make_shared<TriggerWorker>(mouse, output_arbiter,
                 [this] { return config.mouse.allow_send_input && !stop_requested.load() && safety_gate.can_dispatch_auxiliary(); },
                 [this, previous_session = std::uint64_t{0} ]() mutable {
@@ -395,8 +413,8 @@ struct Runtime::Impl {
                     if (!config.gsi.enabled && !timing_catalog) return TriggerContext{};
                     if (exhausted) return TriggerContext{generation, true, false};
                     const auto weapon = config.gsi.enabled ? gsi_receiver.snapshot() : weapon::WeaponSnapshot{};
-                    const std::string& id = config.weapon_timing_manual_id.empty() || !timing_catalog ?
-                        weapon.canonical_id : config.weapon_timing_manual_id;
+                    const std::string_view id = config.weapon_timing_manual_id.empty() || !timing_catalog ?
+                        std::string_view(weapon.canonical_id) : weapon::normalize_weapon_id(config.weapon_timing_manual_id);
                     const bool valid = !config.gsi.enabled || (weapon.valid && weapon.identity_match && !weapon.canonical_id.empty() &&
                         weapon.source_epoch != 0 && weapon.state == weapon::WeaponState::ACTIVE && id == weapon.canonical_id &&
                         weapon.ammo_clip && *weapon.ammo_clip > 0 && weapon.valid_until > TriggerClock::now());
@@ -424,7 +442,8 @@ struct Runtime::Impl {
                     }
                     return result;
                 },
-                [this] { auto stop = auto_stop_worker.load(); return stop ? stop->estimated_completion_id() : 0; });
+                [this] { auto stop = auto_stop_worker.load(); return stop ? stop->estimated_completion_id() : 0; },
+                std::move(resume_movement));
             if (!worker->start(trigger_config)) { set_error("自动扳机启动失败或设备不支持左键"); return false; }
             trigger_worker.store(std::move(worker));
         }

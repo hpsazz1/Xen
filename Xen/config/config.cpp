@@ -1,5 +1,6 @@
 #include "config/config.h"
 #include "weapon/weapon_timing.h"
+#include "weapon/weapon_catalog.h"
 
 #include "aim/aim_config_internal.h"
 
@@ -654,7 +655,7 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"capture", "center_roi"},
         {"aim", "enable_delay_compensation"},
         {"aim", "enable_prediction"},
-        {"auto_stop", "enabled"},
+        {"auto_stop", "enabled"}, {"auto_stop", "cycle_enabled"},
         {"auto_stop", "use_counterpulse_timing"},
         {"trigger", "enabled"}, {"trigger", "fire_enabled"}, {"trigger", "require_stop"},
         {"trigger", "allow_estimated_stop"}, {"weapon_timing", "enabled"},
@@ -1006,6 +1007,14 @@ bool validate_app_config(const AppConfig& config,
             error = "自动扳机参数、绑定键、后端或急停依赖非法";
             return false;
         }
+        if (config.auto_stop.cycle_enabled && (!config.auto_stop.enabled || !config.trigger.enabled ||
+            !config.trigger.fire_enabled || !config.trigger.require_stop || !config.trigger.allow_estimated_stop ||
+            config.trigger.fire_mode != TriggerFireMode::SINGLE ||
+            config.trigger.hold_virtual_key != config.auto_stop.activation_virtual_key ||
+            !config.gsi.enabled || !config.weapon_timing_enabled || !config.weapon_timing_manual_id.empty())) {
+            error = "移动点射循环需要急停与点射共用允许键、估计急停联动、GSI自动识别和共享武器资料";
+            return false;
+        }
         const auto& recoil = config.recoil;
         if (config.weapon_timing_file.empty() || config.weapon_timing_file.size() > 1024 ||
             config.weapon_timing_manual_id.size() > 32) {
@@ -1080,6 +1089,7 @@ bool load_app_config(const std::string& path,
         AppConfig candidate = config;
         // 旧配置无独立节时必须关闭，不能继承调用方已经开启的状态。
         candidate.auto_stop.enabled = ini.GetBoolValue("auto_stop", "enabled", false);
+        candidate.auto_stop.cycle_enabled = ini.GetBoolValue("auto_stop", "cycle_enabled", false);
         // 旧开关已弃用；上方仍严格校验旧键，所有合法配置统一迁移到正式时序。
         candidate.auto_stop.use_counterpulse_timing = true;
         candidate.auto_stop.counter_hold_ms = static_cast<int>(ini.GetLongValue("auto_stop", "counter_hold_ms", 40));
@@ -1093,6 +1103,8 @@ bool load_app_config(const std::string& path,
         candidate.weapon_timing_enabled = ini.GetBoolValue("weapon_timing", "enabled", false);
         candidate.weapon_timing_file = ini.GetValue("weapon_timing", "file", "cache/recoil/weapon-timing.json");
         candidate.weapon_timing_manual_id = ini.GetValue("weapon_timing", "manual_id", "");
+        if (const auto id = weapon::normalize_weapon_id(candidate.weapon_timing_manual_id); !id.empty())
+            candidate.weapon_timing_manual_id = id;
         candidate.gsi.request_timeout_ms = static_cast<int>(ini.GetLongValue("gsi", "request_timeout_ms", 1000));
         candidate.recoil.max_observation_age_ms = static_cast<int>(ini.GetLongValue("recoil", "max_observation_age_ms", 50));
         candidate.recoil.input_path = ini.GetValue("recoil", "input_path", "kmbox_net");
@@ -1616,7 +1628,8 @@ bool save_app_config(const std::string& path,
         ini.SetBoolValue("trigger", "allow_estimated_stop", config.trigger.allow_estimated_stop);
         ini.SetBoolValue("weapon_timing", "enabled", config.weapon_timing_enabled);
         ini.SetValue("weapon_timing", "file", config.weapon_timing_file.c_str());
-        ini.SetValue("weapon_timing", "manual_id", config.weapon_timing_manual_id.c_str());
+        const auto normalized_manual_id = weapon::normalize_weapon_id(config.weapon_timing_manual_id);
+        ini.SetValue("weapon_timing", "manual_id", normalized_manual_id.empty() ? config.weapon_timing_manual_id.c_str() : normalized_manual_id.data());
         ini.SetLongValue("trigger", "hold_virtual_key", config.trigger.hold_virtual_key);
         ini.SetLongValue("trigger", "fire_delay_ms", config.trigger.fire_delay_ms);
         ini.SetLongValue("trigger", "shot_interval_ms", config.trigger.shot_interval_ms);
@@ -1632,6 +1645,7 @@ bool save_app_config(const std::string& path,
         ini.SetDoubleValue("trigger", "general_height_percent", config.trigger.general_height_percent);
         ini.SetDoubleValue("trigger", "min_confidence", config.trigger.min_confidence);
         ini.SetBoolValue("auto_stop", "enabled", config.auto_stop.enabled);
+        ini.SetBoolValue("auto_stop", "cycle_enabled", config.auto_stop.cycle_enabled);
         ini.SetLongValue("auto_stop", "counter_hold_ms", config.auto_stop.counter_hold_ms);
         ini.SetLongValue("auto_stop", "shot_after_release_ms", config.auto_stop.shot_after_release_ms);
         ini.SetLongValue("auto_stop", "activation_virtual_key",

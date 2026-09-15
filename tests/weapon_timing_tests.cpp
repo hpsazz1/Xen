@@ -29,6 +29,9 @@ int main() {
         find_timing(catalog,"revolver")->shot_hold_ms == 300, "R8仅留档");
     expect(find_timing(catalog,"nova") && find_timing(catalog,"mp5sd") && !find_timing(catalog,"Nowa") &&
         !find_timing(catalog,"g3sg1"), "采用协议canonical ID，不猜测未测试武器");
+    expect(find_timing(catalog,"M4A1-S")->canonical_id == "m4a1_s" &&
+        find_timing(catalog,"weapon_m4a1")->canonical_id == "m4a4" && !find_timing(catalog,"m4a1"),
+        "共享资料接受明确别名且区分M4A4与M4A1-S");
     for (const auto& profile : catalog.profiles) if (profile.enabled)
         expect(profile.shot_hold_ms >= 1 && profile.shot_hold_ms <= 500 &&
             profile.fire_interval_ms > profile.shot_hold_ms && profile.fire_interval_ms <= 2000,

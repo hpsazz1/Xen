@@ -1,4 +1,5 @@
 #include "weapon/weapon_internal.h"
+#include "weapon/weapon_catalog.h"
 #include <nlohmann/json.hpp>
 #include <iostream>
 
@@ -44,6 +45,17 @@ int main() {
     expect(canonical_weapon_id("weapon_m4a1") == "m4a4" &&
            canonical_weapon_id("weapon_m4a1_silencer") == "m4a1_s" &&
            canonical_weapon_id("weapon_ak47_extra").empty(), "精确武器映射");
+    expect(display_name("m4a1_s") == "M4A1-S" && display_name("weapon_m4a1") == "M4A4" &&
+           normalize_weapon_id("m4a1").empty(), "旧文件名不可混淆两把M4身份");
+    for (const auto& name : kWeaponNames) {
+        auto named = full;
+        named["player"]["weapons"]["weapon_0"]["name"] = name.gsi_name;
+        const auto identified = parse_payload(named.dump(), config, utc);
+        expect(identified.valid && identified.canonical_id == name.canonical_id &&
+               normalize_weapon_id(name.display_name) == name.canonical_id, "GSI解析与展示名称共用身份");
+    }
+    expect(canonical_weapon_id("AK-47").empty() && canonical_weapon_id("WEAPON_AK47").empty(),
+           "显示别名不放宽GSI协议入口");
     auto bad = full;
     bad["auth"]["token"] = "incorrect";
     expect(parse_payload(bad.dump(), config, utc).status == Status::AUTH_REJECTED, "错误token拒绝");

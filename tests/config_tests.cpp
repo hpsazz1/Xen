@@ -1216,6 +1216,34 @@ void test_feature_combinations_round_trip() {
     std::filesystem::remove(path, ignored);
 }
 
+void test_auxiliary_cycle_config() {
+    const auto directory = make_temp_test_directory("auxiliary_cycle");
+    if (directory.empty()) { expect(false, "循环配置隔离目录"); return; }
+    const auto path = directory / "config.ini";
+    AppConfig config, loaded;
+    std::string error;
+    config.auto_stop.enabled = config.auto_stop.cycle_enabled = true;
+    config.auto_stop.activation_virtual_key = 5;
+    config.trigger.enabled = config.trigger.fire_enabled = true;
+    config.trigger.require_stop = config.trigger.allow_estimated_stop = true;
+    config.trigger.hold_virtual_key = 5;
+    config.mouse.backend = MouseBackend::KMBOX_NET;
+    config.gsi.enabled = config.weapon_timing_enabled = true;
+    config.gsi.expected_player_id = "76561198000000000";
+    expect(save_app_config(path.string(), config, error) && load_app_config(path.string(), loaded, error) &&
+        loaded.auto_stop.cycle_enabled && loaded.trigger.hold_virtual_key == 5,
+        "GSI循环配置必须完整往返：" + error);
+    config.trigger.hold_virtual_key = 6;
+    expect(!validate_app_config(config, error), "循环禁止双允许键造成归还等待失配");
+    config.trigger.hold_virtual_key = 5;
+    config.weapon_timing_manual_id = "deagle";
+    expect(!validate_app_config(config, error), "循环必须使用GSI自动识别武器");
+    config.weapon_timing_manual_id.clear(); config.trigger.fire_enabled = false;
+    expect(!validate_app_config(config, error), "循环不能等待永远不会发生的点射");
+    { std::ofstream out(path); out << "[auto_stop]\ncycle_enabled=perhaps\n"; }
+    expect(!load_app_config(path.string(), loaded, error), "循环开关严格解析布尔值");
+}
+
 void test_shared_weapon_timing_config() {
     const auto directory = make_temp_test_directory("weapon_timing");
     if (directory.empty()) { expect(false, "武器配置隔离目录"); return; }
@@ -1235,6 +1263,9 @@ void test_shared_weapon_timing_config() {
         loaded.auto_stop.use_counterpulse_timing && loaded.auto_stop.counter_hold_ms == 40 &&
         loaded.auto_stop.shot_after_release_ms == 18,
         "共享武器资料独立于压枪关闭且完整往返");
+    config.weapon_timing_manual_id = "Desert Eagle";
+    expect(save_app_config(path.string(), config, error) && load_app_config(path.string(), loaded, error) &&
+        loaded.weapon_timing_manual_id == "deagle", "共享武器展示名保存回读为统一ID");
     config.weapon_timing_manual_id = "revolver";
     expect(!save_app_config(path.string(), config, error), "R8只留档不能启用");
     config.weapon_timing_manual_id = "unknown";
@@ -1306,6 +1337,7 @@ int main() {
     test_auto_stop_config();
     test_trigger_and_source_context_config();
     test_shared_weapon_timing_config();
+    test_auxiliary_cycle_config();
     test_legacy_keyboard_config();
     test_invalid_config();
     test_complete_aim_config_validation();

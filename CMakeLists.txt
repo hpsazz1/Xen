@@ -1779,7 +1779,7 @@ if(BUILD_TESTING)
     target_include_directories(runtime_tests PRIVATE
         ${PROJECT_SOURCE_DIR}/Xen
         ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(runtime_tests PRIVATE ${OpenCV_LIBS} Threads::Threads)
+    target_link_libraries(runtime_tests PRIVATE weapon ${OpenCV_LIBS} Threads::Threads)
     xen_deploy_runtime_dlls(runtime_tests OPENCV)
     add_test(NAME runtime_tests COMMAND runtime_tests)
 

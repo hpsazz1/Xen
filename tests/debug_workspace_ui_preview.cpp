@@ -201,7 +201,7 @@ void require_page_table(const char* table_name) {
 // 只构造显示层与合成快照。无 Runtime 实例、Session、设备、用户配置读取或业务动作执行。
 int wmain(int argc, wchar_t** argv) {
     try {
-        require(argc >= 2, "用法：debug_workspace_ui_preview.exe <独立截图目录> [--dark]");
+        require(argc >= 2, "用法：debug_workspace_ui_preview.exe <独立截图目录> [--dark] [--auxiliary]");
         const auto output = std::filesystem::absolute(argv[1]);
         require(!std::filesystem::exists(output), "截图目录必须独立且尚不存在");
         require(std::filesystem::create_directories(output), "无法创建独立截图目录");
@@ -214,9 +214,29 @@ int wmain(int argc, wchar_t** argv) {
         // 即使未来新增自动浏览逻辑，也只能命中本测试独立空目录。
         config.recoil.profile_directory = (output / "unused-fixture").string();
         config.weapon_timing_file = (output / "unused-timing.json").string();
-        if (argc > 2) { require(std::wstring_view(argv[2]) == L"--dark", "未知参数"); config.ui.theme = UiTheme::DARK; }
+        bool auxiliary = false;
+        for (int i = 2; i < argc; ++i) {
+            const std::wstring_view option(argv[i]);
+            if (option == L"--dark") config.ui.theme = UiTheme::DARK;
+            else if (option == L"--auxiliary") auxiliary = true;
+            else require(false, "未知参数");
+        }
         require(overlay.init(config.ui), "Overlay 初始化失败");
         RuntimeSnapshot runtime; runtime.state = RuntimeState::STOPPED;
+        if (auxiliary) {
+            config.mouse.backend = MouseBackend::KMBOX_NET;
+            config.auto_stop.enabled = config.auto_stop.cycle_enabled = config.gsi.enabled = true;
+            config.auto_stop.activation_virtual_key = 5;
+            runtime.weapon_snapshot.canonical_id = "m4a1_s";
+            runtime.weapon_snapshot.status = weapon::Status::READY;
+            runtime.weapon_snapshot.valid = true;
+            runtime.auto_stop.status = AutoStopStatus::READY;
+            runtime.auto_stop.cycle_moving = true; runtime.auto_stop.cycle_count = 3;
+            runtime.auto_stop.independent_trigger_enabled = runtime.auto_stop.source_focused = true;
+            runtime.auto_stop.target_available = runtime.auto_stop.telemetry_available = true;
+            runtime.auto_stop.use_counterpulse_timing = true;
+            runtime.auto_stop.counter_hold_ms = 40; runtime.auto_stop.shot_after_release_ms = 18;
+        }
         model_workspace::Settings settings; model_workspace::Snapshot workspace; OverlayActions actions;
         debug_session::Snapshot debug;
         debug.state = debug_session::State::COMPLETED;
@@ -265,10 +285,44 @@ int wmain(int argc, wchar_t** argv) {
                 std::chrono::steady_clock::now() - started).count());
         };
         frame(); frame(); frame();
+        if (auxiliary) {
+            // 本模式只验收急停区域；关闭会自动读取资料的独立共享资料折叠区。
+            auto* preview_content = preview_window("content");
+            preview_content->StateStorage.SetInt(preview_content->GetID("共享武器点射节奏"), 0);
+        }
         // 导航点击只进入本进程 ImGui 队列，不调用系统鼠标API。
-        input.position = {70, 36.f + 12.f + 21.f + 6.f * (42.f + ImGui::GetStyle().ItemSpacing.y)};
+        input.position = {70, 36.f + 12.f + 21.f + (auxiliary ? 3.f : 6.f) * (42.f + ImGui::GetStyle().ItemSpacing.y)};
         frame(); input.down = true; frame(); input.down = false; frame(); frame();
         auto* content = preview_window("content");
+        if (auxiliary) {
+            input.position = {400,40}; frame();
+            require_page_table("auto_stop_form");
+            require(capture.text.find("GSI武器：M4A1-S") != std::string::npos, "辅助页未显示统一GSI名称");
+            require(capture.text.find("已归还移动 3 次") != std::string::npos, "辅助页未显示合成循环状态");
+            save_window(capture, output / "auxiliary-top.png");
+            auto* panel = preview_window("auto_stop_panel");
+            // 向当前子窗口注入滚轮，验证与真实浏览相同的滚动路径。
+            input.position = panel->ClipRect.GetCenter(); input.wheel = -5.f; frame(); frame();
+            auto* table = ImGui::GetCurrentContext()->Tables.GetByKey(panel->GetID("auto_stop_form"));
+            require(table != nullptr, "辅助设置表缺失");
+            require(panel->Scroll.y > 0, "辅助循环设置未滚动");
+            save_window(capture, output / "auxiliary-cycle.png");
+            // 820×600最小窗口实绘核对：第二行帮助中心为(269,347)。
+            // 帧结束后的默认字体并非当前表单字体，不用其CalcTextSize反推帮助位置。
+            input.position = {269.f, 347.f};
+            for (int i = 0; i < 35; ++i) frame();
+            require_tooltip(capture, "持续按住方向键及允许键");
+            save_window(capture, output / "auxiliary-help.png");
+            ImGui::RemoveContextHook(ImGui::GetCurrentContext(),capture_hook_id);
+            ImGui::RemoveContextHook(ImGui::GetCurrentContext(),frame_hook_id);
+            ImGui::RemoveContextHook(ImGui::GetCurrentContext(),hook_id);
+            overlay.shutdown(); Log::shutdown();
+            std::ofstream result(output / "ui-preview-result.txt");
+            result << "辅助页合成快照；Runtime实例=0；设备=0；业务动作=0；窗口=" << config.ui.width << 'x' << config.ui.height
+                   << "；帧=" << frames << "\n已检查统一M4A1-S名称、循环状态、循环设置可见性与帮助浮层边界；不证明真实设备行为。\n";
+            require(result.good(), "辅助预览结果写入失败");
+            return 0;
+        }
         auto* bar = ImGui::GetCurrentContext()->TabBars.GetByKey(content->GetID("debug_tabs"));
         require(bar && bar->Tabs.Size == 5, "调试导航没有显示五个标签");
         require(bar->BarRect.Min.x >= 0 && bar->BarRect.Max.x <= ImGui::GetIO().DisplaySize.x,

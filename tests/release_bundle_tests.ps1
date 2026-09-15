@@ -117,6 +117,7 @@ try {
         "tools/model-data/model_training_requirements.txt" = "scripts/model_training_requirements.txt"
         "tools/recoil/import_recoil_profiles.py" = "scripts/import_recoil_profiles.py"
         "tools/recoil/build_recoil_dataset.py" = "scripts/build_recoil_dataset.py"
+        "assets/weapon_catalog.inc" = "assets/weapon_catalog.inc"
         "assets/recoil/legacy_manifest.json" = "assets/recoil/legacy_manifest.json"
         "assets/recoil/README.md" = "assets/recoil/README.md"
     }

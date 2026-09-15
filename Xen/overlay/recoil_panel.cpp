@@ -3,6 +3,7 @@
 #include "recoil/recoil_calibration_io.h"
 #include "recoil_tuner/recoil_tuner.h"
 #include "weapon/weapon_timing.h"
+#include "weapon/weapon_catalog.h"
 
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
@@ -200,14 +201,14 @@ struct RecoilPanel::Impl {
             return;
         }
         ImGui::TextWrapped("仅用于自动扳机的点射节奏，独立于压枪开关；不改变持续扫射、弹道时间轴或急停参数。修改配置和资料在下一次启动运行时生效。");
-        ImGui::TextWrapped("当前GSI武器：%s（%s）", snapshot.weapon_snapshot.canonical_id.empty() ? "未知" : snapshot.weapon_snapshot.canonical_id.c_str(),
+        ImGui::TextWrapped("当前GSI武器：%s（%s）", weapon::display_name(snapshot.weapon_snapshot.canonical_id).data(),
             weapon::status_name(snapshot.weapon_snapshot.status));
         const auto& active_timing = snapshot.trigger.context;
         if (snapshot.state == RuntimeState::RUNNING && snapshot.trigger_telemetry_available &&
             active_timing.timing_required && active_timing.timing_valid && active_timing.valid &&
             active_timing.generation != 0 && !active_timing.timing_weapon_id.empty()) {
-            ImGui::TextWrapped("运行实际点射资料：%.*s / r%llu；按住 %dms，按下间隔 %dms。",
-                static_cast<int>(active_timing.timing_weapon_id.size()), active_timing.timing_weapon_id.data(),
+            ImGui::TextWrapped("运行实际点射资料：%s / r%llu；按住 %dms，按下间隔 %dms。",
+                weapon::display_name(active_timing.timing_weapon_id).data(),
                 static_cast<unsigned long long>(active_timing.timing_catalog_revision),
                 active_timing.shot_hold_ms, active_timing.fire_interval_ms);
         } else ImGui::TextWrapped("运行点射资料：当前未启用或上下文无效，不可作为开火依据；下方为配置草稿。");
@@ -222,12 +223,12 @@ struct RecoilPanel::Impl {
                     load_timing(config.weapon_timing_file);
                 }
                 row("武器选择", "自动按GSI上下文选择；手选是你对当前武器的明确声明，换枪时须同步调整。启用GSI时手选仍须与有效GSI武器一致；R8不能激活。使用全局保存配置保存选择。");
-                const char* selection = config.weapon_timing_manual_id.empty() ? "GSI自动识别" : config.weapon_timing_manual_id.c_str();
+                const char* selection = config.weapon_timing_manual_id.empty() ? "GSI自动识别" : weapon::display_name(config.weapon_timing_manual_id).data();
                 if (ImGui::BeginCombo("##weapon_timing_manual", selection)) {
                     if (ImGui::Selectable("GSI自动识别", config.weapon_timing_manual_id.empty())) config.weapon_timing_manual_id.clear();
                     if (timing_valid) for (const auto& profile : timing_catalog.profiles) {
                         DisabledScope unavailable(!profile.enabled || profile.canonical_id == "revolver");
-                        if (ImGui::Selectable(profile.canonical_id.data(), config.weapon_timing_manual_id == profile.canonical_id))
+                        if (ImGui::Selectable(weapon::display_name(profile.canonical_id).data(), config.weapon_timing_manual_id == profile.canonical_id))
                             config.weapon_timing_manual_id = profile.canonical_id;
                     }
                     ImGui::EndCombo();
@@ -241,9 +242,9 @@ struct RecoilPanel::Impl {
         if (!timing_valid) return;
         ImGui::Text("资料版本：%llu；来源：%s%s", static_cast<unsigned long long>(timing_catalog.revision),
             weapon::timing_catalog_source().data(), timing_dirty ? "；有未保存编辑" : "");
-        if (ImGui::BeginCombo("查看/编辑武器", timing_catalog.profiles[timing_selected].canonical_id.data())) {
+        if (ImGui::BeginCombo("查看/编辑武器", weapon::display_name(timing_catalog.profiles[timing_selected].canonical_id).data())) {
             for (std::size_t i = 0; i < timing_catalog.profiles.size(); ++i)
-                if (ImGui::Selectable(timing_catalog.profiles[i].canonical_id.data(), timing_selected == i)) timing_selected = i;
+                if (ImGui::Selectable(weapon::display_name(timing_catalog.profiles[i].canonical_id).data(), timing_selected == i)) timing_selected = i;
             ImGui::EndCombo();
         }
         help("只切换下面的资料编辑对象，不改变自动扳机实际选用的武器。运行中仍可查看各武器资料。");
@@ -418,7 +419,7 @@ struct RecoilPanel::Impl {
             row("覆盖文件", "曲线目录内的已保存文件名，禁止路径逃逸；仍须匹配武器与校准条件，不能执行未校准候选。"); ImGui::InputText("##recoil_trial_file", &c.trial_file);
             ImGui::EndTable();
         }
-        ImGui::TextWrapped("武器：%s（%s）", snapshot.weapon_snapshot.canonical_id.empty() ? "未知" : snapshot.weapon_snapshot.canonical_id.c_str(),
+        ImGui::TextWrapped("武器：%s（%s）", weapon::display_name(snapshot.weapon_snapshot.canonical_id).data(),
             weapon::status_name(snapshot.weapon_snapshot.status));
         if (!snapshot.recoil_profile_status.empty()) ImGui::TextWrapped("曲线匹配：%s", snapshot.recoil_profile_status.c_str());
         if (snapshot.recoil_telemetry_available) {
@@ -431,15 +432,18 @@ struct RecoilPanel::Impl {
             auto& g = config.gsi;
             if (form("gsi_settings")) {
                 row("启用GSI", "武器上下文来源，不是逐发、前台或停稳证据。"); ImGui::Checkbox("##gsi_enabled", &g.enabled);
-                row("本地绑定地址", "单机建议127.0.0.1；双机需明确可达地址及允许来源，不默认监听公网。"); ImGui::InputText("##gsi_bind", &g.bind_address);
+                row("Xen接收地址", "填写运行Xen的电脑地址；双机时为辅机IP，游戏机向此地址发送GSI。127.0.0.1只适用于游戏与Xen在同一台电脑。"); ImGui::InputText("##gsi_bind", &g.bind_address);
                 row("接收端口", "游戏GSI配置需指向此HTTP接收端口。"); int port = g.port;
                 if (ImGui::InputInt("##gsi_port", &port)) g.port = static_cast<std::uint16_t>(std::clamp(port, 1, 65535));
                 row("本玩家标识", "仅接受对应玩家；观战或身份不匹配不沿用旧武器。"); ImGui::InputText("##gsi_player", &g.expected_player_id);
-                row("允许源IPv4", "仅允许指定源主机请求；认证值仍必须由环境提供。"); ImGui::InputText("##gsi_peer", &g.allowed_peer_ipv4);
+                row("游戏机IPv4", "填写运行游戏的主机IP，只接受这台电脑发送的GSI；这里不是辅机地址，认证值仍必须由环境提供。"); ImGui::InputText("##gsi_peer", &g.allowed_peer_ipv4);
                 row("上下文有效期 / ms", "同一源时间的重复包不续命；不是逐发时间精度。"); ImGui::InputInt("##gsi_ttl", &g.ttl_ms);
                 row("请求超时 / ms", "限制HTTP接收时间，不在设备实时线程解析请求。"); ImGui::InputInt("##gsi_timeout", &g.request_timeout_ms);
                 ImGui::EndTable();
             }
+            if (g.bind_address != "0.0.0.0" && g.bind_address != "127.0.0.1" && !g.bind_address.empty())
+                ImGui::TextWrapped("游戏端GSI URI：http://%s:%u/gsi", g.bind_address.c_str(), static_cast<unsigned>(g.port));
+            else ImGui::TextWrapped("双机使用时，游戏端URI须填写辅机实际IP，不能填写127.0.0.1或0.0.0.0。");
             ImGui::TextWrapped("认证由环境变量 XEN_GSI_TOKEN 提供；此处不输入或显示认证值。");
         }
     }
@@ -469,7 +473,7 @@ struct RecoilPanel::Impl {
         if (ImGui::Button("加载覆盖文件")) load_file(config.recoil, config.recoil.trial_file);
         help("读取配置中固定覆盖的文件到草稿；不会开启覆盖或改变其保存状态。");
         if (!loaded) { ImGui::TextWrapped("先加载已有曲线，再编辑草稿；不会自动创建虚构弹道。"); return; }
-        ImGui::TextWrapped("编辑对象固定：%s / %s / 基线 %llu；GSI换枪不会切走当前草稿。", base.weapon_id.c_str(), base.id.c_str(),
+        ImGui::TextWrapped("编辑对象固定：%s / %s / 基线 %llu；GSI换枪不会切走当前草稿。", weapon::display_name(base.weapon_id).data(), base.id.c_str(),
             static_cast<unsigned long long>(base.revision));
         bool changed = false;
         if (form("recoil_tuning")) {

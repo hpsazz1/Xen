@@ -2,6 +2,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <stdexcept>
 namespace {
 int failures=0;
 void expect(bool b,const char* message){if(!b){++failures;std::cerr<<message<<'\n';}}
@@ -22,6 +23,35 @@ void schema_and_compile(){
     auto p=*profile();std::string error;expect(validate_recoil_profile(p,error),"合成profile合法");
     auto text=serialize_recoil_profile(p);RecoilProfile roundtrip;
     expect(load_recoil_profile(text,roundtrip,error)&&serialize_recoil_profile(roundtrip)==text,"schema往返确定性");
+    auto named=p;named.weapon_id="M4A1-S";
+    for (const auto state : {RecoilProfileState::CALIBRATED, RecoilProfileState::ACCEPTED}) {
+        auto baseline=p;baseline.state=state;
+        auto legacy=serialize_recoil_profile(baseline);
+        legacy.replace(legacy.find("synthetic_weapon"),std::string("synthetic_weapon").size(),"M4A1-S");
+        roundtrip=p;
+        expect(!load_recoil_profile(legacy,roundtrip,error) && roundtrip.weapon_id==p.weapon_id &&
+            !error.empty(),"已校准别名拒绝加载且保留输出快照");
+        named.state=state;
+        expect(!validate_recoil_profile(named,error),"已校准别名不能保留旧证据身份");
+        bool rejected=false;
+        try { serialize_recoil_profile(named); } catch (const std::invalid_argument&) { rejected=true; }
+        expect(rejected,"已校准别名不能静默序列化为另一语义哈希");
+        baseline.weapon_id="m4a1_s";
+        const auto canonical_text=serialize_recoil_profile(baseline);
+        expect(load_recoil_profile(canonical_text,roundtrip,error) && serialize_recoil_profile(roundtrip)==canonical_text,
+            "规范已校准身份及其序列化保持不变");
+    }
+    for (const auto state : {RecoilProfileState::IMPORTED, RecoilProfileState::SCHEMA_VALID}) {
+        auto baseline=p;baseline.state=state;
+        auto legacy=serialize_recoil_profile(baseline);
+        legacy.replace(legacy.find("synthetic_weapon"),std::string("synthetic_weapon").size(),"M4A1-S");
+        expect(load_recoil_profile(legacy,roundtrip,error) && roundtrip.weapon_id=="m4a1_s" &&
+            roundtrip.id==baseline.id && roundtrip.state==state && roundtrip.points.size()==baseline.points.size(),
+            "未校准候选明确别名归一且曲线版本身份不变");
+        named.state=state;named.weapon_id="weapon_m4a1";
+        expect(load_recoil_profile(serialize_recoil_profile(named),roundtrip,error) && roundtrip.weapon_id=="m4a4",
+            "候选序列化使用规范身份并区分M4A4");
+    }
     p.points[1].time_ms=0;expect(!validate_recoil_profile(p,error),"重复时间拒绝");
     p=*profile();p.unit="pixels";expect(!validate_recoil_profile(p,error),"错误单位拒绝");
     p=*profile();p.points[1].x_counts=std::numeric_limits<double>::quiet_NaN();expect(!validate_recoil_profile(p,error),"NaN拒绝");

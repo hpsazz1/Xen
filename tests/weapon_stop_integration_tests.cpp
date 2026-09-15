@@ -83,7 +83,9 @@ public:
     }
     KeyboardReceipt cleanup_wasd_keyboard() noexcept override {
         const auto receipt = keyboard_ack();
-        std::lock_guard lock(mutex); masks = software = 0;
+        std::lock_guard lock(mutex);
+        if (left_down.load()) cleanup_during_shot = true;
+        masks = software = 0;
         return receipt;
     }
     ButtonReceipt set_left_button(bool down) noexcept override {
@@ -108,6 +110,7 @@ public:
     MouseStatus status() const noexcept override { return MouseStatus::READY; }
     std::string last_error() const override { return {}; }
     std::atomic<unsigned> downs{0}, ups{0}, moves{0};
+    std::atomic<bool> cleanup_during_shot{false};
 private:
     std::mutex mutex;
     std::vector<WasdEvent> events;
@@ -126,7 +129,7 @@ std::shared_ptr<TriggerObservation> fresh_observation(std::uint64_t sequence) {
     result->observed_at = Clock::now(); result->valid = result->timing_valid = true;
     return result;
 }
-void run_weapon(const char* weapon_id) {
+void run_weapon(const char* weapon_id, bool cycle = false) {
     const auto catalog = weapon::default_timing_catalog();
     const auto* profile = weapon::find_timing(catalog, weapon_id);
     require(profile && profile->enabled, "组合测试须使用共享表有效武器");
@@ -135,6 +138,10 @@ void run_weapon(const char* weapon_id) {
     std::atomic<std::uint64_t> next_id{0};
     std::atomic<unsigned> trigger_requests{0};
     AutoStopWorker stop(mouse, arbiter, [] { return true; }, [&] { return ++next_id; }, [] { return true; });
+    std::function<void(std::uint64_t, TriggerTime)> resume;
+    if (cycle) resume = [&](std::uint64_t id, TriggerTime deadline) {
+        require(stop.resume_movement(id, deadline - 58ms), "循环必须接收当前点射对应的急停归还");
+    };
     TriggerWorker trigger(mouse, arbiter, [] { return true; }, [] { return true; }, [&] { return ++next_id; },
         [&](std::uint64_t id) { ++trigger_requests; return stop.request(id); },
         [&](std::uint64_t id) { stop.cancel(id); }, [&] {
@@ -143,8 +150,9 @@ void run_weapon(const char* weapon_id) {
             result.shot_hold_ms = profile->shot_hold_ms; result.fire_interval_ms = profile->fire_interval_ms;
             result.timing_catalog_revision = catalog.revision; result.timing_weapon_id = profile->canonical_id;
             return result;
-        }, [&] { return stop.estimated_completion_id(); });
+        }, [&] { return stop.estimated_completion_id(); }, std::move(resume));
     AutoStopConfig stop_config{true, 5};
+    stop_config.cycle_enabled = cycle;
     stop_config.counter_hold_ms = 40; stop_config.shot_after_release_ms = 18;
     TriggerConfig trigger_config;
     trigger_config.enabled = true; trigger_config.hold_virtual_key = 5; trigger_config.fire_delay_ms = 0;
@@ -163,14 +171,18 @@ void run_weapon(const char* weapon_id) {
     until([&] {
         stop.publish_target(Clock::now() + 300ms);
         trigger.publish(fresh_observation(++sequence));
-        return mouse->ups >= 2 && !trigger.snapshot().button_may_be_down;
+        return mouse->ups >= 2 && !trigger.snapshot().button_may_be_down &&
+            (!cycle || (stop.snapshot().cycle_count >= 2 && mouse->released()));
     }, 2500ms);
     const auto keys = mouse->keyboard_commands();
     const auto stopped = stop.snapshot();
-    require(keys.size() == 3 && keys[0].mask == 0 && keys[1].mask == 8 && keys[2].mask == 0,
-        "A100ms后必须仅执行一次zero→D→zero，冷却不得重复制动");
+    require(keys.size() == (cycle ? 6 : 3) && keys[0].mask == 0 && keys[1].mask == 8 && keys[2].mask == 0,
+        "每次接管均须zero→D→zero，循环每发重新制动；旧模式只制动一次");
+    if (cycle) require(keys[3].mask == 0 && keys[4].mask == 8 && keys[5].mask == 0 &&
+        stopped.cycle_moving && stopped.cycle_count == 2 && !mouse->cleanup_during_shot.load(),
+        "持续按A必须完成两轮反向制动，且仅在LEFT UP确认后归还移动");
     require(keys[2].submitted >= keys[1].acknowledged + 40ms, "反向按住不得早于ACK加40ms释放");
-    require(stopped.requests == 1 && stopped.completed == 1 && trigger_requests == 0,
+    require(stopped.requests == (cycle ? 2 : 1) && stopped.completed == (cycle ? 2 : 1) && trigger_requests == 0,
         "两发共享一次独立急停，不额外创建观察租约或急停请求");
     require(!stopped.fire_permitted, "估计时序不得伪造严格观察资格");
     mouse->allow(false);
@@ -190,8 +202,10 @@ void run_weapon(const char* weapon_id) {
     for (std::size_t index = 0; index < 2; ++index) {
         require(up_events[index].call_started_at >= down_events[index].protocol_ack_received_at + std::chrono::milliseconds(profile->shot_hold_ms),
             "LEFT UP提交不得早于DOWN协议ACK加武器按住时长");
-        require(down_events[index].snapshot.estimated_stop_request_id == stopped.request_id,
-            "每发须绑定同一真实急停worker的估计完成id");
+        require(down_events[index].snapshot.estimated_stop_request_id == (cycle ? index + 1 : stopped.request_id),
+            "每发须绑定对应急停worker的估计完成id；循环不可复用旧id");
+        if (cycle) require(down_events[index].call_started_at >= keys[index * 3 + 2].acknowledged + 18ms,
+            "每轮LEFT DOWN都需等待本轮反向释放ACK加18ms");
     }
     require(mouse->released() && mouse->moves == 0, "松允许键清理必须归还键鼠且不得产生鼠标位移");
     std::cout << weapon_id << "：共享生产worker组合证据通过，未连接设备\n";
@@ -199,7 +213,7 @@ void run_weapon(const char* weapon_id) {
 } // namespace
 int main() {
     try {
-        for (const char* id : {"deagle", "ak47", "awp"}) run_weapon(id);
+        for (const char* id : {"deagle", "ak47", "awp"}) { run_weapon(id); run_weapon(id, true); }
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "武器急停组合回归失败：" << error.what() << '\n';

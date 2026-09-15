@@ -131,6 +131,35 @@ struct Fixture {
     }
     void fire() { mouse->held=true; worker.publish(observation()); }
 };
+void cycle_resume_only_after_normal_up() {
+    for (int mode = 0; mode < 3; ++mode) {
+        auto mouse = std::make_shared<Mouse>();
+        auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+        std::atomic<unsigned> resumed{0}, canceled{0};
+        TriggerWorker worker(mouse, arbiter, [] { return true; }, [] { return true; },
+            [] { return std::uint64_t{8}; }, [](std::uint64_t) { return true; },
+            [&](std::uint64_t id) { if (id == 7) ++canceled; }, {}, [] { return std::uint64_t{7}; },
+            [&](std::uint64_t id, TriggerTime) { if (id == 7 && !mouse->dirty) ++resumed; });
+        TriggerConfig config;
+        config.enabled = config.require_stop = config.allow_estimated_stop = true;
+        config.hold_virtual_key = 5; config.fire_delay_ms = 0;
+        config.press_duration_ms = 80; config.shot_interval_ms = 250; config.max_observation_age_ms = 500;
+        expect(worker.start(config), "循环扳机测试启动");
+        expect(until([&] { return worker.snapshot().reason == TriggerReason::RELEASED; }), "等待松键准入");
+        mouse->held = true; worker.publish(observation());
+        expect(until([&] { return mouse->count(true) == 1 && worker.firing_signal().confirmed_down; }), "等待循环首DOWN确认");
+        if (mode == 1) worker.cancel();
+        if (mode == 2) mouse->physical_left = true;
+        expect(until([&] { return mouse->count(false) >= 1 && resumed + canceled >= 1; }), "LEFT UP后完成归还或取消回调");
+        expect(resumed == (mode == 0 ? 1u : 0u) && canceled == (mode == 0 ? 0u : 1u),
+            "仅正常点射UP可续轮，显式取消和物理左键必须取消旧急停");
+        worker.publish(observation(2));
+        std::this_thread::sleep_for(270ms);
+        expect(mouse->count(true) == 1, "归还未完成或旧stop ID不得触发第二发");
+        worker.stop();
+    }
+}
+
 void fire_disabled_no_output_or_receipt() {
     Fixture f; expect(f.start(false, 200, 1000, 10, false), "不开枪调试启动"); f.fire();
     expect(until([&] { return f.worker.snapshot().reason == TriggerReason::FIRE_DISABLED; }), "快照明确不开枪原因");
@@ -493,6 +522,7 @@ void exception_uses_bounded_cleanup() {
 
 }
 int main() {
+    cycle_resume_only_after_normal_up();
     estimated_stop_callback_and_revalidation(); timing_change_at_down_revalidation();
     fire_disabled_no_output_or_receipt();
     autonomous_cleanup(); unknown_and_late_ack(); final_revalidation(); unverified_stop_and_contention();

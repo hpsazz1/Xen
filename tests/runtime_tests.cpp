@@ -622,6 +622,33 @@ void test_runtime_preview_held_slots_and_reset() {
 
 int main() {
     {
+        auto catalog = weapon::default_timing_catalog();
+        weapon::WeaponSnapshot current;
+        const auto now = weapon::Clock::now();
+        current.valid = current.identity_match = true; current.source_epoch = 7;
+        current.state = weapon::WeaponState::ACTIVE; current.ammo_clip = 10;
+        current.valid_until = now + std::chrono::seconds(1);
+        current.canonical_id = "ak47";
+        auto context = runtime::detail::auto_stop_weapon_context(current, true, &catalog, now);
+        expect(context.valid && context.canonical_id == "ak47" && context.generation == 7,
+            "循环上下文使用GSI身份与实际资料快照");
+        for (const char* id : {"g3sg1", "revolver"}) {
+            current.canonical_id = id;
+            expect(!runtime::detail::auto_stop_weapon_context(current, true, &catalog, now).valid,
+                "无资料或禁用武器不准入循环，避免先屏蔽后无限等待点射");
+            expect(runtime::detail::auto_stop_weapon_context(current, false, nullptr, now).valid,
+                "普通急停不强制要求点射资料");
+        }
+        current.canonical_id = "ak47";
+        for (auto& row : catalog.profiles) if (row.canonical_id == "ak47") row.enabled = false;
+        expect(!runtime::detail::auto_stop_weapon_context(current, true, &catalog, now).valid,
+            "用户禁用项必须从实际载入表生效，不以默认表绕过");
+        current.valid_until = now;
+        expect(!runtime::detail::auto_stop_weapon_context(current, false, &catalog, now).valid,
+            "已识别名称不可给过期GSI续期");
+    }
+
+    {
         AutoStopConfig stop{true, 5};
         source_context::SourceContextConfig source;
         expect(runtime::detail::auto_stop_startup_error(stop, source) != nullptr,

@@ -17,6 +17,10 @@ public:
     std::function<void(std::uint64_t)> cancel_stop;
     std::function<TriggerContext()> context;
     std::function<std::uint64_t()> estimated_stop;
+    // 只在本次LEFT UP确认后通知键盘owner归还；绝不由扳机线程直接操作WASD。
+    std::function<void(std::uint64_t, TriggerTime)> resume_movement;
+    std::uint64_t cycle_stop_id = 0, consumed_cycle_stop_id = 0;
+    TriggerTime cycle_next_down{};
     TriggerConfig config;
     TriggerController controller;
     std::atomic<std::shared_ptr<const TriggerObservation>> latest;
@@ -85,7 +89,8 @@ public:
         const auto current = controller.snapshot();
         if (config.require_stop && config.allow_estimated_stop && estimated_stop) {
             p.estimated_stop_request_id = estimated_stop();
-            p.stop_estimated_qualified = p.estimated_stop_request_id != 0;
+            p.stop_estimated_qualified = p.estimated_stop_request_id != 0 &&
+                (!resume_movement || p.estimated_stop_request_id != consumed_cycle_stop_id);
         }
         if (allocate_stop_id && config.require_stop && !config.allow_estimated_stop && current.region != TriggerRegion::NONE &&
             current.stop_request_id == 0 && reserved_stop_id == 0 && p.enabled && p.healthy &&
@@ -224,6 +229,12 @@ public:
                     event.backend_completed_at, event.protocol_ack_received_at, event.observed_at,
                     std::chrono::duration_cast<std::chrono::nanoseconds>(event.backend_completed_at - event.call_started_at)};
             }
+            if (resume_movement && down && receipt.status == TriggerReceiptStatus::ACKNOWLEDGED) {
+                cycle_stop_id = event.snapshot.estimated_stop_request_id;
+                const auto& timing = event.snapshot.firing_context;
+                cycle_next_down = receipt.submitted_at + std::chrono::milliseconds(
+                    timing.timing_required ? timing.fire_interval_ms : config.shot_interval_ms);
+            }
             decision = controller.acknowledge(receipt, event.observed_at);
             if (context_changed) {
                 reserved_stop_id = 0;
@@ -239,6 +250,22 @@ public:
                 cleanup_due = event.observed_at + std::chrono::milliseconds(2);
                 if (receipt.status == TriggerReceiptStatus::ACKNOWLEDGED) {
                     cleanup_active = false;
+                    if (resume_movement && cycle_stop_id) {
+                        const auto id = cycle_stop_id;
+                        cycle_stop_id = 0;
+                        consumed_cycle_stop_id = id;
+                        const auto fresh = permit();
+                        const auto& firing_context = event.snapshot.firing_context;
+                        const bool same_context = fresh.context.required == firing_context.required &&
+                            (!fresh.context.required || (fresh.context.valid && firing_context.valid &&
+                                fresh.context.generation == firing_context.generation));
+                        // 仅正常点射到期的UP可续轮；取消、失焦、物理左键、失效清理均退出。
+                        if (event.snapshot.reason == TriggerReason::RELEASED && fresh.enabled && fresh.healthy &&
+                            fresh.armed && fresh.held && fresh.focused && !fresh.physical_left_down && same_context &&
+                            !stopping.load() && !canceled.load() && !controller.snapshot().faulted)
+                            resume_movement(id, cycle_next_down);
+                        else cancel_stop(id);
+                    }
                     if (deferred_cancel_id) { cancel_stop(deferred_cancel_id); deferred_cancel_id = 0; }
                 } else check_cleanup_budget(event.observed_at);
             }
@@ -325,7 +352,8 @@ TriggerWorker::TriggerWorker(std::shared_ptr<IMouseController> mouse,
     std::shared_ptr<AutoStopOutputArbiter> arbiter, std::function<bool()> permission,
     std::function<bool()> focused, std::function<std::uint64_t()> next_stop_id,
     std::function<bool(std::uint64_t)> request_stop, std::function<void(std::uint64_t)> cancel_stop,
-    std::function<TriggerContext()> context, std::function<std::uint64_t()> estimated_stop)
+    std::function<TriggerContext()> context, std::function<std::uint64_t()> estimated_stop,
+    std::function<void(std::uint64_t, TriggerTime)> resume_movement)
     : impl_(std::make_unique<Impl>()) {
     impl_->mouse = std::move(mouse); impl_->arbiter = std::move(arbiter);
     impl_->permission = std::move(permission); impl_->focused = std::move(focused);
@@ -333,6 +361,7 @@ TriggerWorker::TriggerWorker(std::shared_ptr<IMouseController> mouse,
     impl_->cancel_stop = std::move(cancel_stop);
     impl_->context = std::move(context);
     impl_->estimated_stop = std::move(estimated_stop);
+    impl_->resume_movement = std::move(resume_movement);
 }
 TriggerWorker::~TriggerWorker() { stop(); }
 bool TriggerWorker::start(const TriggerConfig& config, int cleanup_budget_ms) noexcept {
@@ -341,6 +370,8 @@ bool TriggerWorker::start(const TriggerConfig& config, int cleanup_budget_ms) no
             !impl_->permission || !impl_->focused || !impl_->next_id || !impl_->request_stop || !impl_->cancel_stop ||
             !impl_->mouse->supports_left_button() || impl_->mouse->left_button_faulted() ||
             impl_->mouse->left_button_cleanup_required() || cleanup_budget_ms <= 0 || cleanup_budget_ms > 5000 ||
+            (impl_->resume_movement && (!config.require_stop || !config.allow_estimated_stop ||
+                config.fire_mode != TriggerFireMode::SINGLE)) ||
             !impl_->controller.configure(config)) return false;
         impl_->config = config;
         impl_->cleanup_budget_ms = cleanup_budget_ms;
@@ -348,6 +379,7 @@ bool TriggerWorker::start(const TriggerConfig& config, int cleanup_budget_ms) no
         impl_->latest.store({}); impl_->canceled.store(false);
         impl_->evaluated_observation.reset();
         impl_->reserved_stop_id = 0; impl_->cleanup_attempts = 0;
+        impl_->cycle_stop_id = impl_->consumed_cycle_stop_id = 0; impl_->cycle_next_down = {};
         impl_->cleanup_active = false; impl_->cleanup_exhausted = false;
         impl_->thread = std::thread([this] { impl_->run(); });
         return true;

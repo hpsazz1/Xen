@@ -192,11 +192,12 @@ class PackagedImporterTests(unittest.TestCase):
             source.mkdir()
             (source / "fixture.csv").write_bytes(raw)
             manifest = {"repository": "synthetic-only", "commit": "fixture",
-                        "profiles": [{"file": "fixture.csv", "id": "fixture", "canonical_weapon_id": "fixture",
+                        "profiles": [{"file": "fixture.csv", "id": "fixture", "canonical_weapon_id": "M4A1-S",
                                       "sha256": hashlib.sha256(raw).hexdigest(), "multiple": 1,
                                       "sleep_divider": 1, "sleep_suber_ms": 0, "legacy_length": 1}]}
             assets = root / "assets/recoil"
             assets.mkdir(parents=True)
+            shutil.copy2(Path(__file__).resolve().parents[1] / "assets/weapon_catalog.inc", assets.parent / "weapon_catalog.inc")
             (assets / "legacy_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
             output = root / "cache/recoil/profiles"
             command = [sys.executable, "-B", "-X", "utf8", str(script), "--source-directory", str(source),
@@ -205,6 +206,8 @@ class PackagedImporterTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             candidate = json.loads((output / "fixture-r1-imported.json").read_text(encoding="utf-8"))
             self.assertEqual(candidate["points"], [[0.0, 0.0, 0.0], [10.0, 1.0, -2.0]])
+            self.assertEqual(candidate["weapon_id"], "m4a1_s")
+            self.assertEqual(candidate["id"], "fixture")
             self.assertEqual(candidate["state"], "IMPORTED")
             self.assertIsNone(candidate["phase_tolerance_ms"])
             self.assertFalse(candidate["source"]["redistribution_verified"])
