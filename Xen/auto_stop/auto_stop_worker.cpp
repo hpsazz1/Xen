@@ -43,6 +43,61 @@ std::unique_lock<std::timed_mutex> AutoStopOutputArbiter::try_enter_aim(OutputAr
     return lock;
 }
 
+std::unique_lock<std::timed_mutex> AutoStopOutputArbiter::enter_aim_until(Clock::time_point deadline,
+    OutputArbiterRejection* rejection) noexcept {
+    std::unique_lock<std::timed_mutex> lock(mutex_, std::defer_lock);
+    auto& counts = counters_[static_cast<std::size_t>(OutputArbiterSource::AIM)];
+    OutputArbiterRejection reason = OutputArbiterRejection::LOCK_BUSY;
+    for (;;) {
+        if (faulted_.load(std::memory_order_acquire)) { reason = OutputArbiterRejection::OUTPUT_FAULT; break; }
+        if (Clock::now() >= deadline) break;
+        // 已申请的键盘短事务先完成；不能跨配置持有时长设置pending。
+        if (!auxiliary_pending_.load(std::memory_order_acquire)) {
+            if (!lock.try_lock_until(deadline)) break;
+            if (faulted_.load(std::memory_order_acquire)) {
+                lock.unlock(); reason = OutputArbiterRejection::OUTPUT_FAULT; break;
+            }
+            if (Clock::now() >= deadline) { lock.unlock(); break; }
+            if (!auxiliary_pending_.load(std::memory_order_acquire)) {
+                reason = OutputArbiterRejection::NONE; break;
+            }
+            lock.unlock();
+        }
+        // 此时没有持有后端锁；醒来先释放状态锁，再尝试后端事务。
+        std::unique_lock pending_lock(pending_mutex_);
+        if (!pending_changed_.wait_until(pending_lock, deadline, [&] {
+                return !auxiliary_pending_.load(std::memory_order_acquire) ||
+                    faulted_.load(std::memory_order_acquire);
+            })) break;
+    }
+    if (reason != OutputArbiterRejection::NONE && faulted_.load(std::memory_order_acquire))
+        reason = OutputArbiterRejection::OUTPUT_FAULT;
+    if (rejection) *rejection = reason;
+    if (reason == OutputArbiterRejection::NONE) counts.acquired.fetch_add(1, std::memory_order_relaxed);
+    else {
+        if (reason == OutputArbiterRejection::OUTPUT_FAULT) counts.output_fault.fetch_add(1, std::memory_order_relaxed);
+        else counts.lock_busy.fetch_add(1, std::memory_order_relaxed);
+        aim_skips_.fetch_add(1, std::memory_order_relaxed);
+    }
+    return lock;
+}
+
+void AutoStopOutputArbiter::set_auxiliary_pending(bool pending) noexcept {
+    {
+        std::lock_guard lock(pending_mutex_);
+        auxiliary_pending_.store(pending, std::memory_order_release);
+    }
+    pending_changed_.notify_all();
+}
+
+void AutoStopOutputArbiter::latch_output_fault() noexcept {
+    {
+        std::lock_guard lock(pending_mutex_);
+        faulted_.store(true, std::memory_order_release);
+    }
+    pending_changed_.notify_all();
+}
+
 OutputArbiterSnapshot AutoStopOutputArbiter::snapshot() const noexcept {
     OutputArbiterSnapshot result;
     for (std::size_t i = 0; i < counters_.size(); ++i) {
@@ -116,7 +171,8 @@ public:
         try {
             if (!weapon_permission()) return false;
             { std::lock_guard<std::mutex> lock(mutex); if (state.release_required) return false; }
-            return allowed && allowed() && input.state_valid && input.status == InputMonitorStatus::READY &&
+            return allowed && allowed() && !arbiter->faulted_.load(std::memory_order_acquire) &&
+                input.state_valid && input.status == InputMonitorStatus::READY &&
                 !release_key_held(input) &&
                 !input.virtual_keys[0x23] && config.activation_virtual_key > 0 &&
                 config.activation_virtual_key < 256 && input.virtual_keys[config.activation_virtual_key] &&
@@ -170,7 +226,7 @@ public:
         };
         auto release_reservation = [&]() {
             if (output.owns_lock()) output.unlock();
-            arbiter->auxiliary_pending_.store(false, std::memory_order_release);
+            arbiter->set_auxiliary_pending(false);
         };
         const auto mark_estimated = [&]() {
             if (estimated) return;
@@ -184,7 +240,7 @@ public:
         };
         auto reserve = [&]() {
             if (output.owns_lock()) return true;
-            arbiter->auxiliary_pending_.store(true, std::memory_order_release);
+            arbiter->set_auxiliary_pending(true);
             const auto started = now_ns();
             const bool acquired = output.try_lock_until(Clock::now() + std::chrono::milliseconds(command_timeout_ms + 5));
             {
@@ -192,7 +248,7 @@ public:
                 ++state.arbiter_wait_samples;
                 state.max_arbiter_wait_ns = std::max(state.max_arbiter_wait_ns, now_ns() - started);
             }
-            if (!acquired) arbiter->auxiliary_pending_.store(false, std::memory_order_release);
+            if (!acquired) arbiter->set_auxiliary_pending(false);
             return acquired;
         };
         auto clean = [&]() {
@@ -214,7 +270,7 @@ public:
                     state.cleanup_unknown = false;
                 }
             }
-            if (!success) arbiter->faulted_.store(true, std::memory_order_release);
+            if (!success) arbiter->latch_output_fault();
             release_reservation();
             if (!success) {
                 LOG_WARN("auto_stop", "请求{}清理未确认，保留FAULT并阻止Aim发送", active_id);
@@ -542,7 +598,7 @@ public:
                 }
                 if (active_id && mask_only) {
                     if (!masked_hold) {
-                        if (!mouse->poll_input(input) || !permission(input) || !session_permission(false) ||
+                        if (!reserve() || !mouse->poll_input(input) || !permission(input) || !session_permission(false) ||
                             active_generation != cancel_generation.load() || Clock::now() >= lease_end) {
                             cancel_active(false, "permission_changed_before_zero");
                         } else {
@@ -565,7 +621,7 @@ public:
                     const auto decision = controller.tick(now_ns());
                     if (decision.phase == AutoStopPhase::INVALID || decision.phase == AutoStopPhase::CANCELLED) cancel_active(false, "controller_canceled");
                     else if (decision.phase == AutoStopPhase::WAITING_ACK) {
-                        if (!mouse->poll_input(input) || !permission(input) ||
+                        if (!reserve() || !mouse->poll_input(input) || !permission(input) ||
                             (independent && !session_permission(false)) ||
                             (!independent_acquired && held_wasd(input) != original_mask) ||
                             active_generation != cancel_generation.load() || Clock::now() >= lease_end) cancel_active(false, "permission_changed_before_report");
@@ -608,6 +664,8 @@ public:
                         publish(AutoStopStatus::ESTIMATED);
                     }
                 }
+                // 只串行本轮实际后端事务；反向持有与释放后等待期间允许Aim进入。
+                release_reservation();
                 report_block();
                 std::unique_lock<std::mutex> lock(mutex);
                 wake.wait_for(lock, std::chrono::milliseconds(1));
@@ -677,7 +735,7 @@ bool AutoStopWorker::start(const AutoStopConfig& config, int command_timeout_ms)
             impl_->state.cleanup_unknown = true;
             impl_->state.status = AutoStopStatus::FAULT;
             impl_->fault = true;
-            impl_->arbiter->faulted_.store(true, std::memory_order_release);
+            impl_->arbiter->latch_output_fault();
             LOG_WARN("auto_stop", "共享设备的历史键盘债务清理未确认，拒绝启动新会话");
             return false;
         }

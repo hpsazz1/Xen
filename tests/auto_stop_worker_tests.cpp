@@ -3,6 +3,7 @@
 #include <chrono>
 #include <deque>
 #include <iostream>
+#include <future>
 #include <thread>
 #include <vector>
 
@@ -19,8 +20,21 @@ template<class Predicate> void wait_for(Predicate predicate) {
 }
 class Fake final : public IMouseController {
 public:
+    struct BackendCall {
+        Fake& owner;
+        explicit BackendCall(Fake& fake) : owner(fake) {
+            const int count = ++owner.active_backend_calls;
+            auto maximum = owner.max_backend_calls.load();
+            while (maximum < count && !owner.max_backend_calls.compare_exchange_weak(maximum, count)) {}
+        }
+        ~BackendCall() { --owner.active_backend_calls; }
+    };
     bool open() noexcept override { return true; }
-    MouseMoveReceipt move(const MouseMoveCommand&) noexcept override { return {}; }
+    MouseMoveReceipt move(const MouseMoveCommand&) noexcept override {
+        BackendCall call(*this);
+        ++moves;
+        MouseMoveReceipt result; result.succeeded = true; result.backend_completed_at = Clock::now(); return result;
+    }
     bool output_owner_exclusive() const noexcept override { return true; }
     bool supports_wasd_keyboard() const noexcept override { return true; }
     bool poll_input(InputSnapshot& input) noexcept override {
@@ -56,6 +70,7 @@ public:
         result.backend_completed_at = result.protocol_ack_received_at = Clock::now(); return result;
     }
     KeyboardReceipt set_wasd_keyboard(std::uint8_t mask) noexcept override {
+        BackendCall call(*this);
         std::unique_lock<std::mutex> lock(mutex); software.push_back(mask); current_software = mask;
         software_started.push_back(Clock::now());
         if (mask != 0 && reverse_ack_delay_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(reverse_ack_delay_ms));
@@ -68,6 +83,7 @@ public:
         return result;
     }
     KeyboardReceipt set_wasd_mask(std::uint8_t key, bool masked) noexcept override {
+        BackendCall call(*this);
         std::unique_lock<std::mutex> lock(mutex); masks.push_back(masked ? key : 0);
         if (masked) installed_masks |= key; else installed_masks &= ~key;
         const auto index = masks.size();
@@ -80,6 +96,7 @@ public:
         return result;
     }
     KeyboardReceipt cleanup_wasd_keyboard() noexcept override {
+        BackendCall call(*this);
         std::lock_guard<std::mutex> lock(mutex); ++cleanup_checks;
         if (installed_masks == 0 && current_software == 0) {
             KeyboardReceipt result; result.disposition = KeyboardDisposition::ACKNOWLEDGED; return result;
@@ -118,6 +135,7 @@ public:
     std::vector<int> reports() { std::lock_guard<std::mutex> lock(mutex); return software; }
     Clock::time_point cleaned_at() { std::lock_guard<std::mutex> lock(mutex); return cleanup_at; }
     std::mutex mutex;
+    std::atomic<int> active_backend_calls{0}, max_backend_calls{0}, moves{0};
     std::deque<WasdEvent> events;
     std::vector<int> software, masks;
     std::vector<Clock::time_point> software_started, software_ack;
@@ -135,6 +153,51 @@ public:
     std::atomic<int> closes{0};
     Clock::time_point cleanup_at{};
 };
+void bounded_aim_transaction_wait() {
+    AutoStopOutputArbiter arbiter;
+    auto owner = arbiter.try_enter_cleanup();
+    require(owner.owns_lock(), "等待测试须先占用真实事务门");
+    std::promise<void> entered;
+    auto started = entered.get_future();
+    auto waiting = std::async(std::launch::async, [&] {
+        entered.set_value();
+        auto opportunity = arbiter.enter_aim_until(Clock::now() + std::chrono::milliseconds(200));
+        return opportunity.owns_lock();
+    });
+    started.wait();
+    const auto waiting_status = waiting.wait_for(std::chrono::milliseconds(5));
+    owner.unlock();
+    require(waiting_status == std::future_status::timeout && waiting.get(),
+        "Aim须等待短事务完成后进入，不能遇忙立即拒绝");
+    require(arbiter.aim_skips() == 0 && arbiter.snapshot().sources[0].acquired == 1,
+        "健康事务等待不能制造跳过计数");
+
+    auto held = arbiter.try_enter_cleanup();
+    auto expired = std::async(std::launch::async, [&] {
+        OutputArbiterRejection reason{};
+        auto opportunity = arbiter.enter_aim_until(Clock::now() + std::chrono::milliseconds(5), &reason);
+        return !opportunity.owns_lock() && reason == OutputArbiterRejection::LOCK_BUSY;
+    });
+    require(expired.get(), "在途事务超出deadline必须明确退出");
+    held.unlock();
+    require(!arbiter.enter_aim_until({}).owns_lock(), "无效或过期deadline不得开始发送");
+
+    auto fault_owner = arbiter.try_enter_cleanup();
+    std::promise<void> fault_entered;
+    auto fault_started = fault_entered.get_future();
+    auto fault_waiter = std::async(std::launch::async, [&] {
+        fault_entered.set_value();
+        OutputArbiterRejection reason{};
+        auto opportunity = arbiter.enter_aim_until(Clock::now() + std::chrono::milliseconds(200), &reason);
+        return !opportunity.owns_lock() && reason == OutputArbiterRejection::OUTPUT_FAULT;
+    });
+    fault_started.wait();
+    arbiter.latch_output_fault();
+    fault_owner.unlock();
+    require(fault_waiter.get(), "等锁期间出现故障不能在锁释放后误放行");
+    require(arbiter.try_enter_cleanup().owns_lock(), "故障后仍可进入清理事务");
+}
+
 void ready(AutoStopWorker& worker, const std::shared_ptr<Fake>& fake) {
     fake->physical(0);
     wait_for([&] { return worker.snapshot().status == AutoStopStatus::READY; });
@@ -145,6 +208,7 @@ void ready(AutoStopWorker& worker, const std::shared_ptr<Fake>& fake) {
 }
 int main() {
     try {
+        bounded_aim_transaction_wait();
         const AutoStopConfig config = [] {
             AutoStopConfig legacy{true, 5};
             legacy.use_counterpulse_timing = false;
@@ -796,7 +860,9 @@ int main() {
         {
             auto fake = std::make_shared<Fake>(); auto arbiter = std::make_shared<AutoStopOutputArbiter>();
             AutoStopWorker worker(fake, arbiter, [] { return true; });
-            require(worker.start(config, 100), "worker启动失败");
+            AutoStopConfig timed{true, 5};
+            timed.counter_hold_ms = 40; timed.shot_after_release_ms = 18;
+            require(worker.start(timed, 100), "worker启动失败");
             ready(worker, fake);
             require(!fake->has_software() && !fake->has_masks(), "无请求不得发包");
             auto aim = arbiter->try_enter_aim();
@@ -807,10 +873,24 @@ int main() {
             require(!fake->has_software(), "在途Aim期间不得进入设备");
             aim.unlock();
             wait_for([&] { return fake->has_software(); });
-            OutputArbiterRejection blocked{};
-            require(!arbiter->try_enter_aim(OutputArbiterSource::AIM, &blocked).owns_lock(), "制动时Aim不应阻塞或进入");
-            require(blocked == OutputArbiterRejection::AUXILIARY_PENDING && arbiter->snapshot().sources[0].auxiliary_pending > 0,
-                "制动独占必须与普通锁竞争区分");
+            bool braking_move = false, settling_move = false;
+            const auto acquire_until = Clock::now() + std::chrono::milliseconds(200);
+            while (Clock::now() < acquire_until && (!braking_move || !settling_move)) {
+                auto opportunity = arbiter->try_enter_aim();
+                if (opportunity.owns_lock()) {
+                    const auto reports = fake->reports();
+                    const auto state = worker.snapshot();
+                    if (reports.size() == 2 && reports.back() != 0) {
+                        braking_move = fake->move({1, 0}).succeeded;
+                    } else if (reports.size() >= 3 && reports.back() == 0 && state.status != AutoStopStatus::ESTIMATED) {
+                        settling_move = fake->move({1, 0}).succeeded;
+                    }
+                    opportunity.unlock();
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            require(braking_move && settling_move, "反向持有与释放后等待都必须允许Aim实际发送");
+            require(fake->max_backend_calls == 1, "Aim与键盘后端事务必须串行");
             wait_for([&] { return worker.snapshot().status == AutoStopStatus::ESTIMATED; });
             worker.cancel(999);
             require(worker.estimated_completion_id() == 0, "显式请求完成不能冒充独立锁存估计资格");
@@ -825,7 +905,7 @@ int main() {
             require(fake->cleaned_at() - requested_at >= std::chrono::milliseconds(500), "租期结束前不得无故提前归还");
             worker.stop();
             require(fake->closes == 0 && fake->reports().back() == 0 && fake->released(), "共享owner不能关闭且反向键必须释放");
-            require(worker.snapshot().aim_skips > 0 && worker.snapshot().arbiter_wait_samples > 0, "耦合实测计数缺失");
+            require(worker.snapshot().arbiter_wait_samples > 0 && fake->moves >= 2, "短事务等待与实际Aim发送证据缺失");
         }
         {
             auto fake = std::make_shared<Fake>(); auto arbiter = std::make_shared<AutoStopOutputArbiter>();

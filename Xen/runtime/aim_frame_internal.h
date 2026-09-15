@@ -12,6 +12,16 @@ struct PreparedAimFrame {
     double background_motion_ms = 0.0;
 };
 
+// 新按键许可不能追溯激活按未输出状态计算的旧帧；当前撤销仍立即生效。
+inline bool aim_frame_dispatch_allowed(const AimFrame& frame, bool current_permission) noexcept {
+    return frame.lock_active && current_permission;
+}
+
+inline std::chrono::steady_clock::time_point aim_output_slot_deadline(
+        const AimFrame& frame, std::chrono::milliseconds backend_budget) noexcept {
+    return std::min(frame.control_at + backend_budget, frame.captured_at + AimFrame::kObservationHorizon);
+}
+
 // Runtime 与离线验证共用实际组装入口。measure_background 的 false 仅供
 // 无输出性能基线，不暴露为产品配置；生产调用始终使用默认值。
 inline PreparedAimFrame prepare_aim_frame(

@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <chrono>
+#include <condition_variable>
 #include "auto_stop/auto_stop.h"
 #include "mouse/mouse.h"
 
@@ -19,19 +20,26 @@ struct OutputArbiterSnapshot {
     // 下标与OutputArbiterSource一致；并发读取是各计数器的观测值，不宣称同一事务快照。
     std::array<OutputArbiterCounters, 3> sources{};
 };
-// 同一Runtime的Aim发送和辅助发送共用此门。Aim只尝试，不等待辅助事务。
+// 同一Runtime的Aim发送和辅助发送共用此门；配置等待不占用后端事务。
 class AutoStopOutputArbiter {
 public:
     std::unique_lock<std::timed_mutex> try_enter_aim(OutputArbiterSource source = OutputArbiterSource::AIM,
         OutputArbiterRejection* rejection = nullptr) noexcept;
+    // Runtime在计算前有限等待短事务；获得门后仍须复核许可，不排队补发旧命令。
+    std::unique_lock<std::timed_mutex> enter_aim_until(std::chrono::steady_clock::time_point deadline,
+        OutputArbiterRejection* rejection = nullptr) noexcept;
     OutputArbiterSnapshot snapshot() const noexcept;
     // 撤销本owner既有按钮债务不受普通发送门禁阻挡。
     std::unique_lock<std::timed_mutex> try_enter_cleanup() noexcept;
-    void latch_output_fault() noexcept { faulted_.store(true, std::memory_order_release); }
+    void latch_output_fault() noexcept;
     std::uint64_t aim_skips() const noexcept { return aim_skips_.load(std::memory_order_relaxed); }
 private:
     friend class AutoStopWorker;
+    void set_auxiliary_pending(bool pending) noexcept;
     std::timed_mutex mutex_;
+    // 等待状态锁不跨后端mutex获取；通知与谓词在同一锁下更新，避免丢唤醒。
+    std::mutex pending_mutex_;
+    std::condition_variable pending_changed_;
     std::atomic<bool> auxiliary_pending_{false};
     std::atomic<bool> faulted_{false};
     std::atomic<std::uint64_t> aim_skips_{0};

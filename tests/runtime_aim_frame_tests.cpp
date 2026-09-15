@@ -57,6 +57,62 @@ int main() {
         }
     }
     estimator.reset();
+    {
+        AimFrame delayed;
+        delayed.captured_at = start;
+        delayed.control_at = start + std::chrono::milliseconds(200);
+        const auto deadline = runtime::detail::aim_output_slot_deadline(delayed, std::chrono::milliseconds(305));
+        expect(deadline == start + AimFrame::kObservationHorizon && deadline < delayed.control_at,
+               "后端预算不能放行超出既有模型帧龄的旧观测");
+        delayed.control_at = start + std::chrono::milliseconds(2);
+        expect(runtime::detail::aim_output_slot_deadline(delayed, std::chrono::milliseconds(5)) ==
+                   start + std::chrono::milliseconds(7), "较短事务预算仍限制输出等待，不能被帧龄预算放大");
+    }
+    for (bool frame_permission : {false, true}) {
+        for (bool current_permission : {false, true}) {
+            AimConfig feedback_config;
+            feedback_config.min_confirmed_hits = 1;
+            feedback_config.deadzone_pixels = 0;
+            feedback_config.smoothing = 1;
+            feedback_config.counts_per_pixel_x = feedback_config.counts_per_pixel_y = 1;
+            feedback_config.max_counts_per_frame = 100;
+            feedback_config.enable_delay_compensation = true;
+            feedback_config.control_delay_ms = 15;
+            Aim feedback_aim(feedback_config);
+            AimFrame frame;
+            frame.sequence = 1;
+            frame.roi_width = frame.roi_height = 320;
+            frame.control_center_x = frame.control_center_y = 160;
+            frame.captured_at = start;
+            frame.control_at = start + std::chrono::milliseconds(1);
+            frame.lock_active = frame_permission;
+            frame.detections = {{180, 120, 220, 200, 0.95f, 0}};
+            const auto result = feedback_aim.process(frame);
+            expect(result.status == AimStatus::SUCCESS && result.has_command,
+                   "反馈回归必须通过公开Aim接口生成非零预计算命令");
+            // 同步改变发送时许可，复现组帧后按键变化，无需线程时序或真实设备。
+            const bool dispatched = runtime::detail::aim_frame_dispatch_allowed(frame, current_permission);
+            expect(dispatched == (frame_permission && current_permission),
+                   "帧计算时未许可不得被后来按键追溯发送；发送前撤销仍必须拒绝");
+            expect(feedback_aim.record_backend_completed_command(result.command.sequence,
+                       frame.control_at + std::chrono::microseconds(100),
+                       dispatched ? result.command.dx_counts : 0,
+                       dispatched ? result.command.dy_counts : 0),
+                   "Runtime生产发送门后的实际反馈必须与Aim预计算历史一致");
+            if (!frame_permission && current_permission) {
+                ++frame.sequence;
+                frame.captured_at += std::chrono::milliseconds(4);
+                frame.control_at += std::chrono::milliseconds(4);
+                frame.lock_active = current_permission;
+                const auto next = feedback_aim.process(frame);
+                expect(next.has_command && runtime::detail::aim_frame_dispatch_allowed(frame, current_permission) &&
+                           feedback_aim.record_backend_completed_command(next.command.sequence,
+                               frame.control_at + std::chrono::microseconds(100),
+                               next.command.dx_counts, next.command.dy_counts),
+                       "按住许可保持时下一帧正常发送并确认，不应要求松键重按");
+            }
+        }
+    }
     expect(failures == 0, "Runtime/Aim 组装合同失败");
     return failures ? 1 : 0;
 }

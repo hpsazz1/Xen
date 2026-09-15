@@ -115,6 +115,8 @@ struct AimBackgroundMotionX {
 };
 
 struct AimFrame {
+    // 控制模型既有的最大观测帧龄；调度等待不得越过模型可解释的时间范围。
+    static constexpr std::chrono::milliseconds kObservationHorizon{100};
     std::uint64_t sequence = 0;
     std::chrono::steady_clock::time_point captured_at{};
     // 默认零值表示由 Aim 在处理时读取当前时刻（离线未来帧至少钳到

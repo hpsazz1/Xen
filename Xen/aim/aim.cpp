@@ -356,7 +356,7 @@ constexpr int kTrackHorizontalTrendObservationIsolationFrames = 3;
 // 连续降权，不锁死首次方向，因此窗口内的真实二次换向仍能及时进入状态。
 constexpr int kTrackHorizontalManeuverFrames = 10;
 constexpr float kMaxTrackSpeedDiagonalsPerSecond = 6.0f;
-constexpr float kMaxObservationAgeSeconds = 0.10f;
+constexpr float kMaxObservationAgeSeconds = std::chrono::duration<float>(AimFrame::kObservationHorizon).count();
 // 比例控制对恒速目标必然保留与速度成正比的稳态误差。积分项只补偿这部分
 // 基础前馈观察器：状态单位为 counts/frame。历史命令补回相机自运动后，
 // 屏幕相对速度才代表世界目标运动；低通增益按真实帧间隔计算，避免帧率变化

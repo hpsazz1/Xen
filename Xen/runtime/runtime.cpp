@@ -907,17 +907,6 @@ struct Runtime::Impl {
                     stop->publish_target(deadline, reason);
                 }
                 profile.background_motion_ms = prepared.background_motion_ms;
-                profile.control_timing_valid = true;
-                profile.capture_to_control_ms =
-                    std::chrono::duration<double, std::milli>(
-                        aim_frame.control_at -
-                        frame->timing.captured_at).count();
-                if (profile.source_timing_valid) {
-                    profile.source_to_control_ms =
-                        std::chrono::duration<double, std::milli>(
-                            aim_frame.control_at -
-                            frame->timing.source_time_at).count();
-                }
                 if (auto trigger = trigger_worker.load()) {
                     auto observation = std::make_shared<TriggerObservation>();
                     observation->detections = aim_frame.detections;
@@ -936,6 +925,34 @@ struct Runtime::Impl {
                     observation->valid = true;
                     trigger->publish(std::move(observation));
                 }
+                if (config.recoil.enabled && !config.recoil.mixed_aim) aim_frame.lock_active = false;
+                // 在计算前等待正在执行的短事务；辅助动作计时不占通道。
+                // 不先算好命令再等锁，也不把正常短事务竞争当作零执行继续推进控制。
+                std::unique_lock<std::timed_mutex> output_guard;
+                auto slot_deadline = std::chrono::steady_clock::time_point::max();
+                if (runtime::detail::aim_frame_dispatch_allowed(aim_frame, safety_gate.can_dispatch()) && output_arbiter) {
+                    const int timeout_ms = config.mouse.backend == MouseBackend::MAKCU
+                        ? config.mouse.makcu_command_timeout_ms : config.mouse.kmbox_command_timeout_ms;
+                    slot_deadline = runtime::detail::aim_output_slot_deadline(
+                        aim_frame, std::chrono::milliseconds(timeout_ms + 5));
+                    OutputArbiterRejection rejection = OutputArbiterRejection::NONE;
+                    output_guard = output_arbiter->enter_aim_until(slot_deadline, &rejection);
+                    if (!output_guard.owns_lock() || std::chrono::steady_clock::now() > slot_deadline) {
+                        safety_gate.emergency_stop();
+                        aim_reset_requested.store(true, std::memory_order_release);
+                        aim_frame.lock_active = false;
+                        set_error("Aim输出等待超过观测时效、事务预算或共享输出故障");
+                        LOG_ERROR("runtime", "Aim输出时隙失败：seq={}，reason={}",
+                            aim_frame.sequence, static_cast<int>(rejection));
+                    }
+                }
+                aim_frame.lock_active = runtime::detail::aim_frame_dispatch_allowed(aim_frame, safety_gate.can_dispatch());
+                aim_frame.control_at = std::chrono::steady_clock::now();
+                profile.control_timing_valid = true;
+                profile.capture_to_control_ms = std::chrono::duration<double, std::milli>(
+                    aim_frame.control_at - frame->timing.captured_at).count();
+                if (profile.source_timing_valid) profile.source_to_control_ms = std::chrono::duration<double, std::milli>(
+                    aim_frame.control_at - frame->timing.source_time_at).count();
                 std::int64_t candidate_recoil_observation_ns = 0;
                 if (config.recoil.enabled) {
                     if (!config.recoil.mixed_aim) aim_frame.lock_active = false;
@@ -961,13 +978,9 @@ struct Runtime::Impl {
                     const MouseMoveCommand command{
                         aim_result.command.dx_counts,
                         aim_result.command.dy_counts};
-                    bool dispatch_allowed = safety_gate.can_dispatch() && (!config.recoil.enabled || config.recoil.mixed_aim);
-                    std::unique_lock<std::timed_mutex> output_guard;
-                    if (dispatch_allowed && output_arbiter) {
-                        output_guard = output_arbiter->try_enter_aim();
-                        dispatch_allowed = output_guard.owns_lock() &&
-                            safety_gate.can_dispatch();
-                    }
+                    bool dispatch_allowed = runtime::detail::aim_frame_dispatch_allowed(
+                        aim_frame, safety_gate.can_dispatch()) && (!config.recoil.enabled || config.recoil.mixed_aim);
+                    if (output_arbiter) dispatch_allowed = dispatch_allowed && output_guard.owns_lock();
                     if (dispatch_allowed && config.recoil.enabled) {
                         dispatch_allowed = motion_ledger->revision() == aim_frame.external_motion.revision &&
                             motion_ledger->permits(command, RecoilClock::now());
@@ -975,6 +988,13 @@ struct Runtime::Impl {
                     auto mouse_backend_completed =
                         std::chrono::steady_clock::now();
                     MouseMoveReceipt mouse_receipt;
+                    if (dispatch_allowed && mouse_backend_completed > slot_deadline) {
+                        dispatch_allowed = false;
+                        safety_gate.emergency_stop();
+                        aim_reset_requested.store(true, std::memory_order_release);
+                        set_error("Aim输出计算超过观测时效或事务预算");
+                        LOG_ERROR("runtime", "Aim发送前时效失效：seq={}", aim_frame.sequence);
+                    }
                     if (dispatch_allowed) {
                         const auto mouse_started = mouse_backend_completed;
                         mouse_receipt = mouse->move(command);
@@ -1059,6 +1079,11 @@ struct Runtime::Impl {
                         aim_reset_requested.store(
                             true, std::memory_order_release);
                         set_error("Aim 后端完成反馈与预计算历史不一致");
+                        LOG_ERROR("runtime", "Aim后端反馈拒绝：seq={}，frame_allowed={}，dispatch_allowed={}，sent={}，command=({}, {})，control_ns={}，completed_ns={}",
+                            aim_result.command.sequence, aim_frame.lock_active, dispatch_allowed, mouse_sent,
+                            command.dx_counts, command.dy_counts,
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(aim_frame.control_at.time_since_epoch()).count(),
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(mouse_backend_completed.time_since_epoch()).count());
                     } else if (dispatch_allowed && !mouse_sent) {
                         safety_gate.emergency_stop();
                         aim_reset_requested.store(true,
@@ -1066,6 +1091,8 @@ struct Runtime::Impl {
                         set_error(mouse->last_error());
                     }
                 }
+                // 预览、遥测及下一帧图像处理不占后端时隙。
+                if (output_guard.owns_lock()) output_guard.unlock();
             } else {
                 aim_result.status = AimStatus::NOT_RUN;
                 camera_motion.reset();
