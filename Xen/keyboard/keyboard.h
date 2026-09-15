@@ -19,12 +19,15 @@ enum class KeyboardEventType {
     AIM_HOLD_CHANGED,
     EMERGENCY_STOP,
     RUNTIME_TOGGLE,
+    DEBUG_TEST,
 };
 
 struct KeyboardConfig {
     std::vector<int> aim_hold_virtual_keys{0x02};  // VK_RBUTTON
     std::vector<int> emergency_virtual_keys{0x23}; // VK_END
     std::vector<int> runtime_toggle_virtual_keys{0x77}; // VK_F8
+    bool debug_test_enabled = false;
+    std::vector<int> debug_test_virtual_keys{};
 };
 
 // 空集合表示该功能未绑定；集合内任意键均可生效。所有已绑定的全局语义
@@ -41,9 +44,13 @@ inline bool valid_keyboard_config(const KeyboardConfig& config) noexcept {
         }
         return true;
     };
+    for (const int key : config.debug_test_virtual_keys) {
+        if (key == 1 || key == 0x57 || key == 0x41 || key == 0x53 || key == 0x44)
+            return false; // 调试启动键不能兼作左键测试动作。
+    }
     return claim(config.aim_hold_virtual_keys) &&
            claim(config.emergency_virtual_keys) &&
-           claim(config.runtime_toggle_virtual_keys);
+           claim(config.runtime_toggle_virtual_keys) && claim(config.debug_test_virtual_keys);
 }
 
 struct KeyboardEvent {

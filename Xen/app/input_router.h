@@ -10,6 +10,7 @@ namespace app::detail {
 struct KeyboardRoutingResult {
     bool emergency_pressed = false;
     bool runtime_toggle_pressed = false;
+    bool debug_test_pressed = false;
 };
 // 全局界面急停与键盘急停共享独立调试取消语义。
 bool debug_emergency_requested(bool keyboard_emergency, std::span<const RuntimeIntent> intents) noexcept;

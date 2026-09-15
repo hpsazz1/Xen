@@ -106,7 +106,9 @@ void admit(const Context& context, Mode mode) {
     if (context.config.mouse.backend != MouseBackend::KMBOX_NET)
         throw std::runtime_error("该测试仅支持已有KMBOX NET连接");
     if (physical_mode(mode) && (context.config.mouse.kmbox_command_timeout_ms > 100 || context.config.mouse.kmbox_connect_timeout_ms > 2000))
-        throw std::runtime_error("独立测试要求命令超时不超过100ms、连接超时不超过2000ms；请在设置中调整并保存后重新准备");
+        throw std::runtime_error("当前连接命令超时" + std::to_string(context.config.mouse.kmbox_command_timeout_ms) +
+            "ms、连接超时" + std::to_string(context.config.mouse.kmbox_connect_timeout_ms) +
+            "ms；测试要求分别不超过100ms/2000ms，请在设置中保存后重新准备");
     if (context.device->left_button_faulted() || context.device->left_button_cleanup_required())
         throw std::runtime_error("左键清理尚未确认，不能开始新任务");
 }
@@ -126,8 +128,11 @@ struct Session::Impl {
         Json plan, sampling;
         std::string id;
         std::filesystem::path directory;
+        std::uint64_t repeat_revision = 0;
     };
     std::optional<Prepared> prepared;
+    std::atomic<std::shared_ptr<const Prepared>> repeat_plan;
+    std::atomic_uint64_t repeat_revision{0};
     void replace_hud(std::shared_ptr<CounterpulseHud> next = {}) {
         std::shared_ptr<CounterpulseHud> previous;
         { std::lock_guard lock(hud_mutex); previous = hud.exchange(std::move(next)); }
@@ -171,6 +176,9 @@ struct Session::Impl {
                     if (canceled && s.state == State::PREPARED) {
                         s.state = State::CANCELED; s.prepared_id.clear(); s.message = "准备已取消，已生成文件仅留档";
                     }
+                    if (canceled || s.state == State::FAILED || s.cleanup_unknown) {
+                        repeat_plan.store(nullptr); s.repeat_ready = false;
+                    }
                 } });
             });
             return true;
@@ -203,7 +211,22 @@ struct Session::Impl {
         try { result = run_debug(task, {[this] { return canceled.load(); }, [this](const Json& value) {
             // 原生端只发布阶段或有界事件；最终完整对象仅一次进入结果快照。
             auto published = std::make_shared<const Json>(value);
-            update([&](Snapshot& s) { s.live = published; });
+            update([&](Snapshot& s) {
+                s.live = published;
+                const auto stage = value.value("stage",std::string{});
+                if (stage == "READINESS") {
+                    const auto readiness = value.value("readiness",Json::object());
+                    const auto reason = readiness.value("reason",std::string{});
+                    const auto seconds = readiness.value("elapsed_ns",std::int64_t{0}) / 1000000000;
+                    s.message = "等待就绪（" + std::to_string(seconds) + "/15秒）：";
+                    if (reason == "SOURCE_UNAVAILABLE") s.message += "源焦点服务不可用，请检查源端入口与连接";
+                    else if (reason == "SOURCE_NOT_FOCUSED") s.message += "请将源端游戏切到前台";
+                    else if (reason == "PHYSICAL_KEYS_HELD") s.message += "请松开WASD和鼠标按键（含测试快捷键）";
+                    else if (reason == "READY") s.message += "已就绪，即将执行本组";
+                    else if (reason == "STABILIZING") s.message += "保持键鼠松开，正在确认连续就绪";
+                    else s.message += "检查源端与设备输入状态：" + reason;
+                } else if (!stage.empty()) s.message = "任务阶段：" + stage + "；可点击停止当前调试任务";
+            });
         }}); } catch (...) {
             if (uses_device(work.request.mode)) update([](Snapshot& s) { s.cleanup_unknown = true; });
             throw;
@@ -277,12 +300,54 @@ void Session::poll() noexcept {
 void Session::request_shutdown() noexcept { impl_->shutting_down = true; cancel("应用关闭，正在清理"); poll(); }
 void Session::cancel(const std::string& reason) noexcept {
     impl_->canceled = true;
+    invalidate_repeat();
     try {
         impl_->update([&](Snapshot& s) {
             if (s.busy) { s.state = State::STOPPING; s.message = reason; }
             else if (s.state == State::PREPARED) { s.state = State::CANCELED; s.prepared_id.clear(); s.message = "准备已取消"; }
         });
     } catch (...) {}
+}
+
+void Session::invalidate_repeat() noexcept {
+    ++impl_->repeat_revision;
+    impl_->repeat_plan.store(nullptr);
+    try { impl_->update([](Snapshot& s) { s.repeat_ready = false; }); } catch (...) {}
+}
+bool Session::repeat(const Context& context) noexcept {
+    try {
+        const auto reject = [&](const char* message) {
+            impl_->update([&](Snapshot& s) { s.message = message; }); return false;
+        };
+        if (impl_->shutting_down) return reject("应用正在关闭，快捷键测试未执行");
+        if (busy()) return reject("已有调试任务正在执行，本次快捷键忽略，不排队");
+        if (!context.config.keyboard.debug_test_enabled) return reject("调试测试快捷键开关未启用");
+        const auto source = impl_->repeat_plan.load();
+        if (!source || source->repeat_revision != impl_->repeat_revision.load() || !physical_mode(source->request.mode))
+            return reject("没有有效测试模板，请先在调试页重新准备");
+        admit(context,source->request.mode);
+        if (snapshot()->cleanup_unknown || context.device != source->context.device)
+            return reject("设备或清理状态变化，请重新准备");
+        if (!context.config.mouse.allow_send_input || !source->context.config.mouse.allow_send_input)
+            return reject("设置中的物理输出未允许，请保存后重新准备");
+        auto work = *source;
+        impl_->prepared.reset();
+        return impl_->launch(State::RUNNING,true,[this,work = std::move(work)]() mutable {
+            work.directory = new_directory(work.request.output_root);
+            const auto parent_id = work.id;
+            work.id = work.directory.filename().string();
+            write_document(work.directory / "prepare.json",{{"schema_version",1},{"prepared_id",work.id},
+                {"repeat_of",parent_id},{"trigger","USER_HOTKEY"},{"code_identity",code_identity()},
+                {"plan",work.plan},{"sampling",work.sampling},{"physical_output",true}});
+            write_document(work.directory / "plan.json",work.plan);
+            write_document(work.directory / "sampling-settings.json",work.sampling);
+            impl_->update([&](Snapshot& s) { s.prepared_id = work.id; s.report_directory = work.directory.string(); });
+            impl_->run(work,true,physical_confirmation());
+        });
+    } catch (const std::exception& error) {
+        try { impl_->update([&](Snapshot& s) { s.message = error.what(); }); } catch (...) {}
+        return false;
+    } catch (...) { return false; }
 }
 
 bool Session::dispatch(Action action, const Request& request, const Context& context,
@@ -295,17 +360,23 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
             impl_->update([&](Snapshot& s) { s.hud_visible = action == Action::SHOW_HUD; });
             return true;
         }
-        if (action == Action::NONE || impl_->shutting_down || busy()) return false;
+        const auto reject = [&](const char* message) {
+            impl_->update([&](Snapshot& s) { s.message = message; }); return false;
+        };
+        if (action == Action::NONE) return false;
+        if (impl_->shutting_down || busy()) return reject("已有任务执行或正在关闭，本次请求未执行");
         poll();
         if (action == Action::START) {
-            if (!impl_->prepared || snapshot()->state != State::PREPARED || prepared_id != impl_->prepared->id) return false;
+            if (!impl_->prepared || snapshot()->state != State::PREPARED || prepared_id != impl_->prepared->id)
+                return reject("准备身份已失效，请重新准备后启动");
             auto work = *impl_->prepared;
             const bool physical = physical_mode(work.request.mode);
-            if (snapshot()->cleanup_unknown && uses_device(work.request.mode)) return false;
+            if (snapshot()->cleanup_unknown && uses_device(work.request.mode)) return reject("设备清理未知，不能启动新任务");
             admit(context,work.request.mode);
-            if (uses_device(work.request.mode) && context.device != work.context.device) return false;
-            if (physical && (!allow_physical_output || confirmation != physical_confirmation() || !work.context.config.mouse.allow_send_input)) return false;
-            if (!physical && (allow_physical_output || !confirmation.empty())) return false;
+            if (uses_device(work.request.mode) && context.device != work.context.device) return reject("设备连接已改变，请重新准备");
+            if (physical && (!allow_physical_output || confirmation != physical_confirmation())) return reject("请勾选允许本次真实物理输出后点击启动");
+            if (physical && (!work.context.config.mouse.allow_send_input || !context.config.mouse.allow_send_input)) return reject("设置中的物理输出未允许，请保存后重新准备");
+            if (!physical && (allow_physical_output || !confirmation.empty())) return reject("离线及录制任务不接受物理输出授权");
             impl_->prepared.reset();
             return impl_->launch(State::RUNNING,physical,[this,work,allow_physical_output,confirmation] {
                 impl_->run(work,allow_physical_output,confirmation);
@@ -313,8 +384,10 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
         }
         if (snapshot()->cleanup_unknown && uses_device(request.mode)) return false;
         impl_->prepared.reset();
+        invalidate_repeat();
+        const auto repeat_revision = impl_->repeat_revision.load();
         impl_->update([](Snapshot& s) { s.prepared_id.clear(); });
-        return impl_->launch(State::WORKING,false,[this,action,request,context] {
+        return impl_->launch(State::WORKING,false,[this,action,request,context,repeat_revision] {
             if (action == Action::LOAD_WEAPON_TIMING) {
                 auto catalog = weapon::default_timing_catalog();
                 std::string error;
@@ -346,6 +419,7 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
             }
             const auto directory = new_directory(effective.output_root);
             Impl::Prepared work{effective,context,plan,sampling,directory.filename().string(),directory};
+            work.repeat_revision = repeat_revision;
             Json task{{"schema_version",1},{"prepared_id",work.id},{"plan",plan},{"sampling",sampling},
                 {"code_identity",code_identity()},
                 {"parent_run",effective.input_path},{"physical_output",false},{"state","PREPARED_NOT_LAUNCHED"}};
@@ -361,8 +435,19 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
                 if (effective.recording_duration_ms < 1000 || effective.recording_duration_ms > 120000 || effective.candidate_index < 0)
                     throw std::runtime_error("记录时长或候选索引越界");
                 impl_->prepared = work;
+                std::string admission;
+                if (uses_device(effective.mode)) {
+                    try { admit(context,effective.mode);
+                        if (physical_mode(effective.mode) && !context.config.mouse.allow_send_input)
+                            admission = "设置中的物理输出未允许，请保存后重新准备";
+                    } catch (const std::exception& error) { admission = error.what(); }
+                }
+                if (!impl_->canceled && repeat_revision == impl_->repeat_revision.load() && physical_mode(effective.mode) && admission.empty())
+                    impl_->repeat_plan.store(std::make_shared<const Impl::Prepared>(work));
                 impl_->update([&](Snapshot& s) { s.state = State::PREPARED; s.prepared_id = work.id;
-                    s.physical = physical_mode(effective.mode); s.message = "已准备，等待本次前台启动；参数已冻结"; });
+                    s.repeat_ready = repeat_revision == impl_->repeat_revision.load() && static_cast<bool>(impl_->repeat_plan.load());
+                    s.physical = physical_mode(effective.mode); s.message = admission.empty() ?
+                        "已准备，等待本次前台启动；参数已冻结" : "计划已保存，但不能启动：" + admission; });
             } else impl_->run(work,false,{});
         });
     } catch (const std::exception& error) {

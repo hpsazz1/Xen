@@ -373,6 +373,32 @@ void test_keyboard_event_state_machine() {
            "同一个 F8 释放后再次按下必须产生第二次运行切换上升沿");
 }
 
+void test_debug_test_hotkey() {
+    KeyboardConfig config; config.debug_test_virtual_keys = {0x79};
+    auto device = std::make_shared<FakeInputDevice>();
+    device->snapshot_.status = InputMonitorStatus::READY; device->snapshot_.state_valid = true;
+    device->snapshot_.sequence = 1;
+    config.debug_test_enabled = true;
+    KeyboardListener listener(config,device); expect(listener.open(), "调试绑定应可初始化");
+    device->snapshot_.virtual_keys[0x79] = true;
+    expect(listener.poll().events.empty(), "启动时已按住测试键不能直接执行");
+    device->snapshot_.virtual_keys[0x79] = false; ++device->snapshot_.sequence; listener.poll();
+    device->snapshot_.virtual_keys[0x79] = true; ++device->snapshot_.sequence;
+    auto event = listener.poll();
+    expect(event.events.size() == 1 && event.events[0].type == KeyboardEventType::DEBUG_TEST, "释放重按产生一次调试事件");
+    for (int i=0;i<5;++i) { ++device->snapshot_.sequence; expect(listener.poll().events.empty(), "长按测试键不能重复执行"); }
+    device->snapshot_.status = InputMonitorStatus::STALE; device->snapshot_.state_valid = false; listener.poll();
+    device->snapshot_.status = InputMonitorStatus::READY; device->snapshot_.state_valid = true; ++device->snapshot_.sequence;
+    expect(listener.poll().events.empty(), "健康恢复仍按住不能重新启动");
+    device->snapshot_.virtual_keys[0x79] = false; ++device->snapshot_.sequence; listener.poll();
+    device->snapshot_.virtual_keys[0x79] = true; ++device->snapshot_.sequence;
+    event = listener.poll(); expect(event.events.size() == 1 && event.events[0].type == KeyboardEventType::DEBUG_TEST, "恢复后释放重按才允许新事件");
+    config.debug_test_enabled = false;
+    keyboard::detail::KeyboardEventState state;
+    expect(keyboard::detail::update_keyboard_events(state,config,device->snapshot_.virtual_keys).count == 0, "独立开关关闭不得产生调试事件");
+    for (int key : {1,0x57,0x41,0x53,0x44,0x77}) { config.debug_test_virtual_keys = {key}; expect(!valid_keyboard_config(config), "测试动作或全局冲突绑定必须拒绝"); }
+    config.debug_test_virtual_keys = {0x05}; expect(valid_keyboard_config(config), "未被占用侧键应与现有快捷键一致支持");
+}
 void test_keyboard_listener_uses_selected_device() {
     auto device = std::make_shared<FakeInputDevice>();
     device->snapshot_.status = InputMonitorStatus::READY;
@@ -1610,6 +1636,7 @@ int main() {
     test_ndi_session_state_owns_discovery_and_connection_reasons();
     test_ndi_receive_loop_watchdog_covers_receiver_errors();
     test_invalid_keyboard_config();
+    test_debug_test_hotkey();
     test_keyboard_event_state_machine();
     test_keyboard_listener_uses_selected_device();
     test_invalid_capture_config();

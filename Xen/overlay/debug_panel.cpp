@@ -104,8 +104,10 @@ void json_block(const char* title, const Json& value) {
 struct DebugPanel::Impl {
     Request request;
     bool allow = false, edited = true;
-    std::string confirmation, load_path, weapon_id;
+    bool draft_change_pending = false;
+    std::string load_path, weapon_id;
     std::uint64_t seen_generation = 0;
+    std::uint64_t requested_prepare_generation = 0, bound_prepare_generation = 0;
     Json seen_plan;
     Mode prepared_mode = Mode::COUNTERPULSE;
     std::string prepared_id;
@@ -113,18 +115,37 @@ struct DebugPanel::Impl {
     bool move_parallel = true;
     int baseline = 0;
 
-    void changed() { edited = true; allow = false; confirmation.clear(); }
+    void changed(bool invalidate_repeat = true) {
+        edited = true; allow = false;
+        if (invalidate_repeat) draft_change_pending = true;
+    }
+    struct PublishDraftChange {
+        Impl& owner; OverlayActions& actions;
+        ~PublishDraftChange() {
+            actions.debug_plan_edited |= owner.draft_change_pending;
+            owner.draft_change_pending = false;
+        }
+    };
     void send(Action action, OverlayActions& actions) {
         actions.debug_action = action; actions.debug_request = request;
         if (action == Action::PREPARE) {
+            draft_change_pending = true;
             edited = false; prepared_mode = request.mode; prepared_id.clear();
-            allow = false; confirmation.clear();
+            requested_prepare_generation = seen_generation;
+            allow = false;
         }
     }
     void sync(const Snapshot* s) {
         if (!s || s->busy) return;
-        if (s->state == State::PREPARED && !edited && prepared_mode == request.mode)
-            prepared_id = s->prepared_id;
+        if (s->state == State::PREPARED && !edited && prepared_mode == request.mode &&
+            s->generation > requested_prepare_generation) {
+            if (prepared_id != s->prepared_id || bound_prepare_generation != s->generation) {
+                // 准备身份只绑定新的后台结果；旧快照及新任务不能继承前次勾选。
+                allow = false;
+                prepared_id = s->prepared_id;
+                bound_prepare_generation = s->generation;
+            }
+        }
         if (s->generation == seen_generation && s->plan == seen_plan) return;
         seen_generation = s->generation; seen_plan = s->plan;
         if (s->plan.is_object()) {
@@ -164,7 +185,7 @@ struct DebugPanel::Impl {
     void controls(const Snapshot* s, OverlayActions& actions) {
         const bool idle = !s || !s->busy;
         if (input("结果根目录", request.output_root, "每组使用独立目录，保留原始Run；准备和报告由后台执行。")) changed();
-        if (request.mode != Mode::FIRE_TEST && ImGui::Checkbox("常驻 HUD", &request.show_hud)) changed();
+        if (request.mode != Mode::FIRE_TEST && ImGui::Checkbox("常驻 HUD", &request.show_hud)) changed(false);
         tip("显示原生非激活HUD；模型结论不代表真实停稳。隐藏继续任务，关闭HUD请求停止。");
         if (button("校验计划", "仅校验实验参数，不连接或输出设备。", idle)) send(Action::VALIDATE, actions);
         ImGui::SameLine();
@@ -179,27 +200,30 @@ struct DebugPanel::Impl {
         if (physical) {
         ImGui::BeginDisabled(!ready);
         ImGui::Checkbox("允许本次真实物理输出", &allow);
-        tip("只授权下方本次已准备任务；不会授权下一组，也不自动启动生产Runtime。");
-        input("输入确认令牌", confirmation, "需用户手工输入并点击启动；不能从准备动作自动继承确认。");
-        ImGui::TextWrapped("本次确认令牌：%s", physical_confirmation());
+        tip("勾选后由用户点击下方启动按钮；只授权本次已准备任务。修改草稿、重新准备或身份变化均撤销勾选。");
         ImGui::EndDisabled();
         }
         if (button("由用户前台启动本次任务", "仅启动冻结身份匹配的本次任务。启动前后台再次核对唯一设备职责与清理状态。",
-                   ready && (!physical || (allow && confirmation == physical_confirmation())))) {
+                   ready && (!physical || allow))) {
             actions.debug_action = Action::START; actions.debug_request = request;
             actions.debug_prepared_id = prepared_id; actions.debug_allow_physical_output = allow;
-            actions.debug_confirmation = confirmation; changed();
+            // GUI以显式勾选和前台点击授权；CLI与原生执行核仍保留既有双参数校验。
+            actions.debug_confirmation = physical && allow ? physical_confirmation() : "";
+            changed(false);
         }
+        if (s && !s->message.empty()) ImGui::TextWrapped("任务反馈：%s", s->message.c_str());
         if (edited && s && s->state == State::PREPARED) ImGui::TextDisabled("草稿已变更，请重新准备。");
     }
 };
 DebugPanel::DebugPanel() : impl_(std::make_unique<Impl>()) {}
 DebugPanel::~DebugPanel() = default;
 void DebugPanel::render_status(const Snapshot* s, OverlayActions& actions) noexcept {
+    Impl::PublishDraftChange publish{*impl_,actions};
     try {
         impl_->sync(s);
         ImGui::Text("当前任务：%s", s ? state_label(s->state) : "空闲");
         if (s && !s->message.empty()) ImGui::TextWrapped("%s", s->message.c_str());
+        if (s) ImGui::TextDisabled(s->repeat_ready ? "快捷键模板已准备；独立开关启用后每按一次执行一组。" : "快捷键模板未就绪；先检查参数并重新准备。");
         if (button("停止当前调试任务", "直接请求取消；停止中仍等待设备清理，取消不等于释放确认。", s && s->busy))
             impl_->send(Action::CANCEL, actions);
         ImGui::SameLine();
@@ -209,6 +233,7 @@ void DebugPanel::render_status(const Snapshot* s, OverlayActions& actions) noexc
     } catch (...) { ImGui::TextUnformatted("调试快照无法显示。"); }
 }
 void DebugPanel::render_counterpulse(const AppConfig& config, const Snapshot* s, OverlayActions& actions) noexcept {
+    Impl::PublishDraftChange publish{*impl_,actions};
     try {
         auto& d = *impl_; d.mode(Mode::COUNTERPULSE);
         ImGui::TextWrapped("实验草稿独立于生产急停。动作顺序：移动 → 释放 → 反向 → 释放后等待 → 按住左键；由既有严格计划校验约束。");
@@ -241,6 +266,7 @@ void DebugPanel::render_counterpulse(const AppConfig& config, const Snapshot* s,
     } catch (...) { ImGui::TextUnformatted("急停草稿显示失败，请检查计划字段类型。"); }
 }
 void DebugPanel::render_fire(const AppConfig& config, const Snapshot* s, OverlayActions& actions) noexcept {
+    Impl::PublishDraftChange publish{*impl_,actions};
     try {
         auto& d = *impl_; d.mode(Mode::FIRE_TEST);
         ImGui::TextWrapped("独立原地测试，每组固定15次按住；不包含反向急停或模型停稳结论。实际子弹数未知。");
@@ -272,6 +298,7 @@ void DebugPanel::render_fire(const AppConfig& config, const Snapshot* s, Overlay
     } catch (...) { ImGui::TextUnformatted("射击草稿显示失败。"); }
 }
 void DebugPanel::render_manual(const Snapshot* s, OverlayActions& actions) noexcept {
+    Impl::PublishDraftChange publish{*impl_,actions};
     try {
         auto& d = *impl_;
         ImGui::SeparatorText("原生人工模型录制与离线工作流");

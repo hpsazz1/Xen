@@ -206,6 +206,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             : "物理键鼠监听后端创建失败");
     }
     MouseConfig active_input_config = config.mouse;
+    KeyboardConfig active_keyboard_config = config.keyboard;
     KeyboardListener keyboard(config.keyboard, input_device);
     if (!keyboard.open()) {
         append_message(app_message, "全局快捷键初始化失败");
@@ -299,6 +300,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             app_message = "请先结束调试任务并确认设备清理，再启动Runtime。";
             return;
         }
+        debug_workspace.invalidate_repeat();
         if (release_environment.managed &&
             app::detail::runtime_for_backend(config.detector.backend) !=
                 release_environment.runtime_id) {
@@ -429,6 +431,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             app::detail::debug_emergency_requested(keyboard_routing.emergency_pressed, actions.runtime_intents);
         const bool runtime_toggle_pressed =
             keyboard_routing.runtime_toggle_pressed;
+        if (actions.debug_plan_edited) debug_workspace.invalidate_repeat();
 
         if (actions.preview_enabled_changed &&
             !runtime.set_preview_enabled(actions.preview_enabled)) {
@@ -452,6 +455,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             return context;
         };
         if (emergency_pressed || actions.training_stop_requested || actions.stop_requested) debug_workspace.cancel();
+        if (keyboard_routing.debug_test_pressed && !emergency_pressed && !actions.stop_requested &&
+            !runtime_toggle_pressed && !actions.start_requested && !overlay.close_requested()) {
+            if (runtime_stop_job.valid() || overlay.background_busy()) {
+                app_message = "后台停止或弹道任务未结束，本次测试快捷键忽略，不排队。";
+            } else {
+                auto context = make_debug_context();
+                context.config.keyboard = active_keyboard_config;
+                context.config.keyboard.debug_test_enabled = active_keyboard_config.debug_test_enabled && config.keyboard.debug_test_enabled;
+                app_message = debug_workspace.repeat(context) ? "快捷键测试已提交，等待源端聚焦和键鼠松开。" :
+                    "快捷键测试未执行：" + debug_workspace.snapshot()->message;
+            }
+        }
         if (!overlay.close_requested() && !emergency_pressed && !actions.stop_requested) {
             if (actions.training_start_requested) {
                 app_message = !runtime_stop_job.valid() && !overlay.background_busy() && debug_workspace.record_inputs(runtime,actions.training_directory,make_debug_context())
@@ -593,6 +608,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                 bool input_reloaded = true;
                 bool input_rollback_persisted = true;
                 if (input_backend_changed) {
+                    debug_workspace.invalidate_repeat();
                     stop_runtime_session();
                     keyboard.close();
                     if (input_device) input_device->close();
@@ -630,6 +646,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                 if (replacement.open()) {
                     keyboard.close();
                     keyboard = std::move(replacement);
+                    active_keyboard_config = config.keyboard;
                     if (input_reloaded) {
                         app_message =
                             "配置已保存，键鼠后端与快捷键已立即生效。";

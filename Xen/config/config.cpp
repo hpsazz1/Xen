@@ -640,6 +640,7 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
     }
 
     constexpr TypedConfigKey kBoolKeys[]{
+        {"keyboard", "debug_test_enabled"},
         {"log", "enable_console"},
         {"log", "enable_file"},
         {"log", "enable_debug_file"},
@@ -740,6 +741,7 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"keyboard", "aim_hold_virtual_keys"},
         {"keyboard", "emergency_virtual_keys"},
         {"keyboard", "runtime_toggle_virtual_keys"},
+        {"keyboard", "debug_test_virtual_keys"},
     };
     for (const auto& key : kOptionalListKeys) {
         if (has_strict_int_list(ini, key, true)) continue;
@@ -946,6 +948,13 @@ bool validate_app_config(const AppConfig& config,
         if (mouse_backend_invalid || kmbox_invalid || makcu_invalid) {
             error = "Mouse 配置非法";
             return false;
+        }
+        for (const int key : config.keyboard.debug_test_virtual_keys) {
+            if (key == config.auto_stop.activation_virtual_key || key == config.trigger.hold_virtual_key ||
+                key == config.recoil.hold_virtual_key ||
+                std::find(config.auto_stop.release_virtual_keys.begin(), config.auto_stop.release_virtual_keys.end(), key) != config.auto_stop.release_virtual_keys.end()) {
+                error = "调试测试快捷键与急停、扳机或压枪功能键冲突"; return false;
+            }
         }
         const int stop_key = config.auto_stop.activation_virtual_key;
         if (config.auto_stop.counter_hold_ms < 1 || config.auto_stop.counter_hold_ms > 200 ||
@@ -1384,6 +1393,8 @@ bool load_app_config(const std::string& path,
                 ? std::vector<int>{static_cast<int>(legacy)}
                 : fallback;
         };
+        candidate.keyboard.debug_test_enabled = ini.GetBoolValue("keyboard", "debug_test_enabled", false);
+        candidate.keyboard.debug_test_virtual_keys = load_virtual_keys("debug_test_virtual_keys", "debug_test_virtual_key", {});
         candidate.keyboard.aim_hold_virtual_keys = load_virtual_keys(
             "aim_hold_virtual_keys", "aim_hold_virtual_key",
             candidate.keyboard.aim_hold_virtual_keys);
@@ -1627,6 +1638,8 @@ bool save_app_config(const std::string& path,
                          config.auto_stop.activation_virtual_key);
         ini.SetValue("auto_stop", "release_virtual_keys",
                      format_int_list(config.auto_stop.release_virtual_keys).c_str());
+        ini.SetBoolValue("keyboard", "debug_test_enabled", config.keyboard.debug_test_enabled);
+        ini.SetValue("keyboard", "debug_test_virtual_keys", format_int_list(config.keyboard.debug_test_virtual_keys).c_str());
         ini.SetValue(
             "keyboard", "aim_hold_virtual_keys",
             format_int_list(config.keyboard.aim_hold_virtual_keys).c_str());

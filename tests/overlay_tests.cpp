@@ -342,6 +342,15 @@ void test_aim_and_auto_stop_hotkeys_share_without_bypassing_safety() {
         expect(conflicts(target, VK_XBUTTON1) && conflicts(target, VK_XBUTTON2) && conflicts(target, 'K'),
             "安全急停与管线启停反向采集也不能占用瞄准、急停或扳机共键");
     }
+    const std::array<int,1> debug_keys{VK_XBUTTON2};
+    for (const auto target : {Target::RUNTIME_TOGGLE,Target::EMERGENCY,Target::AIM_HOLD,Target::AUTO_STOP})
+        expect(hotkey_binding_conflicts(target,VK_XBUTTON2,runtime,aim,emergency,0,0,0,debug_keys),
+            "反向采集其他功能不得占用已有调试测试键");
+    for (const int key : std::array<int,9>{VK_LBUTTON,'W','A','S','D',VK_F8,VK_END,VK_XBUTTON1,'R'})
+        expect(hotkey_binding_conflicts(Target::DEBUG_TEST,key,runtime,aim,emergency,VK_XBUTTON1,0,'R',debug_keys),
+            "调试测试键拒绝左键、WASD及全局和生产许可冲突");
+    expect(!hotkey_binding_conflicts(Target::DEBUG_TEST,'J',runtime,aim,emergency,0,0,0,debug_keys),
+        "未冲突的调试键可以绑定");
     expect(conflicts(Target::RUNTIME_TOGGLE, VK_END) && conflicts(Target::EMERGENCY, VK_F8),
         "管线启停与安全急停之间继续互斥");
 }

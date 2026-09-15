@@ -34,6 +34,8 @@ KeyboardRoutingResult route_keyboard_events(
             runtime.post_intent({RuntimeIntentType::EMERGENCY_STOP, true});
         } else if (event.type == KeyboardEventType::RUNTIME_TOGGLE) {
             result.runtime_toggle_pressed = true;
+        } else if (event.type == KeyboardEventType::DEBUG_TEST) {
+            result.debug_test_pressed = true;
         }
     }
     return result;

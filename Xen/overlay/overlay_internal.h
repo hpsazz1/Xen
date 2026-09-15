@@ -14,16 +14,20 @@
 
 namespace overlay::detail {
 
-enum class HotkeyConflictTarget { RUNTIME_TOGGLE, AIM_HOLD, EMERGENCY, AUTO_STOP };
+enum class HotkeyConflictTarget { RUNTIME_TOGGLE, AIM_HOLD, EMERGENCY, AUTO_STOP, DEBUG_TEST };
 
 inline bool hotkey_binding_conflicts(
         HotkeyConflictTarget target, int key,
         std::span<const int> runtime_keys, std::span<const int> aim_keys,
         std::span<const int> emergency_keys,
-        int auto_stop_key, int trigger_key, int recoil_key) noexcept {
+        int auto_stop_key, int trigger_key, int recoil_key,
+        std::span<const int> debug_keys = {}) noexcept {
     const auto contains = [key](std::span<const int> keys) {
         return std::find(keys.begin(), keys.end(), key) != keys.end();
     };
+    if (target == HotkeyConflictTarget::DEBUG_TEST &&
+        (key == 1 || key == 'W' || key == 'A' || key == 'S' || key == 'D')) return true;
+    if (target != HotkeyConflictTarget::DEBUG_TEST && contains(debug_keys)) return true;
     if (target != HotkeyConflictTarget::RUNTIME_TOGGLE && contains(runtime_keys)) return true;
     if (target != HotkeyConflictTarget::EMERGENCY && contains(emergency_keys)) return true;
     // 瞄准、自动急停、扳机和压枪属于按住许可；允许共键，安全控制仍互斥。

@@ -429,6 +429,17 @@ void test_stop_or_debug_ownership_cannot_restore_output() {
 } // namespace
 
 int main() {
+    {
+        Runtime runtime;
+        KeyboardPollResult poll;
+        poll.events.push_back({KeyboardEventType::DEBUG_TEST,true});
+        expect(app::detail::route_keyboard_events(runtime,poll,false).debug_test_pressed,
+            "调试快捷键必须独立路由到App");
+        expect(!app::detail::route_keyboard_events(runtime,poll,true).debug_test_pressed,
+            "绑定捕获期间不能启动调试测试");
+        expect(runtime.snapshot().state == RuntimeState::STOPPED && !runtime.snapshot().output_armed,
+            "调试快捷键事件不能直接启动或武装生产Runtime");
+    }
     test_startup_loss_and_recovery();
     test_failure_cache_and_new_release();
     test_poll_failure_visible_in_same_result();

@@ -108,6 +108,12 @@ KeyboardPollResult KeyboardListener::poll() noexcept {
             impl_->have_input_fact = true;
             impl_->last_input_sequence = snapshot.sequence;
 
+            // 初次健康建立或故障恢复不能把缓存按住状态当成调试启动边沿。
+            if (!impl_->input_healthy || snapshot.status != InputMonitorStatus::READY) {
+                for (const int key : impl_->config.debug_test_virtual_keys)
+                    impl_->event_state.debug_blocked_until_release[static_cast<std::size_t>(key)] =
+                        snapshot.virtual_keys[static_cast<std::size_t>(key)];
+            }
             const auto polled = keyboard::detail::update_keyboard_events(
                 impl_->event_state, impl_->config, snapshot.virtual_keys);
             result.events.reserve(polled.count);

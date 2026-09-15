@@ -2356,7 +2356,7 @@ if(BUILD_TESTING)
     # 同一专项一次构建依赖图，避免逐目标重复运行运行库部署前置步骤。
     add_custom_target(debug_workspace_validation DEPENDS xen_app auto_stop_counterpulse
         debug_workspace_ui_preview debug_runner_tests debug_session_tests debug_panel_tests recoil_editor_job_tests
-        overlay_tests input_training_panel_tests runtime_input_training_tests input_training_tests input_safety_tests
+        overlay_tests input_training_panel_tests runtime_input_training_tests input_training_tests input_safety_tests io_tests
         auto_stop_counterpulse_tests auto_stop_sampling_analysis_tests auto_stop_counterpulse_hud_tests
         auto_stop_manual_sampling_tests auto_stop_manual_monitor_tests auto_stop_manual_finalize_tests
         auto_stop_manual_labels_tests auto_stop_hud_feedback_tests auto_stop_manual_intervals_tests

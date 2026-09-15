@@ -253,6 +253,8 @@ void test_round_trip() {
     source.keyboard.aim_hold_virtual_keys = {0x02, 0x05};
     source.keyboard.emergency_virtual_keys = {0x23, 0x06};
     source.keyboard.runtime_toggle_virtual_keys = {0x77, 0x04};
+    source.keyboard.debug_test_enabled = true;
+    source.keyboard.debug_test_virtual_keys = {0x79,0x7A};
     source.log.global_level = LogLevel::WARN;
     source.log.enable_console = false;
     source.log.enable_file = false;
@@ -324,6 +326,8 @@ void test_round_trip() {
            loaded.mouse.makcu_baud_rate == 4000000 &&
            loaded.mouse.makcu_connect_timeout_ms == 800 &&
            loaded.mouse.makcu_command_timeout_ms == 120 &&
+           loaded.keyboard.debug_test_enabled == source.keyboard.debug_test_enabled &&
+           loaded.keyboard.debug_test_virtual_keys == source.keyboard.debug_test_virtual_keys &&
            loaded.keyboard.aim_hold_virtual_keys ==
                source.keyboard.aim_hold_virtual_keys &&
            loaded.keyboard.emergency_virtual_keys ==
@@ -828,7 +832,7 @@ void test_legacy_keyboard_config() {
                loaded.keyboard.emergency_virtual_keys ==
                    std::vector<int>{6} &&
                loaded.keyboard.runtime_toggle_virtual_keys ==
-                   std::vector<int>{118},
+                   std::vector<int>{118} && !loaded.keyboard.debug_test_enabled && loaded.keyboard.debug_test_virtual_keys.empty(),
            "旧版单键配置必须迁移为单元素绑定集合");
     std::error_code ignored;
     std::filesystem::remove(path, ignored);
@@ -968,6 +972,16 @@ void test_invalid_config() {
     config.keyboard.emergency_virtual_keys = {0x23};
     expect(validate_app_config(config, error),
            "互不冲突且位于 Win32 范围内的虚拟键应通过校验");
+    config.keyboard.debug_test_virtual_keys = {0x79};
+    config.keyboard.debug_test_enabled = true;
+    expect(validate_app_config(config,error), "独立调试开关及无冲突绑定应有效");
+    config.trigger.hold_virtual_key = 0x79;
+    expect(!validate_app_config(config,error), "调试与扳机功能绑定必须双向互斥");
+    config.trigger.hold_virtual_key = 0;
+    config.auto_stop.release_virtual_keys.push_back(0x79);
+    expect(!validate_app_config(config,error), "调试与急停释放绑定必须互斥");
+    config.auto_stop.release_virtual_keys.pop_back();
+    config.keyboard.debug_test_virtual_keys.clear(); config.keyboard.debug_test_enabled = false;
     config.keyboard.runtime_toggle_virtual_keys = {0x77, 0x77};
     expect(!validate_app_config(config, error),
            "同一功能内重复绑定必须拒绝配置");

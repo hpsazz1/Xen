@@ -34,6 +34,7 @@ struct Request {
 struct Snapshot {
     State state = State::IDLE;
     bool busy = false, physical = false, hud_visible = false, cleanup_unknown = false;
+    bool repeat_ready = false;
     std::uint64_t generation = 0;
     std::string message, report_directory, prepared_id;
     Json plan, sampling;
@@ -61,6 +62,9 @@ public:
     void cancel(const std::string& reason = "用户停止") noexcept;
     std::shared_ptr<const Snapshot> snapshot() const noexcept;
     bool busy() const noexcept;
+    // 仅显式启用的前台按下沿调用；繁忙不排队，每次从冻结模板创建独立Run。
+    bool repeat(const Context& context) noexcept;
+    void invalidate_repeat() noexcept;
     // 原始输入面板沿用Runtime的记录/回看接口；开始、停止与归档等待均不占UI线程。
     bool record_inputs(Runtime& runtime, const std::string& root,
         const Context& context) noexcept;

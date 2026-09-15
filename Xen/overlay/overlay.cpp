@@ -100,6 +100,7 @@ enum class HotkeyBindingTarget {
     EMERGENCY,
     AUTO_STOP,
     AUTO_STOP_RELEASE,
+    DEBUG_TEST,
     TRIGGER,
     RECOIL,
 };
@@ -3224,6 +3225,20 @@ struct Overlay::Impl {
     void render_debug(const RuntimeSnapshot& snapshot, AppConfig& app_config,
                       bool can_edit, OverlayActions& actions,
                       const debug_session::Snapshot* debug_snapshot) {
+        ImGui::BeginDisabled(!can_edit || (debug_snapshot && debug_snapshot->busy));
+        const auto key_active = current_virtual_key_state();
+        if (can_edit) process_hotkey_capture(app_config,actions,key_active);
+        if (begin_form("debug_hotkey_form",150.0f)) {
+            form_row("启用调试测试快捷键", "这是快捷键路径的物理输出许可；保存配置后生效。仍需先准备测试模板，忙碌时不排队，按住不循环，释放后才能再次按下。");
+            toggle_switch("##debug_test_enabled",&app_config.keyboard.debug_test_enabled);
+            render_hotkey_row("测试键（按下）", "##debug_test_keys",
+                "沿用现有按键绑定：按下追加、Esc清空。本机或已连接后端键均可捕获；拒绝左键、WASD及其他功能冲突。保存配置后生效。",
+                HotkeyBindingTarget::DEBUG_TEST,app_config.keyboard.debug_test_virtual_keys,key_active);
+            ImGui::EndTable();
+        }
+        ImGui::EndDisabled();
+        ImGui::TextWrapped("开启后，每次按键允许执行最近一次已准备的物理测试；每次独立一组，无自动循环。离开本页不会清除模板；编辑实验或切换实验类型需重新准备。");
+        if (!hotkey_capture_message.empty()) ImGui::TextWrapped("%s",hotkey_capture_message.c_str());
         debug_panel.render_status(debug_snapshot, actions);
         if (!ImGui::BeginTabBar("debug_tabs")) return;
         if (ImGui::BeginTabItem("急停测试")) {
@@ -3619,6 +3634,8 @@ struct Overlay::Impl {
                 return &app_config.keyboard.aim_hold_virtual_keys;
             case HotkeyBindingTarget::EMERGENCY:
                 return &app_config.keyboard.emergency_virtual_keys;
+            case HotkeyBindingTarget::DEBUG_TEST:
+                return &app_config.keyboard.debug_test_virtual_keys;
             case HotkeyBindingTarget::AUTO_STOP_RELEASE:
                 return &app_config.auto_stop.release_virtual_keys;
             case HotkeyBindingTarget::AUTO_STOP:
@@ -3637,11 +3654,13 @@ struct Overlay::Impl {
         using Target = overlay::detail::HotkeyConflictTarget;
         const auto target = current_binding == &app_config.keyboard.runtime_toggle_virtual_keys ? Target::RUNTIME_TOGGLE :
             current_binding == &app_config.keyboard.aim_hold_virtual_keys ? Target::AIM_HOLD :
-            current_binding == &app_config.keyboard.emergency_virtual_keys ? Target::EMERGENCY : Target::AUTO_STOP;
+            current_binding == &app_config.keyboard.emergency_virtual_keys ? Target::EMERGENCY :
+            current_binding == &app_config.keyboard.debug_test_virtual_keys ? Target::DEBUG_TEST : Target::AUTO_STOP;
         return overlay::detail::hotkey_binding_conflicts(target, virtual_key,
             app_config.keyboard.runtime_toggle_virtual_keys, app_config.keyboard.aim_hold_virtual_keys,
             app_config.keyboard.emergency_virtual_keys, app_config.auto_stop.activation_virtual_key,
-            app_config.trigger.hold_virtual_key, app_config.recoil.hold_virtual_key);
+            app_config.trigger.hold_virtual_key, app_config.recoil.hold_virtual_key,
+            app_config.keyboard.debug_test_virtual_keys);
     }
 
     void begin_hotkey_binding(
@@ -3693,14 +3712,27 @@ struct Overlay::Impl {
         if (capture_result.type !=
                 overlay::detail::HotkeyCaptureResultType::NONE) {
             std::vector<int>* binding = hotkey_binding(app_config);
-            if (hotkey_binding_target == HotkeyBindingTarget::RECOIL) {
+            if (hotkey_binding_target == HotkeyBindingTarget::DEBUG_TEST && binding) {
+                if (capture_result.type == overlay::detail::HotkeyCaptureResultType::CLEARED) {
+                    binding->clear(); hotkey_capture_message = "调试测试快捷键已清空";
+                } else if (capture_result.type == overlay::detail::HotkeyCaptureResultType::ASSIGNED) {
+                    const int key = capture_result.virtual_key;
+                    if (virtual_key_assigned_elsewhere(app_config,binding,key) ||
+                        std::find(app_config.auto_stop.release_virtual_keys.begin(),app_config.auto_stop.release_virtual_keys.end(),key) != app_config.auto_stop.release_virtual_keys.end())
+                        hotkey_capture_message = "调试测试键不能使用左键、WASD或其他已绑定功能键";
+                    else if (std::find(binding->begin(),binding->end(),key) == binding->end()) {
+                        binding->push_back(key); hotkey_capture_message = "调试测试键已追加；保存配置后生效，每次按下只执行一组";
+                    } else hotkey_capture_message = "该按键已在调试测试绑定中";
+                }
+            } else if (hotkey_binding_target == HotkeyBindingTarget::RECOIL) {
                 if (capture_result.type == overlay::detail::HotkeyCaptureResultType::CLEARED) {
                     app_config.recoil.hold_virtual_key = 0; hotkey_capture_message = "压枪额外许可键已清空";
                 } else if (capture_result.type == overlay::detail::HotkeyCaptureResultType::ASSIGNED) {
                     const int key = capture_result.virtual_key;
                     const auto assigned = [key](const std::vector<int>& keys) { return std::find(keys.begin(), keys.end(), key) != keys.end(); };
                     if (key == 1 || key == VK_END || key == VK_F8 || key == 'W' || key == 'A' || key == 'S' || key == 'D' ||
-                        assigned(app_config.keyboard.emergency_virtual_keys) || assigned(app_config.keyboard.runtime_toggle_virtual_keys))
+                        assigned(app_config.keyboard.emergency_virtual_keys) || assigned(app_config.keyboard.runtime_toggle_virtual_keys) ||
+                        assigned(app_config.keyboard.debug_test_virtual_keys))
                         hotkey_capture_message = "压枪许可键不能使用左键、WASD、安全急停或运行启停键";
                     else { app_config.recoil.hold_virtual_key = key; hotkey_capture_message = "压枪许可键已设置，可与瞄准或扳机共用"; }
                 }
@@ -3714,7 +3746,8 @@ struct Overlay::Impl {
                         return std::find(keys.begin(), keys.end(), key) != keys.end();
                     };
                     if (key == 1 || key == VK_END || key == VK_F8 || key == 'W' || key == 'A' || key == 'S' || key == 'D' ||
-                        assigned(app_config.keyboard.emergency_virtual_keys) || assigned(app_config.keyboard.runtime_toggle_virtual_keys)) {
+                        assigned(app_config.keyboard.emergency_virtual_keys) || assigned(app_config.keyboard.runtime_toggle_virtual_keys) ||
+                        assigned(app_config.keyboard.debug_test_virtual_keys)) {
                         hotkey_capture_message = "扳机许可键不能使用左键、WASD、安全急停或运行启停键";
                     } else {
                         app_config.trigger.hold_virtual_key = key;
@@ -3746,8 +3779,9 @@ struct Overlay::Impl {
                     hotkey_capture_message = "急停释放键已清空";
                 } else if (capture_result.type == overlay::detail::HotkeyCaptureResultType::ASSIGNED) {
                     const int key = capture_result.virtual_key;
-                    if (key == 'W' || key == 'A' || key == 'S' || key == 'D' || key == app_config.auto_stop.activation_virtual_key)
-                        hotkey_capture_message = "释放键不能使用WASD或急停允许键";
+                    if (key == 'W' || key == 'A' || key == 'S' || key == 'D' || key == app_config.auto_stop.activation_virtual_key ||
+                        std::find(app_config.keyboard.debug_test_virtual_keys.begin(),app_config.keyboard.debug_test_virtual_keys.end(),key) != app_config.keyboard.debug_test_virtual_keys.end())
+                        hotkey_capture_message = "释放键不能使用WASD、急停允许键或调试测试键";
                     else if (std::find(binding->begin(), binding->end(), key) == binding->end()) {
                         binding->push_back(key);
                         hotkey_capture_message = "释放键已追加，任意一个键即可释放急停";
@@ -4112,7 +4146,8 @@ struct Overlay::Impl {
              snapshot.state == RuntimeState::RUNNING &&
              snapshot.detector_reload_state !=
                  DetectorReloadState::LOADING);
-        const WorkspacePage capture_page =
+        const WorkspacePage capture_page = hotkey_binding_target == HotkeyBindingTarget::DEBUG_TEST
+            ? WorkspacePage::DEBUG :
             (hotkey_binding_target == HotkeyBindingTarget::AUTO_STOP || hotkey_binding_target == HotkeyBindingTarget::AUTO_STOP_RELEASE || hotkey_binding_target == HotkeyBindingTarget::TRIGGER ||
              hotkey_binding_target == HotkeyBindingTarget::RECOIL)
                 ? WorkspacePage::AUXILIARY : WorkspacePage::SETTINGS;
