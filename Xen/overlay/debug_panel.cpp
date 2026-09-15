@@ -105,10 +105,10 @@ struct DebugPanel::Impl {
     Request request;
     bool allow = false, edited = true;
     bool draft_change_pending = false;
-    std::string load_path, weapon_id;
+    std::string load_path, fire_load_path, weapon_id, counter_plan_text;
     std::uint64_t seen_generation = 0;
     std::uint64_t requested_prepare_generation = 0, bound_prepare_generation = 0;
-    Json seen_plan;
+    std::uint64_t seen_draft_plan = 0, seen_draft_sampling = 0;
     Mode prepared_mode = Mode::COUNTERPULSE;
     std::string prepared_id;
     int shots = 8, move = 120, counter = 40, delay = 0, release = 18, hold = 5, interval = 280, direction = 0;
@@ -146,15 +146,16 @@ struct DebugPanel::Impl {
                 bound_prepare_generation = s->generation;
             }
         }
-        if (s->generation == seen_generation && s->plan == seen_plan) return;
-        seen_generation = s->generation; seen_plan = s->plan;
-        if (s->plan.is_object()) {
-            const auto& p = s->plan;
-            if (request.mode == Mode::FIRE_TEST) {
+        seen_generation = s->generation;
+        if (s->draft_plan_revision != seen_draft_plan && s->draft_plan.is_object()) {
+            seen_draft_plan = s->draft_plan_revision;
+            const auto& p = s->draft_plan;
+            if (s->draft_plan_mode == Mode::FIRE_TEST) {
                 request.shot_hold_ms = p.value("shot_hold_ms", request.shot_hold_ms);
                 request.fire_interval_ms = p.value("fire_interval_ms", request.fire_interval_ms);
-            } else if (request.mode == Mode::COUNTERPULSE || request.mode == Mode::DERIVE_PLAN) {
-                request.plan_text = p.dump(2);
+            } else {
+                counter_plan_text = p.dump(2);
+                if (request.mode == Mode::COUNTERPULSE || request.mode == Mode::DERIVE_PLAN) request.plan_text = counter_plan_text;
                 shots = p.value("shots", shots); move = p.value("move_ms", move);
                 counter = p.value("counter_hold_ms", counter); delay = p.value("counter_delay_ms", delay);
                 release = p.value("shot_after_release_ms", release); hold = p.value("shot_hold_ms", hold);
@@ -163,14 +164,17 @@ struct DebugPanel::Impl {
                 baseline = b == "no_counter" ? 1 : b == "stationary" ? 2 : 0;
                 move_parallel = p.value("move_during_fire_delay", move_parallel);
             }
+            changed();
         }
-        if (s->sampling.is_object()) request.sampling_text = s->sampling.dump(2);
+        if (s->draft_sampling_revision != seen_draft_sampling && s->draft_sampling.is_object()) {
+            seen_draft_sampling = s->draft_sampling_revision; request.sampling_text = s->draft_sampling.dump(2); changed();
+        }
     }
     void mode(Mode value) {
         if (request.mode != value) {
-            const bool derived = request.mode == Mode::DERIVE_PLAN && value == Mode::COUNTERPULSE;
+            if (request.mode == Mode::COUNTERPULSE || request.mode == Mode::DERIVE_PLAN) counter_plan_text = request.plan_text;
             request.mode = value;
-            if (!derived) request.plan_text.clear();
+            request.plan_text = value == Mode::COUNTERPULSE ? counter_plan_text : std::string{};
             if (value == Mode::FIRE_TEST) request.show_hud = false;
             changed();
         }
@@ -181,6 +185,33 @@ struct DebugPanel::Impl {
             {"counter_delay_ms",delay},{"shot_after_release_ms",release},{"shot_hold_ms",hold},
             {"fire_interval_ms",interval},{"fire_delay_ms",baseline == 2 ? 1 : 0},
             {"direction",direction ? 8 : 2},{"move_during_fire_delay",move_parallel},{"late_tolerance_ms",5}}.dump(2);
+    }
+    void weapon_timing(const AppConfig& config, const Snapshot* s, OverlayActions& actions, bool counter_page) {
+        if (button("读取共享武器资料", "后台读取辅助页管理的唯一共享目录。只刷新资料，不覆盖草稿；选择或点击带入才复制两字段。")) {
+            request.load_path = config.weapon_timing_file; changed(); send(Action::LOAD_WEAPON_TIMING, actions);
+        }
+        if (!s || !s->timing_catalog_valid) return;
+        auto apply = [&](const weapon::TimingProfile& profile) {
+            if (counter_page) {
+                if (request.plan_text.empty()) plan_from_fields();
+                auto plan = Json::parse(request.plan_text,nullptr,true,true);
+                plan["shot_hold_ms"] = profile.shot_hold_ms; plan["fire_interval_ms"] = profile.fire_interval_ms;
+                request.plan_text = plan.dump(2); hold = profile.shot_hold_ms; interval = profile.fire_interval_ms;
+            }
+            else { request.shot_hold_ms = profile.shot_hold_ms; request.fire_interval_ms = profile.fire_interval_ms; }
+            changed();
+        };
+        if (ImGui::BeginCombo("带入武器", weapon_id.empty() ? "选择已启用武器" : weapon_id.c_str())) {
+            for (const auto& p : s->timing_catalog.profiles) {
+                ImGui::BeginDisabled(!p.enabled);
+                if (ImGui::Selectable(p.canonical_id.data(), weapon_id == p.canonical_id)) { weapon_id = p.canonical_id; apply(p); }
+                ImGui::EndDisabled(); tip("显式复制共享表的按住和DOWN间隔到当前页；不改变动作、次数或生产选择，禁用资料不能带入。");
+            }
+            ImGui::EndCombo();
+        }
+        tip("两页共享武器选择，各自保留独立草稿。切页不自动覆盖；点击带入可重新复制所选武器最新参数。");
+        const auto* selected = weapon::find_timing(s->timing_catalog,weapon_id);
+        if (button("带入所选武器参数", "仅复制所选武器的左键按住与DOWN提交间隔；不读取独立设置文件。", selected && selected->enabled)) apply(*selected);
     }
     void controls(const Snapshot* s, OverlayActions& actions) {
         const bool idle = !s || !s->busy;
@@ -237,6 +268,7 @@ void DebugPanel::render_counterpulse(const AppConfig& config, const Snapshot* s,
     try {
         auto& d = *impl_; d.mode(Mode::COUNTERPULSE);
         ImGui::TextWrapped("实验草稿独立于生产急停。动作顺序：移动 → 释放 → 反向 → 释放后等待 → 按住左键；由既有严格计划校验约束。");
+        ImGui::TextWrapped("首发为基准射击，后续执行移动和所选制动动作；DOWN提交间隔只是下限，不是移动保持时长。");
         ImGui::BeginDisabled(s && s->busy);
         bool changed = false;
         changed |= ImGui::Combo("基准动作", &d.baseline, "反向制动\0无反向对照\0原地\0"); tip("选择实验动作；不改变生产H40策略，也不将模型基准称作实测。");
@@ -252,6 +284,7 @@ void DebugPanel::render_counterpulse(const AppConfig& config, const Snapshot* s,
             d.counter = config.auto_stop.counter_hold_ms; d.release = config.auto_stop.shot_after_release_ms; changed = true;
         }
         if (changed || d.request.plan_text.empty()) { d.plan_from_fields(); d.changed(); }
+        d.weapon_timing(config,s,actions,true);
         if (ImGui::InputTextMultiline("完整动作计划 JSONC", &d.request.plan_text, { -1, 190 })) d.changed();
         tip("直接编辑正式计划格式，未知字段或越界会拒绝；草稿变更使旧准备失效。");
         input("载入文件", d.load_path, "只在点击载入时由后台读取计划或采样设置，不逐帧访问磁盘。");
@@ -273,25 +306,14 @@ void DebugPanel::render_fire(const AppConfig& config, const Snapshot* s, Overlay
         ImGui::BeginDisabled(s && s->busy);
         if (integer("点射按住 / ms", d.request.shot_hold_ms, 1, 2000, "测试范围1至2000ms；从DOWN协议ACK起算至UP提交。")) d.changed();
         if (integer("射击提交间隔 / ms", d.request.fire_interval_ms, 1, 5000, "测试范围1至5000ms且大于按住；生产表另按较窄范围校验。")) d.changed();
-        if (button("读取共享武器资料", "后台读取辅助页管理的唯一共享目录，不修改文件或生产选择。")) {
-            d.request.load_path = config.weapon_timing_file; d.send(Action::LOAD_WEAPON_TIMING, actions);
-        }
-        if (s && s->timing_catalog_valid) {
-            if (ImGui::BeginCombo("带入武器", d.weapon_id.empty() ? "选择已启用武器" : d.weapon_id.c_str())) {
-                for (const auto& p : s->timing_catalog.profiles) {
-                    ImGui::BeginDisabled(!p.enabled);
-                    if (ImGui::Selectable(p.canonical_id.data(), d.weapon_id == p.canonical_id)) {
-                        d.weapon_id = p.canonical_id; d.request.shot_hold_ms = p.shot_hold_ms;
-                        d.request.fire_interval_ms = p.fire_interval_ms; d.changed();
-                    }
-                    ImGui::EndDisabled(); tip("显式复制共享表值到独立草稿；R8留档禁用，不能激活。");
-                }
-                ImGui::EndCombo();
+        d.weapon_timing(config,s,actions,false);
+        if (ImGui::CollapsingHeader("高级：从独立文件导入")) {
+            input("两字段设置文件", d.fire_load_path, "独立文件与所选共享武器无关；载入成功后明确替换本页两字段，失败保留草稿。");
+            if (button("从文件载入射击设置", "只读取上方指定的shot_hold_ms/fire_interval_ms文件，不表示重载所选武器。", !d.fire_load_path.empty())) {
+                d.request.load_path = d.fire_load_path; d.changed(); d.send(Action::LOAD_FIRE_SETTINGS, actions);
             }
-            tip("共享表在辅助页管理；此处选择不会热改生产武器。");
+            if (d.fire_load_path.empty()) ImGui::TextDisabled("未指定文件；不会载入或清除当前草稿。");
         }
-        input("两字段设置文件", d.load_path, "读取已有shot_hold_ms/fire_interval_ms文件；工程默认80/800不会覆盖用户文件。");
-        if (button("载入射击设置", "严格两字段原生转换；每组仍固定15次。")) { d.request.load_path = d.load_path; d.changed(); d.send(Action::LOAD_FIRE_SETTINGS, actions); }
         d.controls(s, actions); ImGui::EndDisabled();
         if (s) json_block("本次实际射击计划", s->plan);
         render_results(s);

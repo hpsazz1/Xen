@@ -40,6 +40,10 @@ struct Snapshot {
     std::uint64_t generation = 0;
     std::string message, report_directory, prepared_id;
     Json plan, sampling;
+    // 仅显式文件载入或派生发布草稿；运行历史快照不能反向改写编辑器。
+    Json draft_plan, draft_sampling;
+    Mode draft_plan_mode = Mode::COUNTERPULSE;
+    std::uint64_t draft_plan_revision = 0, draft_sampling_revision = 0;
     std::shared_ptr<const Json> result, live;
     weapon::TimingCatalog timing_catalog;
     bool timing_catalog_valid = false;

@@ -299,6 +299,10 @@ struct Session::Impl {
             else { s.state = State::COMPLETED; s.message = "任务完成；自动结果不代表真实停稳或子弹数"; }
             if (completed->contains("candidate_plan")) s.plan = completed->at("candidate_plan");
             if (completed->contains("plan")) s.plan = completed->at("plan");
+            if (success && work.request.mode == Mode::DERIVE_PLAN && completed->contains("candidate_plan")) {
+                s.draft_plan = completed->at("candidate_plan"); s.draft_plan_mode = Mode::COUNTERPULSE;
+                ++s.draft_plan_revision;
+            }
             if (completed->contains("sampling_settings")) s.sampling = completed->at("sampling_settings");
             if (completed->contains("settings")) s.sampling = completed->at("settings");
             if (completed->contains("sampling_analysis")) s.live = std::make_shared<const Json>(completed->at("sampling_analysis"));
@@ -467,6 +471,9 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
                 const auto value = action == Action::LOAD_SAMPLING ? sampling_settings_json(parse_sampling_settings(document)) :
                     action == Action::LOAD_FIRE_SETTINGS ? make_fire_test_plan(document) : validate_debug_plan(document);
                 impl_->update([&](Snapshot& s) { if (action == Action::LOAD_SAMPLING) s.sampling = value; else s.plan = value;
+                    if (action == Action::LOAD_SAMPLING) { s.draft_sampling = value; ++s.draft_sampling_revision; }
+                    else { s.draft_plan = value; s.draft_plan_mode = action == Action::LOAD_FIRE_SETTINGS ? Mode::FIRE_TEST : Mode::COUNTERPULSE;
+                        ++s.draft_plan_revision; }
                     s.state = State::COMPLETED; s.message = "文档已载入，请检查草稿并重新准备"; });
                 return;
             }

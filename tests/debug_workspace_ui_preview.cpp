@@ -237,6 +237,7 @@ int wmain(int argc, wchar_t** argv) {
             {{"previous_down_submit_interval_ms",705},{"down_ack_to_up_submit_ms",60},{"observed_hold_ms",63},{"valid_command_hold",true},
                 {"down_model",{{"valid",true},{"within_model_threshold",true}}}}});
         debug.result = analysis;
+        debug.timing_catalog = weapon::default_timing_catalog(); debug.timing_catalog_valid = true;
         UiInput input; RenderCapture capture; CaptureFailure failure{capture,output};
         ImGuiContextHook hook; hook.Type = ImGuiContextHookType_NewFramePre; hook.Callback = inject_input; hook.UserData = &input;
         const auto hook_id = ImGui::AddContextHook(ImGui::GetCurrentContext(), &hook);
@@ -286,6 +287,16 @@ int wmain(int argc, wchar_t** argv) {
             require(capture.text.find(expected[tab_index]) != std::string::npos, "调试页没有呈现预期内容");
             input.position = {400,40}; frame();
             save_window(capture,output / file_names[tab_index]);
+            if (tab_index == 0 || tab_index == 2) {
+                // 未准备的START控件禁用，不参与导航矩形更新；定位同一区域可用的准备控件。
+                input.focus_window = content; input.focus_id = ImHashStr("准备",0,tab.ID); frame();
+                const auto target = ImGui::WindowRectRelToAbs(content,content->NavRectRel[ImGuiNavLayer_Main]);
+                ImGui::ScrollToRectEx(content,target,ImGuiScrollFlags_AlwaysCenterY); frame(); frame();
+                input.focus_window = content; input.focus_id = ImHashStr("准备",0,tab.ID); frame();
+                const auto visible = ImGui::WindowRectRelToAbs(content,content->NavRectRel[ImGuiNavLayer_Main]);
+                require(content->ClipRect.Contains(visible.GetCenter()),"最小窗口滚动后准备控件仍不可见");
+                save_window(capture,output / (std::string("controls-") + file_names[tab_index]));
+            }
             if (tab_index == 0) {
                 content->StateStorage.SetInt(content->GetID("默认基准与实际模型参数"),1);
                 content->StateStorage.SetInt(content->GetID("default_baseline"),1);

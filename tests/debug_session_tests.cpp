@@ -146,6 +146,29 @@ void test_documents_and_frozen_prepare(const std::filesystem::path& root) {
     require(session.dispatch(Action::LOAD_PLAN, request, context), "计划读取请求未接收");
     wait_idle(session);
     require(session.snapshot()->plan.at("shots") == 15, "读取计划丢失15次按住契约");
+    require(session.snapshot()->draft_plan_revision == 1 && session.snapshot()->draft_plan_mode == Mode::COUNTERPULSE &&
+        session.snapshot()->draft_plan.at("baseline") == "stationary", "显式LOAD_PLAN必须保留原地计划并标记急停草稿来源");
+    const auto imported = session.snapshot()->draft_plan;
+    request.load_path.clear();
+    require(session.dispatch(Action::LOAD_FIRE_SETTINGS,request,context), "空文件请求应由后台报告失败");
+    wait_idle(session);
+    require(session.snapshot()->state == State::FAILED && session.snapshot()->draft_plan_revision == 1 &&
+        session.snapshot()->draft_plan == imported,"文件载入失败不能发布新草稿或复用旧计划覆盖编辑器");
+    const auto catalog_path = root / "isolated-weapon-timing.json";
+    std::string catalog_error;
+    require(weapon::save_timing_catalog(catalog_path,weapon::default_timing_catalog(),catalog_error),"合成武器资料写入失败");
+    request.load_path = utf8(catalog_path);
+    require(session.dispatch(Action::LOAD_WEAPON_TIMING,request,context),"共享资料请求未接收");
+    wait_idle(session);
+    require(session.snapshot()->draft_plan_revision == 1 && session.snapshot()->draft_plan == imported,
+        "刷新共享目录不能重发历史计划到草稿");
+    const auto fire_path = root / "isolated-fire-settings.json";
+    { std::ofstream file(fire_path); file << R"({"shot_hold_ms":70,"fire_interval_ms":410})"; }
+    request.load_path = utf8(fire_path);
+    require(session.dispatch(Action::LOAD_FIRE_SETTINGS,request,context),"射击文件载入请求未接收");
+    wait_idle(session);
+    require(session.snapshot()->draft_plan_revision == 2 && session.snapshot()->draft_plan_mode == Mode::FIRE_TEST &&
+        session.snapshot()->draft_plan.at("fire_interval_ms") == 410,"成功文件导入必须发布对应射击页的显式草稿");
 
     require(session.dispatch(Action::PREPARE, request, context), "准备请求未接收");
     wait_idle(session);
