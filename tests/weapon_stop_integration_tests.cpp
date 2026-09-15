@@ -129,7 +129,7 @@ std::shared_ptr<TriggerObservation> fresh_observation(std::uint64_t sequence) {
     result->observed_at = Clock::now(); result->valid = result->timing_valid = true;
     return result;
 }
-void run_weapon(const char* weapon_id, bool cycle = false) {
+void run_weapon(const char* weapon_id, bool cycle = false, bool lose_candidate = false, bool lose_target = false) {
     const auto catalog = weapon::default_timing_catalog();
     const auto* profile = weapon::find_timing(catalog, weapon_id);
     require(profile && profile->enabled, "组合测试须使用共享表有效武器");
@@ -168,6 +168,29 @@ void run_weapon(const char* weapon_id, bool cycle = false) {
     require(mouse->downs == 0, "允许键未按下不得开火");
     mouse->allow(true);
     std::uint64_t sequence = 0;
+    if (lose_candidate) {
+        until([&] {
+            stop.publish_target(Clock::now() + 300ms);
+            trigger.publish(fresh_observation(++sequence));
+            return mouse->downs == 1 && trigger.firing_signal().confirmed_down;
+        });
+        auto missing = fresh_observation(++sequence);
+        missing->detections.clear();
+        trigger.publish(missing);
+        until([&] { return mouse->ups == 1 && !trigger.snapshot().button_may_be_down; });
+        until([&] { return stop.snapshot().cycle_count == 1 && mouse->released(); });
+        require(!stop.snapshot().release_required, "候选丢失后的已确认抬键不得要求松键重按");
+        const auto waiting_until = Clock::now() + std::chrono::milliseconds(profile->fire_interval_ms) + 80ms;
+        while (Clock::now() < waiting_until) {
+            stop.publish_target(lose_target ? Clock::now() : Clock::now() + 300ms);
+            auto empty = fresh_observation(++sequence);
+            empty->detections.clear();
+            trigger.publish(empty);
+            require(mouse->downs == 1, "候选未恢复期间不得再次开火");
+            if (lose_target) require(stop.snapshot().requests == 1, "目标未恢复期间不得重新接管移动");
+            std::this_thread::sleep_for(1ms);
+        }
+    }
     until([&] {
         stop.publish_target(Clock::now() + 300ms);
         trigger.publish(fresh_observation(++sequence));
@@ -200,8 +223,11 @@ void run_weapon(const char* weapon_id, bool cycle = false) {
     require(down_events[1].call_started_at - down_events[0].call_started_at >= std::chrono::milliseconds(profile->fire_interval_ms),
         "武器两次DOWN实际提交间隔不得短于共享参数");
     for (std::size_t index = 0; index < 2; ++index) {
-        require(up_events[index].call_started_at >= down_events[index].protocol_ack_received_at + std::chrono::milliseconds(profile->shot_hold_ms),
-            "LEFT UP提交不得早于DOWN协议ACK加武器按住时长");
+        if (lose_candidate && index == 0)
+            require(up_events[index].snapshot.reason == TriggerReason::NO_CANDIDATE,
+                "首发必须由候选失效提前抬键，不能用正常到期冒充恢复回归");
+        else require(up_events[index].call_started_at >= down_events[index].protocol_ack_received_at + std::chrono::milliseconds(profile->shot_hold_ms),
+            "正常LEFT UP提交不得早于DOWN协议ACK加武器按住时长");
         require(down_events[index].snapshot.estimated_stop_request_id == (cycle ? index + 1 : stopped.request_id),
             "每发须绑定对应急停worker的估计完成id；循环不可复用旧id");
         if (cycle) require(down_events[index].call_started_at >= keys[index * 3 + 2].acknowledged + 18ms,
@@ -214,6 +240,8 @@ void run_weapon(const char* weapon_id, bool cycle = false) {
 int main() {
     try {
         for (const char* id : {"deagle", "ak47", "awp"}) { run_weapon(id); run_weapon(id, true); }
+        run_weapon("ak47", true, true);
+        run_weapon("ak47", true, true, true);
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "武器急停组合回归失败：" << error.what() << '\n';

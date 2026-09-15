@@ -259,8 +259,11 @@ public:
                         const bool same_context = fresh.context.required == firing_context.required &&
                             (!fresh.context.required || (fresh.context.valid && firing_context.valid &&
                                 fresh.context.generation == firing_context.generation));
-                        // 仅正常点射到期的UP可续轮；取消、失焦、物理左键、失效清理均退出。
-                        if (event.snapshot.reason == TriggerReason::RELEASED && fresh.enabled && fresh.healthy &&
+                        // 候选丢失只中止本发：确认UP且会话仍安全后归还移动，下一发重新取得候选和急停资格。
+                        // 显式取消、失焦、过期观测和未知回执仍撤销整个按住会话。
+                        const bool recoverable = event.snapshot.reason == TriggerReason::RELEASED ||
+                            event.snapshot.reason == TriggerReason::NO_CANDIDATE;
+                        if (recoverable && fresh.enabled && fresh.healthy &&
                             fresh.armed && fresh.held && fresh.focused && !fresh.physical_left_down && same_context &&
                             !stopping.load() && !canceled.load() && !controller.snapshot().faulted)
                             resume_movement(id, cycle_next_down);

@@ -93,6 +93,14 @@ public:
             events.push_back({held, true, 1, ++sequence, clock_ns()});
             physical_during_cleanup = -1;
         }
+        if (cleanup_report_mode != 0) {
+            // 真实监听会重复报告同一按住状态；只有事实断裂才应中断归还。
+            const int mode = cleanup_report_mode;
+            cleanup_report_mode = 0;
+            if (mode == 2) ++sequence;
+            const auto timestamp = mode == 5 ? events.back().received_at_steady_ns - 1 : clock_ns();
+            events.push_back({held, mode != 3, mode == 4 ? 2u : 1u, ++sequence, timestamp});
+        }
         return receipt;
     }
     void close() noexcept override { ++closes; }
@@ -121,6 +129,7 @@ public:
     std::size_t software_fail_at = 0, mask_fail_at = 0;
     int cleanups = 0, cleanup_checks = 0, subscriptions = 0;
     int physical_during_cleanup = -1;
+    int cleanup_report_mode = 0;
     std::function<void()> after_first_software;
     std::function<void(std::size_t)> after_mask;
     std::atomic<int> closes{0};
@@ -141,7 +150,7 @@ int main() {
             legacy.use_counterpulse_timing = false;
             return legacy;
         }();
-        for (bool interrupt_cleanup : {false, true}) {
+        for (int cleanup_case = 0; cleanup_case < 7; ++cleanup_case) {
             auto fake = std::make_shared<Fake>();
             std::atomic<std::uint64_t> id{0};
             AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
@@ -154,15 +163,18 @@ int main() {
             const auto completed_id = worker.estimated_completion_id();
             require(!worker.resume_movement(completed_id + 1, Clock::now() + std::chrono::seconds(1)),
                 "旧或错误请求不得归还其他周期");
-            if (interrupt_cleanup) {
+            if (cleanup_case == 2) {
                 std::lock_guard<std::mutex> lock(fake->mutex); fake->physical_during_cleanup = 8;
+            } else if (cleanup_case != 0) {
+                std::lock_guard<std::mutex> lock(fake->mutex);
+                fake->cleanup_report_mode = cleanup_case == 1 ? 1 : cleanup_case - 1;
             }
             const auto deadline = Clock::now() + std::chrono::milliseconds(180);
             require(worker.resume_movement(completed_id, deadline), "点射释放确认后可投递归还");
             wait_for([&] { return fake->released(); });
-            if (interrupt_cleanup) {
+            if (cleanup_case >= 2) {
                 wait_for([&] { return worker.snapshot().release_required; });
-                require(worker.snapshot().cycle_count == 0, "清理期间事件变化不得伪造模型承接");
+                require(worker.snapshot().cycle_count == 0, "清理期间变向、缺口、无效报告、换代或时间倒退不得伪造模型承接");
             } else {
                 wait_for([&] { return worker.snapshot().cycle_count == 1; });
                 require(worker.snapshot().cycle_moving, "归还成功显示真实移动阶段");

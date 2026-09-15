@@ -244,11 +244,26 @@ public:
                 InputSnapshot after_cleanup;
                 WasdEventBatch after_events;
                 auto after_cursor = cursor;
-                const bool continuous = mouse->poll_input(after_cleanup) && after_cleanup.state_valid &&
+                bool continuous = mouse->poll_input(after_cleanup) && after_cleanup.state_valid &&
                     after_cleanup.status == InputMonitorStatus::READY &&
                     mouse->read_wasd_events(after_cursor, after_events) && after_events.subscribed && !after_events.gap &&
-                    after_events.count == 0 && after_cursor.epoch == before_cleanup_cursor.epoch &&
-                    after_cursor.sequence == before_cleanup_cursor.sequence && held_wasd(after_cleanup) == intent.held_mask;
+                    after_cursor.epoch == before_cleanup_cursor.epoch && held_wasd(after_cleanup) == intent.held_mask;
+                // 监听报告可重复同一键态；逐条验证连续性，不把新报告误当松键或改向。
+                // 临时检查不推进正式历史，下一轮仍按原事件时间消费这些报告。
+                auto checked_history = history;
+                auto checked_sequence = before_cleanup_cursor.sequence;
+                for (std::size_t i = 0; continuous && i < after_events.count; ++i) {
+                    const auto& event = after_events.events[i];
+                    continuous = event.state_valid && event.epoch == before_cleanup_cursor.epoch &&
+                        event.sequence > checked_sequence && event.sequence - checked_sequence == 1 &&
+                        event.held_mask == intent.held_mask;
+                    if (!continuous) break;
+                    const auto checked = checked_history.observe(event.held_mask, event.epoch, event.sequence,
+                        event.received_at_steady_ns, event.state_valid);
+                    continuous = checked.input_continuous && checked.history_valid && !checked.conflicting;
+                    checked_sequence = event.sequence;
+                }
+                continuous = continuous && after_cursor.sequence == checked_sequence;
                 if (continuous && (cycle_resume ? permission(after_cleanup) : !after_cleanup.virtual_keys[config.activation_virtual_key]) &&
                     !after_cleanup.virtual_keys[0x23] && !release_key_held(after_cleanup) && allowed && allowed() &&
                     !paused.load() && !stopping.load() && !arbiter->faulted_.load() &&

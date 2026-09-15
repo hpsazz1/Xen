@@ -131,12 +131,13 @@ struct Fixture {
     }
     void fire() { mouse->held=true; worker.publish(observation()); }
 };
-void cycle_resume_only_after_normal_up() {
-    for (int mode = 0; mode < 3; ++mode) {
+void cycle_resume_after_safe_up() {
+    for (int mode = 0; mode < 5; ++mode) {
         auto mouse = std::make_shared<Mouse>();
         auto arbiter = std::make_shared<AutoStopOutputArbiter>();
         std::atomic<unsigned> resumed{0}, canceled{0};
-        TriggerWorker worker(mouse, arbiter, [] { return true; }, [] { return true; },
+        std::atomic<bool> focused{true};
+        TriggerWorker worker(mouse, arbiter, [] { return true; }, [&] { return focused.load(); },
             [] { return std::uint64_t{8}; }, [](std::uint64_t) { return true; },
             [&](std::uint64_t id) { if (id == 7) ++canceled; }, {}, [] { return std::uint64_t{7}; },
             [&](std::uint64_t id, TriggerTime) { if (id == 7 && !mouse->dirty) ++resumed; });
@@ -150,10 +151,17 @@ void cycle_resume_only_after_normal_up() {
         expect(until([&] { return mouse->count(true) == 1 && worker.firing_signal().confirmed_down; }), "等待循环首DOWN确认");
         if (mode == 1) worker.cancel();
         if (mode == 2) mouse->physical_left = true;
+        if (mode >= 3) {
+            if (mode == 4) focused = false;
+            auto missing = observation(2);
+            missing->detections.clear();
+            worker.publish(missing);
+        }
         expect(until([&] { return mouse->count(false) >= 1 && resumed + canceled >= 1; }), "LEFT UP后完成归还或取消回调");
-        expect(resumed == (mode == 0 ? 1u : 0u) && canceled == (mode == 0 ? 0u : 1u),
-            "仅正常点射UP可续轮，显式取消和物理左键必须取消旧急停");
-        worker.publish(observation(2));
+        const bool recoverable = mode == 0 || mode == 3;
+        expect(resumed == (recoverable ? 1u : 0u) && canceled == (recoverable ? 0u : 1u),
+            "正常或候选失效UP确认且安全时可续轮，显式取消、物理左键和失焦不得续轮");
+        worker.publish(observation(3));
         std::this_thread::sleep_for(270ms);
         expect(mouse->count(true) == 1, "归还未完成或旧stop ID不得触发第二发");
         worker.stop();
@@ -522,7 +530,7 @@ void exception_uses_bounded_cleanup() {
 
 }
 int main() {
-    cycle_resume_only_after_normal_up();
+    cycle_resume_after_safe_up();
     estimated_stop_callback_and_revalidation(); timing_change_at_down_revalidation();
     fire_disabled_no_output_or_receipt();
     autonomous_cleanup(); unknown_and_late_ack(); final_revalidation(); unverified_stop_and_contention();
