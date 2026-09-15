@@ -478,13 +478,11 @@ public:
                 if (!stop_button) throw std::runtime_error("HUD停止按钮不可用");
                 SendMessageW(stop_button, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
             }
-            // 操作与已应用状态共用一次快照，期间的新隐藏请求由后续循环处理。
-            const bool initially_visible = visible.load();
             if (!SetLayeredWindowAttributes(window, 0, 240, LWA_ALPHA) ||
-                !SetWindowPos(window, HWND_TOPMOST, 20, 20, size.right - size.left, size.bottom - size.top, SWP_NOACTIVATE | (initially_visible ? SWP_SHOWWINDOW : 0)))
+                !SetWindowPos(window, HWND_TOPMOST, 20, 20, size.right - size.left, size.bottom - size.top, SWP_NOACTIVATE | (visible.load() ? SWP_SHOWWINDOW : 0)))
                 throw std::runtime_error("HUD显示不可用");
-            shown = initially_visible;
             state.store(1);
+            shown = visible.load();
             bool theme_initialized = false;
             while (!closing.load()) {
                 const auto next_theme = desired_theme.load();

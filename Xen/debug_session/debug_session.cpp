@@ -299,7 +299,7 @@ struct Session::Impl {
             else if (canceled || !success) {
                 s.state = canceled || completed->value("failure","") == "USER_STOP" ? State::CANCELED : State::FAILED;
                 s.message = completed->value("failure","") == "MOVEMENT_WINDOW_UNAVAILABLE" ?
-                    "武器间隔内已无移动余量；本组停止，请减小跨轮起步间隔或调整武器时序后重新准备" : "任务已结束；请查看取消或失败记录";
+                    "武器间隔内已无移动余量；本组停止，请增大提交间隔或缩短按住时间后重新准备" : "任务已结束；请查看取消或失败记录";
             }
             else { s.state = State::COMPLETED; s.message = "任务完成；自动结果不代表真实停稳或子弹数"; }
             if (completed->contains("candidate_plan")) s.plan = completed->at("candidate_plan");

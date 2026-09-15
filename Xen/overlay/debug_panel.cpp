@@ -113,7 +113,7 @@ struct DebugPanel::Impl {
     std::string prepared_id;
     int shots = 20, move = 500, counter = 40, delay = 0, release = 18, hold = 5, interval = 300, direction = 0;
     bool move_parallel = false, overlap = true;
-    int baseline = 0, restart_interval = 0;
+    int baseline = 0;
     void fields_from_plan(const Json& p) {
         shots = p.value("shots", shots); move = p.value("move_ms", move);
         counter = p.value("counter_hold_ms", counter); delay = p.value("counter_delay_ms", delay);
@@ -123,7 +123,6 @@ struct DebugPanel::Impl {
         baseline = b == "no_counter" ? 1 : b == "stationary" ? 2 : 0;
         move_parallel = p.value("move_during_fire_delay", true);
         overlap = p.value("overlap_fire_interval", false);
-        restart_interval = p.value("restart_interval_ms", 0);
     }
 
     void changed(bool invalidate_repeat = true) {
@@ -288,7 +287,6 @@ void DebugPanel::render_counterpulse(const AppConfig& config, const Snapshot* s,
         Json edits = Json::object();
         if (ImGui::Combo("基准动作", &d.baseline, "反向制动\0无反向对照\0原地\0")) {
             edits["baseline"] = d.baseline == 0 ? "counter" : d.baseline == 1 ? "no_counter" : "stationary";
-            if (d.baseline != 0) { d.restart_interval = 0; edits["restart_interval_ms"] = 0; }
             if (d.baseline == 2) {
                 d.overlap = false; edits["overlap_fire_interval"] = false;
                 const auto plan = d.request.plan_text.empty() ? Json::object() : Json::parse(d.request.plan_text,nullptr,true,true);
@@ -315,9 +313,6 @@ void DebugPanel::render_counterpulse(const AppConfig& config, const Snapshot* s,
         edit_integer("反向前等待 / ms",d.delay,0,200,"从正向UP协议ACK起算；仅反向模式允许非零。","counter_delay_ms");
         edit_integer("反向保持 / ms",d.counter,1,200,"从反向DOWN协议ACK起算，1至200ms。","counter_hold_ms");
         edit_integer("释放后等待 / ms",d.release,0,20,"反向UP协议ACK之后等待；这是模型计划参数，不是停稳观测。","shot_after_release_ms");
-        ImGui::BeginDisabled(d.baseline != 0);
-        edit_integer("跨轮起步间隔 / ms",d.restart_interval,0,2000,"上一次反向UP ACK至下一轮正向DOWN提交的最小间隔；0保留原行为。仍等待左键完整释放，不缩短武器按住；动态模式会减少移动余量，无余量则停止。首个移动不受此项限制。","restart_interval_ms");
-        ImGui::EndDisabled();
         edit_integer("左键按住 / ms",d.hold,1,2000,"从DOWN协议ACK至UP提交的计划时长。","shot_hold_ms");
         edit_integer("DOWN提交最小间隔 / ms",d.interval,1,5000,"下一次DOWN的提交下限；动态模式在这个间隔内分配移动预算。","fire_interval_ms");
         if (button("从当前急停参数带入草稿", "复制当前配置的保持及释放等待；不回写生产配置，不修改其他动作。")) {

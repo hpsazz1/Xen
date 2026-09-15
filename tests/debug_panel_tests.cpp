@@ -198,20 +198,10 @@ void check_weapon_draft_isolation() {
     expect(dynamic.value("overlap_fire_interval",false) && dynamic.value("fire_delay_ms",-1) == 0 &&
         !dynamic.value("move_during_fire_delay",true) && dynamic.value("move_ms",0) == 110,
         "显式切动态模式才清额外等待，并将已有移动时长作为上限");
-    click("跨轮起步间隔 / ms");
-    io.AddKeyEvent(ImGuiMod_Ctrl,true); io.AddKeyEvent(ImGuiKey_A,true); frame();
-    io.AddKeyEvent(ImGuiKey_A,false); io.AddKeyEvent(ImGuiMod_Ctrl,false); frame();
-    io.AddInputCharactersUTF8("100"); frame(); io.AddKeyEvent(ImGuiKey_Enter,true); frame();
-    io.AddKeyEvent(ImGuiKey_Enter,false); frame();
-    click("带入所选武器参数"); action = click("校验计划");
-    const auto restart_plan = debug_session::Json::parse(action.debug_request.plan_text);
-    expect(restart_plan.value("restart_interval_ms",0) == 100 && restart_plan.value("counter_hold_ms",0) == 40 &&
-        restart_plan.value("fire_interval_ms",0) == 350,"跨轮间隔必须进入动作计划且不被武器两字段带入覆盖");
     click("基准动作"); frame(); click("原地",true,2); action = click("校验计划");
     const auto stationary = debug_session::Json::parse(action.debug_request.plan_text);
     expect(stationary.value("baseline","") == "stationary" && !stationary.value("overlap_fire_interval",true) &&
-        stationary.value("fire_delay_ms",0) == 1 && stationary.value("restart_interval_ms",-1) == 0,
-        "切换原地必须清除跨轮间隔、禁用动态移动并保留既有最小等待规则");
+        stationary.value("fire_delay_ms",0) == 1,"切换原地必须禁用动态移动并保留既有最小等待规则");
 }
 
 }
