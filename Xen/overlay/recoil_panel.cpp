@@ -11,7 +11,8 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
-#include <future>
+#include "recoil/recoil_editor_job_internal.h"
+#include <functional>
 #include <limits>
 #include <sstream>
 #ifndef NOMINMAX
@@ -120,7 +121,43 @@ struct RecoilPanel::Impl {
     bool dataset_loaded = false;
     recoil_tuner::Request request;
     std::optional<recoil_tuner::Report> report;
-    std::future<recoil_tuner::Report> job;
+    using Job = recoil_editor_detail::Job<std::shared_ptr<Impl>>;
+    std::shared_ptr<Job> job;
+    bool working_copy = false;
+    bool cancel_requested = false;
+
+    std::function<void(Impl&)> pending_action;
+    void launch(std::function<void(Impl&)> action) {
+        if (job || pending_action) return;
+        pending_action = std::move(action);
+    }
+    void poll() {
+        if (pending_action) {
+            auto action = std::exchange(pending_action, {});
+            // 在绘制调用之外转移整份编辑状态，不在 UI 线程复制大型数据集和撤销历史。
+            auto copy = std::make_shared<Impl>(std::move(*this));
+            copy->working_copy = true;
+            cancel_requested = false;
+            try { job = Job::start(copy, [action = std::move(action)](auto& state) {
+                try { action(*state); }
+                catch (...) { state->status = "后台操作失败；请核对文件与数据，已有保存结果不会自动回滚。"; }
+            }); } catch (...) {
+                *this = std::move(*copy);
+                working_copy = false;
+                status = "无法启动后台任务，编辑状态已保留。";
+            }
+            return;
+        }
+        if (!job || !job->ready()) return;
+        auto finished = std::move(job);
+        const bool canceled = cancel_requested;
+        const bool failed = finished->failed();
+        *this = std::move(*finished->value);
+        working_copy = false;
+        cancel_requested = false;
+        if (failed) status = "后台任务异常结束；编辑状态已保留。";
+        if (canceled) status += " 已处理取消请求；已经开始的同步操作完成后退出，已保存结果不回滚。";
+    }
     RecoilCalibrationPrepareRequest calibration_request;
     std::string calibration_config = "config.ini";
     std::string calibration_output = new_output_directory("calibration");
@@ -133,6 +170,7 @@ struct RecoilPanel::Impl {
     bool timing_loaded = false, timing_valid = false, timing_dirty = false;
 
     void load_timing(const std::string& path) {
+        if (!working_copy) { launch([path](Impl& state) { state.load_timing(path); }); return; }
         // 仅首次展开、应用路径或显式重载访问磁盘；失败也缓存，避免每帧重试。
         timing_loaded = true;
         timing_loaded_path = timing_path_draft = path;
@@ -156,7 +194,11 @@ struct RecoilPanel::Impl {
 
     void timing_settings(const RuntimeSnapshot& snapshot, AppConfig& config, bool can_edit) {
         if (!ImGui::CollapsingHeader("共享武器点射节奏", ImGuiTreeNodeFlags_DefaultOpen)) return;
-        if (!timing_loaded || timing_loaded_path != config.weapon_timing_file) load_timing(config.weapon_timing_file);
+        if (!timing_loaded || timing_loaded_path != config.weapon_timing_file) {
+            load_timing(config.weapon_timing_file);
+            ImGui::TextUnformatted("正在后台载入武器资料。");
+            return;
+        }
         ImGui::TextWrapped("仅用于自动扳机的点射节奏，独立于压枪开关；不改变持续扫射、弹道时间轴或急停参数。修改配置和资料在下一次启动运行时生效。");
         ImGui::TextWrapped("当前GSI武器：%s（%s）", snapshot.weapon_snapshot.canonical_id.empty() ? "未知" : snapshot.weapon_snapshot.canonical_id.c_str(),
             weapon::status_name(snapshot.weapon_snapshot.status));
@@ -221,11 +263,14 @@ struct RecoilPanel::Impl {
             if (ImGui::Button("保存武器点射资料")) {
                 auto saved = timing_catalog;
                 ++saved.revision;
-                if (weapon::save_timing_catalog(std::filesystem::u8path(config.weapon_timing_file), saved, timing_status)) {
-                    timing_catalog = saved;
-                    timing_dirty = false;
-                    timing_status = "资料已原子保存；下次启动运行读取新版本。启用、路径和手选项请使用全局保存配置。";
-                }
+                const auto path = config.weapon_timing_file;
+                launch([saved, path](Impl& state) {
+                    if (weapon::save_timing_catalog(std::filesystem::u8path(path), saved, state.timing_status)) {
+                        state.timing_catalog = saved;
+                        state.timing_dirty = false;
+                        state.timing_status = "资料已原子保存；下次启动运行读取新版本。启用、路径和手选项请使用全局保存配置。";
+                    }
+                });
             }
             help("校验后原子替换资料文件并递增版本；失败保留原文件。只保存共享点射参数，不发布或修改压枪弹道。");
         }
@@ -279,34 +324,39 @@ struct RecoilPanel::Impl {
             ImGui::InputText("可复用请求 JSON", &calibration_request_file);
             help("读取已有请求中的环境和预算；不会复用旧会话身份、消费标记或真实输出许可。");
             if (ImGui::Button("载入已有环境与预算")) {
-                RecoilCalibrationPrepareRequest loaded_request;
-                if (load_recoil_calibration_request(calibration_request_file, loaded_request, status))
-                    calibration_request = std::move(loaded_request);
+                launch([](Impl& state) {
+                    RecoilCalibrationPrepareRequest loaded_request;
+                    if (load_recoil_calibration_request(state.calibration_request_file, loaded_request, state.status))
+                        state.calibration_request = std::move(loaded_request);
+                });
             }
             help("从上面的请求文件回填环境和预算，当前所选曲线与新的输出目录仍需单独核对。");
             ImGui::TreePop();
         }
         ImGui::BeginDisabled(selected_file.empty() || calibration_output.empty());
         if (ImGui::Button("准备独立校准会话")) {
-            calibration_command.clear();
-            wchar_t executable[32768]{};
-            const auto length = GetModuleFileNameW(nullptr, executable, 32768);
-            if (length == 0 || length == 32768) status = "无法定位独立校准工具。";
-            else {
-                auto request = calibration_request;
-                request.profile_path = std::filesystem::u8path(config.recoil.profile_directory) / std::filesystem::u8path(selected_file);
-                request.config_path = std::filesystem::u8path(calibration_config);
-                request.output_directory = std::filesystem::u8path(calibration_output);
-                request.executable_path = std::filesystem::path(executable).parent_path() / "xen_recoil_calibration.exe";
-                RecoilCalibrationPrepared prepared;
-                prepare_output_parent(calibration_output);
-                if (prepare_recoil_calibration(request, prepared, status)) {
-                    calibration_command = prepared.launch_command;
-                    calibration_prepared_identity = selected_file + " / " + prepared.manifest.session_id +
-                        " / " + prepared.manifest.profile_file_sha256;
-                    status = "校准会话已准备；尚未启动设备，也未声明校准通过。";
+            const auto directory = config.recoil.profile_directory;
+            launch([directory](Impl& state) {
+                state.calibration_command.clear();
+                wchar_t executable[32768]{};
+                const auto length = GetModuleFileNameW(nullptr, executable, 32768);
+                if (length == 0 || length == 32768) state.status = "无法定位独立校准工具。";
+                else {
+                    auto request = state.calibration_request;
+                    request.profile_path = std::filesystem::u8path(directory) / std::filesystem::u8path(state.selected_file);
+                    request.config_path = std::filesystem::u8path(state.calibration_config);
+                    request.output_directory = std::filesystem::u8path(state.calibration_output);
+                    request.executable_path = std::filesystem::path(executable).parent_path() / "xen_recoil_calibration.exe";
+                    RecoilCalibrationPrepared prepared;
+                    prepare_output_parent(state.calibration_output);
+                    if (prepare_recoil_calibration(request, prepared, state.status)) {
+                        state.calibration_command = prepared.launch_command;
+                        state.calibration_prepared_identity = state.selected_file + " / " + prepared.manifest.session_id +
+                            " / " + prepared.manifest.profile_file_sha256;
+                        state.status = "校准会话已准备；尚未启动设备，也未声明校准通过。";
+                    }
                 }
-            }
+            });
         }
         help("仅生成绑定磁盘候选与配置身份的新校准会话。缺文件、身份不符或目录已存在会失败；不会启动设备。");
         ImGui::EndDisabled();
@@ -329,6 +379,11 @@ struct RecoilPanel::Impl {
         compile();
     }
     void compile() {
+        if (!working_copy) {
+            preview_valid = false;
+            launch([](Impl& state) { state.compile(); });
+            return;
+        }
         preview_valid = compile_recoil_profile(draft, tuning, preview, status);
     }
     void edited() {
@@ -337,9 +392,11 @@ struct RecoilPanel::Impl {
         undo.push_back(checkpoint); redo.clear(); checkpoint = {draft, tuning}; calibration_confirmed = false; compile();
     }
     void refresh(const RecoilConfig& config) {
+        if (!working_copy) { launch([config](Impl& state) { state.refresh(config); }); return; }
         try { RecoilStore store(std::filesystem::u8path(config.profile_directory)); store.list(files, status); } catch (...) { status = "曲线目录无效。"; }
     }
     void load_file(const RecoilConfig& config, const std::string& file) {
+        if (!working_copy) { launch([config, file](Impl& state) { state.load_file(config, file); }); return; }
         try { RecoilStore store(std::filesystem::u8path(config.profile_directory)); RecoilProfile p;
         if (store.load(file, p, status)) { selected_file = file; set_draft(p); status = "已加载独立草稿；活动曲线未改变。"; } } catch (...) { status = "曲线文件或目录无效。"; }
     }
@@ -368,6 +425,8 @@ struct RecoilPanel::Impl {
             ImGui::TextWrapped("压枪状态：%s；已确认 X %.2f / Y %.2f counts", reason_text(snapshot.recoil.reason),
                 snapshot.recoil.confirmed_x, snapshot.recoil.confirmed_y);
         } else ImGui::TextUnformatted("本会话暂无压枪执行记录。");
+    }
+    void connections(AppConfig& config) {
         if (ImGui::CollapsingHeader("GSI自动武器识别配置")) {
             auto& g = config.gsi;
             if (form("gsi_settings")) {
@@ -386,17 +445,17 @@ struct RecoilPanel::Impl {
     }
 
     void editor(const RuntimeSnapshot& snapshot, AppConfig& config) {
-        std::unique_ptr<RecoilStore> owned_store;
-        try { owned_store = std::make_unique<RecoilStore>(std::filesystem::u8path(config.recoil.profile_directory)); }
-        catch (...) { status = "曲线目录无效，请修正后重试。"; return; }
-        auto& store = *owned_store;
         if (ImGui::Button("刷新曲线目录")) refresh(config.recoil);
         help("重新列出所配置目录中的已保存曲线；不会挑选最新文件或自动切换活动版本。");
         ImGui::SameLine();
         if (ImGui::Button("加载当前武器活动版本")) {
             auto lookup = config.recoil; lookup.use_trial = false;
-            auto p = store.resolve(lookup, snapshot.weapon_snapshot.canonical_id, status);
-            if (p) { selected_file.clear(); set_draft(*p); }
+            const auto weapon_id = snapshot.weapon_snapshot.canonical_id;
+            launch([lookup, weapon_id](Impl& state) {
+                RecoilStore store(std::filesystem::u8path(lookup.profile_directory));
+                auto p = store.resolve(lookup, weapon_id, state.status);
+                if (p) { state.selected_file.clear(); state.set_draft(*p); }
+            });
         }
         help("按当前GSI武器和配置条件读取活动版本作为草稿；不会修改正在执行的版本或固定版本覆盖设置。");
         if (ImGui::BeginCombo("已保存版本", selected_file.empty() ? "选择独立版本" : selected_file.c_str())) {
@@ -470,7 +529,11 @@ struct RecoilPanel::Impl {
         ImGui::BeginDisabled(!preview_valid || save_revision <= base.revision);
         if (ImGui::Button("另存候选版本")) {
             auto candidate = preview; candidate.revision = save_revision;
-            if (store.save_new(candidate, selected_file, status)) { refresh(config.recoil); status = "候选已另存；未校准、未激活。"; }
+            const auto settings = config.recoil;
+            launch([candidate, settings](Impl& state) {
+                RecoilStore store(std::filesystem::u8path(settings.profile_directory));
+                if (store.save_new(candidate, state.selected_file, state.status)) { state.refresh(settings); state.status = "候选已另存；未校准、未激活。"; }
+            });
         }
         help("将当前通过编译的草稿另存为未校准候选；此操作不授予物理输出资格，也不更新活动索引。");
         ImGui::EndDisabled();
@@ -490,27 +553,42 @@ struct RecoilPanel::Impl {
             help("由你确认当前草稿与真实Run证据、配置和环境一致；更改草稿后确认会失效，程序不会代替人工判定效果。");
             ImGui::BeginDisabled(!preview_valid || !calibration_confirmed || save_revision <= base.revision);
             if (ImGui::Button("另存人工校准版本")) {
-                std::error_code ec;
-                if (!std::filesystem::exists(std::filesystem::u8path(calibration.evidence), ec) || ec) status = "校准证据路径不存在，不能保存已校准声明。";
-                else {
-                    auto candidate = preview; candidate.revision = save_revision; candidate.state = RecoilProfileState::CALIBRATED;
-                    candidate.calibration = calibration; candidate.phase_tolerance_ms = phase_ms; candidate.recovery_ms = recovery_ms;
-                    if (store.save_new(candidate, selected_file, status, true)) { refresh(config.recoil); status = "已保存人工声明的校准版本；仍未自动激活。"; }
-                }
+                const auto settings = config.recoil;
+                launch([settings](Impl& state) {
+                    RecoilStore store(std::filesystem::u8path(settings.profile_directory));
+                    std::error_code ec;
+                    if (!std::filesystem::exists(std::filesystem::u8path(state.calibration.evidence), ec) || ec) state.status = "校准证据路径不存在，不能保存已校准声明。";
+                    else {
+                        auto candidate = state.preview; candidate.revision = state.save_revision; candidate.state = RecoilProfileState::CALIBRATED;
+                        candidate.calibration = state.calibration; candidate.phase_tolerance_ms = state.phase_ms; candidate.recovery_ms = state.recovery_ms;
+                        if (store.save_new(candidate, state.selected_file, state.status, true)) { state.refresh(settings); state.status = "已保存人工声明的校准版本；仍未自动激活。"; }
+                    }
+                });
             }
             help("另存包含人工校准声明的新版本；须有有效草稿、人工确认、新版本号和存在的证据路径，保存后仍不自动激活。");
             ImGui::EndDisabled();
             ImGui::TextWrapped("发布对象：%s", selected_file.empty() ? "尚未选择已保存文件" : selected_file.c_str());
             ImGui::BeginDisabled(selected_file.empty());
             if (ImGui::Button("发布已选保存版本")) {
-                RecoilProfile saved;
-                if (store.load(selected_file, saved, status) && store.set_active(saved.weapon_id, selected_file, status)) status = "已更新活动索引；停止状态发布，下次新会话生效。";
+                const auto directory = config.recoil.profile_directory;
+                launch([directory](Impl& state) {
+                    RecoilStore store(std::filesystem::u8path(directory));
+                    RecoilProfile saved;
+                    if (store.load(state.selected_file, saved, state.status) && store.set_active(saved.weapon_id, state.selected_file, state.status))
+                        state.status = "已更新活动索引；停止状态发布，下次新会话生效。";
+                });
             }
             help("发布上面显示的磁盘文件，更新该武器的活动索引；不会发布未保存草稿，下一会话使用新选择。");
             ImGui::SameLine(); if (ImGui::Button("设为固定版本覆盖")) { config.recoil.use_trial = true; config.recoil.trial_file = selected_file; status = "已设置固定版本覆盖；活动索引不变。保存配置后持续有效，需手动关闭，不会随会话结束失效。"; }
             help("将已选磁盘文件设为配置中的固定覆盖；生产仍要求已校准并匹配条件。保存后持续有效，需手动关闭。");
             ImGui::EndDisabled();
-            if (ImGui::Button("回退该武器活动版本")) if (store.rollback(base.weapon_id, status)) status = "已回退活动索引；下一会话生效。";
+            if (ImGui::Button("回退该武器活动版本")) {
+                const auto directory = config.recoil.profile_directory;
+                launch([directory](Impl& state) {
+                    RecoilStore store(std::filesystem::u8path(directory));
+                    if (store.rollback(state.base.weapon_id, state.status)) state.status = "已回退活动索引；下一会话生效。";
+                });
+            }
             help("回退当前编辑武器的活动索引到之前的已保存版本，下一会话生效；不会删除候选或自动关闭固定版本覆盖。");
             ImGui::TreePop();
         }
@@ -521,7 +599,10 @@ struct RecoilPanel::Impl {
         ImGui::TextWrapped("读取已完成独立压枪数据，批次间生成候选。GSI不提供逐发残差；缺响应H或独立留出将明确拒绝。");
         ImGui::InputText("Trial数据集JSON", &dataset_path);
         help("选择已完成、已核对基线与响应H的独立试验数据集；不接受把GSI包当作逐发测量。");
-        if (ImGui::Button("导入数据集")) { dataset_loaded = recoil_tuner::load_dataset(std::filesystem::u8path(dataset_path), dataset, status); report.reset(); }
+        if (ImGui::Button("导入数据集")) launch([](Impl& state) {
+            state.dataset_loaded = recoil_tuner::load_dataset(std::filesystem::u8path(state.dataset_path), state.dataset, state.status);
+            state.report.reset();
+        });
         help("读取并验证数据集，清除旧分析显示；不会开始采集、训练或设备操作。");
         ImGui::InputScalar("优化代际", ImGuiDataType_U64, &request.generation);
         help("本次优化的正整数代际，用于数据与留出使用记录；重复消费同一留出会被拒绝。");
@@ -531,45 +612,46 @@ struct RecoilPanel::Impl {
         help("限制本次优化单轴曲线修正量，单位设备counts；不是鼠标发送预算或物理校准结论。");
         ImGui::InputDouble("总修改预算 / counts", &request.max_total_correction_counts);
         help("限制本次优化的总修正量；提高预算不会补齐缺失的响应H、留出或真实试验。");
-        ImGui::BeginDisabled(!dataset_loaded || !preview_valid || job.valid());
+        ImGui::BeginDisabled(!dataset_loaded || !preview_valid || (job || pending_action));
         if (ImGui::Button("分析并生成独立候选")) {
-            bool same = dataset.base_profile_revision == std::to_string(base.revision) && dataset.base_curve.size() == base.points.size();
-            if (same) for (std::size_t i = 0; i < base.points.size(); ++i) same &= dataset.base_curve[i].time_ms == base.points[i].time_ms &&
-                dataset.base_curve[i].x_counts == base.points[i].x_counts && dataset.base_curve[i].y_counts == base.points[i].y_counts;
-            if (!same) status = "数据集基线与加载的执行版本不一致，拒绝用草稿回填旧Run。";
-            else {
-                const auto dataset_copy = dataset; const auto request_copy = request; const auto base_copy = base;
-                job = std::async(std::launch::async, [dataset_copy, request_copy, base_copy] {
-                    RecoilCandidateReplayReport replay;
-                    bool replay_attempted = false;
-                    auto result = recoil_tuner::optimize_profile_recorded(dataset_copy, request_copy, base_copy, [&](const auto& points, std::string& error) {
-                        auto candidate = base_copy; candidate.state = RecoilProfileState::SCHEMA_VALID; candidate.points.clear();
-                        candidate.phase_tolerance_ms.reset(); candidate.recovery_ms.reset(); candidate.calibration.evidence.clear();
-                        for (const auto& p : points) candidate.points.push_back({p.time_ms, p.x_counts, p.y_counts});
-                        replay_attempted = true;
-                        return validate_recoil_candidate_execution(candidate, {}, replay, error);
-                    });
-                    if (replay_attempted) {
-                        const auto checked = [&](bool value) {
-                            return value ? "通过" : replay.validated && !replay.acknowledged_commands ? "不适用（无非零意图）" : "未完成";
-                        };
-                        std::ostringstream summary;
-                        summary << "执行器软件回放" << (replay.validated ? "通过" : "未通过")
-                            << "：步长=" << replay.step_ms << " ms，相位预算=" << replay.phase_budget_ms
-                            << " ms，时长=" << replay.duration_ms << " ms，advance=" << replay.advance_calls
-                            << '/' << replay.advance_limit << "，单轴命令上限=" << replay.command_axis_limit_counts
-                            << " counts，最大单轴命令=" << replay.max_abs_command_axis_counts << " counts，模拟ACK="
-                            << replay.acknowledged_commands << "条、L1=" << replay.acknowledged_l1_counts << " counts；尾部="
-                            << checked(replay.tail_checked) << "，相位边界=" << checked(replay.phase_edge_checked)
-                            << "，时限=" << checked(replay.deadline_checked) << "，取消=" << checked(replay.cancellation_checked)
-                            << "，UNKNOWN=" << checked(replay.unknown_receipt_checked) << "，NOT_SENT=" << checked(replay.not_sent_checked)
-                            << "。仅为模拟条件与回执，未验证实测相位、Worker累计/滚动预算或物理效果；候选仍未校准。";
-                        result.messages.push_back(summary.str());
-                    }
-                    return result;
+            launch([](Impl& state) {
+                const auto& dataset_copy = state.dataset;
+                const auto& request_copy = state.request;
+                const auto& base_copy = state.base;
+                bool same = dataset_copy.base_profile_revision == std::to_string(base_copy.revision) && dataset_copy.base_curve.size() == base_copy.points.size();
+                if (same) for (std::size_t i = 0; i < base_copy.points.size(); ++i) same &= dataset_copy.base_curve[i].time_ms == base_copy.points[i].time_ms &&
+                    dataset_copy.base_curve[i].x_counts == base_copy.points[i].x_counts && dataset_copy.base_curve[i].y_counts == base_copy.points[i].y_counts;
+                if (!same) { state.status = "数据集基线与加载的执行版本不一致，拒绝用草稿回填旧Run。"; return; }
+                RecoilCandidateReplayReport replay;
+                bool replay_attempted = false;
+                auto result = recoil_tuner::optimize_profile_recorded(dataset_copy, request_copy, base_copy, [&](const auto& points, std::string& error) {
+                    auto candidate = base_copy; candidate.state = RecoilProfileState::SCHEMA_VALID; candidate.points.clear();
+                    candidate.phase_tolerance_ms.reset(); candidate.recovery_ms.reset(); candidate.calibration.evidence.clear();
+                    for (const auto& p : points) candidate.points.push_back({p.time_ms, p.x_counts, p.y_counts});
+                    replay_attempted = true;
+                    return validate_recoil_candidate_execution(candidate, {}, replay, error);
                 });
-                status = "正在后台分析已完成数据；未连接设备。";
-            }
+                if (replay_attempted) {
+                    const auto checked = [&](bool value) {
+                        return value ? "通过" : replay.validated && !replay.acknowledged_commands ? "不适用（无非零意图）" : "未完成";
+                    };
+                    std::ostringstream summary;
+                    summary << "执行器软件回放" << (replay.validated ? "通过" : "未通过")
+                        << "：步长=" << replay.step_ms << " ms，相位预算=" << replay.phase_budget_ms
+                        << " ms，时长=" << replay.duration_ms << " ms，advance=" << replay.advance_calls
+                        << '/' << replay.advance_limit << "，单轴命令上限=" << replay.command_axis_limit_counts
+                        << " counts，最大单轴命令=" << replay.max_abs_command_axis_counts << " counts，模拟ACK="
+                        << replay.acknowledged_commands << "条、L1=" << replay.acknowledged_l1_counts << " counts；尾部="
+                        << checked(replay.tail_checked) << "，相位边界=" << checked(replay.phase_edge_checked)
+                        << "，时限=" << checked(replay.deadline_checked) << "，取消=" << checked(replay.cancellation_checked)
+                        << "，UNKNOWN=" << checked(replay.unknown_receipt_checked) << "，NOT_SENT=" << checked(replay.not_sent_checked)
+                        << "。仅为模拟条件与回执，未验证实测相位、Worker累计/滚动预算或物理效果；候选仍未校准。";
+                    result.messages.push_back(summary.str());
+                }
+                state.report = std::move(result);
+                state.status = "后台分析完成；未连接设备。";
+            });
+            status = "正在后台分析已完成数据；未连接设备。";
         }
         help("后台分析已完成数据，并用生产执行器检查候选的模拟命令、尾部、取消和异常回执。需数据基线匹配；通过仍不代表物理验收。");
         ImGui::EndDisabled();
@@ -581,8 +663,10 @@ struct RecoilPanel::Impl {
             ImGui::InputText("独立新结果目录", &result_directory);
             help("默认归入cache/recoil/tuning下的独立目录；目标必须不存在，已有分析和留出记录不会被覆盖。");
             if (ImGui::Button("保存分析和候选")) {
-                prepare_output_parent(result_directory);
-                recoil_tuner::save_result(std::filesystem::u8path(result_directory), *report, status);
+                launch([](Impl& state) {
+                    prepare_output_parent(state.result_directory);
+                    recoil_tuner::save_result(std::filesystem::u8path(state.result_directory), *state.report, state.status);
+                });
             }
             help("保存当前报告、模拟条件和可用候选到独立新目录；不会发布曲线，保存失败时保留当前分析显示。");
             ImGui::BeginDisabled(!report->candidate);
@@ -599,24 +683,66 @@ struct RecoilPanel::Impl {
 };
 RecoilPanel::RecoilPanel() : impl_(std::make_unique<Impl>()) {}
 RecoilPanel::~RecoilPanel() = default;
+void RecoilPanel::poll() noexcept {
+    try { impl_->poll(); }
+    catch (...) { impl_->status = "后台结果应用失败；请重新加载已保存资料。"; }
+}
+bool RecoilPanel::busy() const noexcept { return impl_->job || impl_->pending_action; }
+void RecoilPanel::request_cancel() noexcept {
+    if (impl_->pending_action) {
+        impl_->pending_action = {};
+        impl_->status = "已取消尚未开始的弹道任务。";
+        return;
+    }
+    if (!impl_->job) return;
+    impl_->cancel_requested = true;
+    impl_->job->cancel();
+}
 void RecoilPanel::render(const RuntimeSnapshot& snapshot, AppConfig& config, bool can_edit) noexcept {
     try {
-        if (impl_->job.valid() && impl_->job.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) impl_->report = impl_->job.get();
-        ImGui::Separator(); ImGui::TextUnformatted("压枪与弹道优化");
-        ImGui::TextWrapped("运行中不能编辑或发布；GSI自动匹配活动曲线，下面的草稿不会热改执行版本。");
+        poll();
+        ImGui::Separator(); ImGui::TextUnformatted("压枪与共享点射设置");
+        if (busy()) { ImGui::TextUnformatted("弹道任务正在后台处理；完成后可继续编辑。"); return; }
         impl_->timing_settings(snapshot, config, can_edit);
-        if (!snapshot.recoil_archive.acquisition_run_id.empty()) {
-            const auto& a = snapshot.recoil_archive;
-            ImGui::TextWrapped("射击归档：%s；完整 %llu / 不完整 %llu；%s", a.available ? "可用" : "不可用",
-                static_cast<unsigned long long>(a.complete_batches), static_cast<unsigned long long>(a.incomplete_batches), a.directory.c_str());
-            if (!a.error.empty()) ImGui::TextWrapped("归档错误：%s", a.error.c_str());
-        }
-        { DisabledScope disabled(!can_edit || impl_->job.valid());
+        DisabledScope disabled(!can_edit || busy());
         impl_->settings(snapshot, config);
-        ImGui::Checkbox("打开弹道编辑与优化", &impl_->show_editor);
-        help("展开曲线草稿、人工校准与离线优化工具；不会自动加载、激活或执行曲线。运行或后台分析期间禁用编辑。");
-        if (impl_->show_editor) impl_->editor(snapshot, config);
+        if (!snapshot.recoil_archive.error.empty()) ImGui::TextWrapped("射击归档异常：%s；详细状态见调试 / 运行诊断。", snapshot.recoil_archive.error.c_str());
+        if (!impl_->status.empty()) ImGui::TextWrapped("%s", impl_->status.c_str());
+    } catch (...) { impl_->status = "弹道面板操作失败；请检查文件与数据。"; }
+}
+void RecoilPanel::render_connections(AppConfig& config, bool can_edit) noexcept {
+    try {
+        DisabledScope disabled(!can_edit);
+        impl_->connections(config);
+    } catch (...) { impl_->status = "GSI配置面板操作失败。"; }
+}
+void RecoilPanel::render_diagnostics(const RuntimeSnapshot& snapshot) noexcept {
+    try {
+        const auto& a = snapshot.recoil_archive;
+        if (a.acquisition_run_id.empty()) {
+            ImGui::TextUnformatted("本会话暂无射击归档。");
+            return;
+        }
+        ImGui::TextWrapped("射击归档：%s；完整 %llu / 不完整 %llu；%s", a.available ? "可用" : "不可用",
+            static_cast<unsigned long long>(a.complete_batches), static_cast<unsigned long long>(a.incomplete_batches), a.directory.c_str());
+        if (!a.error.empty()) ImGui::TextWrapped("归档错误：%s", a.error.c_str());
+    } catch (...) { impl_->status = "射击归档状态显示失败。"; }
+}
+void RecoilPanel::render_tools(const RuntimeSnapshot& snapshot, AppConfig& config, bool can_edit) noexcept {
+    try {
+        poll();
+        ImGui::TextUnformatted("弹道工具与射击归档");
+        if (busy()) {
+            ImGui::TextUnformatted("正在后台处理文件或分析；已开始的同步操作完成后退出，不会回滚已保存结果。");
+            if (ImGui::Button("请求取消弹道任务")) request_cancel();
+            help("取消尚未开始的任务；已经开始的同步存储和分析等待完成。不会连接设备。");
+            return;
+        }
+        { DisabledScope disabled(!can_edit);
+            ImGui::Checkbox("打开弹道编辑与优化", &impl_->show_editor);
+            help("展开曲线草稿、人工校准与离线优化工具；不会自动加载、激活或执行曲线。");
+            if (impl_->show_editor) impl_->editor(snapshot, config);
         }
         if (!impl_->status.empty()) ImGui::TextWrapped("%s", impl_->status.c_str());
-    } catch (...) { impl_->status = "弹道面板操作失败；活动版本保持原有存储结果，请检查文件与数据。"; }
+    } catch (...) { impl_->status = "弹道工具操作失败；请检查文件与数据。"; }
 }

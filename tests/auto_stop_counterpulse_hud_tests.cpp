@@ -117,6 +117,17 @@ int main(int argc, char** argv) {
             hud.observe(command("left_button", 0, 1));
             hud.finish(Json{{"success", true}});
             wait_state(hud, "FINISHED_VISIBLE");
+            const auto shared_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+            std::shared_ptr<const Json> shared_analysis;
+            do {
+                shared_analysis = hud.latest_analysis();
+                if (shared_analysis && shared_analysis->value("shot_count",0) == 1 &&
+                    shared_analysis->at("shots")[0].value("complete_hold",false)) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            } while (std::chrono::steady_clock::now() < shared_deadline);
+            require(shared_analysis && shared_analysis->at("shots").size() == 1 &&
+                shared_analysis->at("shots")[0]["down_ack_to_up_submit_ms"].is_number(),
+                "页面共享HUD现有分析快照，结束按住与提交时钟不能缺失");
             const auto status = hud.status();
             require(status["success"] && status["dropped_commands"] == 0,
                 "完整合成回执应正常排空，HUD不得丢命令");

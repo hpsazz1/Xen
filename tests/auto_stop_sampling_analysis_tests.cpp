@@ -23,6 +23,16 @@ void tests() {
     check(defaults.hud_enabled && sampling_detail::sampling_settings_json(defaults)["fire_sample_delay_ms"] == 18,
         "参数默认兼容并输出完整快照");
     const auto five = analyze_counterpulse_sampling(report(5));
+    auto distinct_clocks = report(5,10);
+    distinct_clocks["commands"][7]["submit_ns"] = 140000000;
+    const auto distinct = analyze_counterpulse_sampling(distinct_clocks);
+    check(distinct["shots"][0]["observed_hold_ms"] == 10.0 &&
+        distinct["shots"][0]["down_ack_to_up_submit_ms"] == 7.0 &&
+        distinct["shots"][0]["up_submit_ns"] == 140000000,
+        "DOWN ACK到UP提交7ms与ACK到ACK10ms须分别保留，不能把UP网络ACK延迟算进计划按住");
+    distinct_clocks["commands"].erase(7);
+    check(analyze_counterpulse_sampling(distinct_clocks)["shots"][0]["down_ack_to_up_submit_ms"].is_null(),
+        "缺失UP提交不得伪造零按住时长");
     check(five.contains("timings") && five["timings"].size() == 1,
         "离线自动报告必须保存释放至反向按下的急停反馈，不能仅实时HUD有数据");
     check(five["timings"][0]["delta_ms"] == 0 && five["timing_source"] == "COMMAND_ACK_INTERVAL",

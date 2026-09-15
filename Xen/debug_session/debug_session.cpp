@@ -1,0 +1,443 @@
+#include "debug_session/debug_session.h"
+#include "auto_stop_probe/debug_runner.h"
+#include "auto_stop_probe/counterpulse_internal.h"
+#include "auto_stop_probe/counterpulse_hud.h"
+#include "runtime/runtime.h"
+#include "log/log.h"
+#include <atomic>
+#include <chrono>
+#include <fstream>
+#include <future>
+#include <mutex>
+#include <set>
+#include <thread>
+
+namespace debug_session {
+namespace {
+using namespace auto_stop_probe_detail;
+using namespace std::chrono_literals;
+constexpr std::size_t kDocumentLimit = 1024 * 1024;
+std::atomic_uint64_t next_id{0};
+
+Json parse_document(const std::string& text) {
+    if (text.size() > kDocumentLimit) throw std::runtime_error("文档超过1MiB限制");
+    std::vector<std::set<std::string>> keys;
+    auto callback = [&](int depth, Json::parse_event_t event, Json& value) {
+        if (depth > 32) throw std::runtime_error("文档嵌套过深");
+        if (event == Json::parse_event_t::object_start) keys.emplace_back();
+        if (event == Json::parse_event_t::key && !keys.back().insert(value.get<std::string>()).second)
+            throw std::runtime_error("文档包含重复字段");
+        if (event == Json::parse_event_t::object_end) keys.pop_back();
+        return true;
+    };
+    return Json::parse(text, callback, true, true);
+}
+Json code_identity() {
+    return {{"commit",XEN_DEBUG_BUILD_COMMIT},{"dirty",XEN_DEBUG_BUILD_DIRTY},{"runtime",XEN_DEBUG_RUNTIME_ID}};
+}
+Json read_document(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) throw std::runtime_error("无法打开所选文档");
+    std::string text(kDocumentLimit + 1, '\0');
+    file.read(text.data(), static_cast<std::streamsize>(text.size()));
+    text.resize(static_cast<std::size_t>(file.gcount()));
+    if (text.starts_with("\xef\xbb\xbf")) text.erase(0, 3);
+    return parse_document(text);
+}
+void write_document(const std::filesystem::path& path, const Json& value) {
+    auto temporary = path;
+    temporary += ".partial";
+    std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+    if (!file || !(file << value.dump(2) << '\n')) throw std::runtime_error("结果写入失败");
+    file.close();
+    if (!file) throw std::runtime_error("结果关闭失败");
+    std::filesystem::rename(temporary, path);
+}
+std::filesystem::path new_directory(const std::string& root) {
+    if (root.empty()) throw std::runtime_error("结果目录不能为空");
+    const auto base = std::filesystem::absolute(std::filesystem::u8path(root));
+    std::filesystem::create_directories(base);
+    for (int retry = 0; retry < 8; ++retry) {
+        const auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
+        auto path = base / ("debug-" + std::to_string(stamp) + "-" + std::to_string(++next_id));
+        if (std::filesystem::create_directory(path)) return path;
+    }
+    throw std::runtime_error("不能建立独立结果目录");
+}
+Json request_plan(const Request& request) {
+    if (request.mode == Mode::FIRE_TEST)
+        return make_fire_test_plan({{"shot_hold_ms",request.shot_hold_ms},{"fire_interval_ms",request.fire_interval_ms}});
+    if (!request.plan_text.empty()) return validate_debug_plan(parse_document(request.plan_text));
+    if (request.mode != Mode::COUNTERPULSE) return Json::object();
+    return validate_debug_plan({{"schema_version",2},{"baseline","counter"},{"capture_enabled",false},
+        {"shots",20},{"fire_delay_ms",200},{"fire_interval_ms",0},{"move_during_fire_delay",true},
+        {"move_ms",100},{"counter_hold_ms",40},{"counter_delay_ms",0},
+        {"shot_after_release_ms",18},{"shot_hold_ms",5},{"late_tolerance_ms",5},{"direction",2}});
+}
+Json request_sampling(const Request& request) {
+    if ((request.mode == Mode::EVALUATE_MANUAL || request.mode == Mode::EVALUATE_COMMANDS) && !request.override_sampling)
+        return Json::object();
+    if (request.sampling_text.empty() && (request.mode == Mode::EVALUATE_MANUAL ||
+        request.mode == Mode::EVALUATE_COMMANDS || request.mode == Mode::DERIVE_DEFAULTS || request.mode == Mode::DERIVE_PLAN))
+        return Json::object(); // 未覆盖才沿用原始Run参数，不能用默认值冒充其实际参数。
+    auto settings = request.sampling_text.empty() ? SamplingSettings{} : parse_sampling_settings(parse_document(request.sampling_text));
+    settings.hud_enabled = request.mode != Mode::FIRE_TEST && request.show_hud;
+    return sampling_settings_json(settings);
+}
+DebugRunMode run_mode(Mode mode) {
+    switch (mode) {
+    case Mode::MANUAL_RECORDING: return DebugRunMode::ManualRecording;
+    case Mode::EVALUATE_MANUAL: return DebugRunMode::EvaluateManual;
+    case Mode::EVALUATE_COMMANDS: return DebugRunMode::EvaluateCommands;
+    case Mode::DERIVE_DEFAULTS: return DebugRunMode::DeriveDefaults;
+    case Mode::DERIVE_PLAN: return DebugRunMode::DeriveManualPlan;
+    default: return DebugRunMode::Counterpulse;
+    }
+}
+bool physical_mode(Mode mode) { return mode == Mode::COUNTERPULSE || mode == Mode::FIRE_TEST; }
+bool uses_device(Mode mode) { return physical_mode(mode) || mode == Mode::MANUAL_RECORDING; }
+void admit(const Context& context, Mode mode) {
+    if (!uses_device(mode)) return;
+    if (!context.runtime_idle || !context.input_recording_idle || !context.cleanup_known)
+        throw std::runtime_error("请先停止Runtime和记录，并确认设备清理完成");
+    if (!context.device || !context.device->output_owner_exclusive() ||
+        (context.device->status() != MouseStatus::READY && context.device->status() != MouseStatus::DISABLED))
+        throw std::runtime_error("已有设备未就绪或未持有独占职责");
+    if (context.config.mouse.backend != MouseBackend::KMBOX_NET)
+        throw std::runtime_error("该测试仅支持已有KMBOX NET连接");
+    if (physical_mode(mode) && (context.config.mouse.kmbox_command_timeout_ms > 100 || context.config.mouse.kmbox_connect_timeout_ms > 2000))
+        throw std::runtime_error("独立测试要求命令超时不超过100ms、连接超时不超过2000ms；请在设置中调整并保存后重新准备");
+    if (context.device->left_button_faulted() || context.device->left_button_cleanup_required())
+        throw std::runtime_error("左键清理尚未确认，不能开始新任务");
+}
+}
+
+struct Session::Impl {
+    std::atomic<std::shared_ptr<const Snapshot>> view{std::make_shared<const Snapshot>()};
+    std::future<void> worker;
+    std::atomic_bool canceled{false};
+    std::atomic<std::shared_ptr<CounterpulseHud>> hud;
+    std::mutex hud_mutex;
+    bool shutting_down = false;
+    std::uint64_t generation = 0;
+    struct Prepared {
+        Request request;
+        Context context;
+        Json plan, sampling;
+        std::string id;
+        std::filesystem::path directory;
+    };
+    std::optional<Prepared> prepared;
+    void replace_hud(std::shared_ptr<CounterpulseHud> next = {}) {
+        std::shared_ptr<CounterpulseHud> previous;
+        { std::lock_guard lock(hud_mutex); previous = hud.exchange(std::move(next)); }
+        // 最后引用只在调用本方法的后台线程释放；UI借用在同一短锁内结束。
+    }
+
+    template<class F> void update(F&& fn) {
+        auto prior = view.load();
+        for (;;) {
+            auto next = std::make_shared<Snapshot>(*prior);
+            fn(*next);
+            std::shared_ptr<const Snapshot> immutable = std::move(next);
+            if (view.compare_exchange_weak(prior, immutable)) return;
+        }
+    }
+    bool busy() const { return view.load()->busy || (worker.valid() && worker.wait_for(0ms) != std::future_status::ready); }
+    template<class F> bool launch(State state, bool physical, F&& fn) {
+        if (busy()) return false;
+        if (worker.valid()) {
+            if (worker.wait_for(0ms) != std::future_status::ready) return false;
+            worker.get();
+        }
+        canceled = false;
+        const auto current = ++generation;
+        update([&](Snapshot& s) { s.state = state; s.busy = true; s.physical = physical;
+            s.generation = current; s.message = "后台处理中"; s.live.reset(); });
+        try {
+            worker = std::async(std::launch::async, [this, current, physical, fn = std::forward<F>(fn)]() mutable {
+                try { fn(); }
+                catch (...) {
+                    // 原始异常可能含外部文件内容，界面只发布固定原因；详细原生报告也须脱敏。
+                    update([&](Snapshot& s) {
+                        if (s.generation != current) return;
+                        s.state = physical || s.cleanup_unknown ? State::CLEANUP_UNKNOWN : (canceled ? State::CANCELED : State::FAILED);
+                        if (physical) s.cleanup_unknown = true;
+                        s.message = physical ? "任务失败，设备释放状态不能确认；检查本组报告" : "任务未完成；请检查参数、来源与本组报告";
+                    });
+                }
+                update([&](Snapshot& s) { if (s.generation == current) {
+                    s.busy = false;
+                    if (canceled && s.state == State::PREPARED) {
+                        s.state = State::CANCELED; s.prepared_id.clear(); s.message = "准备已取消，已生成文件仅留档";
+                    }
+                } });
+            });
+            return true;
+        } catch (...) {
+            update([](Snapshot& s) { s.state = State::FAILED; s.busy = false; s.message = "后台任务创建失败"; });
+            return false;
+        }
+    }
+    void run(Prepared work, bool allow, const std::string& confirmation) {
+        DebugRunRequest task;
+        task.mode = run_mode(work.request.mode);
+        task.plan = work.plan; task.sampling_settings = work.sampling;
+        task.config = work.context.config; task.device = uses_device(work.request.mode) ? work.context.device : nullptr;
+        task.input = std::filesystem::u8path(work.request.input_path);
+        task.output = work.directory / "run";
+        task.recording_duration_ms = work.request.recording_duration_ms;
+        task.candidate_index = static_cast<std::size_t>(work.request.candidate_index);
+        task.allow_physical_output = allow; task.confirmation = confirmation;
+        // 旧HUD的析构可能join；替换只在后台线程进行。
+        replace_hud();
+        if (work.request.mode == Mode::MANUAL_RECORDING || (physical_mode(work.request.mode) && work.sampling.value("hud_enabled",false))) {
+            task.hud = std::make_shared<CounterpulseHud>(parse_sampling_settings(work.sampling),
+                work.request.mode != Mode::COUNTERPULSE);
+            task.hud->set_visible(work.request.show_hud);
+            replace_hud(task.hud);
+        }
+        update([&](Snapshot& s) { s.state = State::RUNNING; s.report_directory = task.output.string();
+            s.hud_visible = task.hud && work.request.show_hud; s.message = "任务执行中；可随时停止"; });
+        Json result;
+        try { result = run_debug(task, {[this] { return canceled.load(); }, [this](const Json& value) {
+            // 原生端只发布阶段或有界事件；最终完整对象仅一次进入结果快照。
+            auto published = std::make_shared<const Json>(value);
+            update([&](Snapshot& s) { s.live = published; });
+        }}); } catch (...) {
+            if (uses_device(work.request.mode)) update([](Snapshot& s) { s.cleanup_unknown = true; });
+            throw;
+        }
+        const bool physical = physical_mode(work.request.mode);
+        bool cleanup_ok = !physical;
+        if (physical && result.contains("cleanup")) {
+            const auto& cleanup = result.at("cleanup");
+            cleanup_ok = cleanup.value("button_disposition",-1) == static_cast<int>(ButtonDisposition::ACKNOWLEDGED) &&
+                cleanup.contains("keyboard") && cleanup.at("keyboard").value("disposition","") == "ACKNOWLEDGED" &&
+                !task.device->left_button_cleanup_required();
+        }
+        const bool archive_ok = !result.contains("archive") || result.at("archive").value("success",false);
+        const bool success = result.value("task_success", result.value("success",true)) && archive_ok;
+        if (result.contains("archive") && result.at("archive").value("status","") == "STOP_TIMEOUT") cleanup_ok = false;
+        // 唯一采集owner已经排空并返回后才结束订阅；未知归档不重置其冻结水位。
+        if (uses_device(work.request.mode) && cleanup_ok && archive_ok)
+            task.device->set_input_report_subscription(false);
+        Json index{{"schema_version",1},{"prepared_id",work.id},{"generation",view.load()->generation},
+            {"code_identity",code_identity()},
+            {"parent_run",work.request.input_path},{"plan",work.plan},{"sampling",result.value("settings",work.sampling)},
+            {"physical_output",physical},{"physical_validation_passed",false},{"cleanup_known",cleanup_ok},
+            {"success",success},{"cancel_requested",canceled.load()},{"report_directory",task.output.string()}};
+        write_document(work.directory / "result-index.json",index);
+        auto completed = std::make_shared<const Json>(std::move(result));
+        update([&](Snapshot& s) {
+            s.result = completed;
+            if (!cleanup_ok) { s.state = State::CLEANUP_UNKNOWN; s.cleanup_unknown = true; s.message = "释放未确认，禁止新物理任务"; }
+            else if (canceled || !success) { s.state = canceled || completed->value("failure","") == "USER_STOP" ? State::CANCELED : State::FAILED; s.message = "任务已结束；请查看取消或失败记录"; }
+            else { s.state = State::COMPLETED; s.message = "任务完成；自动结果不代表真实停稳或子弹数"; }
+            if (completed->contains("candidate_plan")) s.plan = completed->at("candidate_plan");
+            if (completed->contains("plan")) s.plan = completed->at("plan");
+            if (completed->contains("sampling_settings")) s.sampling = completed->at("sampling_settings");
+            if (completed->contains("settings")) s.sampling = completed->at("settings");
+            if (completed->contains("sampling_analysis")) s.live = std::make_shared<const Json>(completed->at("sampling_analysis"));
+        });
+    }
+};
+
+Session::Session() : impl_(std::make_unique<Impl>()) { Log::register_module("debug_session",LogLevel::INFO); }
+Session::~Session() {
+    impl_->canceled = true;
+    if (impl_->worker.valid()) impl_->worker.wait();
+    impl_->hud.store(nullptr);
+}
+std::shared_ptr<const Snapshot> Session::snapshot() const noexcept { return impl_->view.load(); }
+bool Session::busy() const noexcept {
+    if (impl_->busy()) return true;
+    if (!impl_->shutting_down) return false;
+    std::lock_guard lock(impl_->hud_mutex);
+    return static_cast<bool>(impl_->hud.load());
+}
+void Session::poll() noexcept {
+    try {
+        if (impl_->worker.valid() && impl_->worker.wait_for(0ms) == std::future_status::ready) impl_->worker.get();
+        {
+            std::lock_guard lock(impl_->hud_mutex);
+            if (auto hud = impl_->hud.load()) {
+                if (auto live = hud->latest_analysis(); live && live != snapshot()->live)
+                    impl_->update([&](Snapshot& s) { s.live = live; });
+            }
+        }
+        if (impl_->shutting_down && !impl_->busy() && impl_->hud.load()) {
+            impl_->launch(State::STOPPING,false,[this] {
+                impl_->replace_hud();
+                impl_->update([](Snapshot& s) { s.state = State::CANCELED; s.hud_visible = false; s.message = "后台资源已回收"; });
+            });
+        }
+    } catch (...) {}
+}
+void Session::request_shutdown() noexcept { impl_->shutting_down = true; cancel("应用关闭，正在清理"); poll(); }
+void Session::cancel(const std::string& reason) noexcept {
+    impl_->canceled = true;
+    try {
+        impl_->update([&](Snapshot& s) {
+            if (s.busy) { s.state = State::STOPPING; s.message = reason; }
+            else if (s.state == State::PREPARED) { s.state = State::CANCELED; s.prepared_id.clear(); s.message = "准备已取消"; }
+        });
+    } catch (...) {}
+}
+
+bool Session::dispatch(Action action, const Request& request, const Context& context,
+    const std::string& prepared_id, bool allow_physical_output, const std::string& confirmation) noexcept {
+    try {
+        if (action == Action::CANCEL) { cancel(); return true; }
+        if (action == Action::SHOW_HUD || action == Action::HIDE_HUD) {
+            { std::lock_guard lock(impl_->hud_mutex);
+              if (auto hud = impl_->hud.load()) hud->set_visible(action == Action::SHOW_HUD); }
+            impl_->update([&](Snapshot& s) { s.hud_visible = action == Action::SHOW_HUD; });
+            return true;
+        }
+        if (action == Action::NONE || impl_->shutting_down || busy()) return false;
+        poll();
+        if (action == Action::START) {
+            if (!impl_->prepared || snapshot()->state != State::PREPARED || prepared_id != impl_->prepared->id) return false;
+            auto work = *impl_->prepared;
+            const bool physical = physical_mode(work.request.mode);
+            if (snapshot()->cleanup_unknown && uses_device(work.request.mode)) return false;
+            admit(context,work.request.mode);
+            if (uses_device(work.request.mode) && context.device != work.context.device) return false;
+            if (physical && (!allow_physical_output || confirmation != physical_confirmation() || !work.context.config.mouse.allow_send_input)) return false;
+            if (!physical && (allow_physical_output || !confirmation.empty())) return false;
+            impl_->prepared.reset();
+            return impl_->launch(State::RUNNING,physical,[this,work,allow_physical_output,confirmation] {
+                impl_->run(work,allow_physical_output,confirmation);
+            });
+        }
+        if (snapshot()->cleanup_unknown && uses_device(request.mode)) return false;
+        impl_->prepared.reset();
+        impl_->update([](Snapshot& s) { s.prepared_id.clear(); });
+        return impl_->launch(State::WORKING,false,[this,action,request,context] {
+            if (action == Action::LOAD_WEAPON_TIMING) {
+                auto catalog = weapon::default_timing_catalog();
+                std::string error;
+                auto path = std::filesystem::u8path(request.load_path);
+                const bool default_missing = request.load_path == "cache/recoil/weapon-timing.json" && !std::filesystem::exists(path);
+                if (!default_missing && !weapon::load_timing_catalog(path,catalog,error)) throw std::runtime_error("点射资料读取失败");
+                impl_->update([&](Snapshot& s) { s.timing_catalog = catalog; s.timing_catalog_valid = true;
+                    s.state = State::COMPLETED; s.message = "共享资料已载入；带入草稿不会热改生产配置"; });
+                return;
+            }
+            if (action == Action::LOAD_PLAN || action == Action::LOAD_SAMPLING || action == Action::LOAD_FIRE_SETTINGS) {
+                const auto document = read_document(std::filesystem::u8path(request.load_path));
+                const auto value = action == Action::LOAD_SAMPLING ? sampling_settings_json(parse_sampling_settings(document)) :
+                    action == Action::LOAD_FIRE_SETTINGS ? make_fire_test_plan(document) : validate_debug_plan(document);
+                impl_->update([&](Snapshot& s) { if (action == Action::LOAD_SAMPLING) s.sampling = value; else s.plan = value;
+                    s.state = State::COMPLETED; s.message = "文档已载入，请检查草稿并重新准备"; });
+                return;
+            }
+            auto effective = request;
+            if (action == Action::DERIVE_DEFAULTS) effective.mode = Mode::DERIVE_DEFAULTS;
+            if (action == Action::DERIVE_PLAN) effective.mode = Mode::DERIVE_PLAN;
+            if (action == Action::REEVALUATE && physical_mode(effective.mode)) throw std::runtime_error("离线重评拒绝物理模式");
+            const auto plan = request_plan(effective), sampling = request_sampling(effective);
+            impl_->update([&](Snapshot& s) { s.plan = plan; s.sampling = sampling; s.result.reset(); });
+            if (impl_->canceled) { impl_->update([](Snapshot& s) { s.state = State::CANCELED; }); return; }
+            if (action == Action::VALIDATE) {
+                impl_->update([](Snapshot& s) { s.state = State::COMPLETED; s.message = "参数校验通过；未创建或启动实际测试"; });
+                return;
+            }
+            const auto directory = new_directory(effective.output_root);
+            Impl::Prepared work{effective,context,plan,sampling,directory.filename().string(),directory};
+            Json task{{"schema_version",1},{"prepared_id",work.id},{"plan",plan},{"sampling",sampling},
+                {"code_identity",code_identity()},
+                {"parent_run",effective.input_path},{"physical_output",false},{"state","PREPARED_NOT_LAUNCHED"}};
+            write_document(directory / "prepare.json",task);
+            if (!plan.empty()) write_document(directory / "plan.json",plan);
+            write_document(directory / "sampling-settings.json",sampling);
+            impl_->update([&](Snapshot& s) { s.report_directory = directory.string(); });
+            if (action == Action::SAVE_PLAN) {
+                impl_->update([](Snapshot& s) { s.state = State::COMPLETED; s.message = "计划已保存到独立目录"; }); return;
+            }
+            if (action == Action::PREPARE) {
+                // Prepare不探测网络、不发送命令，只冻结已有连接与配置身份。
+                if (effective.recording_duration_ms < 1000 || effective.recording_duration_ms > 120000 || effective.candidate_index < 0)
+                    throw std::runtime_error("记录时长或候选索引越界");
+                impl_->prepared = work;
+                impl_->update([&](Snapshot& s) { s.state = State::PREPARED; s.prepared_id = work.id;
+                    s.physical = physical_mode(effective.mode); s.message = "已准备，等待本次前台启动；参数已冻结"; });
+            } else impl_->run(work,false,{});
+        });
+    } catch (const std::exception& error) {
+        try { impl_->update([&](Snapshot& s) { s.message = error.what(); }); } catch (...) {}
+        return false;
+    } catch (...) { return false; }
+}
+
+bool Session::record_inputs(Runtime& runtime, const std::string& root, const Context& context) noexcept {
+    try {
+        if (impl_->shutting_down || busy() || snapshot()->cleanup_unknown || !context.input_recording_idle || !context.device) return false;
+        return impl_->launch(State::RUNNING,false,[this,&runtime,root,context] {
+            const auto directory = new_directory(root);
+            if (!runtime.start_input_training(directory / "input",context.device)) throw std::runtime_error("输入记录未启动");
+            impl_->update([&](Snapshot& s) { s.report_directory = (directory / "input").string(); s.message = "正在记录原始输入，停止后后台保存"; });
+            while (!impl_->canceled) {
+                auto training = runtime.snapshot().training;
+                if (!training || training->status != input_training::Status::RECORDING) break;
+                std::this_thread::sleep_for(20ms);
+            }
+            runtime.stop_input_training();
+            auto training = runtime.snapshot().training;
+            impl_->update([&](Snapshot& s) {
+                if (training && training->status == input_training::Status::STOP_TIMEOUT) {
+                    s.state = State::CLEANUP_UNKNOWN; s.cleanup_unknown = true;
+                    s.message = "记录停止超时，不能开始新设备任务";
+                } else if (training && training->status == input_training::Status::STOPPED) {
+                    s.state = State::COMPLETED;
+                    s.message = "输入记录结束；完整性以归档报告为准";
+                } else {
+                    s.state = State::FAILED;
+                    s.message = training && training->status == input_training::Status::LIMIT ?
+                        "输入记录达到预算，仅保留有限档案，不能认定完整记录" : "输入记录未成功归档；检查本组记录状态";
+                }
+            });
+        });
+    } catch (...) { return false; }
+}
+bool Session::load_inputs(Runtime& runtime, const std::string& directory) noexcept {
+    try {
+        if (impl_->shutting_down || busy()) return false;
+        return impl_->launch(State::WORKING,false,[this,&runtime,directory] {
+            if (!runtime.load_input_training(std::filesystem::u8path(directory))) throw std::runtime_error("离线记录未加载");
+            while (!impl_->canceled) {
+                auto training = runtime.snapshot().training;
+                if (!training || training->status != input_training::Status::REPLAYING) break;
+                std::this_thread::sleep_for(20ms);
+            }
+            if (impl_->canceled) runtime.stop_input_training();
+            const auto training = runtime.snapshot().training;
+            impl_->update([&](Snapshot& s) {
+                s.report_directory = directory;
+                if (training && training->status == input_training::Status::STOP_TIMEOUT) {
+                    s.state = State::CLEANUP_UNKNOWN; s.cleanup_unknown = true;
+                    s.message = "离线读取停止超时，后台资源尚未确认退出";
+                } else if (training && training->status == input_training::Status::STOPPED) {
+                    s.state = impl_->canceled ? State::CANCELED : State::COMPLETED;
+                    s.message = impl_->canceled ? "离线输入读取已取消；未连接设备" : "离线输入读取已结束；未连接设备";
+                } else {
+                    s.state = State::FAILED;
+                    s.message = training && training->status == input_training::Status::LIMIT ?
+                        "离线档案包含预算截断，不能认定完整回看" : "离线输入读取失败；检查档案清单与原始文件";
+                }
+            });
+        });
+    } catch (...) { return false; }
+}
+const char* state_name(State state) noexcept {
+    switch (state) {
+    case State::IDLE:return "空闲"; case State::WORKING:return "后台处理中";
+    case State::PREPARED:return "已准备，未启动"; case State::RUNNING:return "执行中";
+    case State::STOPPING:return "停止与清理中"; case State::COMPLETED:return "已完成";
+    case State::CANCELED:return "已取消"; case State::FAILED:return "失败";
+    case State::CLEANUP_UNKNOWN:return "清理未确认";
+    } return "未知";
+}
+const char* physical_confirmation() noexcept { return "AUTO_STOP_COUNTERPULSE"; }
+}

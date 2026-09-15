@@ -382,6 +382,50 @@ void test_makcu_stream_loss_disarms_without_releasing(bool keyboard_continues) {
            "新 MAKCU 物理释放报告才可清除 Runtime 保留的 hold");
 }
 
+void test_global_debug_emergency_uses_both_frontend_sources() {
+    using app::detail::debug_emergency_requested;
+    const std::vector<RuntimeIntent> ordinary{
+        {RuntimeIntentType::ARM_OUTPUT, true},
+        {RuntimeIntentType::DISARM_OUTPUT, false}};
+    expect(!debug_emergency_requested(false, ordinary),
+           "普通武装/解除操作不能被误判为独立调试急停");
+    expect(debug_emergency_requested(true, {}),
+           "只有键盘急停且没有UI意图时，独立调试仍须取消");
+    auto ui_emergency = ordinary;
+    ui_emergency.push_back({RuntimeIntentType::EMERGENCY_STOP, true});
+    expect(debug_emergency_requested(false, ui_emergency),
+           "只点击界面急停、没有键盘事件时，独立调试仍须取消");
+    expect(debug_emergency_requested(true, ui_emergency),
+           "同帧键盘和界面急停不能相互抵消");
+}
+
+void test_stop_or_debug_ownership_cannot_restore_output() {
+    Runtime runtime;
+    expect(runtime.post_intent({RuntimeIntentType::INPUT_HEALTH_CHANGED, true}),
+           "异步停止场景必须先建立输入健康");
+    expect(runtime.post_intent({RuntimeIntentType::ARM_OUTPUT, true}),
+           "异步停止前必须可以显式武装");
+    runtime.post_intent({RuntimeIntentType::DISARM_OUTPUT, false});
+    const RuntimeIntent arm{RuntimeIntentType::ARM_OUTPUT, true};
+    if (app::detail::allow_runtime_intent(arm, true)) runtime.post_intent(arm);
+    expect(!runtime.snapshot().output_armed,
+           "F8停止与点击武装同帧时，停止后的ARM不得重新打开物理门");
+
+    const RuntimeIntent emergency{RuntimeIntentType::EMERGENCY_STOP, true};
+    expect(app::detail::allow_runtime_intent(emergency, true),
+           "停止或调试持有设备期间仍须接收急停");
+    if (app::detail::allow_runtime_intent(emergency, true)) runtime.post_intent(emergency);
+    const RuntimeIntent reset{RuntimeIntentType::RESET_EMERGENCY, true};
+    if (app::detail::allow_runtime_intent(reset, true)) runtime.post_intent(reset);
+    expect(runtime.snapshot().emergency_stopped && !runtime.snapshot().output_armed,
+           "停止/独立调试期间RESET不得清除刚收到的急停锁存");
+    expect(app::detail::allow_runtime_intent({RuntimeIntentType::DISARM_OUTPUT, false}, true),
+           "停止期间仍须允许解除武装");
+    expect(app::detail::allow_runtime_intent(reset, false) &&
+               app::detail::allow_runtime_intent(arm, false),
+           "普通运行状态必须保留显式复位与武装入口");
+}
+
 } // namespace
 
 int main() {
@@ -391,6 +435,8 @@ int main() {
     test_listener_generation_resets_sequence_owner();
     test_makcu_stream_loss_disarms_without_releasing(true);
     test_makcu_stream_loss_disarms_without_releasing(false);
+    test_global_debug_emergency_uses_both_frontend_sources();
+    test_stop_or_debug_ownership_cannot_restore_output();
 
     if (failures != 0) {
         std::cerr << "input_safety_tests 失败数: " << failures << '\n';

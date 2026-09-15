@@ -55,20 +55,25 @@ inline Json finalize_manual_archive(const std::filesystem::path& raw_directory,
 // 只有显式人工入口调用；工厂配置固定禁用软件输入，既有独占租约继续生效。
 inline ManualRecordingResult record_manual_monitor(const MouseConfig& original,
     const std::filesystem::path& directory, const SamplingSettings& settings, int duration_ms,
-    CounterpulseHud& hud, const std::function<bool()>& canceled) {
+    CounterpulseHud& hud, const std::function<bool()>& canceled,
+    std::shared_ptr<IMouseController> injected_device = {}) {
     struct State {
         std::mutex mutex;
         ManualSamplingAccumulator model;
         explicit State(const SamplingSettings& settings) : model(settings) {}
     };
     auto state = std::make_shared<State>(settings);
-    std::shared_ptr<IMouseController> device = MouseDeviceFactory::create(manual_monitor_config(original));
-    struct Close { std::shared_ptr<IMouseController> value; ~Close() { if (value) value->close(); } } close{device};
-    if (!device || !device->open() || !device->output_owner_exclusive())
+    const bool owns_device = !injected_device;
+    std::shared_ptr<IMouseController> device = injected_device ? std::move(injected_device) :
+        MouseDeviceFactory::create(manual_monitor_config(original));
+    struct Close { std::shared_ptr<IMouseController> value; ~Close() { if (value) value->close(); } } close{owns_device ? device : nullptr};
+    if (!device || (owns_device && !device->open()) || !device->output_owner_exclusive())
         throw std::runtime_error("人工监听连接或独占失败");
     if (!device->set_input_report_subscription(true)) throw std::runtime_error("人工监听订阅失败");
     auto source = std::make_shared<runtime::detail::InputTrainingSource>(device);
     input_training::Session session;
+    // 异常路径同样先冻结Reader水位，再由Session析构排空；外部owner负责恢复订阅。
+    struct Freeze { std::shared_ptr<IMouseController> value; ~Freeze() { if (value) value->freeze_input_reports(); } } freeze{device};
     if (!session.start(directory / "raw", {}, [source, state] {
         auto batch = source->read();
         std::lock_guard lock(state->mutex);
@@ -90,13 +95,14 @@ inline ManualRecordingResult record_manual_monitor(const MouseConfig& original,
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     device->freeze_input_reports();
+    freeze.value.reset();
     const auto stopped_at_ns = ns(Clock::now());
     session.stop();
     if (session.snapshot()->status == input_training::Status::STOP_TIMEOUT)
         throw std::runtime_error("人工归档停止超时，不能将前缀当成完成记录");
     // Session的最终Reader调用排空冻结水位；只有之后才能关闭monitor。
     source.reset();
-    device->close();
+    if (owns_device) device->close();
     ManualRecordingResult result;
     result.analysis = finalize_manual_archive(directory / "raw", settings, stopped_at_ns);
     result.archive = training_snapshot_json(*session.snapshot(), "KMBOX_MONITOR");

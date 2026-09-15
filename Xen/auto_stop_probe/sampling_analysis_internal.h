@@ -198,7 +198,7 @@ inline Json analyze_counterpulse_sampling_impl(const Json& report, std::optional
     const auto count = std::min<std::size_t>(commands.size(), 512);
     if (commands.size() > count) issue("COMMAND_BUDGET_EXCEEDED");
     SamplingModel model(settings);
-    struct Shot { std::size_t command; std::int64_t down, submit; std::optional<std::int64_t> up; bool valid; };
+    struct Shot { std::size_t command; std::int64_t down, submit; std::optional<std::int64_t> up, up_submit; bool valid; };
     std::vector<Shot> shots;
     std::optional<std::size_t> active;
     std::int64_t previous = 0;
@@ -243,8 +243,8 @@ inline Json analyze_counterpulse_sampling_impl(const Json& report, std::optional
             if (button && value == 1) {
                 timing_direction = timing_held = 0; timing_release.reset();
                 if (active) { shots[*active].valid = false; model.invalidate(ack); issue("DUPLICATE_FIRE_DOWN"); }
-                shots.push_back({index, ack, submit, {}, model.valid()}); active = shots.size() - 1;
-            } else if (button && active) { shots[*active].up = ack; active.reset(); }
+                shots.push_back({index, ack, submit, {}, {}, model.valid()}); active = shots.size() - 1;
+            } else if (button && active) { shots[*active].up = ack; shots[*active].up_submit = submit; active.reset(); }
             previous = ack;
         } catch (const std::exception&) {
             timing_direction = timing_held = 0; timing_release.reset();
@@ -274,6 +274,10 @@ inline Json analyze_counterpulse_sampling_impl(const Json& report, std::optional
             {"up_ack_ns", shot.up ? Json(*shot.up) : Json(nullptr)}, {"complete_hold", shot.up.has_value()},
             {"valid_command_hold", hold_valid}, {"active_hold", live_active},
             {"observed_hold_ms", shot.up ? Json((*shot.up - shot.down) / 1e6) : Json(nullptr)},
+            {"up_submit_ns", shot.up_submit ? Json(*shot.up_submit) : Json(nullptr)},
+            // 按住计划的时钟锚点为DOWN协议ACK，结束命令提交与UP ACK不得混用。
+            {"down_ack_to_up_submit_ms", shot.up_submit && *shot.up_submit >= shot.down ?
+                Json((*shot.up_submit - shot.down) / 1e6) : Json(nullptr)},
             {"planned_hold_ms", plan.value("shot_hold_ms", Json(nullptr))},
             {"previous_down_submit_interval_ms", index ? Json((shot.submit - shots[index - 1].submit) / 1e6) : Json(nullptr)},
             {"next_down_submit_interval_ms", index + 1 < shots.size() ? Json((shots[index + 1].submit - shot.submit) / 1e6) : Json(nullptr)},

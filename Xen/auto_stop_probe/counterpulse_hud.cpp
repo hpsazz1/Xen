@@ -29,11 +29,14 @@ public:
     std::atomic<unsigned> paint_count{0}, title_updates{0};
     std::atomic<unsigned> valid_first_plot_count{0};
     std::atomic<int> state{0}; // 0启动中、1显示中、2结束保留、3窗口/模型失败。
+    std::atomic<bool> visible{true};
     std::atomic<bool> ending{false}, execution_success{false}, closing{false};
     std::atomic<std::int64_t> finished_at{0};
     const bool external;
     struct PublishedSnapshot { Json value; unsigned version; };
     std::atomic<std::shared_ptr<const PublishedSnapshot>> pending_snapshot;
+    std::atomic<std::shared_ptr<const Json>> latest_analysis;
+    std::int64_t last_analysis_published_ns = 0;
     Json displayed = {{"shots", Json::array()}, {"timings", Json::array()}, {"current_model", {{"valid", false}}}};
     std::atomic<unsigned> snapshots{0}, snapshots_displayed{0}, snapshots_superseded{0};
     std::atomic<bool> monitor_source{false}, window_closed{false};
@@ -186,6 +189,13 @@ public:
         } else {
             displayed = analyze_counterpulse_live_sampling(Json{{"commands", commands}}, settings, now);
             displayed["feedback"] = summarize_hud_feedback(displayed, settings);
+        }
+        // 复用本轮已完成的模型结果；页面只取共享快照，不重复拟合/采样。
+        const auto publication_now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (!last_analysis_published_ns || publication_now - last_analysis_published_ns >= 100000000) {
+            latest_analysis.store(std::make_shared<const Json>(displayed));
+            last_analysis_published_ns = publication_now;
         }
         const auto& analysis = displayed;
         auto current = analysis.at("current_model");
@@ -373,7 +383,7 @@ public:
             PAINTSTRUCT paint{}; const auto dc = BeginPaint(hwnd, &paint);
             self->present(hwnd, dc); EndPaint(hwnd, &paint); return 0;
         }
-        if (message == WM_CLOSE) { self->closing.store(true); return 0; }
+        if (message == WM_CLOSE) { self->stop_recording.store(true); self->closing.store(true); return 0; }
         return DefWindowProcW(hwnd, message, wparam, lparam);
     }
     void run() noexcept {
@@ -403,7 +413,10 @@ public:
                 !SetWindowPos(window, HWND_TOPMOST, 20, 20, size.right - size.left, size.bottom - size.top, SWP_NOACTIVATE | SWP_SHOWWINDOW))
                 throw std::runtime_error("HUD显示不可用");
             state.store(1);
+            bool shown = true;
             while (!closing.load()) {
+                const bool desired = visible.load();
+                if (shown != desired) { ShowWindow(window, desired ? SW_SHOWNOACTIVATE : SW_HIDE); shown = desired; }
                 MSG message;
                 while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
                     TranslateMessage(&message); DispatchMessageW(&message);
@@ -420,6 +433,8 @@ public:
 CounterpulseHud::CounterpulseHud(const sampling_detail::SamplingSettings& settings, bool external_snapshots)
     : impl_(std::make_unique<Impl>(settings, external_snapshots)) {}
 CounterpulseHud::~CounterpulseHud() = default;
+std::shared_ptr<const Json> CounterpulseHud::latest_analysis() const noexcept { return impl_->latest_analysis.load(); }
+void CounterpulseHud::set_visible(bool value) noexcept { impl_->visible.store(value); }
 void CounterpulseHud::observe(const Json& command) noexcept { impl_->enqueue(command); }
 void CounterpulseHud::publish(const Json& snapshot) noexcept { impl_->publish_snapshot(snapshot); }
 bool CounterpulseHud::closed() const noexcept { return impl_->window_closed.load(); }

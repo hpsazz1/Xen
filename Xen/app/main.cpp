@@ -8,6 +8,7 @@
 #include "config/config.h"
 #include "crash/crash.h"
 #include "debug/debug.h"
+#include "debug_session/debug_session.h"
 #include "keyboard/keyboard.h"
 #include "log/log.h"
 #include "overlay/overlay.h"
@@ -21,6 +22,7 @@
 #endif
 
 #include <filesystem>
+#include <future>
 #include <chrono>
 #include <memory>
 #include <optional>
@@ -212,6 +214,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     bool debug_session_active = false;
     bool detector_reload_pending = false;
     bool release_restart_requested = false;
+    bool pending_runtime_stop = false;
+    std::future<void> runtime_stop_job;
     std::string debug_run_id;
     std::optional<AimConfig> debug_aim_config;
     std::optional<AutoStopConfig> debug_auto_stop_config;
@@ -222,6 +226,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     std::uint64_t debug_segment = 0;
     std::vector<RuntimePipelineSample> pending_debug_samples;
     Overlay overlay;
+    debug_session::Session debug_workspace;
     if (!startup_boundary.observe_overlay_initialization(
             overlay.init(config.ui))) {
         LOG_ERROR("app", "Overlay 初始化失败");
@@ -290,6 +295,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     };
 
     const auto start_runtime_session = [&]() {
+        if (runtime_stop_job.valid() || debug_workspace.busy() || debug_workspace.snapshot()->cleanup_unknown || overlay.background_busy()) {
+            app_message = "请先结束调试任务并确认设备清理，再启动Runtime。";
+            return;
+        }
         if (release_environment.managed &&
             app::detail::runtime_for_backend(config.detector.backend) !=
                 release_environment.runtime_id) {
@@ -332,18 +341,43 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             : "Runtime 已启动，Debug 报告未启用。";
     };
     const auto stop_runtime_session = [&]() {
-        runtime.stop();
-        finish_debug_report();
+        if (runtime_stop_job.valid()) return;
         detector_reload_pending = false;
-        app_message = "Runtime 已停止。";
+        const auto state = runtime.snapshot().state;
+        if (state == RuntimeState::STOPPED && !debug_session_active) {
+            app_message = "Runtime 已停止。";
+            return;
+        }
+        runtime.post_intent({RuntimeIntentType::DISARM_OUTPUT, true});
+        runtime_stop_job = std::async(std::launch::async, [&] {
+            runtime.stop();
+            finish_debug_report();
+        });
+        app_message = "正在后台停止Runtime并保存报告。";
     };
 
-    while (overlay.pump_messages()) {
+    while (overlay.pump_messages(true)) {
+        debug_workspace.poll();
+        if (runtime_stop_job.valid() && runtime_stop_job.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+            runtime_stop_job.get();
+            app_message = "Runtime已停止，后台报告处理结束。";
+        }
+        if (pending_runtime_stop && !debug_workspace.busy()) {
+            stop_runtime_session();
+            pending_runtime_stop = false;
+        }
+        if (overlay.close_requested()) {
+            debug_workspace.request_shutdown();
+            overlay.cancel_background();
+            if (!debug_workspace.busy() && !overlay.background_busy()) stop_runtime_session();
+            if (!debug_workspace.busy() && !overlay.background_busy() && !runtime_stop_job.valid()) break;
+            app_message = "正在结束调试任务并回收资源；设备清理未知时仍会明确报告。";
+        }
         const KeyboardPollResult keyboard_poll = keyboard.poll();
         // health 不属于可被热键绑定 UI 吞掉的语义事件；先投递后再生成
         // Snapshot 和渲染，保证武装控件与实际 SafetyGate 同帧一致。
         app::detail::route_input_health(runtime, keyboard_poll);
-        drain_debug_samples();
+        if (!runtime_stop_job.valid()) drain_debug_samples();
         RuntimeSnapshot snapshot = runtime.snapshot();
         if (detector_reload_pending &&
             snapshot.state != RuntimeState::RUNNING) {
@@ -373,7 +407,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             : nullptr;
         const bool overlay_rendered = overlay.render(
             snapshot, preview, model_catalog, backend_catalog,
-            config, workspace_settings, model_workspace.poll(&workspace_settings), app_message, actions, &keyboard_poll);
+            config, workspace_settings, model_workspace.poll(&workspace_settings), app_message, actions, &keyboard_poll,
+            debug_workspace.snapshot().get());
         if (!startup_boundary.observe_overlay_render(
                 overlay_rendered,
                 overlay.last_error())) {
@@ -391,7 +426,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         const auto keyboard_routing = app::detail::route_keyboard_events(
             runtime, keyboard_poll, actions.hotkey_capture_consumed);
         const bool emergency_pressed =
-            keyboard_routing.emergency_pressed;
+            app::detail::debug_emergency_requested(keyboard_routing.emergency_pressed, actions.runtime_intents);
         const bool runtime_toggle_pressed =
             keyboard_routing.runtime_toggle_pressed;
 
@@ -400,23 +435,41 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             app_message = "ROI 预览通道切换失败。";
         }
 
-        try {
-        if (actions.training_stop_requested || emergency_pressed) {
-            runtime.stop_input_training();
-        } else if (actions.training_start_requested) {
-            // 按需新建独占目录；单调时刻仅用于名称，不作为跨机时间证据。
-            const auto suffix = std::chrono::steady_clock::now().time_since_epoch().count();
-            const auto directory = std::filesystem::u8path(actions.training_directory) /
-                ("input-" + std::to_string(suffix));
-            app_message = runtime.start_input_training(directory, input_device)
-                ? "输入记录已开始；不启动检测或武装输出，KMBOX位移语义仍未实机验证。"
-                : "输入记录未启动：请检查已连接的KMBOX、目录权限及现有记录状态。";
-        } else if (actions.training_load_requested) {
-            app_message = runtime.load_input_training(std::filesystem::u8path(actions.training_load_path))
-                ? "正在后台回看原始输入记录；不连接设备、不发送输出。"
-                : "回看未启动：请先结束当前记录，并检查输入Run目录。";
+        const auto make_debug_context = [&] {
+            debug_session::Context context;
+            context.config = config;
+            // 已打开设备的参数才是事实；未保存草稿不能冒充连接已重配。
+            context.config.mouse = active_input_config;
+            context.device = input_device;
+            context.runtime_idle = !runtime_stop_job.valid() &&
+                (snapshot.state == RuntimeState::STOPPED || snapshot.state == RuntimeState::FAILED);
+            context.input_recording_idle = !snapshot.training ||
+                (snapshot.training->status != input_training::Status::RECORDING &&
+                 snapshot.training->status != input_training::Status::REPLAYING &&
+                 snapshot.training->status != input_training::Status::STOP_TIMEOUT);
+            context.cleanup_known = !snapshot.auto_stop.cleanup_unknown && !snapshot.trigger.button_may_be_down &&
+                !snapshot.trigger.faulted && !snapshot.output_armed && !debug_workspace.snapshot()->cleanup_unknown;
+            return context;
+        };
+        if (emergency_pressed || actions.training_stop_requested || actions.stop_requested) debug_workspace.cancel();
+        if (!overlay.close_requested() && !emergency_pressed && !actions.stop_requested) {
+            if (actions.training_start_requested) {
+                app_message = !runtime_stop_job.valid() && !overlay.background_busy() && debug_workspace.record_inputs(runtime,actions.training_directory,make_debug_context())
+                    ? "已提交原始输入记录；开始和结束归档均在后台处理。" : "已有任务或记录未结束，不能开始第二组。";
+            } else if (actions.training_load_requested) {
+                app_message = !runtime_stop_job.valid() && !overlay.background_busy() && debug_workspace.load_inputs(runtime,actions.training_load_path)
+                    ? "正在后台读取离线记录，不连接设备。" : "请先结束当前调试任务。";
+            }
+            if (actions.debug_action != debug_session::Action::NONE) {
+                const bool cancel_or_display = actions.debug_action == debug_session::Action::CANCEL ||
+                    actions.debug_action == debug_session::Action::SHOW_HUD || actions.debug_action == debug_session::Action::HIDE_HUD;
+                if (((!runtime_stop_job.valid() && !overlay.background_busy()) || cancel_or_display) && debug_workspace.dispatch(actions.debug_action,
+                    actions.debug_request,make_debug_context(),actions.debug_prepared_id,
+                    actions.debug_allow_physical_output,actions.debug_confirmation))
+                    app_message = "调试请求已接收。";
+                else app_message = "调试请求未接受：" + debug_workspace.snapshot()->message;
+            }
         }
-        } catch (...) { app_message = "输入记录路径无效或资源不足；未启动新的记录。"; }
 
         if (actions.workspace_action != model_workspace::Action::NONE) {
             if (actions.workspace_action == model_workspace::Action::START_COLLECTION &&
@@ -462,15 +515,20 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
              snapshot.state == RuntimeState::FAILED);
         if (actions.stop_requested ||
             (!actions.start_requested && toggle_requests_stop)) {
-            stop_runtime_session();
+            if (debug_workspace.busy()) {
+                debug_workspace.cancel();
+                pending_runtime_stop = true;
+                runtime.post_intent({RuntimeIntentType::DISARM_OUTPUT, true});
+                app_message = "正在停止调试任务；生产Runtime不会并发接管设备。";
+            } else stop_runtime_session();
         } else if (actions.start_requested || toggle_requests_start) {
-            if (model_workspace.poll().job_running) {
+            if (model_workspace.poll().job_running || overlay.close_requested()) {
                 app_message = "请先结束离线数据或训练作业，再启动Runtime。";
             } else {
                 start_runtime_session();
             }
         }
-        if (actions.reload_detector_requested &&
+        if (actions.reload_detector_requested && !runtime_stop_job.valid() && !debug_workspace.busy() &&
             !actions.stop_requested) {
             DetectorConfig detector_config = config.detector;
             const bool wrong_release_runtime =
@@ -505,11 +563,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             }
         }
         for (const auto& intent : actions.runtime_intents) {
+            if (!app::detail::allow_runtime_intent(intent, runtime_stop_job.valid() || pending_runtime_stop ||
+                overlay.close_requested() || (debug_workspace.busy() && debug_workspace.snapshot()->physical))) continue;
             if (!runtime.post_intent(intent)) {
                 app_message = "意图被安全门拒绝。";
             }
         }
-        if (actions.save_config_requested) {
+        const bool device_change_requires_stop = !same_mouse_config(active_input_config, config.mouse) &&
+            (runtime.snapshot().state != RuntimeState::STOPPED || debug_session_active);
+        if (actions.save_config_requested && (runtime_stop_job.valid() || debug_workspace.busy() || overlay.background_busy() || device_change_requires_stop)) {
+            app_message = "请先结束后台调试与弹道任务，再保存或切换设备配置。";
+        } else if (actions.save_config_requested && !overlay.close_requested()) {
             DetectorConfig detector_config = config.detector;
             if (!resolve_detector_config(detector_config)) {
                 app_message = model_error;
@@ -585,6 +649,19 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         }
     }
 
+    // 渲染失败和系统退出同样经过屏障；不可先关闭后台仍使用的设备或日志。
+    debug_workspace.request_shutdown();
+    overlay.cancel_background();
+    for (;;) {
+        debug_workspace.poll();
+        overlay.poll_background();
+        if (runtime_stop_job.valid() && runtime_stop_job.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready)
+            runtime_stop_job.get();
+        if (!debug_workspace.busy() && !overlay.background_busy()) stop_runtime_session();
+        if (!debug_workspace.busy() && !overlay.background_busy() && !runtime_stop_job.valid()) break;
+        overlay.pump_messages(true);
+        MsgWaitForMultipleObjectsEx(0, nullptr, 16, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+    }
     runtime.stop();
     model_workspace.shutdown();
     finish_debug_report();

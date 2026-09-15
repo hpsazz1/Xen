@@ -5,6 +5,7 @@
 #include "overlay/overlay_internal.h"
 #include "overlay/recoil_panel.h"
 #include "overlay/input_training_panel.h"
+#include "overlay/debug_panel.h"
 
 #include "log/log.h"
 
@@ -88,6 +89,7 @@ enum class WorkspacePage {
     TRAINING,
     AIM,
     AUXILIARY,
+    DEBUG,
     SETTINGS,
 };
 
@@ -320,6 +322,7 @@ const char* page_title(WorkspacePage page) noexcept {
         case WorkspacePage::TRAINING: return "训练";
         case WorkspacePage::AIM: return "瞄准控制";
         case WorkspacePage::AUXILIARY: return "辅助";
+        case WorkspacePage::DEBUG: return "调试";
         case WorkspacePage::SETTINGS: return "设置";
     }
     return "概览";
@@ -333,6 +336,7 @@ const char* page_context(WorkspacePage page) noexcept {
         case WorkspacePage::TRAINING: return "审核、训练与候选模型";
         case WorkspacePage::AIM: return "追踪与控制";
         case WorkspacePage::AUXILIARY: return "移动与辅助";
+        case WorkspacePage::DEBUG: return "测试、回看与运行诊断";
         case WorkspacePage::SETTINGS: return "输入安全、运行与窗口";
     }
     return "P0 / 本地闭环";
@@ -711,6 +715,7 @@ struct Overlay::Impl {
     HotkeyBindingTarget hotkey_binding_target = HotkeyBindingTarget::NONE;
     RecoilPanel recoil_panel;
     InputTrainingPanel input_training_panel;
+    DebugPanel debug_panel;
     int trigger_general_class = 0;
     overlay::detail::HotkeyCaptureState hotkey_capture_state;
     std::array<bool, 256> capture_device_keys{};
@@ -1594,6 +1599,9 @@ struct Overlay::Impl {
         nav_item(
             "训练", WorkspacePage::TRAINING,
             "检查素材、生成预标注、外部审核、导出数据集、离线训练和评估候选模型。");
+        nav_item(
+            "调试", WorkspacePage::DEBUG,
+            "急停HUD、人工录制与离线重评、独立射击节奏、弹道工具及运行诊断；进入页面不启动设备。");
         nav_item(
             "设置", WorkspacePage::SETTINGS,
             "配置键鼠后端、按键绑定、物理输出安全门、日志、统计和窗口偏好。");
@@ -3002,8 +3010,6 @@ struct Overlay::Impl {
     void render_auxiliary_config(
             const RuntimeSnapshot& snapshot, AppConfig& app_config,
             bool can_edit, OverlayActions& actions) {
-        input_training_panel.render(snapshot.training, actions);
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
         ImGui::TextWrapped("停止运行后可编辑并保存参数；下次启动生效。");
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         begin_config_panel("auto_stop_panel", "自动急停", 300.0f);
@@ -3072,21 +3078,8 @@ struct Overlay::Impl {
             if (snapshot.auto_stop.use_counterpulse_timing)
                 ImGui::Text("运行H40时序：反向 %dms / 释放后 %dms", snapshot.auto_stop.counter_hold_ms,
                     snapshot.auto_stop.shot_after_release_ms);
-            ImGui::Text("请求 %llu | 预计完成 %llu | 取消 %llu",
-                static_cast<unsigned long long>(snapshot.auto_stop.requests),
-                static_cast<unsigned long long>(snapshot.auto_stop.completed),
-                static_cast<unsigned long long>(snapshot.auto_stop.canceled));
-            ImGui::Text("清理尝试 %llu | 未确认 %llu",
-                static_cast<unsigned long long>(snapshot.auto_stop.cleanup_attempts),
-                static_cast<unsigned long long>(snapshot.auto_stop.cleanup_failures));
-            if (snapshot.auto_stop.rescue_attempts) {
-                ImGui::Text("按键救援 %llu | 释放确认 %llu | 失败 %llu",
-                    static_cast<unsigned long long>(snapshot.auto_stop.rescue_attempts),
-                    static_cast<unsigned long long>(snapshot.auto_stop.rescue_succeeded),
-                    static_cast<unsigned long long>(snapshot.auto_stop.rescue_failed));
-                if (snapshot.auto_stop.status == AutoStopStatus::FAULT)
-                    ImGui::TextWrapped("故障锁存仍保留；清理确认只表示急停按键已归还，检查后停止并重新启动。");
-            }
+            if (snapshot.auto_stop.status == AutoStopStatus::FAULT)
+                ImGui::TextWrapped("故障锁存仍保留；检查清理状态后停止并重新启动。");
             if (snapshot.auto_stop.cleanup_unknown)
                 ImGui::TextWrapped("设备清理尚未确认；控制状态未知。");
         } else {
@@ -3098,7 +3091,7 @@ struct Overlay::Impl {
         if (snapshot.auto_stop.independent_trigger_enabled) {
             ImGui::TextWrapped("当前条件：%s", AutoStopBlockReasonName(snapshot.auto_stop.block_reason));
             if (!snapshot.auto_stop.source_focused)
-                ImGui::TextWrapped("等待源机焦点：请检查下方源状态桥接与源机前台游戏。");
+                ImGui::TextWrapped("等待源机焦点：请检查设置中的源状态桥接与源机前台游戏。");
             if (!snapshot.auto_stop.target_available)
                 ImGui::TextWrapped("等待新鲜目标：需要有效源时钟及50毫秒内的配置目标检测。");
         }
@@ -3106,7 +3099,10 @@ struct Overlay::Impl {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         render_trigger_config(snapshot, app_config, can_edit, key_active);
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        render_source_context_config(snapshot, app_config, can_edit);
+        ImGui::TextWrapped("源端焦点：%s", snapshot.source_context.available ?
+            (snapshot.source_context.focused ? "目标进程在前台" : "目标进程不在前台") : "未就绪或已过期");
+        if (ImGui::Button("连接与上下文设置")) active_page = WorkspacePage::SETTINGS;
+        show_help_tooltip("跳转唯一连接参数入口；切页不会启动或停止设备。");
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         begin_config_panel("recoil_permission_panel", "压枪许可", 300.0f);
         ImGui::BeginDisabled(!can_edit);
@@ -3223,6 +3219,51 @@ struct Overlay::Impl {
         if (snapshot.trigger.button_may_be_down) ImGui::TextWrapped("软件左键可能仍按下；以释放回执与设备实际状态为准。");
         if (snapshot.trigger.faulted) ImGui::TextWrapped("故障已锁存；完成设备清理并停止会话后再启动。");
         end_config_panel();
+    }
+
+    void render_debug(const RuntimeSnapshot& snapshot, AppConfig& app_config,
+                      bool can_edit, OverlayActions& actions,
+                      const debug_session::Snapshot* debug_snapshot) {
+        debug_panel.render_status(debug_snapshot, actions);
+        if (!ImGui::BeginTabBar("debug_tabs")) return;
+        if (ImGui::BeginTabItem("急停测试")) {
+            debug_panel.render_counterpulse(app_config, debug_snapshot, actions);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("人工录制与回看")) {
+            input_training_panel.render(snapshot.training, actions);
+            debug_panel.render_manual(debug_snapshot, actions);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("射击节奏")) {
+            debug_panel.render_fire(app_config, debug_snapshot, actions);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("弹道工具")) {
+            recoil_panel.render_tools(snapshot, app_config, can_edit);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("运行诊断")) {
+            ImGui::Text("请求 %llu | 预计完成 %llu | 取消 %llu",
+                static_cast<unsigned long long>(snapshot.auto_stop.requests),
+                static_cast<unsigned long long>(snapshot.auto_stop.completed),
+                static_cast<unsigned long long>(snapshot.auto_stop.canceled));
+            ImGui::Text("清理尝试 %llu | 未确认 %llu",
+                static_cast<unsigned long long>(snapshot.auto_stop.cleanup_attempts),
+                static_cast<unsigned long long>(snapshot.auto_stop.cleanup_failures));
+            if (snapshot.auto_stop.rescue_attempts) {
+                ImGui::Text("按键救援 %llu | 释放确认 %llu | 失败 %llu",
+                    static_cast<unsigned long long>(snapshot.auto_stop.rescue_attempts),
+                    static_cast<unsigned long long>(snapshot.auto_stop.rescue_succeeded),
+                    static_cast<unsigned long long>(snapshot.auto_stop.rescue_failed));
+                if (snapshot.auto_stop.status == AutoStopStatus::FAULT)
+                    ImGui::TextWrapped("故障锁存仍保留；清理确认只表示急停按键已归还，检查后停止并重新启动。");
+            }
+            debug_panel.render_results(debug_snapshot);
+            recoil_panel.render_diagnostics(snapshot);
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
     }
 
     void render_source_context_config(const RuntimeSnapshot& snapshot, AppConfig& app_config, bool can_edit) {
@@ -4063,8 +4104,9 @@ struct Overlay::Impl {
             model_workspace::Settings& workspace_settings,
             const model_workspace::Snapshot& workspace_snapshot,
             const std::string& app_message,
-            OverlayActions& actions) {
-        const bool can_edit = editable(snapshot);
+            OverlayActions& actions,
+            const debug_session::Snapshot* debug_snapshot) {
+        const bool can_edit = editable(snapshot) && !(debug_snapshot && debug_snapshot->busy);
         const bool can_save = can_edit ||
             (active_page == WorkspacePage::DETECTION &&
              snapshot.state == RuntimeState::RUNNING &&
@@ -4120,7 +4162,12 @@ struct Overlay::Impl {
                 case WorkspacePage::TRAINING:
                     render_training(snapshot, workspace_settings, workspace_snapshot, actions);
                     break;
+                case WorkspacePage::DEBUG:
+                    render_debug(snapshot, app_config, can_edit, actions, debug_snapshot);
+                    break;
                 case WorkspacePage::SETTINGS:
+                    render_source_context_config(snapshot, app_config, can_edit);
+                    recoil_panel.render_connections(app_config, can_edit);
                     render_input_config(
                         snapshot, app_config, can_edit, actions);
                     ImGui::Dummy(ImVec2(0.0f, 12.0f));
@@ -4240,7 +4287,7 @@ bool Overlay::init(const UiConfig& config) noexcept {
     }
 }
 
-bool Overlay::pump_messages() noexcept {
+bool Overlay::pump_messages(bool defer_close) noexcept {
     if (!impl_ || !impl_->initialized) return false;
     MSG message{};
     while (PeekMessageW(&message, nullptr, 0U, 0U, PM_REMOVE)) {
@@ -4250,8 +4297,13 @@ bool Overlay::pump_messages() noexcept {
             impl_->close_requested = true;
         }
     }
-    return !impl_->close_requested;
+    return defer_close || !impl_->close_requested;
 }
+
+bool Overlay::close_requested() const noexcept { return impl_ && impl_->close_requested; }
+bool Overlay::background_busy() const noexcept { return impl_ && impl_->recoil_panel.busy(); }
+void Overlay::poll_background() noexcept { if (impl_) impl_->recoil_panel.poll(); }
+void Overlay::cancel_background() noexcept { if (impl_) impl_->recoil_panel.request_cancel(); }
 
 bool Overlay::render(
         const RuntimeSnapshot& snapshot,
@@ -4263,12 +4315,14 @@ bool Overlay::render(
         const model_workspace::Snapshot& workspace_snapshot,
         const std::string& app_message,
         OverlayActions& actions,
-        const KeyboardPollResult* keyboard_poll) noexcept {
+        const KeyboardPollResult* keyboard_poll,
+        const debug_session::Snapshot* debug_snapshot) noexcept {
     if (!impl_ || !impl_->initialized || impl_->present_boundary.failed()) {
         return false;
     }
     try {
         actions = {};
+        impl_->recoil_panel.poll();
         impl_->capture_device_valid = keyboard_poll && keyboard_poll->capture_state_valid;
         if (impl_->capture_device_valid) impl_->capture_device_keys = keyboard_poll->capture_virtual_keys;
         impl_->update_metric_history(snapshot);
@@ -4318,10 +4372,13 @@ bool Overlay::render(
             ImGuiChildFlags_None,
             ImGuiWindowFlags_NoScrollbar |
             ImGuiWindowFlags_NoScrollWithMouse);
+        if (impl_->close_requested) ImGui::TextWrapped("正在停止后台任务并确认设备清理，请稍候。窗口保持响应。");
+        ImGui::BeginDisabled(impl_->close_requested);
         impl_->render_global_bar(snapshot, actions);
         impl_->render_workspace(
             snapshot, preview, model_catalog, backend_catalog,
-            config, workspace_settings, workspace_snapshot, app_message, actions);
+            config, workspace_settings, workspace_snapshot, app_message, actions, debug_snapshot);
+        ImGui::EndDisabled();
         const bool detection_page_active =
             impl_->active_page == WorkspacePage::DETECTION;
         const bool preview_enabled =

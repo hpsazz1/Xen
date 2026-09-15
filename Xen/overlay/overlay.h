@@ -8,8 +8,14 @@
 #include "config/config.h"
 #include "runtime/runtime.h"
 #include "model_workspace/model_workspace.h"
+#include "debug_session/debug_session.h"
 
 struct OverlayActions {
+    debug_session::Action debug_action = debug_session::Action::NONE;
+    debug_session::Request debug_request;
+    std::string debug_prepared_id;
+    bool debug_allow_physical_output = false;
+    std::string debug_confirmation;
     model_workspace::Action workspace_action = model_workspace::Action::NONE;
     bool start_requested = false;
     bool stop_requested = false;
@@ -48,7 +54,7 @@ public:
     Overlay& operator=(const Overlay&) = delete;
 
     bool init(const UiConfig& config) noexcept;
-    bool pump_messages() noexcept;
+    bool pump_messages(bool defer_close = false) noexcept;
     bool render(const RuntimeSnapshot& snapshot,
                 const std::shared_ptr<const RuntimePreviewFrame>& preview,
                 const OverlayModelCatalog& model_catalog,
@@ -58,7 +64,12 @@ public:
                 const model_workspace::Snapshot& workspace_snapshot,
                 const std::string& app_message,
                 OverlayActions& actions,
-                const KeyboardPollResult* keyboard_poll = nullptr) noexcept;
+                const KeyboardPollResult* keyboard_poll = nullptr,
+                const debug_session::Snapshot* debug_snapshot = nullptr) noexcept;
+    bool close_requested() const noexcept;
+    bool background_busy() const noexcept;
+    void poll_background() noexcept;
+    void cancel_background() noexcept;
     const std::string& last_error() const noexcept;
     void shutdown() noexcept;
 

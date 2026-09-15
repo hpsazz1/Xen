@@ -1041,11 +1041,25 @@ target_link_libraries(mouse_effect_probe_runner
     PUBLIC mouse_effect_probe capture
     PRIVATE config nlohmann_json::nlohmann_json bcrypt)
 
+add_library(debug_runner STATIC Xen/auto_stop_probe/debug_runner.cpp
+    Xen/auto_stop_probe/counterpulse_hud.cpp)
+target_include_directories(debug_runner PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(debug_runner PUBLIC config mouse capture source_context input_training nlohmann_json::nlohmann_json
+    PRIVATE user32 gdi32)
+add_library(debug_session STATIC Xen/debug_session/debug_session.cpp)
+target_include_directories(debug_session PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(debug_session PUBLIC runtime weapon nlohmann_json::nlohmann_json
+    PRIVATE debug_runner log Threads::Threads)
+target_compile_definitions(debug_session PRIVATE
+    XEN_DEBUG_BUILD_COMMIT="${XEN_BUILD_GIT_COMMIT}"
+    XEN_DEBUG_BUILD_DIRTY=${XEN_BUILD_GIT_DIRTY}
+    XEN_DEBUG_RUNTIME_ID="${XEN_BUILD_RUNTIME_ID}")
+
 add_library(overlay STATIC
-    Xen/overlay/overlay.cpp Xen/overlay/recoil_panel.cpp Xen/overlay/input_training_panel.cpp)
+    Xen/overlay/overlay.cpp Xen/overlay/recoil_panel.cpp Xen/overlay/input_training_panel.cpp Xen/overlay/debug_panel.cpp)
 target_include_directories(overlay PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(overlay
-    PUBLIC runtime config model_workspace
+    PUBLIC runtime config model_workspace debug_session
     PRIVATE imgui recoil_tuner recoil recoil_calibration_io d3d11 dxgi dwmapi)
 
 add_executable(xen_app WIN32
@@ -1146,10 +1160,9 @@ target_include_directories(auto_stop_probe PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(auto_stop_probe PRIVATE config mouse nlohmann_json::nlohmann_json)
 
 # 单组反向脉冲点射标定：与生产Runtime互斥，显式前台双授权。
-add_executable(auto_stop_counterpulse Xen/auto_stop_probe/counterpulse_main.cpp
-    Xen/auto_stop_probe/counterpulse_hud.cpp)
+add_executable(auto_stop_counterpulse Xen/auto_stop_probe/counterpulse_main.cpp)
 target_include_directories(auto_stop_counterpulse PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
-target_link_libraries(auto_stop_counterpulse PRIVATE config mouse capture source_context input_training nlohmann_json::nlohmann_json)
+target_link_libraries(auto_stop_counterpulse PRIVATE debug_runner)
 if(WIN32)
     target_link_libraries(auto_stop_counterpulse PRIVATE user32 gdi32)
     xen_deploy_runtime_dlls(auto_stop_counterpulse OPENCV NDI)
@@ -1719,6 +1732,24 @@ if(BUILD_TESTING)
     add_test(NAME mouse_effect_probe_runner_tests
         COMMAND mouse_effect_probe_runner_tests)
 
+    add_executable(debug_runner_tests tests/debug_runner_tests.cpp)
+    target_link_libraries(debug_runner_tests PRIVATE debug_runner)
+    add_test(NAME debug_runner_tests COMMAND debug_runner_tests)
+    xen_deploy_runtime_dlls(debug_runner_tests OPENCV NDI)
+    add_executable(debug_session_tests tests/debug_session_tests.cpp)
+    target_link_libraries(debug_session_tests PRIVATE debug_session)
+    add_test(NAME debug_session_tests COMMAND debug_session_tests)
+    xen_deploy_runtime_dlls(debug_session_tests OPENCV ORT NDI)
+    set_tests_properties(debug_session_tests PROPERTIES TIMEOUT 30)
+    add_executable(debug_panel_tests tests/debug_panel_tests.cpp Xen/overlay/debug_panel.cpp)
+    target_link_libraries(debug_panel_tests PRIVATE debug_session imgui)
+    add_test(NAME debug_panel_tests COMMAND debug_panel_tests)
+    xen_deploy_runtime_dlls(debug_panel_tests OPENCV ORT NDI)
+    add_executable(recoil_editor_job_tests tests/recoil_editor_job_tests.cpp)
+    target_include_directories(recoil_editor_job_tests PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
+    add_test(NAME recoil_editor_job_tests COMMAND recoil_editor_job_tests)
+    set_tests_properties(recoil_editor_job_tests PROPERTIES TIMEOUT 10)
+
     add_executable(input_training_tests tests/input_training_tests.cpp)
     target_link_libraries(input_training_tests PRIVATE input_training)
     add_test(NAME input_training_tests COMMAND input_training_tests)
@@ -1781,6 +1812,9 @@ if(BUILD_TESTING)
     add_executable(model_workspace_ui_preview tests/model_workspace_ui_preview.cpp)
     target_link_libraries(model_workspace_ui_preview PRIVATE overlay imgui ${OpenCV_LIBS} log)
     xen_deploy_runtime_dlls(model_workspace_ui_preview OPENCV ORT NDI)
+    add_executable(debug_workspace_ui_preview tests/debug_workspace_ui_preview.cpp)
+    target_link_libraries(debug_workspace_ui_preview PRIVATE overlay imgui ${OpenCV_LIBS} log)
+    xen_deploy_runtime_dlls(debug_workspace_ui_preview OPENCV ORT NDI)
 
     # Overlay Present 系统 seam 与标量 helper 均不创建 Win32/D3D11 窗口，
     # 测试只注入 HRESULT，也不链接 ImGui。
@@ -2314,6 +2348,22 @@ if(BUILD_TESTING)
         add_test(NAME runtime_model_reload_test
             COMMAND runtime_model_reload_test "${XEN_TEST_MODEL}")
     endif()
+endif()
+
+if(BUILD_TESTING)
+    add_test(NAME weapon_fire_test_cli_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+        "${PROJECT_SOURCE_DIR}/tests/weapon_fire_test_cli_tests.py" --executable "$<TARGET_FILE:auto_stop_counterpulse>")
+    # 同一专项一次构建依赖图，避免逐目标重复运行运行库部署前置步骤。
+    add_custom_target(debug_workspace_validation DEPENDS xen_app auto_stop_counterpulse
+        debug_workspace_ui_preview debug_runner_tests debug_session_tests debug_panel_tests recoil_editor_job_tests
+        overlay_tests input_training_panel_tests runtime_input_training_tests input_training_tests input_safety_tests
+        auto_stop_counterpulse_tests auto_stop_sampling_analysis_tests auto_stop_counterpulse_hud_tests
+        auto_stop_manual_sampling_tests auto_stop_manual_monitor_tests auto_stop_manual_finalize_tests
+        auto_stop_manual_labels_tests auto_stop_hud_feedback_tests auto_stop_manual_intervals_tests
+        auto_stop_default_baseline_tests auto_stop_manual_plan_tests auto_stop_training_evaluation_tests
+        auto_stop_readiness_tests auto_stop_preroll_tests config_tests trigger_tests trigger_worker_tests
+        auto_stop_tests auto_stop_worker_tests weapon_timing_tests weapon_tests weapon_stop_integration_tests
+        recoil_worker_tests recoil_report_tests)
 endif()
 
 if(WIN32)

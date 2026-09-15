@@ -2,6 +2,16 @@
 
 namespace app::detail {
 
+bool debug_emergency_requested(bool keyboard_emergency, std::span<const RuntimeIntent> intents) noexcept {
+    if (keyboard_emergency) return true;
+    for (const auto& intent : intents) if (intent.type == RuntimeIntentType::EMERGENCY_STOP) return true;
+    return false;
+}
+bool allow_runtime_intent(const RuntimeIntent& intent, bool stopping_or_debug_owned) noexcept {
+    return !stopping_or_debug_owned || intent.type == RuntimeIntentType::EMERGENCY_STOP ||
+        intent.type == RuntimeIntentType::DISARM_OUTPUT;
+}
+
 bool route_input_health(
         Runtime& runtime, const KeyboardPollResult& poll) noexcept {
     return runtime.post_intent({
