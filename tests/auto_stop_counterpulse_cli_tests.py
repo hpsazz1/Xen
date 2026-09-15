@@ -190,6 +190,18 @@ $code = 0
             assert read_generated_json(prepared / 'sampling-settings.json') == read_generated_json(sequential_run / 'sampling-settings.json')
             assert (prepared / 'edit-config.bat').is_file() and (prepared / 'start-test.bat').is_file()
             assert not (prepared / 'result').exists()
+            # 动态候选必须经正式Prepare保留开关，不能退回固定move_ms执行。
+            dynamic_candidate = dict(candidate, overlap_fire_interval=True, fire_delay_ms=0, move_ms=500)
+            fixture.write_text(json.dumps({'groups': [{'baseline': 'counter', 'direction': 'D', 'samples': 4,
+                'candidate_plan': dynamic_candidate, 'proposed_plan': dynamic_candidate}]}), encoding='utf-8')
+            invoke(entry=analyze_entry, ok=True)
+            dynamic_prepared = next(item / 'test' for item in (sequential_run / 'manual-reviews').iterdir()
+                if item not in reviews and (item / 'test').is_dir())
+            assert read_generated_json(dynamic_prepared / 'plan.json') == dynamic_candidate
+            invoke('-Mode', 'Prepare', '-RunDirectory', dynamic_prepared, '-Executable', args.executable,
+                '-ConfigPath', sequential_config, '-ReuseRunDirectory', ok=True)
+            assert read_generated_json(dynamic_prepared / 'plan.json') == dynamic_candidate, '复用必须继承动态开关'
+            assert '动态移动占用' in (dynamic_prepared / 'TASK.md').read_text(encoding='utf-8-sig')
             # 超界提案必须保留原值进入编辑，不可clamp；选择0退出仍不Prepare。
             invalid_candidate = dict(candidate, counter_delay_ms=-5)
             fixture.write_text(json.dumps({'groups': [{'baseline': 'counter', 'direction': 'D', 'samples': 4,
@@ -264,9 +276,11 @@ $code = 0
             inherited = (default_run / 'test' / 'prepare-default-test.ps1').read_text(encoding='utf-8-sig')
             assert "credential''s directory'" in inherited and "$originalScope = 'LocalMachine'" in inherited
             override = sequential_run / 'mock-default-settings.json'
+            (sequential_run / 'mock-default-plan.json').write_text(json.dumps(dynamic_candidate), encoding='utf-8')
             invoke('-SamplingSettingsPath', override, entry=defaults_entry, ok=True)
             second = next(item for item in (sequential_run / 'default-baselines').iterdir() if item != default_run)
             assert read_generated_json(second / 'mock-derive.json')[-2:] == ['--sampling-settings', str(override)]
+            assert read_generated_json(second / 'test' / 'plan.json') == dynamic_candidate, '默认派生也必须保留动态开关'
             defaults_entry.write_bytes(defaults_original)
             excluded_labels.write_bytes(saved_labels)
             (sequential_run / 'task.json').write_bytes(original_task)

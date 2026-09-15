@@ -111,9 +111,19 @@ struct DebugPanel::Impl {
     std::uint64_t seen_draft_plan = 0, seen_draft_sampling = 0;
     Mode prepared_mode = Mode::COUNTERPULSE;
     std::string prepared_id;
-    int shots = 8, move = 120, counter = 40, delay = 0, release = 18, hold = 5, interval = 280, direction = 0;
-    bool move_parallel = true;
+    int shots = 20, move = 500, counter = 40, delay = 0, release = 18, hold = 5, interval = 300, direction = 0;
+    bool move_parallel = false, overlap = true;
     int baseline = 0;
+    void fields_from_plan(const Json& p) {
+        shots = p.value("shots", shots); move = p.value("move_ms", move);
+        counter = p.value("counter_hold_ms", counter); delay = p.value("counter_delay_ms", delay);
+        release = p.value("shot_after_release_ms", release); hold = p.value("shot_hold_ms", hold);
+        interval = p.value("fire_interval_ms", interval); direction = p.value("direction", 2) == 8 ? 1 : 0;
+        const auto b = p.value("baseline", std::string("counter"));
+        baseline = b == "no_counter" ? 1 : b == "stationary" ? 2 : 0;
+        move_parallel = p.value("move_during_fire_delay", true);
+        overlap = p.value("overlap_fire_interval", false);
+    }
 
     void changed(bool invalidate_repeat = true) {
         edited = true; allow = false;
@@ -156,13 +166,7 @@ struct DebugPanel::Impl {
             } else {
                 counter_plan_text = p.dump(2);
                 if (request.mode == Mode::COUNTERPULSE || request.mode == Mode::DERIVE_PLAN) request.plan_text = counter_plan_text;
-                shots = p.value("shots", shots); move = p.value("move_ms", move);
-                counter = p.value("counter_hold_ms", counter); delay = p.value("counter_delay_ms", delay);
-                release = p.value("shot_after_release_ms", release); hold = p.value("shot_hold_ms", hold);
-                interval = p.value("fire_interval_ms", interval); direction = p.value("direction", 2) == 8 ? 1 : 0;
-                const auto b = p.value("baseline", std::string("counter"));
-                baseline = b == "no_counter" ? 1 : b == "stationary" ? 2 : 0;
-                move_parallel = p.value("move_during_fire_delay", move_parallel);
+                fields_from_plan(p);
             }
             changed();
         }
@@ -179,12 +183,15 @@ struct DebugPanel::Impl {
             changed();
         }
     }
-    void plan_from_fields() {
-        request.plan_text = Json{{"schema_version",2},{"baseline",baseline == 0 ? "counter" : baseline == 1 ? "no_counter" : "stationary"},
+    void plan_from_fields(const Json& edits = Json::object()) {
+        auto plan = request.plan_text.empty() ? Json{{"schema_version",2},{"baseline",baseline == 0 ? "counter" : baseline == 1 ? "no_counter" : "stationary"},
             {"capture_enabled",false},{"shots",shots},{"move_ms",move},{"counter_hold_ms",counter},
             {"counter_delay_ms",delay},{"shot_after_release_ms",release},{"shot_hold_ms",hold},
             {"fire_interval_ms",interval},{"fire_delay_ms",baseline == 2 ? 1 : 0},
-            {"direction",direction ? 8 : 2},{"move_during_fire_delay",move_parallel},{"late_tolerance_ms",5}}.dump(2);
+            {"direction",direction ? 8 : 2},{"move_during_fire_delay",move_parallel},{"late_tolerance_ms",5}} : Json::parse(request.plan_text,nullptr,true,true);
+        if (request.plan_text.empty()) plan["overlap_fire_interval"] = overlap;
+        plan.update(edits);
+        request.plan_text = plan.dump(2);
     }
     void weapon_timing(const AppConfig& config, const Snapshot* s, OverlayActions& actions, bool counter_page) {
         if (button("读取共享武器资料", "后台读取辅助页管理的唯一共享目录。只刷新资料，不覆盖草稿；选择或点击带入才复制两字段。")) {
@@ -270,22 +277,48 @@ void DebugPanel::render_counterpulse(const AppConfig& config, const Snapshot* s,
         ImGui::TextWrapped("实验草稿独立于生产急停。动作顺序：移动 → 释放 → 反向 → 释放后等待 → 按住左键；由既有严格计划校验约束。");
         ImGui::TextWrapped("首发为基准射击，后续执行移动和所选制动动作；DOWN提交间隔只是下限，不是移动保持时长。");
         ImGui::BeginDisabled(s && s->busy);
-        bool changed = false;
-        changed |= ImGui::Combo("基准动作", &d.baseline, "反向制动\0无反向对照\0原地\0"); tip("选择实验动作；不改变生产H40策略，也不将模型基准称作实测。");
-        changed |= ImGui::Combo("移动方向", &d.direction, "D → A\0A → D\0"); tip("正向移动与反向制动方向，仅支持正式计划允许的左右方向。");
-        changed |= integer("每组次数", d.shots, 1, 30, "1至30次；总时长和组合约束仍由原生计划严格校验。");
-        changed |= integer("移动 / ms", d.move, 1, 500, "正向移动阶段时长，1至500ms。");
-        changed |= integer("反向前等待 / ms", d.delay, 0, 200, "从正向UP协议ACK起算；仅反向模式允许非零。");
-        changed |= integer("反向保持 / ms", d.counter, 1, 200, "从反向DOWN协议ACK起算，1至200ms。");
-        changed |= integer("释放后等待 / ms", d.release, 0, 20, "反向UP协议ACK之后等待；这是模型计划参数，不是停稳观测。");
-        changed |= integer("左键按住 / ms", d.hold, 1, 2000, "从DOWN协议ACK至UP提交的计划时长。");
-        changed |= integer("DOWN提交最小间隔 / ms", d.interval, 1, 5000, "下一次DOWN的提交下限；移动阶段可能使实际间隔更长。");
-        if (button("从当前急停参数带入草稿", "复制当前配置的保持及释放等待；不回写生产配置，不修改其他动作。")) {
-            d.counter = config.auto_stop.counter_hold_ms; d.release = config.auto_stop.shot_after_release_ms; changed = true;
+        Json edits = Json::object();
+        if (ImGui::Combo("基准动作", &d.baseline, "反向制动\0无反向对照\0原地\0")) {
+            edits["baseline"] = d.baseline == 0 ? "counter" : d.baseline == 1 ? "no_counter" : "stationary";
+            if (d.baseline == 2) {
+                d.overlap = false; edits["overlap_fire_interval"] = false;
+                const auto plan = d.request.plan_text.empty() ? Json::object() : Json::parse(d.request.plan_text,nullptr,true,true);
+                if (plan.value("fire_delay_ms",0) == 0) edits["fire_delay_ms"] = 1;
+            }
         }
-        if (changed || d.request.plan_text.empty()) { d.plan_from_fields(); d.changed(); }
+        tip("选择实验动作；原地关闭动态移动，已有非零等待保留。测试不改变生产H40策略。");
+        ImGui::BeginDisabled(d.baseline == 2);
+        if (ImGui::Checkbox("按武器间隔动态移动", &d.overlap)) {
+            edits["overlap_fire_interval"] = d.overlap;
+            if (d.overlap) { edits["fire_delay_ms"] = 0; edits["move_during_fire_delay"] = false; d.move_parallel = false; }
+        }
+        tip("开启后按上一DOWN提交与射击间隔安排后续移动，移动时长自动分配；明确清除额外fire_delay等待和旧并行等待选项。关闭后恢复固定移动语义。");
+        ImGui::EndDisabled();
+        ImGui::TextWrapped(d.overlap ? "动态调度：扣除实际UP、反向与释放等待后分配移动，超出上限的余量先等待；没有正移动预算时停止，不发下一枪。" : "固定调度：沿用导入计划的移动时长、额外等待与并行设置；普通字段编辑不重置隐藏等待参数。");
+        if (ImGui::Combo("移动方向", &d.direction, "D → A\0A → D\0")) edits["direction"] = d.direction ? 8 : 2;
+        tip("正向移动与反向制动方向，仅支持正式计划允许的左右方向。");
+        auto edit_integer = [&](const char* label, int& value, int low, int high, const char* help, const char* key) {
+            if (integer(label,value,low,high,help)) edits[key] = value;
+        };
+        edit_integer("每组次数",d.shots,1,30,"1至30次；总时长和组合约束仍由原生计划严格校验。","shots");
+        edit_integer(d.overlap ? "移动上限 / ms" : "移动 / ms",d.move,1,500,
+            d.overlap ? "单次移动上限，实际时长由本次武器间隔预算动态分配；不是固定移动时长。" : "固定正向移动阶段时长，1至500ms。","move_ms");
+        edit_integer("反向前等待 / ms",d.delay,0,200,"从正向UP协议ACK起算；仅反向模式允许非零。","counter_delay_ms");
+        edit_integer("反向保持 / ms",d.counter,1,200,"从反向DOWN协议ACK起算，1至200ms。","counter_hold_ms");
+        edit_integer("释放后等待 / ms",d.release,0,20,"反向UP协议ACK之后等待；这是模型计划参数，不是停稳观测。","shot_after_release_ms");
+        edit_integer("左键按住 / ms",d.hold,1,2000,"从DOWN协议ACK至UP提交的计划时长。","shot_hold_ms");
+        edit_integer("DOWN提交最小间隔 / ms",d.interval,1,5000,"下一次DOWN的提交下限；动态模式在这个间隔内分配移动预算。","fire_interval_ms");
+        if (button("从当前急停参数带入草稿", "复制当前配置的保持及释放等待；不回写生产配置，不修改其他动作。")) {
+            d.counter = config.auto_stop.counter_hold_ms; d.release = config.auto_stop.shot_after_release_ms;
+            edits["counter_hold_ms"] = d.counter; edits["shot_after_release_ms"] = d.release;
+        }
+        if (!edits.empty() || d.request.plan_text.empty()) { d.plan_from_fields(edits); d.changed(); }
         d.weapon_timing(config,s,actions,true);
-        if (ImGui::InputTextMultiline("完整动作计划 JSONC", &d.request.plan_text, { -1, 190 })) d.changed();
+        if (ImGui::InputTextMultiline("完整动作计划 JSONC", &d.request.plan_text, { -1, 190 })) {
+            d.changed();
+            // 编辑未完成时保留原文；可解析后同步表单，后续只改用户明确操作的字段。
+            try { d.fields_from_plan(Json::parse(d.request.plan_text,nullptr,true,true)); } catch (...) {}
+        }
         tip("直接编辑正式计划格式，未知字段或越界会拒绝；草稿变更使旧准备失效。");
         input("载入文件", d.load_path, "只在点击载入时由后台读取计划或采样设置，不逐帧访问磁盘。");
         if (button("载入计划", "读取既有JSON/JSONC计划；保留原文件。")) { d.request.load_path = d.load_path; d.changed(); d.send(Action::LOAD_PLAN, actions); }

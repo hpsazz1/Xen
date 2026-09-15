@@ -70,8 +70,8 @@ Json request_plan(const Request& request) {
     if (!request.plan_text.empty()) return validate_debug_plan(parse_document(request.plan_text));
     if (request.mode != Mode::COUNTERPULSE) return Json::object();
     return validate_debug_plan({{"schema_version",2},{"baseline","counter"},{"capture_enabled",false},
-        {"shots",20},{"fire_delay_ms",200},{"fire_interval_ms",0},{"move_during_fire_delay",true},
-        {"move_ms",100},{"counter_hold_ms",40},{"counter_delay_ms",0},
+        {"shots",20},{"fire_delay_ms",0},{"fire_interval_ms",300},{"move_during_fire_delay",false},
+        {"overlap_fire_interval",true},{"move_ms",500},{"counter_hold_ms",40},{"counter_delay_ms",0},
         {"shot_after_release_ms",18},{"shot_hold_ms",5},{"late_tolerance_ms",5},{"direction",2}});
 }
 Json request_sampling(const Request& request) {
@@ -295,7 +295,11 @@ struct Session::Impl {
         update([&](Snapshot& s) {
             s.result = completed;
             if (!cleanup_ok) { s.state = State::CLEANUP_UNKNOWN; s.cleanup_unknown = true; s.message = "释放未确认，禁止新物理任务"; }
-            else if (canceled || !success) { s.state = canceled || completed->value("failure","") == "USER_STOP" ? State::CANCELED : State::FAILED; s.message = "任务已结束；请查看取消或失败记录"; }
+            else if (canceled || !success) {
+                s.state = canceled || completed->value("failure","") == "USER_STOP" ? State::CANCELED : State::FAILED;
+                s.message = completed->value("failure","") == "MOVEMENT_WINDOW_UNAVAILABLE" ?
+                    "武器间隔内已无移动余量；本组停止，请增大提交间隔或缩短按住时间后重新准备" : "任务已结束；请查看取消或失败记录";
+            }
             else { s.state = State::COMPLETED; s.message = "任务完成；自动结果不代表真实停稳或子弹数"; }
             if (completed->contains("candidate_plan")) s.plan = completed->at("candidate_plan");
             if (completed->contains("plan")) s.plan = completed->at("plan");

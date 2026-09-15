@@ -95,10 +95,14 @@ void check_weapon_draft_isolation() {
     DebugPanel panel; AppConfig config; debug_session::Snapshot snapshot;
     snapshot.timing_catalog = weapon::default_timing_catalog(); snapshot.timing_catalog_valid = true;
     int page = 1;
-    auto frame = [&](const char* focus = nullptr, bool popup = false) {
+    auto item_id = [](ImGuiWindow* window, const char* label, int item_index) {
+        // ImGui::Combo为每个列表项PushID(index)，自定义BeginCombo武器列表没有这一层。
+        return item_index < 0 ? window->GetID(label) : ImHashStr(label,0,window->GetID(item_index));
+    };
+    auto frame = [&](const char* focus = nullptr, bool popup = false, int item_index = -1) {
         ImGui::NewFrame();
         auto* prior = ImGui::FindWindowByName(popup ? "##Combo_00" : "武器草稿交互回归");
-        if (focus && prior) ImGui::SetFocusID(prior->GetID(focus), prior);
+        if (focus && prior) ImGui::SetFocusID(item_id(prior,focus,item_index), prior);
         ImGui::SetNextWindowPos({0,0}); ImGui::SetNextWindowSize({1000,2000});
         ImGui::Begin("武器草稿交互回归",nullptr,ImGuiWindowFlags_NoSavedSettings);
         OverlayActions actions; panel.render_status(&snapshot,actions);
@@ -106,10 +110,10 @@ void check_weapon_draft_isolation() {
         else panel.render_counterpulse(config,&snapshot,actions);
         ImGui::End(); ImGui::Render(); return actions;
     };
-    auto click = [&](const char* label, bool popup = false) {
-        auto& io = ImGui::GetIO(); io.AddMousePosEvent(-100,-100); frame(label,popup);
+    auto click = [&](const char* label, bool popup = false, int item_index = -1) {
+        auto& io = ImGui::GetIO(); io.AddMousePosEvent(-100,-100); frame(label,popup,item_index);
         auto* window = ImGui::FindWindowByName(popup ? "##Combo_00" : "武器草稿交互回归");
-        expect(window && ImGui::GetCurrentContext()->NavId == window->GetID(label),"武器回归必须定位真实控件");
+        expect(window && ImGui::GetCurrentContext()->NavId == item_id(window,label,item_index),"武器回归必须定位真实控件");
         const auto rect = ImGui::WindowRectRelToAbs(window,window->NavRectRel[ImGuiNavLayer_Main]);
         io.AddMousePosEvent(rect.GetCenter().x,rect.GetCenter().y); frame();
         io.AddMouseButtonEvent(0,true); frame(); io.AddMouseButtonEvent(0,false); return frame();
@@ -131,11 +135,16 @@ void check_weapon_draft_isolation() {
     page = 0; frame(); ++snapshot.generation; frame();
     action = click("校验计划");
     const auto counter = debug_session::Json::parse(action.debug_request.plan_text);
-    expect(counter.value("baseline","") == "counter" && counter.value("move_ms",0) == 120 && counter.value("shots",0) == 8,
+    expect(counter.value("baseline","") == "counter" && counter.value("move_ms",0) == 500 && counter.value("shots",0) == 20,
         "历史stationary快照不能将counter草稿污染为move1或15次");
+    expect(counter.value("overlap_fire_interval",false) && counter.value("counter_hold_ms",0) == 40 &&
+        counter.value("counter_delay_ms",-1) == 0 && counter.value("shot_after_release_ms",0) == 18 &&
+        counter.value("shot_hold_ms",0) == 5 && counter.value("fire_interval_ms",0) == 300 &&
+        counter.value("fire_delay_ms",-1) == 0 && !counter.value("move_during_fire_delay",true),
+        "新建GUI急停草稿须为H40动态预算：20次、移动上限500、间隔300");
     click("带入所选武器参数"); action = click("校验计划");
     const auto imported = debug_session::Json::parse(action.debug_request.plan_text);
-    expect(imported.value("shot_hold_ms",0) == 60 && imported.value("fire_interval_ms",0) == 350 && imported.value("move_ms",0) == 120,
+    expect(imported.value("shot_hold_ms",0) == 60 && imported.value("fire_interval_ms",0) == 350 && imported.value("move_ms",0) == 500,
         "急停页必须复用所选武器两字段且保持独立动作参数");
     page = 1; frame(); action = click("校验计划");
     expect(action.debug_request.fire_interval_ms == 350,"切回射击页必须保留独立武器草稿");
@@ -158,6 +167,30 @@ void check_weapon_draft_isolation() {
     page = 1; frame(); action = click("校验计划");
     expect(action.debug_request.shot_hold_ms == 70 && action.debug_request.fire_interval_ms == 410,
         "明确文件导入必须在射击页使用新两字段");
+    snapshot.draft_plan = {{"schema_version",2},{"baseline","counter"},{"move_ms",90},{"shots",6},
+        {"fire_delay_ms",200},{"move_during_fire_delay",true},{"shot_hold_ms",9},{"fire_interval_ms",510},
+        {"late_tolerance_ms",7},{"counter_hold_ms",40}};
+    snapshot.draft_plan_mode = debug_session::Mode::COUNTERPULSE; ++snapshot.draft_plan_revision;
+    frame(); page = 0; frame(); click("移动 / ms");
+    auto& io = ImGui::GetIO();
+    io.AddKeyEvent(ImGuiMod_Ctrl,true); io.AddKeyEvent(ImGuiKey_A,true); frame();
+    io.AddKeyEvent(ImGuiKey_A,false); io.AddKeyEvent(ImGuiMod_Ctrl,false); frame();
+    io.AddInputCharactersUTF8("110"); frame(); io.AddKeyEvent(ImGuiKey_Enter,true); frame();
+    io.AddKeyEvent(ImGuiKey_Enter,false); frame(); action = click("校验计划");
+    const auto edited_plan = debug_session::Json::parse(action.debug_request.plan_text);
+    expect(edited_plan.value("move_ms",0) == 110 && edited_plan.value("fire_delay_ms",0) == 200 &&
+        edited_plan.value("move_during_fire_delay",false) && edited_plan.value("late_tolerance_ms",0) == 7 &&
+        edited_plan.value("shots",0) == 6 && !edited_plan.value("overlap_fire_interval",false),
+        "显式导入旧计划后编辑移动必须保留200ms等待、并行、容差与其余字段");
+    click("按武器间隔动态移动"); action = click("校验计划");
+    const auto dynamic = debug_session::Json::parse(action.debug_request.plan_text);
+    expect(dynamic.value("overlap_fire_interval",false) && dynamic.value("fire_delay_ms",-1) == 0 &&
+        !dynamic.value("move_during_fire_delay",true) && dynamic.value("move_ms",0) == 110,
+        "显式切动态模式才清额外等待，并将已有移动时长作为上限");
+    click("基准动作"); frame(); click("原地",true,2); action = click("校验计划");
+    const auto stationary = debug_session::Json::parse(action.debug_request.plan_text);
+    expect(stationary.value("baseline","") == "stationary" && !stationary.value("overlap_fire_interval",true) &&
+        stationary.value("fire_delay_ms",0) == 1,"切换原地必须禁用动态移动并保留既有最小等待规则");
 }
 
 }

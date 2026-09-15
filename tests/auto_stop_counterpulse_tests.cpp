@@ -489,7 +489,87 @@ void schema2_release_timing() {
         require(rejected, "版本2必须拒绝旧参数、版本错误和超范围计划");
     }
 }
+void schema2_dynamic_movement_window() {
+    std::vector<std::int64_t> observed_holds;
+    for (const int interval : {300,600,1200}) for (const int hold : {5,60}) for (const int latency : {0,1,7}) {
+        const Json document{{"schema_version",2},{"baseline","counter"},{"shots",3},
+            {"shot_hold_ms",hold},{"fire_interval_ms",interval},{"fire_delay_ms",0},
+            {"move_during_fire_delay",false},{"overlap_fire_interval",true},
+            {"move_ms",500},{"counter_hold_ms",40},{"counter_delay_ms",0},{"shot_after_release_ms",18}};
+        CounterpulsePlan p;
+        try { p = parse_counterpulse_plan(document); }
+        catch (...) { throw std::runtime_error("动态移动计划未被原生执行器支持"); }
+        require(counterpulse_plan_json(p).at("overlap_fire_interval") == true,"动态调度身份必须随计划保存");
+        Fake mouse; mouse.latency_ms = latency;
+        const auto result = execute_counterpulse(mouse,p,{},mouse.clock());
+        require(result["success"] && mouse.downs == 3,"动态窗口应完成有界三发且完整清理");
+        std::int64_t last_down=0, last_up=0, move_ack=0, reverse_ack=0, release_ack=0;
+        for (const auto& command : result["commands"]) {
+            if (command["shot_index"] == 0) continue;
+            const auto submit=command["submit_ns"].get<std::int64_t>();
+            const auto ack=command["ack_received_ns"].get<std::int64_t>();
+            const int value=command["value"];
+            if(command["kind"] == "left_button") {
+                if(value) {
+                    if(last_down) {
+                        require(submit >= last_down + interval*1000000LL,"不能早于武器提交间隔开火");
+                        require(submit >= release_ack + 18000000,"不能截短方向释放后的18ms");
+                        require(submit < last_down + (interval+100)*1000000LL,"不能把完整移动再串接到武器间隔之后");
+                    }
+                    last_down=submit;
+                } else last_up=ack;
+            } else if(value == 2) {
+                require(submit >= last_up && submit < last_down + interval*1000000LL,"移动须在左键松开后且武器等待区间内发生");
+                move_ack=ack; reverse_ack=0;
+            } else if(value == 8) { reverse_ack=ack; }
+            else if(reverse_ack) {
+                require(submit-reverse_ack == 40000000,"反向制动仍从ACK完整保持40ms"); release_ack=ack;
+            } else if(move_ack) {
+                const auto duration=submit-move_ack;
+                require(duration > 0 && duration <= 500000000,"动态移动不得无时长或超过500ms上限");
+                observed_holds.push_back(duration);
+            }
+        }
+        require(!mouse.left && !mouse.held && mouse.cleanup_calls == 1,"动态调度结束仍归零");
+    }
+    require(*std::min_element(observed_holds.begin(),observed_holds.end()) <
+        *std::max_element(observed_holds.begin(),observed_holds.end()),"移动时长必须随射击窗口变化，不能固定100ms");
+    Json base{{"schema_version",2},{"baseline","counter"},{"shots",3},{"shot_hold_ms",60},
+        {"fire_interval_ms",600},{"fire_delay_ms",0},{"move_during_fire_delay",false},
+        {"overlap_fire_interval",true},{"move_ms",500},{"counter_hold_ms",40},{"shot_after_release_ms",18}};
+    for(const auto& patch : {Json{{"fire_interval_ms",118}},Json{{"fire_delay_ms",1}},
+            Json{{"move_during_fire_delay",true}},Json{{"baseline","stationary"}},Json{{"overlap_fire_interval",1}}}) {
+        auto invalid=base; invalid.update(patch); bool rejected=false;
+        try { (void)parse_counterpulse_plan(invalid); } catch(...) { rejected=true; }
+        require(rejected,"动态模式必须拒绝无正余量、冲突等待及非法开关");
+    }
+    { auto tight=base; tight["fire_interval_ms"]=122;
+      Fake mouse; mouse.latency_ms=3;
+      const auto result=execute_counterpulse(mouse,parse_counterpulse_plan(tight),{},mouse.clock());
+      require(result["failure"] == "MOVEMENT_WINDOW_UNAVAILABLE" && mouse.downs == 1 &&
+          !mouse.left && !mouse.held && mouse.cleanup_calls == 1,"左键ACK耗尽移动窗口时必须停止而非补开下一枪"); }
+    { auto tight=base; tight["fire_interval_ms"]=121;
+      Fake mouse; mouse.latency_ms=1;
+      const auto result=execute_counterpulse(mouse,parse_counterpulse_plan(tight),{},mouse.clock());
+      require(result["failure"] == "MOVEMENT_WINDOW_UNAVAILABLE" && mouse.keyboards.size() == 2 &&
+          mouse.downs == 1 && !mouse.held && mouse.cleanup_calls == 1,"移动DOWN ACK耗尽余量时须释放已按方向且不再开火"); }
+    for(bool missing_ack : {false,true}) {
+        Fake mouse; if(missing_ack) mouse.unknown_keyboard_call=2; else mouse.physical_at_ms=200;
+        const auto result=execute_counterpulse(mouse,parse_counterpulse_plan(base),{},mouse.clock());
+        require(!result["success"].get<bool>() && mouse.downs == 1 && !mouse.left && !mouse.held && mouse.cleanup_calls == 1,
+            "动态移动期间输入取消或未知ACK不能绕过最终释放");
+    }
+    { Fake mouse; auto clock=mouse.clock();
+      clock.sleep_until=[&](auto target){mouse.time=std::max(mouse.time,target)+(mouse.left ? std::chrono::milliseconds(100) : std::chrono::milliseconds(0));};
+      const auto result=execute_counterpulse(mouse,parse_counterpulse_plan(base),{},clock);
+      require(!result["success"].get<bool>() && result["failure"] == "RELEASE_DEADLINE_MISSED" &&
+          !mouse.left && !mouse.held,"已生成目标后的迟到仍失败，不能重新取now掩盖"); }
+    { auto no_counter=base; no_counter["baseline"]="no_counter"; no_counter["direction"]=8;
+      Fake mouse; const auto result=execute_counterpulse(mouse,parse_counterpulse_plan(no_counter),{},mouse.clock());
+      require(result["success"] && mouse.downs == 3,"无反向和另一方向也按各自释放预算动态移动"); }
+}
 void schema2_weapon_hold_and_interval() {
+    schema2_dynamic_movement_window();
     for (const auto* baseline : {"counter", "no_counter", "stationary"})
         for (const int interval : {0, 500, 1500, 5000}) {
         const auto p = parse_counterpulse_plan(Json{{"schema_version", 2}, {"baseline", baseline},
