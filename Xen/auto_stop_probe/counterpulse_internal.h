@@ -14,6 +14,7 @@ struct CounterpulsePlan {
     int fire_interval_ms = 0; // 版本2：相邻左键DOWN提交的最小间隔，余下等待放在下一轮移动前。
     bool overlap_fire_interval = false; // 显式动态模式：move_ms为上限，实际移动占用武器间隔剩余预算。
     bool move_during_fire_delay = true; // true并行移动；false等待结束后才开始移动。
+    int restart_interval_ms = 0; // 版本2：上轮反向UP ACK到下一轮正向DOWN提交的最小间隔。
     int move_ms = 120;
     int counter_hold_ms = 30;
     int counter_delay_ms = 0; // 正向UP ACK后等待多久再按反向；不同于反向持键时长。
@@ -32,9 +33,9 @@ struct CounterpulsePlan {
     int cycle_budget_ms() const {
         if (schema_version == 2) {
             if (baseline == "stationary") return std::max(shot_hold_ms + fire_delay_ms, fire_interval_ms);
-            if (overlap_fire_interval) return std::max(fire_interval_ms,shot_hold_ms + move_ms + move_tail_ms());
+            if (overlap_fire_interval) return std::max(fire_interval_ms,shot_hold_ms + move_ms + move_tail_ms()) + restart_interval_ms;
             return std::max(shot_hold_ms, fire_interval_ms) +
-                (move_during_fire_delay ? std::max(move_ms, fire_delay_ms) : fire_delay_ms + move_ms) + move_tail_ms();
+                (move_during_fire_delay ? std::max(move_ms, fire_delay_ms) : fire_delay_ms + move_ms) + move_tail_ms() + restart_interval_ms;
         }
         return fire_delay_ms > 0 ? shot_hold_ms +
             (move_during_fire_delay ? std::max(move_ms, fire_delay_ms) : fire_delay_ms + move_ms) + move_tail_ms() :
@@ -44,7 +45,7 @@ struct CounterpulsePlan {
 
 inline CounterpulsePlan parse_counterpulse_plan(const Json& input) {
     if (!input.is_object()) throw std::runtime_error("反冲计划必须为对象");
-    const std::vector<std::string> fields{"schema_version", "baseline", "capture_enabled", "shots", "shot_interval_ms", "fire_delay_ms", "fire_interval_ms", "overlap_fire_interval", "move_during_fire_delay", "move_ms",
+    const std::vector<std::string> fields{"schema_version", "baseline", "capture_enabled", "shots", "shot_interval_ms", "fire_delay_ms", "fire_interval_ms", "overlap_fire_interval", "restart_interval_ms", "move_during_fire_delay", "move_ms",
         "counter_hold_ms", "counter_delay_ms", "brake_window_ms", "shot_after_release_ms", "shot_hold_ms", "late_tolerance_ms", "direction"};
     for (const auto& [key, value] : input.items()) {
         if (std::find(fields.begin(), fields.end(), key) == fields.end())
@@ -71,6 +72,7 @@ inline CounterpulsePlan parse_counterpulse_plan(const Json& input) {
     p.fire_interval_ms = input.value("fire_interval_ms", p.fire_interval_ms);
     p.overlap_fire_interval = input.value("overlap_fire_interval",false);
     p.move_during_fire_delay = input.value("move_during_fire_delay", p.move_during_fire_delay);
+    p.restart_interval_ms = input.value("restart_interval_ms", 0);
     p.move_ms = input.value("move_ms", p.move_ms);
     p.counter_hold_ms = input.value("counter_hold_ms", p.counter_hold_ms);
     p.counter_delay_ms = input.value("counter_delay_ms", p.counter_delay_ms);
@@ -84,6 +86,7 @@ inline CounterpulsePlan parse_counterpulse_plan(const Json& input) {
             p.move_during_fire_delay || p.fire_interval_ms <= p.shot_hold_ms + p.move_tail_ms()))
             throw std::runtime_error("动态移动需要独立武器间隔且有正移动余量；不能同时启用射后等待或原地模式");
         if ((p.baseline != "counter" && p.baseline != "stationary" && p.baseline != "no_counter") ||
+            p.restart_interval_ms > 2000 || (p.restart_interval_ms > 0 && p.baseline != "counter") ||
             p.capture_enabled || p.shots < 1 || p.shots > 30 || p.fire_delay_ms > 2000 || p.fire_interval_ms > 5000 ||
             (p.baseline == "stationary" && p.fire_delay_ms == 0) ||
             (direction != 2 && direction != 8) || p.move_ms < 1 || p.move_ms > 500 ||
@@ -95,7 +98,7 @@ inline CounterpulsePlan parse_counterpulse_plan(const Json& input) {
         p.direction = static_cast<std::uint8_t>(direction);
         return p;
     }
-    if (input.contains("fire_interval_ms") || input.contains("overlap_fire_interval") || (p.baseline != "counter" && p.baseline != "stationary" && p.baseline != "no_counter") ||
+    if (input.contains("restart_interval_ms") || input.contains("fire_interval_ms") || input.contains("overlap_fire_interval") || (p.baseline != "counter" && p.baseline != "stationary" && p.baseline != "no_counter") ||
         (p.shots < 1 || p.shots > 30) || (p.shot_interval_ms != 0 && p.shot_interval_ms < 280) || p.shot_interval_ms > 650 ||
         (p.shot_interval_ms == 0 && (p.baseline == "stationary" || !p.uses_release_timing())) ||
         ((p.fire_delay_ms == 0 || p.capture_enabled) && p.cycle_budget_ms() > 650) ||
@@ -124,6 +127,7 @@ inline Json counterpulse_plan_json(const CounterpulsePlan& p) {
         {"shot_after_release_ms", p.shot_after_release_ms}, {"shot_hold_ms", p.shot_hold_ms},
         {"late_tolerance_ms", p.late_tolerance_ms}, {"direction", p.direction}};
         if (p.overlap_fire_interval) plan["overlap_fire_interval"] = true;
+        if (p.restart_interval_ms != 0) plan["restart_interval_ms"] = p.restart_interval_ms;
         return plan;
     }
     return {{"baseline", p.baseline}, {"capture_enabled", p.capture_enabled}, {"shots", p.shots}, {"shot_interval_ms", p.shot_interval_ms}, {"fire_delay_ms", p.fire_delay_ms},
@@ -242,6 +246,10 @@ inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan
     auto command = [&](bool button, int value, int shot, Clock::time_point planned) -> bool {
         if (!check()) return false;
         const auto submit = clock.now();
+        if (!button && value == p.direction && p.overlap_fire_interval &&
+            submit >= last_shot_submit + std::chrono::milliseconds(p.fire_interval_ms - p.move_tail_ms())) {
+            failure = "MOVEMENT_WINDOW_UNAVAILABLE"; return false;
+        }
         if (button && value && shot > 1 && p.schema_version == 2 &&
             submit < last_shot_submit + std::chrono::milliseconds(p.fire_interval_ms)) {
             budget_failure("SHOT_RECOVERY_TOO_SHORT", shot, submit,
@@ -305,6 +313,7 @@ inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan
         if (command(true, 0, 0, start) && command(false, 0, 0, clock.now())) {
             const auto first = clock.now();
             auto deadline = first;
+            Clock::time_point previous_counter_up_ack{};
             for (int shot = 1; shot <= p.shots && failure.empty(); ++shot) {
                 if (!wait(deadline)) break;
                 if (clock.now() > deadline + std::chrono::milliseconds(p.late_tolerance_ms)) { failure = "SHOT_DEADLINE_MISSED"; break; }
@@ -334,9 +343,25 @@ inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan
                     move_start = std::max(move_start, last_shot_submit + std::chrono::milliseconds(p.fire_interval_ms));
                 if (p.fire_delay_ms > 0 && !p.move_during_fire_delay)
                     move_start = std::max(move_start, fire_delay_start + std::chrono::milliseconds(p.fire_delay_ms));
+                const auto restart_anchor = previous_counter_up_ack;
+                const bool has_restart_anchor = restart_anchor != Clock::time_point{};
+                const auto restart_target = restart_anchor + std::chrono::milliseconds(p.restart_interval_ms);
+                if (has_restart_anchor) move_start = std::max(move_start, restart_target);
+                // 跨轮等待只消耗现有窗口，不能通过推迟武器目标伪造动态移动余量。
+                if (p.overlap_fire_interval && move_start >= dynamic_move_end) {
+                    report["restart_window_failure"] = {{"shot_index",shot+1},
+                        {"restart_anchor_ack_ns",ns(restart_anchor)}, {"restart_target_ns",ns(restart_target)},
+                        {"move_start_deadline_ns",ns(move_start)}, {"move_end_deadline_ns",ns(dynamic_move_end)}};
+                    failure = "MOVEMENT_WINDOW_UNAVAILABLE"; break;
+                }
                 next_shot_deadline = run_deadline;
                 minimum_shot = earliest;
-                if (!wait(move_start) || !command(false, p.direction, shot + 1, move_start)) break;
+                if (!wait(move_start)) break;
+                if (p.overlap_fire_interval && clock.now() >= dynamic_move_end) {
+                    failure = "MOVEMENT_WINDOW_UNAVAILABLE"; break;
+                }
+                if (!command(false, p.direction, shot + 1, move_start)) break;
+                const auto move_down_submit_ns = report["commands"].back()["submit_ns"].get<std::int64_t>();
                 auto move_release = ack + std::chrono::milliseconds(p.move_ms);
                 const auto move_down_ack = ack;
                 if (p.overlap_fire_interval) {
@@ -360,6 +385,7 @@ inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan
                     if (!wait(counter_press) || !command(false, p.direction == 2 ? 8 : 2, shot + 1, counter_press)) break;
                     const auto counter_release = ack + std::chrono::milliseconds(p.counter_hold_ms);
                     if (!wait(counter_release) || !command(false, 0, shot + 1, counter_release)) break;
+                    previous_counter_up_ack = ack;
                 }
                 const auto shot_anchor = after_release ? ack : move_up_ack;
                 if (after_release) deadline = shot_anchor + std::chrono::milliseconds(p.shot_after_release_ms);
@@ -372,6 +398,14 @@ inline Json execute_counterpulse(IMouseController& mouse, const CounterpulsePlan
                     {"move_release_deadline_ns", ns(move_release)}, {"shot_anchor_ack_ns", ns(shot_anchor)}, {"shot_deadline_ns", ns(deadline)},
                     {"minimum_shot_ns", p.shot_interval_ms > 0 ? Json(ns(earliest)) : Json(nullptr)},
                     {"shot_after_release_ms", p.shot_after_release_ms}});
+                if (p.schema_version == 2 && p.baseline == "counter") {
+                    auto& cycle = report["cycles"].back();
+                    cycle["restart_interval_ms"] = p.restart_interval_ms;
+                    cycle["restart_anchor_ack_ns"] = has_restart_anchor ? Json(ns(restart_anchor)) : Json(nullptr);
+                    cycle["restart_target_ns"] = has_restart_anchor ? Json(ns(restart_target)) : Json(nullptr);
+                    cycle["restart_actual_gap_ns"] = has_restart_anchor ? Json(move_down_submit_ns-ns(restart_anchor)) : Json(nullptr);
+                    cycle["move_down_submit_ns"] = move_down_submit_ns;
+                }
                 if (p.schema_version != 2) report["cycles"].back()["brake_window_ms"] = p.brake_window_ms;
                 else report["cycles"].back()["minimum_shot_ns"] =
                     ns(last_shot_submit + std::chrono::milliseconds(p.fire_interval_ms));

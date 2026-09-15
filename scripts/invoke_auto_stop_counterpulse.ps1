@@ -10,6 +10,7 @@ param(
     [ValidateRange(1, 30)][int]$Shots = 20,
     [ValidateRange(0, 2000)][int]$FireDelayMs = 300,
     [ValidateRange(0, 5000)][int]$FireIntervalMs = 0,
+    [ValidateRange(0, 2000)][int]$RestartIntervalMs = 0,
     [bool]$OverlapFireInterval = $false,
     [bool]$MoveDuringFireDelay = $true,
     [ValidateSet('A', 'D')][string]$Direction = 'A',
@@ -66,6 +67,7 @@ $planHelp = [ordered]@{
     shots='开火次数1..30，不代表实际子弹数。';
     fire_delay_ms='上一轮左键UP ACK后的等待0..2000ms；与移动是否并行由下一开关决定。';
     fire_interval_ms='相邻左键DOWN提交的最小间隔0..5000ms；0关闭。冷却在下一轮移动前，不是精确周期。';
+    restart_interval_ms='反向UP ACK至下一正向DOWN提交的最小间隔0..2000ms；与左键释放及既有目标取较晚时刻。0保持原行为；非counter必须0；无前次反向UP时不限制。';
     move_during_fire_delay='true等待与移动并行；false先等待再移动。';
     overlap_fire_interval='缺省false保持原顺序；true在武器间隔内安排移动，move_ms为上限，完整保留反向及松键后等待。需fire_delay_ms=0且move_during_fire_delay=false。';
     move_ms='正向键DOWN ACK起保持1..500ms；动态模式为上限，剩余窗口不足时缩短。';
@@ -284,6 +286,7 @@ try {
             move_ms = $MoveMs; counter_hold_ms = $CounterHoldMs; counter_delay_ms = $CounterDelayMs; shot_after_release_ms = $ShotAfterReleaseMs; shot_hold_ms = $ShotHoldMs;
             late_tolerance_ms = $LateToleranceMs; direction = $(if ($Direction -eq 'A') { 2 } else { 8 }) }
         if ($OverlapFireInterval) { $plan['overlap_fire_interval'] = $true }
+        if ($RestartIntervalMs -ne 0) { $plan['restart_interval_ms'] = $RestartIntervalMs }
         if (-not $exists) { $null = New-Item -ItemType Directory -Path $runPath }
         $lockPath = Join-Path $runPath '.counterpulse.lock'
         Assert-PlainPath $lockPath
@@ -315,6 +318,11 @@ try {
             }
             if ($OverlapFireInterval) { $plan['overlap_fire_interval'] = $true }
             else { $plan.Remove('overlap_fire_interval') }
+            if (-not $PSBoundParameters.ContainsKey('RestartIntervalMs')) {
+                $RestartIntervalMs = if ($inherited.PSObject.Properties.Name -contains 'restart_interval_ms') { $inherited.restart_interval_ms } else { 0 }
+            }
+            if ($RestartIntervalMs -ne 0) { $plan['restart_interval_ms'] = $RestartIntervalMs }
+            else { $plan.Remove('restart_interval_ms') }
             if ($PSBoundParameters.ContainsKey('Baseline') -and $Baseline -ne 'counter' -and
                 -not $PSBoundParameters.ContainsKey('CounterDelayMs')) { $plan['counter_delay_ms'] = 0 }
             foreach ($parameter in $fields.Keys) {
@@ -538,9 +546,15 @@ try {
             $overlap = $plan.overlap_fire_interval
         }
         $testDirectory = Join-Path $output 'test'; Assert-LocalPlain $testDirectory
+        $restartInterval = 0
+        if ($plan.PSObject.Properties.Name -contains 'restart_interval_ms') {
+            if ($plan.restart_interval_ms -isnot [int] -and $plan.restart_interval_ms -isnot [long]) { throw '候选重新起步间隔类型无效。' }
+            $restartInterval = $plan.restart_interval_ms
+        }
         if ($null -eq $usedSettings) { throw '重评报告缺少实际模型设置；未生成测试。' }
         $prepare = @{ Mode='Prepare'; RunDirectory=$testDirectory; Repeatable=$true; Executable=$task.executable; ConfigPath=$task.config;
             Baseline=$plan.baseline; Shots=$plan.shots; FireDelayMs=$plan.fire_delay_ms; FireIntervalMs=$plan.fire_interval_ms;
+            RestartIntervalMs=$restartInterval;
             OverlapFireInterval=$overlap; MoveDuringFireDelay=$plan.move_during_fire_delay; Direction=$(if ($plan.direction -eq 2) { 'A' } else { 'D' });
             MoveMs=$plan.move_ms; CounterHoldMs=$plan.counter_hold_ms; CounterDelayMs=$plan.counter_delay_ms;
             ShotAfterReleaseMs=$plan.shot_after_release_ms; ShotHoldMs=$plan.shot_hold_ms; LateToleranceMs=$plan.late_tolerance_ms;
@@ -635,12 +649,13 @@ try {
         } else {
             "首轮原地；上一轮左键UP ACK后静止等待$($FireDelayMs)ms，然后按${Direction}保持$($MoveMs)ms；收到该键UP ACK后等待$($CounterDelayMs)ms，再$action；$timing。"
         }
+        if ($RestartIntervalMs -gt 0) { $behavior += "反向UP ACK到下一正向DOWN提交至少$($RestartIntervalMs)ms，与左键释放和既有目标取较晚时刻；无前次反向UP时不限制。" }
         $behavior += "各动作迟到超过$($LateToleranceMs)ms则拒绝该组；固定瞄准，不人为按方向或射击键。"
         $observation = '默认不采集图像；自动保存输入训练原始报告和评价。接收域换键评分不代表人物停稳，命令ACK不代表实际开火或弹着稳定'
         $cadence = "每次左键按住$($ShotHoldMs)ms（DOWN ACK起计）；fire_interval_ms=$($FireIntervalMs)ms是相邻左键DOWN提交的最小间隔，不是精确周期。额外冷却等待在下一轮移动开始前完成，避免急停后再补等；0表示不添加此间隔。fire_delay_ms仍表示上一轮松左键ACK后的等待"
         if ($OverlapFireInterval) { $cadence = "每次左键按住$($ShotHoldMs)ms（DOWN ACK起计）；动态移动占用fire_interval_ms=$($FireIntervalMs)ms的剩余窗口，move_ms=$($MoveMs)ms为上限；完整保留反向和松键后等待，相邻DOWN提交仍不早于武器间隔，不是精确周期。" }
         $reuseInstructions = if ($Repeatable) {
-            '本目录允许重复手动Launch，无需再次Prepare或打包。直接复用绑定的正式脚本和Executable路径，不复制程序、DLL或模型。编辑plan.json：shots（开火次数1..30，不代表实际子弹数）、fire_delay_ms（0..2000ms）、fire_interval_ms（0..5000ms，相邻DOWN提交最小间隔；0为关闭）、move_during_fire_delay（true为等待与移动并行，false为先等待再移动）、overlap_fire_interval（缺省false；true在武器间隔内动态移动）、move_ms（1..500ms，动态模式为上限）、counter_delay_ms（0..200ms）、counter_hold_ms（1..200ms）、shot_after_release_ms（0..20ms，0即立即计划开枪）、shot_hold_ms（1..2000ms，1000即按住1秒）、late_tolerance_ms（0..10ms）及baseline/direction。schema_version固定2，capture_enabled固定false，不接受旧shot_interval_ms/brake_window_ms。每次Launch冻结execution-plan.json，运行中编辑原文件仅影响下一组。验证通过后覆盖上组result；失败不自动重试。正式对比另建目录。'
+            '本目录允许重复手动Launch，无需再次Prepare或打包。直接复用绑定的正式脚本和Executable路径，不复制程序、DLL或模型。编辑plan.json：shots（开火次数1..30，不代表实际子弹数）、fire_delay_ms（0..2000ms）、fire_interval_ms（0..5000ms，相邻DOWN提交最小间隔；0为关闭）、restart_interval_ms（0..2000ms，反向UP ACK到下一正向DOWN提交最小间隔，0保持原行为；非counter必须0）、move_during_fire_delay（true为等待与移动并行，false为先等待再移动）、overlap_fire_interval（缺省false；true在武器间隔内动态移动）、move_ms（1..500ms，动态模式为上限）、counter_delay_ms（0..200ms）、counter_hold_ms（1..200ms）、shot_after_release_ms（0..20ms，0即立即计划开枪）、shot_hold_ms（1..2000ms，1000即按住1秒）、late_tolerance_ms（0..10ms）及baseline/direction。schema_version固定2，capture_enabled固定false，不接受旧shot_interval_ms/brake_window_ms。每次Launch冻结execution-plan.json，运行中编辑原文件仅影响下一组。验证通过后覆盖上组result；失败不自动重试。正式对比另建目录。'
         } else {
             '参数探索可通过Prepare -ReuseRunDirectory复用本目录；新计划验证通过后替换参数并清理上次result和CONSUMED。每次Prepare后仍由用户前台触发Launch。固定正式文件不复制打包；需要重复调参时Prepare -Repeatable。'
         }

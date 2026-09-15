@@ -663,6 +663,87 @@ void command_observer_failure_keeps_cleanup() {
     require(callbacks == static_cast<int>(r["commands"].size()) && r["observer_failures"] == callbacks,
         "每条已记录回执恰好通知一次，观察器失败须显式计数而非冒充正常");
 }
+void schema2_restart_interval() {
+    Json base{{"schema_version",2},{"baseline","counter"},{"shots",4},{"shot_hold_ms",60},
+        {"fire_interval_ms",300},{"fire_delay_ms",0},{"move_during_fire_delay",false},
+        {"overlap_fire_interval",true},{"move_ms",500},{"counter_hold_ms",40},{"shot_after_release_ms",18}};
+    for (bool dynamic : {false,true}) for (int direction : {2,8}) for (int gap : {0,40,100,200}) {
+        auto input=base; input["overlap_fire_interval"]=dynamic; input["direction"]=direction;
+        input["restart_interval_ms"]=gap;
+        const auto plan=parse_counterpulse_plan(input);
+        const auto encoded=counterpulse_plan_json(plan);
+        require(encoded.value("restart_interval_ms",0)==gap && (gap || !encoded.contains("restart_interval_ms")),
+            "跨轮间隔必须往返保留，零默认不得改变旧计划身份");
+        Fake m; const auto result=execute_counterpulse(m,plan,{},m.clock());
+        require(result["success"],"跨轮起步间隔合法窗口应完成");
+        std::int64_t previous_reverse_up=0, last_button_up=0, button_down=0, last_shot=0;
+        int previous_direction=0, movements=0;
+        for (const auto& command : result["commands"]) {
+            const auto submit=command["submit_ns"].get<std::int64_t>();
+            const auto ack=command["ack_received_ns"].get<std::int64_t>();
+            const int value=command["value"];
+            if(command["kind"]=="left_button") {
+                if(value) {
+                    if(last_shot) require(submit-last_shot>=300000000,"跨轮间隔不能缩短武器射击间隔");
+                    if(previous_reverse_up) require(submit-previous_reverse_up>=18000000,"跨轮配置不能缩短释放后18ms");
+                    button_down=ack; last_shot=submit;
+                } else {
+                    if(button_down) require(submit-button_down==60000000,"跨轮配置不能缩短左键60ms");
+                    last_button_up=ack;
+                }
+            } else {
+                if(value==direction) {
+                    require(submit>=last_button_up,"方向起步必须等待左键完整释放");
+                    if(previous_reverse_up) {
+                        require(submit-previous_reverse_up>=gap*1000000LL,"真实方向DOWN必须满足上轮反向UP ACK最小间隔");
+                        const auto& cycle=result["cycles"][movements];
+                        require(cycle["restart_anchor_ack_ns"]==previous_reverse_up &&
+                            cycle["restart_actual_gap_ns"]==submit-previous_reverse_up,
+                            "跨轮报告必须来自实际ACK和提交时间");
+                        if(dynamic && gap>=100) require(submit-previous_reverse_up==gap*1000000LL,"动态余量内配置必须实际改变起步时间");
+                    }
+                    ++movements;
+                } else if(value==0 && previous_direction==(direction==2?8:2)) previous_reverse_up=ack;
+                previous_direction=value;
+            }
+        }
+        require(movements==3 && !m.left && !m.held && m.cleanup_calls==1,"两方向与固定动态均须完整清理");
+    }
+    for(const auto& patch : {Json{{"restart_interval_ms",-1}},Json{{"restart_interval_ms",2001}},
+        Json{{"restart_interval_ms",1.5}},Json{{"restart_interval_ms",true}},
+        Json{{"restart_interval_ms",1},{"baseline","no_counter"}},
+        Json{{"restart_interval_ms",1},{"baseline","stationary"},{"overlap_fire_interval",false},{"fire_delay_ms",1}}}) {
+        auto invalid=base; invalid.update(patch); bool rejected=false;
+        try { (void)parse_counterpulse_plan(invalid); } catch(...) { rejected=true; }
+        require(rejected,"跨轮间隔必须有界整数且非零仅允许反向基线");
+    }
+    { bool rejected=false; try { (void)parse_counterpulse_plan(Json{{"restart_interval_ms",0}}); } catch(...) { rejected=true; }
+      require(rejected,"旧schema即使零也必须拒绝新字段"); }
+    { auto plan=parse_counterpulse_plan(base); plan.restart_interval_ms=-1;
+      Fake m; bool rejected=false;
+      try { (void)execute_counterpulse(m,plan,{},m.clock()); } catch(...) { rejected=true; }
+      require(rejected && m.downs==0 && m.keyboard_calls==0 && m.cleanup_calls==0,
+          "结构体负间隔不能被序列化丢弃，必须在设备调用前拒绝"); }
+    { auto input=base; input["restart_interval_ms"]=259;
+      Fake m; int at_boundary_checks=0;
+      const auto r=execute_counterpulse(m,parse_counterpulse_plan(input),[&]() -> std::string {
+          if(m.downs==2 && m.keyboard_calls==5 && m.time>=Clock::time_point(std::chrono::milliseconds(10546))) {
+              if(++at_boundary_checks==2) m.time+=std::chrono::milliseconds(5);
+          }
+          return {};
+      },m.clock());
+      require(r["failure"]=="MOVEMENT_WINDOW_UNAVAILABLE" && at_boundary_checks==2 && m.keyboards.size()==5 &&
+          !m.left && !m.held,"等待后命令检查耗尽动态余量也不得发出新方向"); }
+    { auto input=base; input["restart_interval_ms"]=300;
+      Fake m; const auto r=execute_counterpulse(m,parse_counterpulse_plan(input),{},m.clock());
+      require(r["failure"]=="MOVEMENT_WINDOW_UNAVAILABLE" && m.downs==2 && m.keyboards.size()==5 &&
+          !m.left && !m.held && m.cleanup_calls==1,"跨轮等待耗尽动态窗口必须在新方向DOWN前停止"); }
+    { auto input=base; input["restart_interval_ms"]=200;
+      Fake m; m.physical_at_ms=410;
+      const auto r=execute_counterpulse(m,parse_counterpulse_plan(input),{},m.clock());
+      require(r["failure"]=="PHYSICAL_INPUT_CANCELED" && m.downs==2 && m.keyboards.size()==5 &&
+          !m.left && !m.held && m.cleanup_calls==1,"跨轮等待中取消必须保持全松且不发新方向"); }
+}
 void invalid_plans() {
     for (const auto& json : {Json{{"counter_delay_ms", 201}}, Json{{"baseline", "stationary"}, {"counter_delay_ms", 50}}, Json{{"fire_delay_ms", 300}}, Json{{"fire_delay_ms", 2001}},
         Json{{"move_during_fire_delay", 0}}, Json{{"move_during_fire_delay", "false"}}, Json{{"move_during_fire_delay", nullptr}},
@@ -686,7 +767,7 @@ void invalid_plans() {
 }
 }
 int main() {
-    try { command_observer_failure_keeps_cleanup(); wait_deadline_reached_during_check(); wait_transient_equal_clock_ticks(); schema2_weapon_hold_and_interval(); schema2_release_timing(); fire_delay_before_moving(); delayed_reverse_tap_then_fire(); fire_delay_while_moving(); immediate_movement_cycles(); shot_after_direction_release(); matched_brake_window(); successful_and_baselines(); configurable_stationary_intervals(); failures_stop_and_cleanup(); invalid_plans(); }
+    try { schema2_restart_interval(); command_observer_failure_keeps_cleanup(); wait_deadline_reached_during_check(); wait_transient_equal_clock_ticks(); schema2_weapon_hold_and_interval(); schema2_release_timing(); fire_delay_before_moving(); delayed_reverse_tap_then_fire(); fire_delay_while_moving(); immediate_movement_cycles(); shot_after_direction_release(); matched_brake_window(); successful_and_baselines(); configurable_stationary_intervals(); failures_stop_and_cleanup(); invalid_plans(); }
     catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
     std::cout << "反冲纯fake专项通过：时序、基线、预算、取消、未知ACK、清理及参数拒绝\n";
 }

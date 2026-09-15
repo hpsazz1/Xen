@@ -191,7 +191,8 @@ $code = 0
             assert (prepared / 'edit-config.bat').is_file() and (prepared / 'start-test.bat').is_file()
             assert not (prepared / 'result').exists()
             # 动态候选必须经正式Prepare保留开关，不能退回固定move_ms执行。
-            dynamic_candidate = dict(candidate, overlap_fire_interval=True, fire_delay_ms=0, move_ms=500)
+            dynamic_candidate = dict(candidate, overlap_fire_interval=True, fire_delay_ms=0, move_ms=500,
+                                     restart_interval_ms=150)
             fixture.write_text(json.dumps({'groups': [{'baseline': 'counter', 'direction': 'D', 'samples': 4,
                 'candidate_plan': dynamic_candidate, 'proposed_plan': dynamic_candidate}]}), encoding='utf-8')
             invoke(entry=analyze_entry, ok=True)
@@ -200,8 +201,17 @@ $code = 0
             assert read_generated_json(dynamic_prepared / 'plan.json') == dynamic_candidate
             invoke('-Mode', 'Prepare', '-RunDirectory', dynamic_prepared, '-Executable', args.executable,
                 '-ConfigPath', sequential_config, '-ReuseRunDirectory', ok=True)
-            assert read_generated_json(dynamic_prepared / 'plan.json') == dynamic_candidate, '复用必须继承动态开关'
+            assert read_generated_json(dynamic_prepared / 'plan.json') == dynamic_candidate, '复用必须继承动态开关与重新起步间隔'
             assert '动态移动占用' in (dynamic_prepared / 'TASK.md').read_text(encoding='utf-8-sig')
+            assert '下一正向DOWN提交至少150ms' in (dynamic_prepared / 'TASK.md').read_text(encoding='utf-8-sig')
+            invoke('-Mode', 'Prepare', '-RunDirectory', dynamic_prepared, '-Executable', args.executable,
+                '-ConfigPath', sequential_config, '-ReuseRunDirectory', '-RestartIntervalMs', 200, ok=True)
+            assert read_generated_json(dynamic_prepared / 'plan.json') == dict(dynamic_candidate, restart_interval_ms=200)
+            invoke('-Mode', 'Prepare', '-RunDirectory', dynamic_prepared, '-Executable', args.executable,
+                '-ConfigPath', sequential_config, '-ReuseRunDirectory', '-RestartIntervalMs', 0, ok=True)
+            without_restart = dict(dynamic_candidate)
+            without_restart.pop('restart_interval_ms')
+            assert read_generated_json(dynamic_prepared / 'plan.json') == without_restart, '显式0清除可选字段并恢复原行为'
             # 超界提案必须保留原值进入编辑，不可clamp；选择0退出仍不Prepare。
             invalid_candidate = dict(candidate, counter_delay_ms=-5)
             fixture.write_text(json.dumps({'groups': [{'baseline': 'counter', 'direction': 'D', 'samples': 4,
@@ -280,7 +290,7 @@ $code = 0
             invoke('-SamplingSettingsPath', override, entry=defaults_entry, ok=True)
             second = next(item for item in (sequential_run / 'default-baselines').iterdir() if item != default_run)
             assert read_generated_json(second / 'mock-derive.json')[-2:] == ['--sampling-settings', str(override)]
-            assert read_generated_json(second / 'test' / 'plan.json') == dynamic_candidate, '默认派生也必须保留动态开关'
+            assert read_generated_json(second / 'test' / 'plan.json') == dynamic_candidate, '默认派生也必须保留动态开关与重新起步间隔'
             defaults_entry.write_bytes(defaults_original)
             excluded_labels.write_bytes(saved_labels)
             (sequential_run / 'task.json').write_bytes(original_task)
@@ -644,6 +654,7 @@ $code = 0
             (held_run / 'sampling-settings.json').write_text(json.dumps(user_settings), encoding='utf-8')
             user_settings_bytes = (held_run / 'sampling-settings.json').read_bytes()
             assert held_plan['shot_hold_ms'] == 1000 and held_plan['fire_interval_ms'] == 2000
+            assert 'restart_interval_ms' not in held_plan, '旧默认计划保持原形，不加入零值字段'
             held_task = (held_run / 'TASK.md').read_text(encoding='utf-8-sig')
             assert '左键按住1000ms' in held_task and 'fire_interval_ms=2000ms' in held_task
             assert '不是精确周期' in held_task and '下一轮移动开始前' in held_task
@@ -652,11 +663,18 @@ $code = 0
             held_migrated = read_generated_json(held_run / 'plan.json')
             assert held_migrated['shot_hold_ms'] == 1000 and held_migrated['fire_interval_ms'] == 2000
             assert held_migrated['move_ms'] == 10
+            assert 'restart_interval_ms' not in held_migrated, '复用旧计划缺省间隔必须为0'
             assert (held_run / 'sampling-settings.json').read_bytes() == user_settings_bytes
             parameters = (held_run / 'PARAMETERS.md').read_text(encoding='utf-8-sig')
             assert '| shot_hold_ms | 1000 |' in parameters and '| fire_interval_ms | 2000 |' in parameters
             assert '| move_ms | 10 |' in parameters
-            for index, extra in enumerate([('-ShotHoldMs', 0), ('-ShotHoldMs', 2001), ('-FireIntervalMs', -1), ('-FireIntervalMs', 5001)]):
+            for baseline in ('no_counter', 'stationary'):
+                invalid_restart = root / ('invalid-restart-' + baseline)
+                invoke('-Mode', 'Prepare', '-RunDirectory', invalid_restart, '-Executable', args.executable,
+                    '-ConfigPath', config, '-Baseline', baseline, '-RestartIntervalMs', 100)
+                assert not (invalid_restart / 'TASK.md').exists(), '非反向基线不能准备非零重新起步间隔'
+            for index, extra in enumerate([('-ShotHoldMs', 0), ('-ShotHoldMs', 2001), ('-FireIntervalMs', -1), ('-FireIntervalMs', 5001),
+                                          ('-RestartIntervalMs', -1), ('-RestartIntervalMs', 2001)]):
                 invalid_hold = root / ('invalid-hold-' + str(index))
                 invoke('-Mode', 'Prepare', '-RunDirectory', invalid_hold, '-Executable', args.executable,
                     '-ConfigPath', config, *extra)

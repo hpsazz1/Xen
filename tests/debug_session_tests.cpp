@@ -105,20 +105,24 @@ void test_idle_hud_show() {
     require(!session.busy() && session.snapshot()->generation == before->generation &&
         session.snapshot()->state == before->state && session.snapshot()->prepared_id.empty(),
         "空闲显示HUD不得创建调试任务或准备身份");
-    const auto wait_visible = [&](bool visible) {
+    const auto wait_visible = [&](bool visible, const char* phase) {
         const auto until = std::chrono::steady_clock::now() + 2s;
         do { session.poll();
             if (session.snapshot()->hud_visible == visible && (IsWindowVisible(window) != FALSE) == visible) return;
             std::this_thread::sleep_for(5ms);
         } while (std::chrono::steady_clock::now() < until);
-        throw std::runtime_error("HUD实际可见状态未同步到Session");
+        DWORD owner = 0; GetWindowThreadProcessId(window, &owner);
+        throw std::runtime_error(std::string("HUD实际可见状态未同步到Session: ") + phase +
+            " expected=" + std::to_string(visible) + " snapshot=" + std::to_string(session.snapshot()->hud_visible) +
+            " actual=" + std::to_string(IsWindowVisible(window)) + " owner=" + std::to_string(owner) +
+            " current=" + std::to_string(GetCurrentProcessId()));
     };
-    session.dispatch(Action::HIDE_HUD,request,context); wait_visible(false);
-    session.dispatch(Action::SHOW_HUD,request,context); wait_visible(true);
+    session.dispatch(Action::HIDE_HUD,request,context); wait_visible(false,"hide");
+    session.dispatch(Action::SHOW_HUD,request,context); wait_visible(true,"show/reopen");
     require(FindWindowW(L"XenCounterpulseReadOnlyHud",nullptr) == window,"空闲隐藏/显示不应创建第二窗口");
-    PostMessageW(window,WM_CLOSE,0,0); wait_visible(false);
+    PostMessageW(window,WM_CLOSE,0,0); wait_visible(false,"close");
     require(!session.snapshot()->hud_requested,"用户关闭HUD必须取消显示开关");
-    session.dispatch(Action::SHOW_HUD,request,context); wait_visible(true);
+    session.dispatch(Action::SHOW_HUD,request,context); wait_visible(true,"show/reopen");
     require(!session.busy() && session.snapshot()->generation == before->generation,
         "关闭复开HUD不得启动任务或改变准备身份");
     session.set_theme(UiTheme::DARK);
