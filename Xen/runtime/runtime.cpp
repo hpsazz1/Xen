@@ -366,12 +366,9 @@ struct Runtime::Impl {
                 }
             }
         if (config.gsi.enabled) {
-            auto gsi_config = config.gsi;
-            char* token = nullptr; std::size_t token_size = 0;
-            if (_dupenv_s(&token, &token_size, "XEN_GSI_TOKEN") == 0 && token) {
-                gsi_config.token = token; std::free(token);
+            if (!gsi_receiver.start(config.gsi)) {
+                set_error("GSI接收启动失败：" + gsi_receiver.last_error()); return false;
             }
-            if (!gsi_receiver.start(gsi_config)) { set_error("GSI接收启动失败，请核对身份/地址/认证环境变量"); return false; }
         }
         if (config.trigger.enabled) {
             Log::register_module("trigger", LogLevel::INFO);

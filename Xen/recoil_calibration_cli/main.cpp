@@ -15,7 +15,7 @@ BOOL WINAPI control(DWORD event) {
 }
 std::string environment_token(const char* name) {
     const auto* value=std::getenv(name);
-    if(!value || !*value)throw std::runtime_error("缺少GSI或源端焦点环境凭据");
+    if(!value || !*value)throw std::runtime_error("缺少源端焦点环境凭据");
     return value;
 }
 struct Resources {
@@ -41,7 +41,6 @@ int run(RecoilCalibrationPrepared prepared) {
         auto source_config=prepared.config.source_context;
         auto gsi_config=prepared.config.gsi;
         source_config.token=environment_token("XEN_SOURCE_CONTEXT_TOKEN");
-        gsi_config.token=environment_token("XEN_GSI_TOKEN");
         auto mouse_config=prepared.config.mouse;mouse_config.allow_send_input=true;
         auto device=MouseDeviceFactory::create(mouse_config);
         if(!device || !device->open() || !device->output_owner_exclusive())throw std::runtime_error("无法获得真实设备独占所有权");

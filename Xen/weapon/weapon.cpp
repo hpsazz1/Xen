@@ -19,11 +19,6 @@ using Json = nlohmann::json;
 bool digits(std::string_view text) noexcept {
     return !text.empty() && std::all_of(text.begin(), text.end(), [](char c) { return c >= '0' && c <= '9'; });
 }
-bool same_secret(std::string_view a, std::string_view b) noexcept {
-    std::size_t diff = a.size() ^ b.size();
-    for (std::size_t i = 0; i < b.size(); ++i) diff |= static_cast<unsigned char>(i < a.size() ? a[i] : 0) ^ static_cast<unsigned char>(b[i]);
-    return diff == 0;
-}
 std::string lower(std::string_view text) {
     std::string result(text);
     for (char& c : result) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
@@ -58,7 +53,7 @@ const char* status_name(Status status) noexcept {
     switch (status) {
 #define WEAPON_STATUS(v) case Status::v: return #v
         WEAPON_STATUS(DISABLED); WEAPON_STATUS(UNAVAILABLE); WEAPON_STATUS(READY); WEAPON_STATUS(EXPIRED);
-        WEAPON_STATUS(AUTH_REJECTED); WEAPON_STATUS(INVALID_PAYLOAD); WEAPON_STATUS(IDENTITY_MISMATCH);
+        WEAPON_STATUS(INVALID_PAYLOAD); WEAPON_STATUS(IDENTITY_MISMATCH);
         WEAPON_STATUS(PLAYER_INACTIVE); WEAPON_STATUS(UNKNOWN_WEAPON); WEAPON_STATUS(RELOADING);
         WEAPON_STATUS(EMPTY); WEAPON_STATUS(CLOCK_REJECTED); WEAPON_STATUS(OUT_OF_ORDER);
         WEAPON_STATUS(DUPLICATE); WEAPON_STATUS(COUNTER_EXHAUSTED);
@@ -68,7 +63,7 @@ const char* status_name(Status status) noexcept {
 }
 bool valid_config(const GsiConfig& c) noexcept {
     IN_ADDR bind{}, peer{};
-    return c.enabled && c.port != 0 && c.token.size() >= 32 && c.token.size() <= 1024 &&
+    return c.enabled && c.port != 0 &&
         c.ttl_ms >= 100 && c.ttl_ms <= 10000 && c.request_timeout_ms >= 20 && c.request_timeout_ms <= 2000 &&
         c.max_body_bytes >= 256 && c.max_body_bytes <= 65536 && c.max_clock_skew_ms >= 1000 && c.max_clock_skew_ms <= 10000 &&
         InetPtonA(AF_INET, c.bind_address.c_str(), &bind) == 1 &&
@@ -125,10 +120,6 @@ WeaponSnapshot parse_payload(std::string_view body, const GsiConfig& config, std
             return true;
         }, false);
         if (json.is_discarded() || !json.is_object()) return result;
-        if (!json.contains("auth") || !json["auth"].is_object() || !json["auth"].contains("token") ||
-            !json["auth"]["token"].is_string() || !same_secret(json["auth"]["token"].get_ref<const std::string&>(), config.token)) {
-            result.status = Status::AUTH_REJECTED; return result;
-        }
         if (!json.contains("provider") || !json["provider"].is_object() ||
             !json.contains("player") || !json["player"].is_object()) return result;
         const auto& provider = json["provider"];
@@ -202,7 +193,6 @@ Status GsiState::ingest(std::string_view body, const GsiConfig& config,
     try {
         auto incoming = parse_payload(body, config, local_utc_ms);
         if (epoch_ == 0) epoch_ = 1;
-        if (incoming.status == Status::AUTH_REJECTED) return incoming.status;
         if (now < last_now_ || epoch_ == std::numeric_limits<std::uint64_t>::max() || revision_ == std::numeric_limits<std::uint64_t>::max()) {
             current_.valid = false; current_.status = Status::COUNTER_EXHAUSTED; return current_.status;
         }
@@ -279,11 +269,8 @@ struct GsiReceiver::Impl {
             if (request.size() != header_end + content_length) continue;
             if (stopping.load() || Clock::now() >= deadline) return;
             const auto utc = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-            Status status;
-            { std::lock_guard lock(mutex); status = state.ingest(std::string_view(request).substr(header_end), config, Clock::now(), utc); }
-            const char* response = status == Status::AUTH_REJECTED
-                ? "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                : "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            { std::lock_guard lock(mutex); state.ingest(std::string_view(request).substr(header_end), config, Clock::now(), utc); }
+            const char* response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             send(connection, response, static_cast<int>(std::char_traits<char>::length(response)), 0);
             return;
         }

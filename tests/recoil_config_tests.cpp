@@ -13,7 +13,6 @@ int main() {
         config.recoil.enabled = true;
         check(!validate_app_config(config, error), "缺GSI与场景不能启用");
         config.gsi.enabled = true;
-        config.gsi.token = "SECRET_NOT_FOR_DISK_01234567890123456789";
         config.source_context.enabled = true; config.source_context.host = "127.0.0.1";
         config.source_context.port = 5014; config.source_context.process_name = "synthetic.exe";
         config.recoil.sensitivity = 1.25; config.recoil.game_build = "synthetic"; config.recoil.conditions = "synthetic_standing";
@@ -22,9 +21,9 @@ int main() {
         AppConfig loaded;
         check(load_app_config(path.string(), loaded, error), error.c_str());
         check(loaded.recoil.enabled && loaded.gsi.enabled && loaded.recoil.sensitivity == 1.25 &&
-            loaded.recoil.conditions == config.recoil.conditions && loaded.gsi.token.empty(), "压枪往返与认证不落盘");
+            loaded.recoil.conditions == config.recoil.conditions, "压枪配置无GSI令牌往返");
         std::ifstream input(path); std::string text((std::istreambuf_iterator<char>(input)), {}); input.close();
-        check(text.find(config.gsi.token) == std::string::npos, "秘密不得出现在文件");
+        check(text.find("XEN_GSI_TOKEN") == std::string::npos, "配置不生成GSI环境变量要求");
         config.recoil.hold_virtual_key = 0x23;
         check(!validate_app_config(config, error), "End不能作压枪键");
         config.recoil.hold_virtual_key = 0; config.recoil.use_trial = true;

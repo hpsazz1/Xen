@@ -10,7 +10,6 @@ void expect(bool condition, const char* message) {
 }
 nlohmann::json payload(const weapon::GsiConfig& config, std::uint64_t timestamp = 1700000000) {
     return {
-        {"auth", {{"token", config.token}}},
         {"provider", {{"appid", 730}, {"steamid", "76561198000000000"}, {"timestamp", timestamp}}},
         {"player", {{"steamid", "76561198000000000"}, {"activity", "playing"},
             {"state", {{"health", 100}}}, {"weapons", {{"weapon_0", {
@@ -26,7 +25,6 @@ int main() {
     GsiConfig config;
     expect(!valid_config(config), "GSI默认关闭");
     config.enabled = true;
-    config.token = std::string(32, 't');
     expect(valid_config(config), "显式本地配置");
     auto invalid_config = config;
     invalid_config.bind_address = "0.0.0.0";
@@ -56,7 +54,7 @@ int main() {
            "显示别名不放宽GSI协议入口");
     auto bad = full;
     bad["auth"]["token"] = "incorrect";
-    expect(parse_payload(bad.dump(), config, utc).status == Status::AUTH_REJECTED, "错误token拒绝");
+    expect(parse_payload(bad.dump(), config, utc).status == Status::READY, "旧auth字段忽略，无需令牌");
     bad = full; bad["player"]["steamid"] = "76561198000000001";
     expect(parse_payload(bad.dump(), config, utc).status == Status::IDENTITY_MISMATCH, "观战身份不匹配拒绝");
     bad = full; bad["player"]["activity"] = "textinput";
@@ -139,9 +137,9 @@ int main() {
     denied.reset();
     denied.ingest(full.dump(), config, start, utc);
     bad = full; bad["auth"]["token"] = "wrong";
-    expect(denied.ingest(bad.dump(), config, start + 100ms, utc + 100) == Status::AUTH_REJECTED &&
+    expect(denied.ingest(bad.dump(), config, start + 100ms, utc + 100) == Status::DUPLICATE &&
            denied.snapshot(start + 100ms).revision == 1 && denied.snapshot(start + 100ms).valid_until == first.valid_until,
-           "未鉴权请求不能覆盖或续命合法快照");
+           "旧auth字段变化不能绕过去重或续命");
     // 只测试纯解码/时间状态，不start接收器、不监听、不访问游戏或设备。
     return failures == 0 ? 0 : 1;
 }

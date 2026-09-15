@@ -1044,10 +1044,7 @@ bool validate_app_config(const AppConfig& config,
                 (recoil.use_trial && recoil.trial_file.empty())))) {
             error = "压枪配置需要有效热键、GSI、源焦点和明确校准条件"; return false;
         }
-        auto gsi_validation = config.gsi;
-        // 凭据只在启动时从环境注入；配置检查不读取/保存秘密。
-        gsi_validation.token.assign(32, 'x');
-        if (config.gsi.enabled && !weapon::valid_config(gsi_validation)) {
+        if (config.gsi.enabled && !weapon::valid_config(config.gsi)) {
             error = "GSI绑定地址、来源限制或接收参数非法"; return false;
         }
         const bool physical_keyboard_invalid =
