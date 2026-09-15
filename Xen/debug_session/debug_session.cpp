@@ -8,6 +8,7 @@
 #include <chrono>
 #include <fstream>
 #include <future>
+#include <limits>
 #include <mutex>
 #include <set>
 #include <thread>
@@ -460,6 +461,31 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
         const auto repeat_revision = impl_->repeat_revision.load();
         impl_->update([](Snapshot& s) { s.prepared_id.clear(); });
         return impl_->launch(State::WORKING,false,[this,action,request,context,repeat_revision] {
+            if (action == Action::SAVE_WEAPON_TIMING) {
+                auto catalog = weapon::default_timing_catalog();
+                std::string error;
+                const auto& configured_path = context.config.weapon_timing_file;
+                const auto path = std::filesystem::u8path(configured_path);
+                const bool default_missing = configured_path == "cache/recoil/weapon-timing.json" && !std::filesystem::exists(path);
+                if (!default_missing && !weapon::load_timing_catalog(path,catalog,error))
+                    throw std::runtime_error("保存前读取共享武器资料失败：" + error);
+                const auto* selected = weapon::find_timing(catalog,request.weapon_id);
+                if (!selected) throw std::runtime_error("未选择有效武器，未保存");
+                if (!selected->enabled) throw std::runtime_error("所选武器已禁用，未保存");
+                if (catalog.revision == (std::numeric_limits<std::uint64_t>::max)())
+                    throw std::runtime_error("武器资料版本已达上限，未保存");
+                // 每次从磁盘最新目录修改两字段，避免旧UI快照覆盖其他武器的修改。
+                auto& profile = catalog.profiles[static_cast<std::size_t>(selected - catalog.profiles.data())];
+                profile.shot_hold_ms = request.shot_hold_ms;
+                profile.fire_interval_ms = request.fire_interval_ms;
+                if (!weapon::valid_timing_catalog(catalog))
+                    throw std::runtime_error("点射按住须为1–500ms，射击间隔须大于按住且不超过2000ms，未保存");
+                ++catalog.revision;
+                if (!weapon::save_timing_catalog(path,catalog,error)) throw std::runtime_error(error);
+                impl_->update([&](Snapshot& s) { s.timing_catalog = catalog; s.timing_catalog_valid = true;
+                    s.state = State::COMPLETED; s.message = "所选武器的点射按住和射击间隔已保存；请重新准备测试"; });
+                return;
+            }
             if (action == Action::LOAD_WEAPON_TIMING) {
                 auto catalog = weapon::default_timing_catalog();
                 std::string error;

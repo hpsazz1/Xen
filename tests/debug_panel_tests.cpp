@@ -118,7 +118,10 @@ void check_weapon_draft_isolation() {
         io.AddMousePosEvent(rect.GetCenter().x,rect.GetCenter().y); frame();
         io.AddMouseButtonEvent(0,true); frame(); io.AddMouseButtonEvent(0,false); return frame();
     };
-    frame(); frame(); click("带入武器"); frame(); click("p250",true);
+    frame(); frame();
+    auto no_selection = click("保存武器参数");
+    expect(no_selection.debug_action == debug_session::Action::NONE,"未选择武器不能保存资料");
+    click("带入武器"); frame(); click("p250",true);
     auto action = click("校验计划");
     expect(action.debug_request.shot_hold_ms == 60 && action.debug_request.fire_interval_ms == 350,"选择p250必须带入60/350");
     action = click("带入所选武器参数");
@@ -167,6 +170,14 @@ void check_weapon_draft_isolation() {
     page = 1; frame(); action = click("校验计划");
     expect(action.debug_request.shot_hold_ms == 70 && action.debug_request.fire_interval_ms == 410,
         "明确文件导入必须在射击页使用新两字段");
+    action = click("保存武器参数");
+    expect(action.debug_action == debug_session::Action::SAVE_WEAPON_TIMING &&
+        action.debug_request.weapon_id == "p250" && action.debug_request.shot_hold_ms == 70 &&
+        action.debug_request.fire_interval_ms == 410 && !action.debug_allow_physical_output && !action.debug_plan_edited,
+        "保存必须交付所选武器和当前草稿两字段，不启动输出或覆盖草稿");
+    snapshot.busy = true; frame(); action = click("保存武器参数");
+    expect(action.debug_action == debug_session::Action::NONE,"任务繁忙时不能发起武器保存");
+    snapshot.busy = false; frame();
     snapshot.draft_plan = {{"schema_version",2},{"baseline","counter"},{"move_ms",90},{"shots",6},
         {"fire_delay_ms",200},{"move_during_fire_delay",true},{"shot_hold_ms",9},{"fire_interval_ms",510},
         {"late_tolerance_ms",7},{"counter_hold_ms",40}};

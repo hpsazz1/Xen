@@ -16,7 +16,7 @@ enum class Mode { COUNTERPULSE, FIRE_TEST, MANUAL_RECORDING, EVALUATE_MANUAL,
     EVALUATE_COMMANDS, DERIVE_DEFAULTS, DERIVE_PLAN };
 enum class Action { NONE, VALIDATE, SAVE_PLAN, PREPARE, START, CANCEL, REEVALUATE,
     HIDE_HUD, SHOW_HUD, LOAD_PLAN, LOAD_SAMPLING, LOAD_FIRE_SETTINGS,
-    LOAD_WEAPON_TIMING, DERIVE_PLAN, DERIVE_DEFAULTS };
+    LOAD_WEAPON_TIMING, SAVE_WEAPON_TIMING, DERIVE_PLAN, DERIVE_DEFAULTS };
 enum class State { IDLE, WORKING, PREPARED, RUNNING, STOPPING, COMPLETED,
     CANCELED, FAILED, CLEANUP_UNKNOWN };
 
@@ -24,6 +24,7 @@ enum class State { IDLE, WORKING, PREPARED, RUNNING, STOPPING, COMPLETED,
 struct Request {
     Mode mode = Mode::COUNTERPULSE;
     std::string plan_text, sampling_text, input_path, load_path;
+    std::string weapon_id;
     std::string output_root = "cache/debug";
     int recording_duration_ms = 120000;
     int candidate_index = 0;

@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <thread>
 
@@ -125,6 +126,77 @@ void test_idle_hud_show() {
     require(!IsWindow(window),"Session关闭必须销毁其持久窗口");
 }
 
+void test_save_weapon_timing(const std::filesystem::path& root) {
+    Session session;
+    auto device = std::make_shared<FakeDevice>();
+    auto context = context_for(device);
+    const auto path = root / "save-weapon-timing.json";
+    context.config.weapon_timing_file = utf8(path);
+    auto catalog = weapon::default_timing_catalog();
+    std::string error;
+    require(weapon::save_timing_catalog(path,catalog,error),"保存测试初始目录失败");
+    Request request; request.mode = Mode::FIRE_TEST; request.show_hud = false;
+    request.load_path = utf8(path);
+    require(session.dispatch(Action::LOAD_WEAPON_TIMING,request,context),"保存测试载入请求未接收");
+    wait_idle(session);
+    // 模拟UI载入后其他编辑器保存；本次必须保留磁盘最新的其他武器。
+    catalog.revision = 17; catalog.profiles[0].shot_hold_ms = 91;
+    require(weapon::save_timing_catalog(path,catalog,error),"保存测试外部更新失败");
+    const auto before = read_json(path);
+    const auto draft = session.snapshot()->draft_plan;
+    const auto draft_revision = session.snapshot()->draft_plan_revision;
+    request.weapon_id = "ak47"; request.shot_hold_ms = 85; request.fire_interval_ms = 420;
+    request.load_path = utf8(root / "must-not-be-written.json");
+    require(session.dispatch(Action::SAVE_WEAPON_TIMING,request,context),"武器参数保存请求未接收");
+    wait_idle(session);
+    require(session.snapshot()->state == State::COMPLETED,"有效武器参数保存失败");
+    const auto after = read_json(path);
+    auto expected = before; expected["revision"] = 18;
+    for (auto& row : expected["profiles"]) if (row["canonical_id"] == "ak47") {
+        row["shot_hold_ms"] = 85; row["fire_interval_ms"] = 420;
+    }
+    require(after == expected,"保存覆盖了最新其他武器或没有仅更新所选两字段和版本");
+    require(!std::filesystem::exists(std::filesystem::u8path(request.load_path)),"保存不得使用导入路径作为目的地");
+    weapon::TimingCatalog loaded;
+    require(weapon::load_timing_catalog(path,loaded,error) && loaded.revision == 18 &&
+        weapon::find_timing(loaded,"ak47")->shot_hold_ms == 85,"保存结果无法通过正式读取器回读");
+    require(session.snapshot()->timing_catalog_valid && session.snapshot()->timing_catalog.revision == 18 &&
+        session.snapshot()->draft_plan == draft && session.snapshot()->draft_plan_revision == draft_revision,
+        "保存应刷新资料快照但不能覆盖射击草稿");
+    const auto bytes = [&] { std::ifstream file(path,std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(file),{}); };
+    const auto reject_unchanged = [&] {
+        const auto original = bytes();
+        require(session.dispatch(Action::SAVE_WEAPON_TIMING,request,context),"无效保存应提交后台报告原因");
+        wait_idle(session);
+        require(session.snapshot()->state == State::FAILED && bytes() == original,
+            "无效参数、目录或保存失败不能修改原文件");
+        require(session.snapshot()->timing_catalog.revision == 18,"失败不能发布未保存目录");
+    };
+    request.weapon_id = "unknown"; reject_unchanged();
+    request.weapon_id = "revolver"; reject_unchanged();
+    request.weapon_id = "ak47";
+    request.shot_hold_ms = 0; reject_unchanged();
+    request.shot_hold_ms = 501; reject_unchanged();
+    request.shot_hold_ms = 85; request.fire_interval_ms = 85; reject_unchanged();
+    request.fire_interval_ms = 2001; reject_unchanged();
+    request.fire_interval_ms = 420;
+    require(SetFileAttributesW(path.c_str(),FILE_ATTRIBUTE_READONLY) != FALSE,"只读目标测试设置失败");
+    struct RestoreAttributes { std::filesystem::path path;
+        ~RestoreAttributes() { SetFileAttributesW(path.c_str(),FILE_ATTRIBUTE_NORMAL); } } restore{path};
+    reject_unchanged();
+    require(SetFileAttributesW(path.c_str(),FILE_ATTRIBUTE_NORMAL) != FALSE,"只读目标测试恢复失败");
+    loaded.revision = (std::numeric_limits<std::uint64_t>::max)();
+    require(weapon::save_timing_catalog(path,loaded,error),"版本上限测试资料写入失败");
+    reject_unchanged();
+    { std::ofstream file(path); file << "broken"; }
+    reject_unchanged();
+    std::filesystem::remove(path);
+    reject_unchanged();
+    require(!std::filesystem::exists(path),"缺失自定义资料不能静默用默认资料创建");
+    require(device->outputs == 0 && device->opens == 0 && device->closes == 0 && device->subscriptions == 0,
+        "保存武器资料不能触碰设备");
+}
 void test_documents_and_frozen_prepare(const std::filesystem::path& root) {
     Session session;
     Request request;
@@ -459,6 +531,7 @@ int main() {
                 "无源配置且取消的测试不得真实输出或重建设备");
         }
         test_idle_hud_show();
+        test_save_weapon_timing(root);
         test_documents_and_frozen_prepare(root);
         test_cancel_prepare(root);
         test_fire_start_block_is_visible(root);

@@ -219,6 +219,13 @@ struct DebugPanel::Impl {
         tip("两页共享武器选择，各自保留独立草稿。切页不自动覆盖；点击带入可重新复制所选武器最新参数。");
         const auto* selected = weapon::find_timing(s->timing_catalog,weapon_id);
         if (button("带入所选武器参数", "仅复制所选武器的左键按住与DOWN提交间隔；不读取独立设置文件。", selected && selected->enabled)) apply(*selected);
+        if (!counter_page) {
+            ImGui::SameLine();
+            if (button("保存武器参数", "将当前点射按住和射击间隔保存到所选共享武器；只更新两字段，失败保留原资料。生产运行下次启动读取新版本。", selected && selected->enabled)) {
+                request.weapon_id = weapon_id;
+                send(Action::SAVE_WEAPON_TIMING, actions);
+            }
+        }
     }
     void controls(const Snapshot* s, OverlayActions& actions) {
         const bool idle = !s || !s->busy;
