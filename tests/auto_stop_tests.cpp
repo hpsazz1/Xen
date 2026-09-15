@@ -14,6 +14,121 @@ int main() {
     constexpr std::int64_t base = 1000000000, ms = 1000000;
     AutoStopConfig legacy;
     legacy.use_counterpulse_timing = false;
+    for (const std::uint8_t before_mask : {1, 2, 4, 8, 3, 9, 6, 12}) {
+        for (const std::uint8_t after_mask : {0, 1, 2, 4, 8, 3, 9, 6, 12}) {
+            WasdInputHistory history;
+            history.observe(0, 1, 1, base);
+            const auto before = history.observe(before_mask, 1, 2, base + ms);
+            const auto after = history.observe(after_mask, 1, 3, base + 2 * ms);
+            const auto expected = static_cast<std::uint8_t>(after_mask == 0 ? before_mask : 0);
+            expect(WasdReleasedAxes(before, after) == expected,
+                   "人工释放须WASD全部松开，剩余持键、重复状态及直接换向不得误触发");
+        }
+    }
+    {
+        WasdInputHistory history;
+        history.observe(0, 1, 1, base);
+        const auto before = history.observe(9, 1, 2, base + ms);
+        const auto after = history.observe(8, 1, 3, base + 2 * ms);
+        expect(WasdReleasedAxes(before, after) == 0, "W+D松W仍持D，不得制动");
+        const auto all_released = history.observe(0, 1, 4, base + 3 * ms);
+        expect(WasdReleasedAxes(after, all_released) == 8,
+               "D最后松开只制动D，不累计此前已松开的W");
+        for (int invalid_case = 0; invalid_case < 9; ++invalid_case) {
+            auto invalid = after;
+            invalid.held_mask = 0;
+            switch (invalid_case) {
+                case 0: invalid.sequence = before.sequence; break;
+                case 1: ++invalid.sequence; break;
+                case 2: ++invalid.epoch; break;
+                case 3: invalid.received_at_ns = before.received_at_ns - 1; break;
+                case 4: invalid.input_continuous = false; break;
+                case 5: invalid.history_valid = false; break;
+                case 6: invalid.conflicting = true; break;
+                case 7: invalid.held_mask = 10; break;
+                case 8: invalid.held_mask = 16; break;
+            }
+            expect(WasdReleasedAxes(before, invalid) == 0,
+                   "释放检测拒绝重复游标、缺口、换代、倒时及无效历史");
+        }
+        auto invalid_before = after;
+        invalid_before.history_valid = false;
+        expect(WasdReleasedAxes(invalid_before, all_released) == 0, "不得由无效前态推导释放");
+        expect(WasdReleasedAxes(all_released, history.observe(0, 1, 5, base + 4 * ms)) == 0,
+               "持续全松的新序号报告不得重复触发");
+    }
+    for (const std::uint8_t released : {1, 2, 4, 8, 3, 9, 6, 12}) {
+        AutoStopConfig manual_config;
+        manual_config.counter_hold_ms = 17;
+        manual_config.shot_after_release_ms = 9;
+        AutoStopController controller(manual_config);
+        WasdInputHistory history;
+        controller.observe(history.observe(0, 1, 1, base), base);
+        controller.observe(history.observe(released, 1, 2, base + ms), base + ms);
+        controller.observe(history.observe(0, 1, 3, base + 2 * ms), base + 2 * ms);
+        auto d = controller.request_manual_release(1, released, base + 3 * ms);
+        expect(d.phase == AutoStopPhase::WAITING_ACK && d.desired_mask == 0,
+               "真实松键后人工制动先零报告，不伪造持键");
+        const auto first_command = d.command_id;
+        expect(controller.request_manual_release(2, released, base + 3 * ms).command_id == first_command,
+               "活动人工制动不得被第二个请求替换");
+        d = controller.acknowledge(1, d.command_id, 0, base + 4 * ms);
+        const auto inverse = static_cast<std::uint8_t>(((released & 1) << 2) | ((released & 4) >> 2) |
+            ((released & 2) << 2) | ((released & 8) >> 2));
+        expect(d.phase == AutoStopPhase::WAITING_ACK && d.desired_mask == inverse,
+               "人工制动仅反转已释放原方向");
+        d = controller.acknowledge(1, d.command_id, inverse, base + 5 * ms);
+        expect(((released & 5) == 0 || d.axis_deadline_ns[0] == base + 22 * ms) &&
+                   ((released & 10) == 0 || d.axis_deadline_ns[1] == base + 22 * ms),
+               "反向按住计时从实际ACK开始并复用配置");
+        expect(controller.tick(base + 22 * ms - 1).desired_mask == inverse,
+               "人工反向按住不得提前释放");
+        d = controller.tick(base + 22 * ms);
+        expect(d.phase == AutoStopPhase::WAITING_ACK && d.desired_mask == 0,
+               "人工hold到期须请求零报告");
+        d = controller.acknowledge(1, d.command_id, 0, base + 25 * ms);
+        expect(d.phase == AutoStopPhase::SETTLING && d.completion_ready_ns == base + 34 * ms,
+               "人工settle从最终零ACK计算");
+        expect(controller.tick(base + 34 * ms - 1).phase == AutoStopPhase::SETTLING,
+               "人工settle期限前不得完成");
+        d = controller.tick(base + 34 * ms);
+        expect(d.phase == AutoStopPhase::COMPLETE_ESTIMATED && !d.fire_permitted,
+               "人工制动完成仍不构成开火资格");
+        controller.cancel(1, base + 35 * ms);
+        controller.observe(history.observe(released, 1, 4, base + 36 * ms), base + 36 * ms);
+        controller.observe(history.observe(0, 1, 5, base + 37 * ms), base + 37 * ms);
+        d = controller.request_manual_release(2, released, base + 38 * ms);
+        expect(d.request_id == 2 && d.phase == AutoStopPhase::WAITING_ACK && d.desired_mask == 0,
+               "人工制动完成清理后下一次真实按下全松可开始新轮");
+    }
+    {
+        AutoStopController controller;
+        WasdInputHistory history;
+        controller.observe(history.observe(0, 1, 1, base), base);
+        controller.observe(history.observe(9, 1, 2, base + ms), base + ms);
+        controller.observe(history.observe(8, 1, 3, base + 2 * ms), base + 2 * ms);
+        for (const std::uint8_t invalid_mask : {0, 1, 5, 10, 16, 255, 2, 8})
+            expect(controller.request_manual_release(1, invalid_mask, base + 3 * ms).request_id == 0,
+                   "人工制动拒绝非法掩码、冲突轴及任何WASD仍持键");
+        controller.observe(history.observe(0, 1, 4, base + 4 * ms), base + 4 * ms);
+        for (const std::uint8_t invalid_mask : {0, 5, 10, 16, 255})
+            expect(controller.request_manual_release(1, invalid_mask, base + 5 * ms).request_id == 0,
+                   "全松后仍拒绝非法掩码及冲突轴");
+        auto d = controller.request_manual_release(1, 8, base + 5 * ms);
+        d = controller.acknowledge(1, d.command_id, 0, base + 6 * ms);
+        expect(d.desired_mask == 2, "W+D先松W再松D只计划A，不累计S");
+        auto canceled = controller.cancel(1, base + 7 * ms);
+        expect(controller.request_manual_release(1, 8, base + 8 * ms).phase == canceled.phase,
+               "取消后旧人工id不得重入");
+        AutoStopController no_history;
+        expect(no_history.request_manual_release(1, 1, base).request_id == 0,
+               "无真实连续历史不能人工制动");
+        AutoStopController old_model(legacy);
+        WasdInputHistory old_history;
+        old_model.observe(old_history.observe(0, 1, 1, base), base);
+        expect(old_model.request_manual_release(1, 1, base + ms).request_id == 0,
+               "人工释放不借旧动量模型改写hold时序");
+    }
     for (const std::uint8_t direction : {1, 2, 4, 8, 3, 9, 6, 12}) {
         AutoStopController c; WasdInputHistory history;
         c.observe(history.observe(0, 1, 1, base), base);

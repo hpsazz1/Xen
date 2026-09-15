@@ -4,6 +4,9 @@
 #include <deque>
 #include <iostream>
 #include <future>
+#include <initializer_list>
+#include <string_view>
+#include <source_location>
 #include <thread>
 #include <vector>
 
@@ -11,10 +14,12 @@ namespace {
 using Clock = std::chrono::steady_clock;
 std::int64_t clock_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count(); }
 void require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
-template<class Predicate> void wait_for(Predicate predicate) {
+template<class Predicate> void wait_for(Predicate predicate,
+        const std::source_location source = std::source_location::current()) {
     const auto limit = Clock::now() + std::chrono::seconds(2);
     while (!predicate()) {
-        if (Clock::now() >= limit) throw std::runtime_error("worker专项等待超时");
+        if (Clock::now() >= limit) throw std::runtime_error(std::string("worker专项等待超时: ") +
+            source.file_name() + ":" + std::to_string(source.line()));
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
@@ -98,6 +103,7 @@ public:
     KeyboardReceipt cleanup_wasd_keyboard() noexcept override {
         BackendCall call(*this);
         std::lock_guard<std::mutex> lock(mutex); ++cleanup_checks;
+        cleanup_started.push_back(Clock::now());
         if (installed_masks == 0 && current_software == 0) {
             KeyboardReceipt result; result.disposition = KeyboardDisposition::ACKNOWLEDGED; return result;
         }
@@ -127,6 +133,13 @@ public:
         std::lock_guard<std::mutex> lock(mutex); held = mask;
         events.push_back({mask, true, 1, ++sequence, clock_ns()});
     }
+    void physical_batch(std::initializer_list<std::uint8_t> masks) {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (const auto mask : masks) {
+            held = mask;
+            events.push_back({mask, true, 1, ++sequence, clock_ns()});
+        }
+    }
     bool drained() { std::lock_guard<std::mutex> lock(mutex); return delivered_sequence == sequence; }
     bool has_software() { std::lock_guard<std::mutex> lock(mutex); return !software.empty(); }
     bool has_cleanup() { std::lock_guard<std::mutex> lock(mutex); return cleanups != 0; }
@@ -139,6 +152,7 @@ public:
     std::deque<WasdEvent> events;
     std::vector<int> software, masks;
     std::vector<Clock::time_point> software_started, software_ack;
+    std::vector<Clock::time_point> cleanup_started;
     int reverse_ack_delay_ms = 0;
     std::array<bool, 256> extra_keys{};
     std::uint64_t sequence = 0, delivered_sequence = 0;
@@ -198,6 +212,224 @@ void bounded_aim_transaction_wait() {
     require(arbiter.try_enter_cleanup().owns_lock(), "故障后仍可进入清理事务");
 }
 
+void manual_release_contracts() {
+    using namespace std::chrono_literals;
+    // 无目标、无允许键绑定也消费真实全松；仍有任一WASD按住时不制动。
+    for (const auto masks : {std::array<std::uint8_t, 3>{1, 0, 4}, {8, 0, 2}, {2, 0, 8}, {4, 0, 1},
+             {9, 8, 2}, {9, 1, 4}, {9, 0, 6}}) {
+        auto fake = std::make_shared<Fake>(); fake->activation = false;
+        auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+        std::atomic<std::uint64_t> id{0};
+        AutoStopWorker worker(fake, arbiter, [] { return true; }, [&] { return ++id; }, [] { return true; });
+        AutoStopConfig config{true, 0};
+        require(worker.start(config), "manual无绑定启动失败");
+        fake->physical(0); wait_for([&] { return fake->drained(); });
+        fake->physical(masks[0]); wait_for([&] { return fake->drained(); });
+        require(fake->reports().empty(), "manual按下不得提前反向");
+        fake->physical(masks[1]);
+        if (masks[1] != 0) {
+            wait_for([&] { return fake->drained(); });
+            std::this_thread::sleep_for(10ms);
+            require(fake->reports().empty() && !fake->has_masks(),
+                "W+D变为D或W时仍有人为方向，必须不制动");
+            fake->physical(0);
+        }
+        wait_for([&] { const auto reports = fake->reports(); return std::find(reports.begin(), reports.end(), masks[2]) != reports.end(); });
+        require(!fake->has_masks() && worker.estimated_completion_id() == 0,
+            "manual不得屏蔽物理键或授予扳机估计资格");
+        wait_for([&] { std::lock_guard lock(fake->mutex); return fake->cleanup_checks >= 2; });
+        {
+            std::lock_guard lock(fake->mutex);
+            const auto reverse = std::find(fake->software.begin(), fake->software.end(), masks[2]);
+            const auto index = static_cast<std::size_t>(reverse - fake->software.begin());
+            require(std::count_if(fake->software.begin(), fake->software.end(), [](int mask) { return mask != 0; }) == 1,
+                "manual单个释放边沿只能产生一段反向");
+            require(index + 1 < fake->software.size() && fake->software[index + 1] == 0,
+                "manual反向后必须发送软件零报告");
+            require(fake->software_started[index + 1] >= fake->software_ack[index] + 40ms,
+                "manual持有时间必须从反向ACK起算");
+            require(fake->cleanup_started.back() >= fake->software_ack[index + 1] + 18ms,
+                "manual归还清理必须保留释放ACK后的等待");
+            require(fake->held == 0 && fake->installed_masks == 0,
+                "manual仅全松后动作且不得安装物理屏蔽");
+        }
+        const auto before_repeat = fake->reports().size();
+        fake->physical(0); wait_for([&] { return fake->drained(); });
+        std::this_thread::sleep_for(70ms);
+        require(fake->reports().size() == before_repeat && worker.estimated_completion_id() == 0,
+            "重复相同键态不得重触发manual或迟授开火资格");
+        worker.stop();
+    }
+
+    // 同批快速变化只使用最后释放的D；按住热键但没有目标也不得禁用manual。
+    {
+        auto fake = std::make_shared<Fake>(); fake->activation = true;
+        std::atomic<std::uint64_t> id{0};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [&] { return ++id; }, [] { return true; });
+        AutoStopConfig config{true, 5};
+        require(worker.start(config), "manual同批边沿启动失败");
+        fake->physical(0); wait_for([&] { return fake->drained(); });
+        fake->physical_batch({9, 8, 0});
+        wait_for([&] { std::lock_guard lock(fake->mutex); return fake->cleanup_checks >= 2; });
+        const auto reports = fake->reports();
+        require(std::count(reports.begin(), reports.end(), 2) == 1 &&
+            std::count_if(reports.begin(), reports.end(), [](int mask) { return mask != 0; }) == 1,
+            "同批W+D到D到全松只能轻点A，不能累积已释放W的反向");
+        require(!fake->has_masks() && worker.estimated_completion_id() == 0,
+            "热键按住但无目标的manual仍不得安装屏蔽或授予开火");
+        worker.stop();
+    }
+    // 取消反向的新D按下仍是下一轮合法arm，松D后应反A。
+    {
+        auto fake = std::make_shared<Fake>(); fake->activation = false;
+        std::atomic<std::uint64_t> id{0};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [&] { return ++id; }, [] { return true; });
+        AutoStopConfig config{true, 0}; config.counter_hold_ms = 200;
+        require(worker.start(config), "manual取消后重新arm启动失败");
+        fake->physical(0); wait_for([&] { return fake->drained(); });
+        fake->physical(1); wait_for([&] { return fake->drained(); });
+        fake->physical(0); wait_for([&] { const auto reports = fake->reports(); return std::find(reports.begin(), reports.end(), 4) != reports.end(); });
+        fake->physical(8); wait_for([&] { return fake->has_cleanup(); });
+        const auto while_held = fake->reports().size();
+        std::this_thread::sleep_for(20ms);
+        require(fake->reports().size() == while_held, "新方向D保持期间不得反向");
+        fake->physical(0);
+        wait_for([&] { const auto reports = fake->reports(); return std::find(reports.begin(), reports.end(), 2) != reports.end(); });
+        wait_for([&] { std::lock_guard lock(fake->mutex); return fake->cleanup_checks >= 3; });
+        std::vector<int> nonzero;
+        for (const int report : fake->reports()) if (report) nonzero.push_back(report);
+        require(nonzero == std::vector<int>{4, 2} && !fake->has_masks(),
+            "manual新按键取消后，下一次真实全松必须建立新反向且不继承旧方向");
+        worker.stop();
+    }
+    // 等待通道时快速D按下又松开不能被最终全松快照掩盖。
+    {
+        auto fake = std::make_shared<Fake>(); fake->activation = false;
+        auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+        std::atomic<std::uint64_t> id{0};
+        AutoStopWorker worker(fake, arbiter, [] { return true; }, [&] { return ++id; }, [] { return true; });
+        AutoStopConfig config{true, 0};
+        require(worker.start(config), "manual等待期间复核启动失败");
+        fake->physical(0); wait_for([&] { return fake->drained(); });
+        fake->physical(1); wait_for([&] { return fake->drained(); });
+        auto in_flight = arbiter->try_enter_cleanup();
+        require(in_flight.owns_lock(), "manual复核必须真实占住输出通道");
+        fake->physical(0); wait_for([&] { return id.load() > 0; });
+        fake->physical_batch({8, 0});
+        in_flight.unlock();
+        wait_for([&] { return fake->drained(); });
+        std::this_thread::sleep_for(100ms);
+        const auto reports = fake->reports();
+        require(std::none_of(reports.begin(), reports.end(), [](int mask) { return mask != 0; }),
+            "等锁期间发生新DOWN到UP后，旧manual不得依据最终全松快照发出");
+        require(!fake->has_masks() && worker.estimated_completion_id() == 0,
+            "等待后取消不得安装屏蔽或授予开火");
+        worker.stop();
+    }
+
+    // 旧显式构造、缺少focused、旧模型模式、未见健康全松都不得伪造manual。
+    for (int mode = 0; mode < 7; ++mode) {
+        auto fake = std::make_shared<Fake>(); fake->activation = false;
+        std::atomic<std::uint64_t> id{0};
+        std::function<std::uint64_t()> allocate;
+        std::function<bool()> focused;
+        if (mode != 0) allocate = [&] { return ++id; };
+        if (mode != 1) focused = [] { return true; };
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; }, allocate, focused);
+        AutoStopConfig config{mode != 4, 0}; config.use_counterpulse_timing = mode != 2;
+        require(worker.start(config), "manual边界构造启动失败");
+        if (mode != 3) fake->physical(0);
+        if (mode != 4 && mode != 3) wait_for([&] { return fake->drained(); });
+        fake->physical(mode == 6 ? 5 : 1);
+        if (mode != 4) wait_for([&] { return fake->drained(); });
+        if (mode == 5) { std::lock_guard lock(fake->mutex); fake->gap = true; }
+        fake->physical(0);
+        if (mode != 4) wait_for([&] { return fake->drained(); });
+        std::this_thread::sleep_for(70ms);
+        require(fake->reports().empty() && !fake->has_masks(), "manual缺资格不得输出");
+        worker.stop();
+    }
+
+    // 新人工方向、暂停、失焦、事件缺口、End和共享故障应尽快停止当前反向。
+    for (int ending = 0; ending < 6; ++ending) {
+        auto fake = std::make_shared<Fake>(); fake->activation = false;
+        auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+        std::atomic<std::uint64_t> id{0}; std::atomic<bool> focused{true};
+        AutoStopWorker worker(fake, arbiter, [] { return true; }, [&] { return ++id; }, [&] { return focused.load(); });
+        AutoStopConfig config{true, 0}; config.counter_hold_ms = 200;
+        require(worker.start(config), "manual取消启动失败");
+        fake->physical(0); wait_for([&] { return fake->drained(); });
+        fake->physical(1); wait_for([&] { return fake->drained(); });
+        fake->physical(0); wait_for([&] { const auto reports = fake->reports(); return std::find(reports.begin(), reports.end(), 4) != reports.end(); });
+        if (ending == 0) fake->physical(8);
+        else if (ending == 1) worker.set_paused(true);
+        else if (ending == 2) focused = false;
+        else if (ending == 3) { std::lock_guard lock(fake->mutex); fake->gap = true; }
+        else if (ending == 4) { std::lock_guard lock(fake->mutex); fake->end = true; }
+        else arbiter->latch_output_fault();
+        wait_for([&] { return fake->has_cleanup(); });
+        require(fake->released() && worker.estimated_completion_id() == 0 && !fake->has_masks(),
+            "manual取消须清掉软件键且不接管物理方向");
+        {
+            std::lock_guard lock(fake->mutex);
+            const auto reverse = std::find(fake->software.begin(), fake->software.end(), 4);
+            const auto index = static_cast<std::size_t>(reverse - fake->software.begin());
+            require(fake->cleanup_at < fake->software_ack[index] + 200ms,
+                "manual取消不能等完整反向时长才清理");
+        }
+        const auto reports = fake->reports().size();
+        std::this_thread::sleep_for(30ms);
+        require(fake->reports().size() == reports, "manual取消后不能补发旧边沿");
+        worker.stop();
+    }
+
+    // 按键急停接管内的真实释放不排队补发manual。
+    {
+        auto fake = std::make_shared<Fake>(); fake->activation = false;
+        std::atomic<std::uint64_t> id{0};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [&] { return ++id; }, [] { return true; });
+        AutoStopConfig config{true, 5};
+        require(worker.start(config), "manual抑制启动失败");
+        fake->physical(0); wait_for([&] { return fake->drained(); });
+        fake->physical(1); wait_for([&] { return fake->drained(); });
+        worker.publish_target(Clock::now() + 1s);
+        { std::lock_guard lock(fake->mutex); fake->activation = true; }
+        wait_for([&] { return fake->has_masks() && fake->has_software(); });
+        fake->physical(0); wait_for([&] { return fake->drained(); });
+        { std::lock_guard lock(fake->mutex); fake->activation = false; }
+        wait_for([&] { return fake->has_cleanup(); });
+        const auto reports = fake->reports().size();
+        std::this_thread::sleep_for(100ms);
+        require(fake->reports().size() == reports, "按键急停接管期间的释放不得延迟补发manual");
+        worker.stop();
+    }
+    // manual反向时，用户重新按方向并获得热键与目标资格，应先清理再安装屏蔽。
+    {
+        auto fake = std::make_shared<Fake>(); fake->activation = false;
+        std::atomic<std::uint64_t> id{0};
+        std::atomic<bool> cleaned_before_mask{true};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [&] { return ++id; }, [] { return true; });
+        AutoStopConfig config{true, 5}; config.counter_hold_ms = 200;
+        require(worker.start(config), "manual抢占启动失败");
+        fake->physical(0); wait_for([&] { return fake->drained(); });
+        fake->physical(9); wait_for([&] { return fake->drained(); });
+        fake->physical(0); wait_for([&] { const auto reports = fake->reports(); return std::find(reports.begin(), reports.end(), 6) != reports.end(); });
+        { std::lock_guard lock(fake->mutex);
+            fake->after_mask = [&](std::size_t) { if (!fake->has_cleanup()) cleaned_before_mask = false; };
+        }
+        worker.publish_target(Clock::now() + 1s);
+        { std::lock_guard lock(fake->mutex); fake->activation = true; }
+        fake->physical(8);
+        wait_for([&] { return fake->has_masks(); });
+        require(cleaned_before_mask && fake->has_cleanup(), "热键抢占manual必须先清理旧软件键再安装屏蔽");
+        worker.stop();
+    }
+}
+
 void ready(AutoStopWorker& worker, const std::shared_ptr<Fake>& fake) {
     fake->physical(0);
     wait_for([&] { return worker.snapshot().status == AutoStopStatus::READY; });
@@ -206,8 +438,13 @@ void ready(AutoStopWorker& worker, const std::shared_ptr<Fake>& fake) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 }
 }
-int main() {
+int main(int argc, char** argv) {
     try {
+        manual_release_contracts();
+        if (argc == 2 && std::string_view(argv[1]) == "--manual-release") {
+            std::cout << "手动松键急停worker专项通过\n";
+            return 0;
+        }
         bounded_aim_transaction_wait();
         const AutoStopConfig config = [] {
             AutoStopConfig legacy{true, 5};

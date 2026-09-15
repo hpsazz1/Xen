@@ -40,6 +40,19 @@ AutoStopSnapshot assess_auto_stop_availability(
     return snapshot;
 }
 
+std::uint8_t WasdReleasedAxes(const WasdMotionIntent& previous,
+                             const WasdMotionIntent& current) noexcept {
+    const auto valid = [](const WasdMotionIntent& value) {
+        return value.input_continuous && value.history_valid && !value.conflicting &&
+            value.held_mask <= 15 && (value.held_mask & 5) != 5 && (value.held_mask & 10) != 10 &&
+            value.epoch != 0 && value.sequence != 0 && value.received_at_ns > 0;
+    };
+    if (!valid(previous) || !valid(current) || current.held_mask != 0 || previous.epoch != current.epoch ||
+        current.sequence <= previous.sequence || current.sequence - previous.sequence != 1 ||
+        current.received_at_ns < previous.received_at_ns) return 0;
+    return previous.held_mask;
+}
+
 void WasdInputHistory::reset() noexcept {
     state_ = {};
     epoch_ = sequence_ = 0;
@@ -273,6 +286,24 @@ AutoStopDecision AutoStopController::request(std::uint64_t id, std::int64_t now_
     issue(mask);
     return decision_;
 }
+AutoStopDecision AutoStopController::request_manual_release(
+        std::uint64_t id, std::uint8_t released_mask, std::int64_t now_ns) noexcept {
+    if (!counterpulse_ || !timing_valid_ || id == 0 || id <= request_watermark_ || active() ||
+        released_mask == 0 || released_mask > 15 || (released_mask & 5) == 5 ||
+        (released_mask & 10) == 10 || input_.held_mask != 0 ||
+        !synchronized_ || !input_.input_continuous || !input_.history_valid || input_.conflicting)
+        return decision_;
+    request_watermark_ = id;
+    if (!advance(now_ns)) { invalidate(); return decision_; }
+    decision_.request_id = id;
+    decision_.completion_ready_ns = 0;
+    counter_mask_ = static_cast<std::uint8_t>(((released_mask & 1) << 2) | ((released_mask & 4) >> 2) |
+        ((released_mask & 2) << 2) | ((released_mask & 8) >> 2));
+    initial_zero_ = true;
+    issue(0);
+    return decision_;
+}
+
 AutoStopDecision AutoStopController::tick(std::int64_t now_ns) noexcept {
     if (!active()) {
         if (now_ns <= 0 || now_ns < time_ns_) invalidate();

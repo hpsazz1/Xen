@@ -179,6 +179,15 @@ public:
                 !paused.load(std::memory_order_acquire) && !stopping.load(std::memory_order_acquire);
         } catch (...) { return false; }
     }
+    bool manual_permission(const InputSnapshot& input) noexcept {
+        try {
+            // release_required属于快捷键循环的重新武装条件，不能使人工松键依赖快捷键松开。
+            return config.use_counterpulse_timing && allocate_request && focused && focused() &&
+                weapon_permission() && allowed && allowed() && !arbiter->faulted_.load() &&
+                input.state_valid && input.status == InputMonitorStatus::READY &&
+                !release_key_held(input) && !input.virtual_keys[0x23] && !paused.load() && !stopping.load();
+        } catch (...) { return false; }
+    }
     bool session_permission(bool require_target) noexcept {
         try {
             const bool source_focused = focused && focused();
@@ -207,6 +216,8 @@ public:
         std::uint8_t software_mask = 0, original_mask = 0;
         bool debt = false, estimated = false, independent = false, target_consumed = false;
         bool independent_acquired = false;
+        bool manual_release = false;
+        std::uint8_t release_armed_mask = 0;
         bool mask_only = false, masked_hold = false;
         Clock::time_point lease_end;
         Clock::time_point last_block_log{};
@@ -282,7 +293,7 @@ public:
             return success;
         };
         auto cancel_active = [&](bool force_fault, const char* reason, bool normal_activation_release = false,
-                                 bool cycle_resume = false) {
+                                 bool cycle_resume = false, bool manual_finished = false) {
             { std::lock_guard<std::mutex> lock(mutex); estimated_id = 0; }
             AutoStopBlockReason block_reason;
             { std::lock_guard<std::mutex> lock(mutex); block_reason = state.block_reason; }
@@ -333,16 +344,23 @@ public:
             if (resumed) LOG_INFO("auto_stop", "键盘归还已确认；保留连续输入以支持再次急停");
             // 正常归还不破坏真实事件连续性；无法承接模型时，下次仅屏蔽，不伪造运动历史。
             // 清理期间的事件留给正式游标，下一轮先验证再准入。
-            const bool retain_input = normal_activation_release && clean_ok && !force_fault && intent.input_continuous;
+            const bool retain_input = (normal_activation_release || manual_release) && clean_ok && !force_fault && intent.input_continuous;
+            if (manual_release) {
+                // 松键动作结束后仅用真实当前输入建立下一计划，不承接软件反向期间的运动估算。
+                controller = AutoStopController(config);
+                if (intent.history_valid) controller.observe(intent, now_ns());
+            }
             std::lock_guard<std::mutex> lock(mutex);
-            if (active_id && !(cycle_resume && resumed)) ++state.canceled;
-            if ((cycle_resume && !resumed) || (config.cycle_enabled && !normal_activation_release && !cycle_resume))
+            if (active_id && !(cycle_resume && resumed) && !manual_finished) ++state.canceled;
+            if (!manual_release && ((cycle_resume && !resumed) || (config.cycle_enabled && !normal_activation_release && !cycle_resume)))
                 state.release_required = true;
             if (cycle_resume && resumed) ++state.cycle_count;
             state.cycle_moving = cycle_resume && resumed;
             if (fault || force_fault || !clean_ok) { fault = true; state.status = AutoStopStatus::FAULT; }
             else state.status = paused.load() ? AutoStopStatus::PAUSED : AutoStopStatus::CANCELED;
             active_id = 0;
+            manual_release = false;
+            release_armed_mask = 0;
             independent = false;
             independent_acquired = false;
             estimated = false;
@@ -353,21 +371,38 @@ public:
         try {
             while (!stopping.load(std::memory_order_acquire)) {
                 bool input_ok = mouse->poll_input(input) && input.state_valid && input.status == InputMonitorStatus::READY;
+                std::uint8_t released_axes = 0;
+                std::int64_t release_event_ns = 0;
+                bool manual_input_changed = false;
+                const bool observe_manual_edges = !active_id && !debt && input_ok && manual_permission(input);
+                if (!observe_manual_edges) release_armed_mask = 0;
                 WasdEventBatch batch;
                 bool events_ok = mouse->read_wasd_events(cursor, batch) && batch.subscribed && !batch.gap;
-                if (!events_ok) { history.reset(); intent = {}; }
+                if (!events_ok) { history.reset(); intent = {}; release_armed_mask = 0; }
                 if (events_ok) for (std::size_t i = 0; i < batch.count; ++i) {
                     const auto& event = batch.events[i];
                     if (!event.state_valid) { events_ok = false; history.reset(); intent = {}; break; }
+                    const auto previous_intent = intent;
                     intent = history.observe(event.held_mask, event.epoch, event.sequence, event.received_at_steady_ns, event.state_valid);
+                    if (manual_release && event.held_mask != original_mask) manual_input_changed = true;
+                    // 只接纳无人接管期间真实的新按下和释放。重复报告不重新武装，清理后不补发旧释放。
+                    if (observe_manual_edges && intent.history_valid && previous_intent.history_valid &&
+                        intent.input_continuous && intent.epoch == previous_intent.epoch) {
+                        const auto released = WasdReleasedAxes(previous_intent, intent) & release_armed_mask;
+                        // 只保留最后一次全松边沿，不累计组合键中较早释放的方向。
+                        if (released) released_axes = static_cast<std::uint8_t>(released);
+                        if (released) release_event_ns = intent.received_at_ns;
+                        release_armed_mask = static_cast<std::uint8_t>((release_armed_mask |
+                            (intent.held_mask & ~previous_intent.held_mask)) & intent.held_mask);
+                    } else { release_armed_mask = 0; released_axes = 0; }
                     // 活动会话逐事件锁定缺口/代际/时间故障，同批后续全松不能洗掉撤销。
-                    if (active_id && independent && (!intent.input_continuous || event.epoch != active_input_epoch)) {
+                    if (active_id && (independent || manual_release) && (!intent.input_continuous || event.epoch != active_input_epoch)) {
                         events_ok = false;
                         history.reset(); intent = {};
                         break;
                     }
                     // 全部屏蔽确认后，物理改向不再是施加给游戏的输入；制动沿原ACK模型推进。
-                    if (!estimated && !independent_acquired) controller.observe(intent, event.received_at_steady_ns);
+                    if (!estimated && !independent_acquired && !manual_release) controller.observe(intent, event.received_at_steady_ns);
                 }
                 // 救援只信任本设备的新按键边沿；失联缓存不产生救援动作。
                 bool rescue_pressed = false;
@@ -418,14 +453,117 @@ public:
                 {
                     std::lock_guard<std::mutex> lock(mutex);
                     if (weapon_ready && (!allocate_request || state.source_focused) && input_ok && !release_key_held(input) &&
-                        config.activation_virtual_key > 0 && config.activation_virtual_key < 256 &&
-                        !input.virtual_keys[config.activation_virtual_key])
+                        (config.activation_virtual_key <= 0 || config.activation_virtual_key >= 256 ||
+                        !input.virtual_keys[config.activation_virtual_key]))
                         state.release_required = false;
                     release_required = state.release_required;
                 }
                 const bool request_eligible = session_ready && !release_required && input_ok && permission(input) &&
                     Clock::now() >= movement_not_before;
                 if (!request_eligible) target_consumed = false;
+                // 松键制动与快捷键制动共享active_id和软件键盘债务，不能同时拥有输出。
+                bool queued_request = false;
+                { std::lock_guard<std::mutex> lock(mutex); queued_request = pending_id != 0; }
+                const bool hotkey_priority = queued_request || (request_eligible && !target_consumed && intent.held_mask != 0);
+                if (!active_id && !debt && released_axes && !hotkey_priority && !latched_fault &&
+                    input_ok && events_ok && intent.history_valid && intent.held_mask == 0 && held_wasd(input) == 0 &&
+                    release_event_ns > 0 && now_ns() >= release_event_ns &&
+                    now_ns() - release_event_ns < 500'000'000 && manual_permission(input)) {
+                    const auto id = allocate_request();
+                    std::lock_guard<std::mutex> lock(mutex);
+                    if (id > last_request_id && !pending_id) {
+                        // 全松是本次真实事件；独立建立固定时序计划，无需沿用上一次运动模型。
+                        controller = AutoStopController(config);
+                        controller.observe(intent, now_ns());
+                        const auto decision = controller.request_manual_release(id, released_axes, now_ns());
+                        if (decision.phase == AutoStopPhase::WAITING_ACK && decision.request_id == id) {
+                            active_id = last_request_id = id;
+                            active_generation = cancel_generation.load(); active_input_epoch = intent.epoch;
+                            original_mask = intent.held_mask;
+                            lease_end = Clock::now() + std::chrono::milliseconds(500);
+                            manual_release = true; release_armed_mask = 0;
+                            state.request_id = id; ++state.requests; state.status = AutoStopStatus::BRAKING;
+                            state.block_reason = AutoStopBlockReason::NONE;
+                            state.counter_release_ack_ns = state.completion_ready_ns = 0;
+                            state.cycle_moving = false;
+                            LOG_INFO("auto_stop", "开始松键急停{}，释放方向mask={}，保留物理方向mask={}", id, released_axes, original_mask);
+                        }
+                    }
+                }
+                if (manual_release) {
+                    const auto valid_manual = [&]() {
+                        return manual_permission(input) && input_ok && events_ok && !manual_input_changed && intent.input_continuous && intent.epoch == active_input_epoch &&
+                            held_wasd(input) == original_mask && intent.held_mask == original_mask &&
+                            active_generation == cancel_generation.load() && Clock::now() < lease_end;
+                    };
+                    const auto reports_still_released = [&]() {
+                        // 等待输出事务后复核整个积压窗口；最终快照为零不能掩盖按下再松开。
+                        WasdEventBatch pending;
+                        if (!mouse->read_wasd_events(cursor, pending) || !pending.subscribed || pending.gap ||
+                            cursor.epoch != active_input_epoch || pending.count >= pending.events.size()) {
+                            events_ok = false; history.reset(); intent = {}; return false;
+                        }
+                        bool still_released = true;
+                        for (std::size_t i = 0; i < pending.count; ++i) {
+                            const auto& event = pending.events[i];
+                            intent = history.observe(event.held_mask, event.epoch, event.sequence,
+                                event.received_at_steady_ns, event.state_valid);
+                            if (event.held_mask != 0) { still_released = false; manual_input_changed = true; }
+                            if (!event.state_valid || event.epoch != active_input_epoch || !intent.input_continuous || !intent.history_valid)
+                                events_ok = false;
+                        }
+                        // 正式消费动作拥有期间的事件，撤销后不能把该窗口重新解释为新一轮松键。
+                        return still_released && events_ok;
+                    };
+                    if (hotkey_priority || !valid_manual()) {
+                        const auto new_press = intent.held_mask;
+                        const bool may_rearm = manual_permission(input) && input_ok && events_ok && intent.history_valid &&
+                            intent.epoch == active_input_epoch && new_press != 0 && new_press == held_wasd(input) &&
+                            active_generation == cancel_generation.load();
+                        cancel_active(false, "manual_release_revoked");
+                        // 人工新按下已取消无屏蔽的反向输出；正常清理后允许其下一次真实全松。
+                        if (may_rearm && !debt && !fault) release_armed_mask = new_press;
+                    }
+                    else {
+                        auto decision = controller.tick(now_ns());
+                        if (decision.phase == AutoStopPhase::WAITING_ACK) {
+                            if (!reserve() || !(input_ok = mouse->poll_input(input)) || !reports_still_released() || !valid_manual())
+                                cancel_active(false, "manual_permission_before_report");
+                            else {
+                                const auto started = now_ns();
+                                if (software_mask && decision.desired_mask == 0) {
+                                    std::lock_guard<std::mutex> lock(mutex);
+                                    ++state.release_commands;
+                                }
+                                const auto result = mouse->set_wasd_keyboard(decision.desired_mask);
+                                debt |= result.datagram_sent; receipt(result, started);
+                                const auto returned = now_ns();
+                                const auto ack = std::chrono::duration_cast<std::chrono::nanoseconds>(result.protocol_ack_received_at.time_since_epoch()).count();
+                                const auto completed = std::chrono::duration_cast<std::chrono::nanoseconds>(result.backend_completed_at.time_since_epoch()).count();
+                                if (result.disposition != KeyboardDisposition::ACKNOWLEDGED || ack < started || ack > completed || completed > returned)
+                                    cancel_active(true, "manual_keyboard_not_acknowledged");
+                                else {
+                                    software_mask = decision.desired_mask;
+                                    decision = controller.acknowledge(active_id, decision.command_id, software_mask, ack);
+                                    if (decision.completion_ready_ns) {
+                                        std::lock_guard<std::mutex> lock(mutex);
+                                        state.counter_release_ack_ns = ack;
+                                        state.completion_ready_ns = decision.completion_ready_ns;
+                                    }
+                                }
+                            }
+                        }
+                        if (manual_release && decision.phase == AutoStopPhase::COMPLETE_ESTIMATED) {
+                            { std::lock_guard<std::mutex> lock(mutex); ++state.completed; }
+                            cancel_active(false, "manual_release_completed", false, false, true);
+                        } else if (manual_release && (decision.phase == AutoStopPhase::INVALID || decision.phase == AutoStopPhase::CANCELLED))
+                            cancel_active(false, "manual_controller_canceled");
+                    }
+                    release_reservation();
+                    std::unique_lock<std::mutex> lock(mutex);
+                    wake.wait_for(lock, std::chrono::milliseconds(1));
+                    continue;
+                }
                 {
                     std::lock_guard<std::mutex> lock(mutex);
                     if (latched_fault || !weapon_ready || release_required || !input_ok || !events_ok ||

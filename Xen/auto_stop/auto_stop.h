@@ -113,6 +113,10 @@ struct WasdMotionIntent {
     std::int64_t received_at_ns = 0;
 };
 
+// 仅在连续真实事件的WASD全部松开时返回紧邻前态方向；部分释放不累计。
+std::uint8_t WasdReleasedAxes(const WasdMotionIntent& previous,
+                             const WasdMotionIntent& current) noexcept;
+
 enum class AutoStopPhase { IDLE, WAITING_ACK, BRAKING, COMPLETE_ESTIMATED, CANCELLED, INVALID, SETTLING };
 struct AutoStopDecision {
     AutoStopPhase phase = AutoStopPhase::IDLE;
@@ -133,6 +137,9 @@ public:
     explicit AutoStopController(const AutoStopConfig& config) noexcept;
     AutoStopDecision observe(const WasdMotionIntent& intent, std::int64_t now_ns) noexcept;
     AutoStopDecision request(std::uint64_t request_id, std::int64_t now_ns) noexcept;
+    // released_mask由真实释放边沿取得；不改写当前input，不使用旧模型估计速度。
+    AutoStopDecision request_manual_release(std::uint64_t request_id,
+        std::uint8_t released_mask, std::int64_t now_ns) noexcept;
     AutoStopDecision cancel(std::uint64_t request_id, std::int64_t now_ns) noexcept;
     AutoStopDecision tick(std::int64_t now_ns) noexcept;
     // 调用方须证明完整屏蔽、正常释放与清理ACK，并保持真实监听连续；

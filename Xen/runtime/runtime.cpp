@@ -352,7 +352,7 @@ struct Runtime::Impl {
                 }
                 auto_stop_worker.store(std::move(worker));
             }
-            LOG_INFO("auto_stop", "自动急停由允许键和准星进入人物完整范围触发；要求源机焦点，估算不授予开火");
+            LOG_INFO("auto_stop", "自动急停支持人工松方向键反向轻点，以及允许键与人物范围触发；共用键盘所有者，要求源机焦点");
         }
         if ((config.auto_stop.enabled || config.trigger.enabled || config.recoil.enabled) && config.source_context.enabled) {
                 auto context_config = config.source_context;

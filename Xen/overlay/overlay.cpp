@@ -2958,10 +2958,10 @@ struct Overlay::Impl {
         switch (snapshot.auto_stop.status) {
             case AutoStopStatus::DISABLED: status = "已关闭"; break;
             case AutoStopStatus::UNSUPPORTED_BACKEND: status = "需要 KMBOX NET"; break;
-            case AutoStopStatus::UNBOUND: status = "未绑定允许键"; break;
+            case AutoStopStatus::UNBOUND: status = "未绑定允许键，松键急停仍可用"; break;
             case AutoStopStatus::AWAITING_VALIDATION: status = "待设备与制动验证"; break;
             case AutoStopStatus::PAUSED: status = "已暂停"; break;
-            case AutoStopStatus::READY: status = "等待快捷键与目标"; break;
+            case AutoStopStatus::READY: status = "等待方向松键或快捷键与目标"; break;
             case AutoStopStatus::WAITING_INPUT: status = "等待有效输入"; break;
             case AutoStopStatus::MASKED: status = "已屏蔽保持（未估算制动）"; break;
             case AutoStopStatus::BRAKING: status = "制动中"; break;
@@ -2978,13 +2978,13 @@ struct Overlay::Impl {
                 static_cast<unsigned long long>(snapshot.auto_stop.cycle_count));
         }
         if (snapshot.auto_stop.independent_trigger_enabled) {
-            ImGui::TextWrapped("阻断原因：%s", AutoStopBlockReasonName(snapshot.auto_stop.block_reason));
+            ImGui::TextWrapped("快捷键急停阻断：%s", AutoStopBlockReasonName(snapshot.auto_stop.block_reason));
             if (!snapshot.auto_stop.source_focused)
                 ImGui::TextWrapped("等待源机焦点：请检查设置中的源状态桥接与源机前台游戏。");
             if (snapshot.auto_stop.block_reason == AutoStopBlockReason::SOURCE_TIMING_INVALID)
                 ImGui::TextWrapped("源机时钟服务不可用或映射尚未建立，请检查源机时钟服务与连接状态。");
             else if (!snapshot.auto_stop.target_available)
-                ImGui::TextWrapped("等待新鲜目标：需要有效源时钟及50毫秒内的配置目标检测。");
+                ImGui::TextWrapped("快捷键急停等待新鲜目标：需要有效源时钟及50毫秒内的配置目标检测；人工松键急停无需目标。");
         }
         if (snapshot.auto_stop.telemetry_available) {
             if (snapshot.auto_stop.use_counterpulse_timing)
@@ -3001,6 +3001,7 @@ struct Overlay::Impl {
         if (snapshot.auto_stop.status == AutoStopStatus::MASKED)
             ImGui::TextWrapped("方向重叠或制动历史不可用：已阻止方向键继续输入，保持至松开急停键；未执行反向制动，可能仍有惯性滑行。");
         ImGui::Separator();
+        ImGui::TextWrapped("启用后，WASD全部松开时按最后释放方向轻点反方向，无需快捷键或目标。仍有方向键按住时不制动，例如W+D先松W不动作，再松D才轻点A。重新按方向键立即归还；快捷键急停接管期间的松键不叠加、不补发。");
         ImGui::TextWrapped("按住快捷键且准星进入人物完整检测范围时制动；无需开启自动扳机，不使用扳机缩小区域。");
         ImGui::TextWrapped("准星进入人物范围用于首次触发；接管WASD后，制动途中和保持期间的离框、目标消失或换向都不会解除。松开允许键恢复移动；循环开启时每次点射释放后也会归还移动。失焦、救援、GSI失效和输入异常仍会安全释放。");
         ImGui::TextWrapped("面向单方向及相邻双键移动；自动急停与物理输出安全急停相互独立。");
@@ -3008,7 +3009,7 @@ struct Overlay::Impl {
         const auto key_active = current_virtual_key_state();
         if (can_edit) process_hotkey_capture(app_config, actions, key_active);
         if (begin_form("auto_stop_form", 126.0f)) {
-            form_row("启用自动急停", "仅支持 KMBOX NET；保存启用状态不会触发制动，预计完成不等于角色已停稳。");
+            form_row("启用自动急停", "同时控制快捷键急停和人工松方向键急停，仅支持 KMBOX NET；运行后满足安全条件即可响应人工松键，预计完成不等于角色已停稳。");
             ImGui::BeginDisabled(app_config.mouse.backend != MouseBackend::KMBOX_NET &&
                                  !app_config.auto_stop.enabled);
             toggle_switch("##auto_stop_enabled", &app_config.auto_stop.enabled);
