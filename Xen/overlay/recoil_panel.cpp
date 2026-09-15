@@ -194,13 +194,13 @@ struct RecoilPanel::Impl {
     }
 
     void timing_settings(const RuntimeSnapshot& snapshot, AppConfig& config, bool can_edit) {
-        if (!ImGui::CollapsingHeader("共享武器点射节奏", ImGuiTreeNodeFlags_DefaultOpen)) return;
+        if (!ImGui::CollapsingHeader("武器点射资料", ImGuiTreeNodeFlags_DefaultOpen)) return;
         if (!timing_loaded || timing_loaded_path != config.weapon_timing_file) {
             load_timing(config.weapon_timing_file);
             ImGui::TextUnformatted("正在后台载入武器资料。");
             return;
         }
-        ImGui::TextWrapped("仅用于自动扳机的点射节奏，独立于压枪开关；不改变持续扫射、弹道时间轴或急停参数。修改配置和资料在下一次启动运行时生效。");
+        ImGui::TextWrapped("自动扳机使用共享GSI识别到的武器点射资料，独立于压枪开关。修改资料在下一次启动运行时生效。");
         ImGui::TextWrapped("当前GSI武器：%s（%s）", weapon::display_name(snapshot.weapon_snapshot.canonical_id).data(),
             weapon::status_name(snapshot.weapon_snapshot.status));
         const auto& active_timing = snapshot.trigger.context;
@@ -215,23 +215,10 @@ struct RecoilPanel::Impl {
         {
             DisabledScope disabled(!can_edit);
             if (form("weapon_timing_settings")) {
-                row("启用武器点射资料", "自动扳机点射读取所选武器的按住时长和提交间隔；不要求开启压枪。未知、失效或未启用的武器资料不能沿用上一把武器。");
-                ImGui::Checkbox("##weapon_timing_enabled", &config.weapon_timing_enabled);
                 row("资料文件", "回车应用路径并加载资料；只在首次、路径应用和手动重载时读盘。默认cache/recoil/weapon-timing.json缺失可直接使用内置33项，自定义路径缺失必须先保存。损坏文件不静默回退。");
                 if (ImGui::InputText("##weapon_timing_file", &timing_path_draft, ImGuiInputTextFlags_EnterReturnsTrue)) {
                     config.weapon_timing_file = timing_path_draft;
                     load_timing(config.weapon_timing_file);
-                }
-                row("武器选择", "自动按GSI上下文选择；手选是你对当前武器的明确声明，换枪时须同步调整。启用GSI时手选仍须与有效GSI武器一致；R8不能激活。使用全局保存配置保存选择。");
-                const char* selection = config.weapon_timing_manual_id.empty() ? "GSI自动识别" : weapon::display_name(config.weapon_timing_manual_id).data();
-                if (ImGui::BeginCombo("##weapon_timing_manual", selection)) {
-                    if (ImGui::Selectable("GSI自动识别", config.weapon_timing_manual_id.empty())) config.weapon_timing_manual_id.clear();
-                    if (timing_valid) for (const auto& profile : timing_catalog.profiles) {
-                        DisabledScope unavailable(!profile.enabled || profile.canonical_id == "revolver");
-                        if (ImGui::Selectable(weapon::display_name(profile.canonical_id).data(), config.weapon_timing_manual_id == profile.canonical_id))
-                            config.weapon_timing_manual_id = profile.canonical_id;
-                    }
-                    ImGui::EndCombo();
                 }
                 ImGui::EndTable();
             }
@@ -401,6 +388,19 @@ struct RecoilPanel::Impl {
         try { RecoilStore store(std::filesystem::u8path(config.profile_directory)); RecoilProfile p;
         if (store.load(file, p, status)) { selected_file = file; set_draft(p); status = "已加载独立草稿；活动曲线未改变。"; } } catch (...) { status = "曲线文件或目录无效。"; }
     }
+    bool strength_controls() {
+        bool changed = false;
+        if (form("recoil_tuning")) {
+            row("垂直强度", "只改变草稿Y增量；100%保持基线，正比例保留原方向。不会热改正在执行的版本。");
+            double vertical = tuning.y_strength * 100;
+            if (ImGui::SliderScalar("##recoil_y_strength", ImGuiDataType_Double, &vertical, &kZero, &kTwoHundred, "%.0f%%")) { tuning.y_strength = vertical / 100; changed = true; }
+            row("水平强度", "只改变草稿X增量；原X为0时请使用节点或局部分段修正。");
+            double horizontal = tuning.x_strength * 100;
+            if (ImGui::SliderScalar("##recoil_x_strength", ImGuiDataType_Double, &horizontal, &kZero, &kTwoHundred, "%.0f%%")) { tuning.x_strength = horizontal / 100; changed = true; }
+            ImGui::EndTable();
+        }
+        return changed;
+    }
     void settings(const RuntimeSnapshot& snapshot, AppConfig& config) {
         auto& c = config.recoil;
         if (form("recoil_settings")) {
@@ -408,6 +408,21 @@ struct RecoilPanel::Impl {
             ImGui::Checkbox("##recoil_enabled", &c.enabled);
             row("Aim混合模式", "关闭时选择独立压枪阶段能力；混合需外部运动账本和对应物理验收，不改变Aim参数。");
             ImGui::Checkbox("##recoil_mixed", &c.mixed_aim);
+            ImGui::EndTable();
+        }
+        ImGui::TextWrapped("曲线校准、强度编辑与匹配配置见调试 / 弹道工具。");
+        ImGui::TextWrapped("武器：%s（%s）", weapon::display_name(snapshot.weapon_snapshot.canonical_id).data(),
+            weapon::status_name(snapshot.weapon_snapshot.status));
+        if (!snapshot.recoil_profile_status.empty()) ImGui::TextWrapped("曲线匹配：%s", snapshot.recoil_profile_status.c_str());
+        if (snapshot.recoil_telemetry_available) {
+            ImGui::TextWrapped("压枪状态：%s；已确认 X %.2f / Y %.2f counts", reason_text(snapshot.recoil.reason),
+                snapshot.recoil.confirmed_x, snapshot.recoil.confirmed_y);
+        } else ImGui::TextUnformatted("本会话暂无压枪执行记录。");
+    }
+    void calibration_settings(AppConfig& config) {
+        auto& c = config.recoil;
+        if (!ImGui::CollapsingHeader("压枪校准匹配配置")) return;
+        if (form("recoil_calibration_settings")) {
             row("曲线目录", "新配置默认使用cache/recoil/profiles；旧配置中的自定义目录保留。只加载活动索引或固定版本覆盖，新文件不会自动激活。");
             ImGui::InputText("##recoil_directory", &c.profile_directory);
             row("游戏版本", "必须与所选曲线的校准条件一致；改变后旧曲线不可伪装适配。"); ImGui::InputText("##recoil_build", &c.game_build);
@@ -419,13 +434,6 @@ struct RecoilPanel::Impl {
             row("覆盖文件", "曲线目录内的已保存文件名，禁止路径逃逸；仍须匹配武器与校准条件，不能执行未校准候选。"); ImGui::InputText("##recoil_trial_file", &c.trial_file);
             ImGui::EndTable();
         }
-        ImGui::TextWrapped("武器：%s（%s）", weapon::display_name(snapshot.weapon_snapshot.canonical_id).data(),
-            weapon::status_name(snapshot.weapon_snapshot.status));
-        if (!snapshot.recoil_profile_status.empty()) ImGui::TextWrapped("曲线匹配：%s", snapshot.recoil_profile_status.c_str());
-        if (snapshot.recoil_telemetry_available) {
-            ImGui::TextWrapped("压枪状态：%s；已确认 X %.2f / Y %.2f counts", reason_text(snapshot.recoil.reason),
-                snapshot.recoil.confirmed_x, snapshot.recoil.confirmed_y);
-        } else ImGui::TextUnformatted("本会话暂无压枪执行记录。");
     }
     void connections(AppConfig& config) {
         if (ImGui::CollapsingHeader("GSI自动武器识别配置")) {
@@ -475,15 +483,7 @@ struct RecoilPanel::Impl {
         ImGui::TextWrapped("编辑对象固定：%s / %s / 基线 %llu；GSI换枪不会切走当前草稿。", weapon::display_name(base.weapon_id).data(), base.id.c_str(),
             static_cast<unsigned long long>(base.revision));
         bool changed = false;
-        if (form("recoil_tuning")) {
-            row("垂直强度", "只改变草稿Y增量；100%保持基线，正比例保留原方向。不会热改正在执行的版本。");
-            double vertical = tuning.y_strength * 100;
-            if (ImGui::SliderScalar("##recoil_y_strength", ImGuiDataType_Double, &vertical, &kZero, &kTwoHundred, "%.0f%%")) { tuning.y_strength = vertical / 100; changed = true; }
-            row("水平强度", "只改变草稿X增量；原X为0时请使用节点或局部分段修正。");
-            double horizontal = tuning.x_strength * 100;
-            if (ImGui::SliderScalar("##recoil_x_strength", ImGuiDataType_Double, &horizontal, &kZero, &kTwoHundred, "%.0f%%")) { tuning.x_strength = horizontal / 100; changed = true; }
-            ImGui::EndTable();
-        }
+        changed |= strength_controls();
         if (ImGui::TreeNode("时序（高级）")) {
             changed |= ImGui::InputDouble("起压偏移 / ms", &tuning.start_offset_ms, 0.5, 1, "%.2f"); help("相对基线首次补偿时刻偏移；不允许跨到射击事件之前。0.5ms是编辑步长，不是硬实时保证。");
             changed |= ImGui::InputDouble("后续时间比例", &tuning.time_scale, 0.05, 0.1, "%.3f"); help("只伸缩首次非零节点后的时间，保持总位移；不改变扳机间隔或游戏射速。");
@@ -704,9 +704,7 @@ void RecoilPanel::request_cancel() noexcept {
 void RecoilPanel::render(const RuntimeSnapshot& snapshot, AppConfig& config, bool can_edit) noexcept {
     try {
         poll();
-        ImGui::Separator(); ImGui::TextUnformatted("压枪与共享点射设置");
         if (busy()) { ImGui::TextUnformatted("弹道任务正在后台处理；完成后可继续编辑。"); return; }
-        impl_->timing_settings(snapshot, config, can_edit);
         DisabledScope disabled(!can_edit || busy());
         impl_->settings(snapshot, config);
         if (!snapshot.recoil_archive.error.empty()) ImGui::TextWrapped("射击归档异常：%s；详细状态见调试 / 运行诊断。", snapshot.recoil_archive.error.c_str());
@@ -741,7 +739,11 @@ void RecoilPanel::render_tools(const RuntimeSnapshot& snapshot, AppConfig& confi
             help("取消尚未开始的任务；已经开始的同步存储和分析等待完成。不会连接设备。");
             return;
         }
-        { DisabledScope disabled(!can_edit);
+        impl_->timing_settings(snapshot, config, can_edit);
+        { DisabledScope disabled(!can_edit || busy());
+            impl_->calibration_settings(config);
+        }
+        { DisabledScope disabled(!can_edit || busy());
             ImGui::Checkbox("打开弹道编辑与优化", &impl_->show_editor);
             help("展开曲线草稿、人工校准与离线优化工具；不会自动加载、激活或执行曲线。");
             if (impl_->show_editor) impl_->editor(snapshot, config);

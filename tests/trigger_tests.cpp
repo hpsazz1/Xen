@@ -59,7 +59,7 @@ void geometry_and_timing() {
     TriggerConfig fast = config(); fast.fire_delay_ms = 0;
     TriggerController boundary; arm(boundary, fast);
     o = frame(1); o.center_x = 175;
-    expect(boundary.observe(o, permit(), at(1)).button_action == TriggerButtonAction::DOWN, "椭圆数学边界包含");
+    expect(boundary.observe(o, permit(), at(1)).button_action == TriggerButtonAction::DOWN, "矩形数学边界包含");
     TriggerController outside; arm(outside, fast); o.center_x = 175.01f;
     expect(outside.observe(o, permit(), at(1)).button_action == TriggerButtonAction::NONE, "不添加框外epsilon");
     TriggerController clipped; arm(clipped, fast); o = frame(1); o.detections[0].x1 = 0;
@@ -70,6 +70,24 @@ void geometry_and_timing() {
     expect(stale.observe(o, permit(), at(11)).snapshot.reason == TriggerReason::STALE, "年龄上界包括时钟不确定性");
     TriggerController nan; arm(nan, fast); o = frame(1); o.detections[0].x1 = std::numeric_limits<float>::quiet_NaN();
     expect(nan.observe(o, permit(), at(1)).button_action == TriggerButtonAction::NONE, "NaN框必须拒绝");
+}
+void full_detection_bounds() {
+    auto cfg = config(); cfg.fire_delay_ms = 0;
+    cfg.body_width_percent = cfg.body_height_percent = 100;
+    cfg.head_width_percent = cfg.head_height_percent = 100;
+    // 最近报告的身体仍完整包围准星；框内角部也必须与急停矩形判据一致。
+    auto o = frame(1); o.center_x = 160; o.center_y = 160;
+    o.detections = {{133.3125f, 134.5f, 175.1875f, 240.25f, .9f, 0}};
+    TriggerController body; arm(body, cfg);
+    expect(body.observe(o, permit(), at(1)).button_action == TriggerButtonAction::DOWN,
+        "实际身体框内准星不额外等待中心驻留");
+    TriggerController corner; arm(corner, cfg);
+    o.center_x = o.detections[0].x2; o.center_y = o.detections[0].y2;
+    expect(corner.observe(o, permit(), at(1)).button_action == TriggerButtonAction::DOWN,
+        "完整有效矩形角部与急停使用相同范围");
+    TriggerController outside; arm(outside, cfg); o.center_x += .01f;
+    expect(outside.observe(o, permit(), at(1)).button_action == TriggerButtonAction::NONE,
+        "矩形外不因范围统一获得资格");
 }
 void association() {
     TriggerController c; arm(c);
@@ -386,7 +404,7 @@ void estimated_stop_is_explicit_and_parallel() {
 int main() {
     weapon_timing_submission_and_cleanup(); estimated_stop_is_explicit_and_parallel();
     fire_disabled_preserves_qualification_and_stop();
-    geometry_and_timing(); association(); permissions_and_receipts(); stop_and_automatic();
+    geometry_and_timing(); full_detection_bounds(); association(); permissions_and_receipts(); stop_and_automatic();
     weapon_context_cancels_qualification(); weapon_context_invalidity_and_held_cleanup();
     auto bad = config(); bad.person_class_ids.push_back(1);
     expect(!valid_trigger_config(bad), "头身映射相交必须拒绝");

@@ -86,14 +86,19 @@ struct AppConfig {
     }();
     KeyboardConfig keyboard;
     AutoStopConfig auto_stop;
-    TriggerConfig trigger;
+    TriggerConfig trigger = [] {
+        TriggerConfig value;
+        value.fire_delay_ms = 0;
+        value.fire_mode = TriggerFireMode::SINGLE;
+        value.head_width_percent = value.head_height_percent = 100.0f;
+        value.body_width_percent = value.body_height_percent = 100.0f;
+        return value;
+    }();
     source_context::SourceContextConfig source_context;
     RecoilConfig recoil;
     weapon::GsiConfig gsi;
     // 独立于弹道启用；启动时读取一次，运行中固定版本。
-    bool weapon_timing_enabled = false;
     std::string weapon_timing_file = "cache/recoil/weapon-timing.json";
-    std::string weapon_timing_manual_id;
     LogConfig log = [] {
         LogConfig value;
         value.global_level = LogLevel::INFO;

@@ -68,9 +68,10 @@ public:
         result.enabled = config.enabled && !stopping.load();
         result.held = physical || synthetic.confirmed_down;
         result.firing_started_at = physical ? physical_started : synthetic.started_at;
-        result.permission = result.permission && !source_blocked && !stopping.load() && !canceled.load() &&
-            (config.hold_virtual_key == 0 || raw.virtual_keys[config.hold_virtual_key]);
+        result.permission = result.permission && !source_blocked && !stopping.load() && !canceled.load();
         if(calibration_budget) {
+            // 独立校准保留人工许可；普通压枪不再读取额外保持键。
+            result.permission = result.permission && raw.virtual_keys[calibration_permit->manifest().hold_virtual_key];
             if(result.healthy&&raw.virtual_keys[calibration_permit->manifest().cancel_virtual_key])
                 calibration_budget->finish(RecoilCalibrationEnd::CANCELED);
             const bool within_budget=calibration_budget->check_time(RecoilClock::now());
@@ -259,7 +260,7 @@ bool RecoilWorker::start_impl(const RecoilConfig& config) noexcept {
     try {
         if (impl_->thread.joinable() || !impl_->mouse || !impl_->arbiter || !impl_->ledger ||
             !impl_->context || !impl_->firing || impl_->mouse->left_button_cleanup_required() ||
-            impl_->mouse->left_button_faulted() || config.hold_virtual_key < 0 || config.hold_virtual_key > 255) return false;
+            impl_->mouse->left_button_faulted()) return false;
         impl_->config = config; impl_->stopping.store(false); impl_->canceled.store(false);
         impl_->thread = std::thread([this] { impl_->run(); }); return true;
     } catch (...) { return false; }

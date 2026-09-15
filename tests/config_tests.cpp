@@ -716,21 +716,22 @@ void test_trigger_and_source_context_config() {
     if (directory.empty()) return;
     const auto path = directory / "config.ini";
     config.trigger.enabled = true;
+    config.gsi.enabled = true;
     config.trigger.fire_enabled = false;
     config.trigger.hold_virtual_key = config.keyboard.aim_hold_virtual_keys.front();
-    config.trigger.head_width_percent = 73.0f;
-    config.trigger.head_height_percent = 61.0f;
-    config.trigger.body_width_percent = 42.0f;
-    config.trigger.body_height_percent = 58.0f;
+    config.trigger.head_width_percent = 100.0f;
+    config.trigger.head_height_percent = 100.0f;
+    config.trigger.body_width_percent = 100.0f;
+    config.trigger.body_height_percent = 100.0f;
     config.trigger.general_width_percent = 33.0f;
     config.trigger.general_height_percent = 44.0f;
     config.trigger.min_confidence = 0.75f;
-    config.trigger.fire_delay_ms = 31;
+    config.trigger.fire_delay_ms = 0;
     config.trigger.shot_interval_ms = 143;
     config.trigger.press_duration_ms = 27;
     config.trigger.max_hold_ms = 333;
     config.trigger.max_observation_age_ms = 67;
-    config.trigger.fire_mode = TriggerFireMode::AUTOMATIC;
+    config.trigger.fire_mode = TriggerFireMode::SINGLE;
     config.source_context.enabled = true;
     config.source_context.host = "127.0.0.1";
     config.source_context.port = 5017;
@@ -742,14 +743,14 @@ void test_trigger_and_source_context_config() {
     AppConfig loaded;
     expect(load_app_config(path.string(), loaded, error), "扳机与源端配置应加载");
     expect(loaded.trigger.enabled && !loaded.trigger.fire_enabled && loaded.trigger.hold_virtual_key == config.trigger.hold_virtual_key &&
-        loaded.trigger.head_width_percent == 73.0f && loaded.trigger.head_height_percent == 61.0f &&
-        loaded.trigger.body_width_percent == 42.0f && loaded.trigger.body_height_percent == 58.0f &&
+        loaded.trigger.head_width_percent == 100.0f && loaded.trigger.head_height_percent == 100.0f &&
+        loaded.trigger.body_width_percent == 100.0f && loaded.trigger.body_height_percent == 100.0f &&
         loaded.trigger.general_width_percent == 33.0f && loaded.trigger.general_height_percent == 44.0f &&
-        loaded.trigger.min_confidence == 0.75f && loaded.trigger.fire_delay_ms == 31 &&
-        loaded.trigger.shot_interval_ms == 143 && loaded.trigger.press_duration_ms == 27 &&
-        loaded.trigger.max_hold_ms == 333 && loaded.trigger.max_observation_age_ms == 67 &&
-        loaded.trigger.fire_mode == TriggerFireMode::AUTOMATIC,
-        "扳机几何、模式和全部时序往返不能丢失或交叉覆盖");
+        loaded.trigger.min_confidence == 0.75f && loaded.trigger.fire_delay_ms == 0 &&
+        loaded.trigger.shot_interval_ms == AppConfig{}.trigger.shot_interval_ms && loaded.trigger.press_duration_ms == AppConfig{}.trigger.press_duration_ms &&
+        loaded.trigger.max_hold_ms == AppConfig{}.trigger.max_hold_ms && loaded.trigger.max_observation_age_ms == 67 &&
+        loaded.trigger.fire_mode == TriggerFireMode::SINGLE,
+        "扳机通用几何及新鲜度往返，头身与节奏恢复生产默认");
     expect(loaded.source_context.enabled && loaded.source_context.host == "127.0.0.1" &&
         loaded.source_context.port == 5017 && loaded.source_context.process_name == "source-game.exe" &&
         loaded.source_context.ttl_ms == 350 && loaded.source_context.token.empty(), "源端配置往返不持久化认证值");
@@ -803,8 +804,8 @@ void test_trigger_and_source_context_config() {
     expect(load_app_config(path.string(), loaded, error) && !loaded.trigger.enabled && loaded.trigger.fire_enabled &&
         loaded.trigger.hold_virtual_key == 0 && !loaded.source_context.enabled && loaded.source_context.token.empty(),
         "旧配置必须清除调用方遗留的启用和绑定状态");
-    for (const char* text : {"[trigger]\nenabled=perhaps\n", "[trigger]\nfire_enabled=perhaps\n", "[trigger]\nfire_delay_ms=1.5\n",
-            "[trigger]\nfire_mode=999999999999999999999\n", "[trigger]\nhead_width_percent=nan\n",
+    for (const char* text : {"[trigger]\nenabled=perhaps\n", "[trigger]\nfire_enabled=perhaps\n", "[trigger]\nmax_observation_age_ms=1.5\n",
+            "[trigger]\nhold_virtual_key=999999999999999999999\n", "[trigger]\ngeneral_width_percent=nan\n",
             "[source_context]\nport=65536\n", "[source_context]\nttl_ms=1.5\n"}) {
         expect(write_file_bytes(path, text), "写入畸形配置夹具");
         expect(!load_app_config(path.string(), loaded, error), "新配置节须严格解析而非静默截断");
@@ -1228,7 +1229,7 @@ void test_auxiliary_cycle_config() {
     config.trigger.require_stop = config.trigger.allow_estimated_stop = true;
     config.trigger.hold_virtual_key = 5;
     config.mouse.backend = MouseBackend::KMBOX_NET;
-    config.gsi.enabled = config.weapon_timing_enabled = true;
+    config.gsi.enabled = true;
 
     expect(save_app_config(path.string(), config, error) && load_app_config(path.string(), loaded, error) &&
         loaded.auto_stop.cycle_enabled && loaded.trigger.hold_virtual_key == 5,
@@ -1236,12 +1237,86 @@ void test_auxiliary_cycle_config() {
     config.trigger.hold_virtual_key = 6;
     expect(!validate_app_config(config, error), "循环禁止双允许键造成归还等待失配");
     config.trigger.hold_virtual_key = 5;
-    config.weapon_timing_manual_id = "deagle";
+    config.gsi.enabled = false;
     expect(!validate_app_config(config, error), "循环必须使用GSI自动识别武器");
-    config.weapon_timing_manual_id.clear(); config.trigger.fire_enabled = false;
+    config.gsi.enabled = true; config.trigger.fire_enabled = false;
     expect(!validate_app_config(config, error), "循环不能等待永远不会发生的点射");
     { std::ofstream out(path); out << "[auto_stop]\ncycle_enabled=perhaps\n"; }
     expect(!load_app_config(path.string(), loaded, error), "循环开关严格解析布尔值");
+}
+
+void test_trigger_legacy_timing_migration() {
+    const auto directory = make_temp_test_directory("trigger_legacy_timing");
+    if (directory.empty()) { expect(false, "扳机迁移隔离目录"); return; }
+    const auto path = directory / "config.ini";
+    AppConfig loaded;
+    std::string error;
+    expect(AppConfig{}.trigger.fire_delay_ms == 0 && AppConfig{}.trigger.fire_mode == TriggerFireMode::SINGLE,
+        "生产扳机默认首发无额外延迟且使用共享点射");
+    expect(AppConfig{}.trigger.head_width_percent == 100.0f && AppConfig{}.trigger.head_height_percent == 100.0f &&
+        AppConfig{}.trigger.body_width_percent == 100.0f && AppConfig{}.trigger.body_height_percent == 100.0f,
+        "生产扳机默认使用完整头身范围");
+    expect(write_file_bytes(path, "[trigger]\nfire_delay_ms=invalid\nshot_interval_ms=invalid\npress_duration_ms=invalid\nmax_hold_ms=invalid\nfire_mode=invalid\nhead_width_percent=invalid\nhead_height_percent=invalid\nbody_width_percent=invalid\nbody_height_percent=invalid\n[weapon_timing]\nenabled=invalid\nmanual_id=unknown\nfile=custom/timing.json\n[recoil]\nhold_virtual_key=invalid\n"), "写入旧扳机字段");
+    expect(load_app_config(path.string(), loaded, error) && loaded.trigger.fire_delay_ms == 0 &&
+        loaded.trigger.fire_mode == TriggerFireMode::SINGLE && loaded.recoil.hold_virtual_key == 0 &&
+        loaded.weapon_timing_file == "custom/timing.json" && loaded.trigger.head_width_percent == 100.0f &&
+        loaded.trigger.head_height_percent == 100.0f && loaded.trigger.body_width_percent == 100.0f &&
+        loaded.trigger.body_height_percent == 100.0f, "废弃节奏、缩放和额外许可字段不再参与解析: " + error);
+    expect(save_app_config(path.string(), loaded, error), "保存迁移配置: " + error);
+    const auto bytes = read_file_bytes(path);
+    for (const auto* key : {"fire_delay_ms", "shot_interval_ms", "press_duration_ms", "max_hold_ms", "manual_id",
+            "head_width_percent", "head_height_percent", "body_width_percent", "body_height_percent"})
+        expect(bytes.find(key) == std::string::npos, "保存移除旧节奏字段");
+    const auto timing_begin = bytes.find("[weapon_timing]");
+    const auto timing_end = bytes.find('[', timing_begin + 1);
+    expect(timing_begin != std::string::npos && bytes.substr(timing_begin, timing_end - timing_begin).find("enabled") == std::string::npos,
+        "共享节奏不再保存独立启用开关");
+    const auto trigger_begin = bytes.find("[trigger]");
+    const auto trigger_end = bytes.find('[', trigger_begin + 1);
+    expect(trigger_begin != std::string::npos && bytes.substr(trigger_begin, trigger_end - trigger_begin).find("fire_mode") == std::string::npos,
+        "普通扳机不再保存独立射击模式");
+    loaded.trigger.enabled = true;
+    loaded.gsi.enabled = false;
+    expect(!validate_app_config(loaded, error), "自动扳机必须复用全局GSI识别");
+    loaded.gsi.enabled = true;
+    expect(validate_app_config(loaded, error), "开启统一GSI后满足扳机识别依赖");
+    for (int variant = 0; variant < 6; ++variant) {
+        auto unsupported = loaded;
+        switch (variant) {
+            case 0: unsupported.trigger.fire_mode = TriggerFireMode::AUTOMATIC; break;
+            case 1: unsupported.trigger.fire_delay_ms = 20; break;
+            case 2: unsupported.trigger.head_width_percent = 60.0f; break;
+            case 3: unsupported.trigger.head_height_percent = 60.0f; break;
+            case 4: unsupported.trigger.body_width_percent = 50.0f; break;
+            case 5: unsupported.trigger.body_height_percent = 60.0f; break;
+        }
+        expect(!validate_app_config(unsupported, error), "程序化生产扳机不得绕过统一点射、首发时序和完整头身范围");
+        unsupported.trigger.enabled = false;
+        expect(validate_app_config(unsupported, error), "未启用扳机不阻断旧的无关合法参数");
+    }
+    // seq10915 身体几何子集的合成反例：原完整头框和许可未收录，不能称为完整Run回放。
+    loaded.trigger.hold_virtual_key = 5;
+    loaded.trigger.require_stop = false;
+    TriggerController controller;
+    expect(controller.configure(loaded.trigger), "迁移后的生产扳机配置可进入控制器");
+    TriggerPermit permit;
+    permit.enabled = permit.healthy = permit.focused = permit.armed = true;
+    permit.context = {1, true, true, true, true, 60, 300};
+    const TriggerTime start{std::chrono::milliseconds(1000)};
+    controller.tick(permit, start);
+    permit.held = true;
+    TriggerObservation observation;
+    observation.valid = observation.timing_valid = true;
+    observation.epoch = 1; observation.sequence = 10915;
+    observation.observed_at = start + std::chrono::milliseconds(1);
+    observation.roi_width = observation.roi_height = 320;
+    observation.center_x = observation.center_y = 160.0f;
+    observation.detections.push_back({133.3125f, 134.5f, 175.1875f, 240.25f, 0.9f, 0});
+    const auto decision = controller.observe(observation, permit, observation.observed_at);
+    expect(decision.button_action == TriggerButtonAction::DOWN && decision.stop_action == TriggerStopAction::NONE,
+        "迁移配置与完整身体范围同次产生首发DOWN，不增加20ms等待或急停联动");
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
 }
 
 void test_shared_weapon_timing_config() {
@@ -1250,36 +1325,28 @@ void test_shared_weapon_timing_config() {
     const auto path = directory / "config.ini";
     AppConfig config, loaded;
     std::string error;
-    config.weapon_timing_enabled = true;
-    config.weapon_timing_manual_id = "deagle";
+    config.gsi.enabled = true;
     config.weapon_timing_file = "custom/weapon-timing.json";
     config.trigger.allow_estimated_stop = true;
     config.auto_stop.use_counterpulse_timing = true;
     config.auto_stop.counter_hold_ms = 40;
     config.auto_stop.shot_after_release_ms = 18;
     expect(save_app_config(path.string(), config, error) && load_app_config(path.string(), loaded, error) &&
-        loaded.weapon_timing_enabled && loaded.weapon_timing_manual_id == "deagle" &&
+        loaded.gsi.enabled &&
         loaded.weapon_timing_file == config.weapon_timing_file && loaded.trigger.allow_estimated_stop &&
         loaded.auto_stop.use_counterpulse_timing && loaded.auto_stop.counter_hold_ms == 40 &&
         loaded.auto_stop.shot_after_release_ms == 18,
         "共享武器资料独立于压枪关闭且完整往返");
-    config.weapon_timing_manual_id = "Desert Eagle";
-    expect(save_app_config(path.string(), config, error) && load_app_config(path.string(), loaded, error) &&
-        loaded.weapon_timing_manual_id == "deagle", "共享武器展示名保存回读为统一ID");
-    config.weapon_timing_manual_id = "revolver";
-    expect(!save_app_config(path.string(), config, error), "R8只留档不能启用");
-    config.weapon_timing_manual_id = "unknown";
-    expect(!save_app_config(path.string(), config, error), "未知手选武器不回退");
-    config.weapon_timing_manual_id.clear();
-    expect(!save_app_config(path.string(), config, error), "自动选择需要GSI");
-    config.weapon_timing_manual_id = "deagle";
+    config.weapon_timing_file.clear();
+    expect(!save_app_config(path.string(), config, error), "共享资料路径不能为空");
+    config.weapon_timing_file = "custom/weapon-timing.json";
     config.auto_stop.counter_hold_ms = 0;
     expect(!save_app_config(path.string(), config, error), "H40反向保持不能为0");
     config.auto_stop.counter_hold_ms = 40;
     config.auto_stop.shot_after_release_ms = 201;
     expect(!save_app_config(path.string(), config, error), "H40等待上限保持租约内");
     { std::ofstream out(path); out << "[weapon_timing]\nenabled=perhaps\n"; }
-    expect(!load_app_config(path.string(), loaded, error), "共享开关严格布尔校验");
+    expect(load_app_config(path.string(), loaded, error), "废弃共享开关不再参与校验");
     { std::ofstream out(path); out << "[trigger]\nallow_estimated_stop=perhaps\n"; }
     expect(!load_app_config(path.string(), loaded, error), "估计策略严格布尔校验");
     { std::ofstream out(path); out << "[auto_stop]\nuse_counterpulse_timing=perhaps\n"; }
@@ -1287,8 +1354,8 @@ void test_shared_weapon_timing_config() {
     { std::ofstream out(path); out << "[auto_stop]\ncounter_hold_ms=40.5\n"; }
     expect(!load_app_config(path.string(), loaded, error), "H40时长严格整数校验");
     { std::ofstream out(path); out << "[trigger]\nenabled=false\n"; }
-    expect(load_app_config(path.string(), loaded, error) && !loaded.weapon_timing_enabled &&
-        !loaded.trigger.allow_estimated_stop && loaded.weapon_timing_manual_id.empty() &&
+    expect(load_app_config(path.string(), loaded, error) && !loaded.gsi.enabled &&
+        !loaded.trigger.allow_estimated_stop &&
         loaded.auto_stop.use_counterpulse_timing && loaded.auto_stop.counter_hold_ms == 40 &&
         loaded.auto_stop.shot_after_release_ms == 18,
         "旧配置不继承调用方已启用共享或估计策略");
@@ -1304,13 +1371,13 @@ void test_shared_weapon_timing_config() {
             loaded.auto_stop.enabled = !enabled;
             loaded.auto_stop.use_counterpulse_timing = false;
             loaded.trigger.enabled = true;
-            loaded.weapon_timing_enabled = true;
+            loaded.gsi.enabled = true;
             expect(load_app_config(path.string(), loaded, error) &&
                 loaded.auto_stop.use_counterpulse_timing &&
                 loaded.auto_stop.counter_hold_ms == (custom ? 55 : 40) &&
                 loaded.auto_stop.shot_after_release_ms == (custom ? 27 : 18) &&
                 loaded.auto_stop.enabled == enabled && loaded.auto_stop.activation_virtual_key == 118 &&
-                !loaded.trigger.enabled && !loaded.weapon_timing_enabled,
+                !loaded.trigger.enabled && !loaded.gsi.enabled,
                 "旧时序键缺失或真假值均迁移，保留时长及急停开关，不启用其他模块: " + error);
             expect(save_app_config(path.string(), loaded, error) &&
                 read_file_bytes(path).find("use_counterpulse_timing") == std::string::npos,
@@ -1324,6 +1391,7 @@ void test_shared_weapon_timing_config() {
 } // namespace
 
 int main() {
+    test_trigger_legacy_timing_migration();
     test_current_code_defaults();
     test_load_or_create_default_config();
     test_round_trip();

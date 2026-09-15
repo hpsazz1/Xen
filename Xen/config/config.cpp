@@ -1,5 +1,4 @@
 #include "config/config.h"
-#include "weapon/weapon_timing.h"
 #include "weapon/weapon_catalog.h"
 
 #include "aim/aim_config_internal.h"
@@ -583,14 +582,9 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"auto_stop", "activation_virtual_key"},
         {"auto_stop", "counter_hold_ms"}, {"auto_stop", "shot_after_release_ms"},
         {"trigger", "hold_virtual_key"},
-        {"trigger", "fire_delay_ms"},
-        {"trigger", "shot_interval_ms"},
-        {"trigger", "press_duration_ms"},
-        {"trigger", "max_hold_ms"},
         {"trigger", "max_observation_age_ms"},
-        {"trigger", "fire_mode"},
         {"source_context", "port"}, {"source_context", "ttl_ms"},
-        {"recoil", "hold_virtual_key"}, {"recoil", "budget_window_ms"}, {"recoil", "max_observation_age_ms"},
+        {"recoil", "budget_window_ms"}, {"recoil", "max_observation_age_ms"},
         {"gsi", "port"}, {"gsi", "ttl_ms"}, {"gsi", "request_timeout_ms"},
         {"keyboard", "aim_hold_virtual_key"},
         {"keyboard", "emergency_virtual_key"},
@@ -626,10 +620,6 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"aim", "max_delay_compensation_percent"},
         {"aim", "max_prediction_lead_percent"},
         {"aim", "predicted_gain"},
-        {"trigger", "head_width_percent"},
-        {"trigger", "head_height_percent"},
-        {"trigger", "body_width_percent"},
-        {"trigger", "body_height_percent"},
         {"trigger", "general_width_percent"},
         {"trigger", "general_height_percent"},
         {"trigger", "min_confidence"}, {"recoil", "sensitivity"},
@@ -658,7 +648,7 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"auto_stop", "enabled"}, {"auto_stop", "cycle_enabled"},
         {"auto_stop", "use_counterpulse_timing"},
         {"trigger", "enabled"}, {"trigger", "fire_enabled"}, {"trigger", "require_stop"},
-        {"trigger", "allow_estimated_stop"}, {"weapon_timing", "enabled"},
+        {"trigger", "allow_estimated_stop"},
         {"source_context", "enabled"}, {"gsi", "enabled"},
         {"recoil", "enabled"}, {"recoil", "mixed_aim"}, {"recoil", "use_trial"},
         {"mouse", "allow_send_input"},
@@ -952,9 +942,8 @@ bool validate_app_config(const AppConfig& config,
         }
         for (const int key : config.keyboard.debug_test_virtual_keys) {
             if (key == config.auto_stop.activation_virtual_key || key == config.trigger.hold_virtual_key ||
-                key == config.recoil.hold_virtual_key ||
                 std::find(config.auto_stop.release_virtual_keys.begin(), config.auto_stop.release_virtual_keys.end(), key) != config.auto_stop.release_virtual_keys.end()) {
-                error = "调试测试快捷键与急停、扳机或压枪功能键冲突"; return false;
+                error = "调试测试快捷键与急停或扳机功能键冲突"; return false;
             }
         }
         const int stop_key = config.auto_stop.activation_virtual_key;
@@ -1002,39 +991,31 @@ bool validate_app_config(const AppConfig& config,
             trigger_key == 'W' || trigger_key == 'A' || trigger_key == 'S' || trigger_key == 'D' ||
             trigger_conflict(config.keyboard.emergency_virtual_keys) ||
             trigger_conflict(config.keyboard.runtime_toggle_virtual_keys) ||
-            (config.trigger.enabled && config.mouse.backend != MouseBackend::KMBOX_NET) ||
+            (config.trigger.enabled && (config.mouse.backend != MouseBackend::KMBOX_NET || !config.gsi.enabled)) ||
             (config.trigger.enabled && config.trigger.require_stop && !config.auto_stop.enabled)) {
-            error = "自动扳机参数、绑定键、后端或急停依赖非法";
+            error = "自动扳机参数、绑定键、后端、GSI或急停依赖非法";
+            return false;
+        }
+        if (config.trigger.enabled && (config.trigger.fire_mode != TriggerFireMode::SINGLE ||
+            config.trigger.fire_delay_ms != 0 || config.trigger.head_width_percent != 100.0f ||
+            config.trigger.head_height_percent != 100.0f || config.trigger.body_width_percent != 100.0f ||
+            config.trigger.body_height_percent != 100.0f)) {
+            error = "生产自动扳机固定共享点射、无额外首发延迟和完整头身范围";
             return false;
         }
         if (config.auto_stop.cycle_enabled && (!config.auto_stop.enabled || !config.trigger.enabled ||
             !config.trigger.fire_enabled || !config.trigger.require_stop || !config.trigger.allow_estimated_stop ||
             config.trigger.fire_mode != TriggerFireMode::SINGLE ||
             config.trigger.hold_virtual_key != config.auto_stop.activation_virtual_key ||
-            !config.gsi.enabled || !config.weapon_timing_enabled || !config.weapon_timing_manual_id.empty())) {
+            !config.gsi.enabled)) {
             error = "移动点射循环需要急停与点射共用允许键、估计急停联动、GSI自动识别和共享武器资料";
             return false;
         }
         const auto& recoil = config.recoil;
-        if (config.weapon_timing_file.empty() || config.weapon_timing_file.size() > 1024 ||
-            config.weapon_timing_manual_id.size() > 32) {
-            error = "武器点射资料路径或手选名称非法"; return false;
+        if (config.weapon_timing_file.empty() || config.weapon_timing_file.size() > 1024) {
+            error = "武器点射资料路径非法"; return false;
         }
-        if (config.weapon_timing_enabled) {
-            const auto defaults = weapon::default_timing_catalog();
-            const auto* selected = weapon::find_timing(defaults, config.weapon_timing_manual_id);
-            if ((!config.weapon_timing_manual_id.empty() && (!selected || !selected->enabled)) ||
-                (config.weapon_timing_manual_id.empty() && !config.gsi.enabled)) {
-                error = "共享点射资料需要GSI自动识别或有效手选武器；R8暂不支持"; return false;
-            }
-        }
-        const int recoil_key = recoil.hold_virtual_key;
-        const bool recoil_key_conflict = recoil_key == 1 || recoil_key == 'W' || recoil_key == 'A' ||
-            recoil_key == 'S' || recoil_key == 'D' || recoil_key == 0x23 || recoil_key == 0x77 ||
-            std::find(config.keyboard.emergency_virtual_keys.begin(), config.keyboard.emergency_virtual_keys.end(), recoil_key) != config.keyboard.emergency_virtual_keys.end() ||
-            std::find(config.keyboard.runtime_toggle_virtual_keys.begin(), config.keyboard.runtime_toggle_virtual_keys.end(), recoil_key) != config.keyboard.runtime_toggle_virtual_keys.end();
-        if (recoil_key < 0 || recoil_key > 255 || (recoil_key != 0 && recoil_key_conflict) ||
-            recoil.budget_window_ms < 1 || recoil.budget_window_ms > 100 ||
+        if (recoil.budget_window_ms < 1 || recoil.budget_window_ms > 100 ||
             recoil.max_observation_age_ms < 1 || recoil.max_observation_age_ms > 500 || recoil.input_path != "kmbox_net" ||
             !std::isfinite(recoil.sensitivity) || recoil.sensitivity < 0 ||
             recoil.fire_mode != "automatic" ||
@@ -1042,7 +1023,7 @@ bool validate_app_config(const AppConfig& config,
                 !config.gsi.enabled || !config.source_context.enabled || recoil.sensitivity <= 0 ||
                 recoil.game_build.empty() || recoil.conditions.empty() || recoil.profile_directory.empty() ||
                 (recoil.use_trial && recoil.trial_file.empty())))) {
-            error = "压枪配置需要有效热键、GSI、源焦点和明确校准条件"; return false;
+            error = "压枪配置需要GSI、源焦点和明确校准条件"; return false;
         }
         if (config.gsi.enabled && !weapon::valid_config(config.gsi)) {
             error = "GSI绑定地址、来源限制或接收参数非法"; return false;
@@ -1097,15 +1078,12 @@ bool load_app_config(const std::string& path,
         candidate.auto_stop.release_virtual_keys = release_keys
             ? parse_int_list(release_keys, {}) : AutoStopConfig{}.release_virtual_keys;
         candidate.recoil = {}; candidate.gsi = {};
-        candidate.weapon_timing_enabled = ini.GetBoolValue("weapon_timing", "enabled", false);
         candidate.weapon_timing_file = ini.GetValue("weapon_timing", "file", "cache/recoil/weapon-timing.json");
-        candidate.weapon_timing_manual_id = ini.GetValue("weapon_timing", "manual_id", "");
-        if (const auto id = weapon::normalize_weapon_id(candidate.weapon_timing_manual_id); !id.empty())
-            candidate.weapon_timing_manual_id = id;
         candidate.gsi.request_timeout_ms = static_cast<int>(ini.GetLongValue("gsi", "request_timeout_ms", 1000));
         candidate.recoil.max_observation_age_ms = static_cast<int>(ini.GetLongValue("recoil", "max_observation_age_ms", 50));
         candidate.recoil.input_path = ini.GetValue("recoil", "input_path", "kmbox_net");
-        candidate.recoil.hold_virtual_key = static_cast<decltype(candidate.recoil.hold_virtual_key)>(ini.GetLongValue("recoil", "hold_virtual_key", candidate.recoil.hold_virtual_key));
+        // 额外许可仅供独立校准链使用，普通配置不继承旧键值。
+        candidate.recoil.hold_virtual_key = 0;
         candidate.recoil.budget_window_ms = static_cast<decltype(candidate.recoil.budget_window_ms)>(ini.GetLongValue("recoil", "budget_window_ms", candidate.recoil.budget_window_ms));
         candidate.gsi.ttl_ms = static_cast<decltype(candidate.gsi.ttl_ms)>(ini.GetLongValue("gsi", "ttl_ms", candidate.gsi.ttl_ms));
         candidate.recoil.enabled = static_cast<decltype(candidate.recoil.enabled)>(ini.GetBoolValue("recoil", "enabled", candidate.recoil.enabled));
@@ -1131,23 +1109,15 @@ bool load_app_config(const std::string& path,
         candidate.source_context.port = static_cast<std::uint16_t>(context_port);
         candidate.source_context.process_name = ini.GetValue("source_context", "process_name", "");
         candidate.source_context.ttl_ms = static_cast<int>(ini.GetLongValue("source_context", "ttl_ms", 200));
-        candidate.trigger = TriggerConfig{};
+        // 旧首发延迟、独立节奏与头身缩放不再覆盖统一生产契约。
+        candidate.trigger = AppConfig{}.trigger;
         candidate.trigger.general_class_ids = parse_int_list(ini.GetValue("trigger", "general_class_ids"), {});
         candidate.trigger.enabled = ini.GetBoolValue("trigger", "enabled", false);
         candidate.trigger.fire_enabled = ini.GetBoolValue("trigger", "fire_enabled", true);
         candidate.trigger.require_stop = ini.GetBoolValue("trigger", "require_stop", false);
         candidate.trigger.allow_estimated_stop = ini.GetBoolValue("trigger", "allow_estimated_stop", false);
         candidate.trigger.hold_virtual_key = static_cast<int>(ini.GetLongValue("trigger", "hold_virtual_key", candidate.trigger.hold_virtual_key));
-        candidate.trigger.fire_delay_ms = static_cast<int>(ini.GetLongValue("trigger", "fire_delay_ms", candidate.trigger.fire_delay_ms));
-        candidate.trigger.shot_interval_ms = static_cast<int>(ini.GetLongValue("trigger", "shot_interval_ms", candidate.trigger.shot_interval_ms));
-        candidate.trigger.press_duration_ms = static_cast<int>(ini.GetLongValue("trigger", "press_duration_ms", candidate.trigger.press_duration_ms));
-        candidate.trigger.max_hold_ms = static_cast<int>(ini.GetLongValue("trigger", "max_hold_ms", candidate.trigger.max_hold_ms));
         candidate.trigger.max_observation_age_ms = static_cast<int>(ini.GetLongValue("trigger", "max_observation_age_ms", candidate.trigger.max_observation_age_ms));
-        candidate.trigger.fire_mode = static_cast<TriggerFireMode>(ini.GetLongValue("trigger", "fire_mode", 0));
-        candidate.trigger.head_width_percent = static_cast<float>(ini.GetDoubleValue("trigger", "head_width_percent", candidate.trigger.head_width_percent));
-        candidate.trigger.head_height_percent = static_cast<float>(ini.GetDoubleValue("trigger", "head_height_percent", candidate.trigger.head_height_percent));
-        candidate.trigger.body_width_percent = static_cast<float>(ini.GetDoubleValue("trigger", "body_width_percent", candidate.trigger.body_width_percent));
-        candidate.trigger.body_height_percent = static_cast<float>(ini.GetDoubleValue("trigger", "body_height_percent", candidate.trigger.body_height_percent));
         candidate.trigger.general_width_percent = static_cast<float>(ini.GetDoubleValue("trigger", "general_width_percent", candidate.trigger.general_width_percent));
         candidate.trigger.general_height_percent = static_cast<float>(ini.GetDoubleValue("trigger", "general_height_percent", candidate.trigger.general_height_percent));
         candidate.trigger.min_confidence = static_cast<float>(ini.GetDoubleValue("trigger", "min_confidence", candidate.trigger.min_confidence));
@@ -1594,7 +1564,6 @@ bool save_app_config(const std::string& path,
                          config.mouse.makcu_command_timeout_ms);
         ini.SetLongValue("recoil", "max_observation_age_ms", config.recoil.max_observation_age_ms);
         ini.SetValue("recoil", "input_path", config.recoil.input_path.c_str());
-        ini.SetLongValue("recoil", "hold_virtual_key", config.recoil.hold_virtual_key);
         ini.SetLongValue("recoil", "budget_window_ms", config.recoil.budget_window_ms);
         ini.SetLongValue("gsi", "ttl_ms", config.gsi.ttl_ms);
         ini.SetBoolValue("recoil", "enabled", config.recoil.enabled);
@@ -1621,21 +1590,9 @@ bool save_app_config(const std::string& path,
         ini.SetBoolValue("trigger", "fire_enabled", config.trigger.fire_enabled);
         ini.SetBoolValue("trigger", "require_stop", config.trigger.require_stop);
         ini.SetBoolValue("trigger", "allow_estimated_stop", config.trigger.allow_estimated_stop);
-        ini.SetBoolValue("weapon_timing", "enabled", config.weapon_timing_enabled);
         ini.SetValue("weapon_timing", "file", config.weapon_timing_file.c_str());
-        const auto normalized_manual_id = weapon::normalize_weapon_id(config.weapon_timing_manual_id);
-        ini.SetValue("weapon_timing", "manual_id", normalized_manual_id.empty() ? config.weapon_timing_manual_id.c_str() : normalized_manual_id.data());
         ini.SetLongValue("trigger", "hold_virtual_key", config.trigger.hold_virtual_key);
-        ini.SetLongValue("trigger", "fire_delay_ms", config.trigger.fire_delay_ms);
-        ini.SetLongValue("trigger", "shot_interval_ms", config.trigger.shot_interval_ms);
-        ini.SetLongValue("trigger", "press_duration_ms", config.trigger.press_duration_ms);
-        ini.SetLongValue("trigger", "max_hold_ms", config.trigger.max_hold_ms);
         ini.SetLongValue("trigger", "max_observation_age_ms", config.trigger.max_observation_age_ms);
-        ini.SetLongValue("trigger", "fire_mode", static_cast<long>(config.trigger.fire_mode));
-        ini.SetDoubleValue("trigger", "head_width_percent", config.trigger.head_width_percent);
-        ini.SetDoubleValue("trigger", "head_height_percent", config.trigger.head_height_percent);
-        ini.SetDoubleValue("trigger", "body_width_percent", config.trigger.body_width_percent);
-        ini.SetDoubleValue("trigger", "body_height_percent", config.trigger.body_height_percent);
         ini.SetDoubleValue("trigger", "general_width_percent", config.trigger.general_width_percent);
         ini.SetDoubleValue("trigger", "general_height_percent", config.trigger.general_height_percent);
         ini.SetDoubleValue("trigger", "min_confidence", config.trigger.min_confidence);

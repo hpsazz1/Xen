@@ -25,7 +25,16 @@ int main() {
         std::ifstream input(path); std::string text((std::istreambuf_iterator<char>(input)), {}); input.close();
         check(text.find("XEN_GSI_TOKEN") == std::string::npos, "配置不生成GSI环境变量要求");
         config.recoil.hold_virtual_key = 0x23;
-        check(!validate_app_config(config, error), "End不能作压枪键");
+        check(validate_app_config(config, error), "生产压枪忽略校准链的额外许可键");
+        { std::ofstream old(path); old << "[recoil]\nhold_virtual_key=invalid\n"; }
+        check(load_app_config(path.string(), loaded, error) && loaded.recoil.hold_virtual_key == 0,
+            "旧额外许可不解析且归零");
+        check(save_app_config(path.string(), loaded, error), error.c_str());
+        { std::ifstream migrated(path); std::string bytes((std::istreambuf_iterator<char>(migrated)), {});
+          const auto section = bytes.find("[recoil]");
+          const auto end = bytes.find('[', section + 1);
+          check(section != std::string::npos && bytes.substr(section, end - section).find("hold_virtual_key") == std::string::npos,
+              "保存移除压枪额外许可"); }
         config.recoil.hold_virtual_key = 0; config.recoil.use_trial = true;
         check(!validate_app_config(config, error), "试验模式需要明确独立引用");
         { std::ofstream old(path); old << "[recoil]\nenabled=invalid\n"; }

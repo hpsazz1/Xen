@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <string_view>
 namespace {
 int failures=0;
 void expect(bool value,const char* message){if(!value){++failures;std::cerr<<message<<'\n';}}
@@ -10,7 +11,26 @@ RecoilProfile profile(){RecoilProfile p;p.id="synthetic";p.weapon_id="test_weapo
     p.calibration={"test_build","kmbox_net","test_conditions","synthetic:test_only",1.0};
     p.source.sha256=std::string(64,'a');p.points={{0,0,0},{10,1,2}};return p;}
 }
-int main(){
+int main(int argc, char** argv){
+    // 实际本地导入产物的只读验收；不设置活动版本、不启动设备。
+    if (argc == 3 && std::string_view(argv[1]) == "--validate-imported") {
+        RecoilStore imported(std::filesystem::u8path(argv[2]));
+        std::vector<RecoilStoredProfile> profiles; std::string error;
+        if (!imported.list(profiles, error) || profiles.empty()) {
+            std::cerr << "导入目录不可读取或为空：" << error << '\n'; return 1;
+        }
+        for (const auto& entry : profiles) {
+            const auto& value = *entry.profile;
+            if (value.state != RecoilProfileState::IMPORTED || value.phase_tolerance_ms ||
+                value.recovery_ms || !value.calibration.evidence.empty()) {
+                std::cerr << "候选状态不符：" << entry.file << '\n'; return 1;
+            }
+            std::cout << entry.file << " | " << value.weapon_id << " | " << value.points.size() << '\n';
+        }
+        std::cout << "生产解析器通过 " << profiles.size() << " 份导入候选；未激活。\n";
+        return 0;
+    }
+    if (argc != 1) return 2;
     auto directory=std::filesystem::temp_directory_path()/("xen-recoil-store-test-"+std::to_string(RecoilClock::now().time_since_epoch().count()));
     std::filesystem::create_directories(directory);
     RecoilStore store(directory);std::string error,file1,file2,file3;

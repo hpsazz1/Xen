@@ -191,9 +191,10 @@ bool TriggerController::select_candidate(const TriggerObservation& observation, 
             ((static_cast<double>(box.x2) - box.x1) * width / 200.0);
         const double dy = (observation.center_y - (static_cast<double>(box.y1) + box.y2) / 2.0) /
             ((static_cast<double>(box.y2) - box.y1) * height / 200.0);
-        const double square = dx * dx + dy * dy;
-        if (square > 1.0) continue;
-        const float margin = static_cast<float>(1.0 - square);
+        // 与自动急停使用同一矩形范围；不再把框内角部误判成未到位。
+        const double distance = std::max(std::abs(dx), std::abs(dy));
+        if (distance > 1.0) continue;
+        const float margin = static_cast<float>(1.0 - distance);
         if (margin > best_margin || (margin == best_margin && box.confidence > best_confidence)) {
             selected = i; best_margin = margin; best_confidence = box.confidence;
         }

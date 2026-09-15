@@ -82,7 +82,6 @@ enum class HotkeyBindingTarget {
     AUTO_STOP_RELEASE,
     DEBUG_TEST,
     TRIGGER,
-    RECOIL,
 };
 
 std::array<bool, 256> current_virtual_key_state() noexcept {
@@ -3021,8 +3020,7 @@ struct Overlay::Impl {
                 app_config.trigger.require_stop = app_config.trigger.allow_estimated_stop = true;
                 app_config.trigger.fire_mode = TriggerFireMode::SINGLE;
                 app_config.trigger.hold_virtual_key = app_config.auto_stop.activation_virtual_key;
-                app_config.gsi.enabled = app_config.weapon_timing_enabled = true;
-                app_config.weapon_timing_manual_id.clear();
+                app_config.gsi.enabled = true;
             }
             form_row("GSI自动识别", "与弹道和共享武器资料使用同一套名称；身份、地址和认证仍在设置页配置。GSI只提供武器状态，不证明角色已停稳。");
             toggle_switch("##auxiliary_gsi_enabled", &app_config.gsi.enabled);
@@ -3063,89 +3061,28 @@ struct Overlay::Impl {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         render_trigger_config(snapshot, app_config, can_edit, key_active);
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        ImGui::TextWrapped("源端焦点：%s", snapshot.source_context.available ?
-            (snapshot.source_context.focused ? "目标进程在前台" : "目标进程不在前台") : "未就绪或已过期");
-        if (ImGui::Button("连接与上下文设置")) active_page = WorkspacePage::SETTINGS;
-        show_help_tooltip("跳转唯一连接参数入口；切页不会启动或停止设备。");
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        begin_config_panel("recoil_permission_panel", "压枪许可", 300.0f);
-        ImGui::BeginDisabled(!can_edit);
-        if (begin_form("recoil_permission_form", 150.0f)) {
-            const int key = app_config.recoil.hold_virtual_key;
-            render_hotkey_row("额外许可键（可选）", "##recoil_hold_key",
-                "可与瞄准或扳机共用；未绑定时仍需真实射击事实与完整公共许可。禁止左键、WASD、End、F8和实际安全键。",
-                HotkeyBindingTarget::RECOIL, key == 0 ? std::vector<int>{} : std::vector<int>{key}, key_active);
-            ImGui::EndTable();
-        }
-        ImGui::EndDisabled();
-        end_config_panel();
+        begin_config_panel("recoil_panel", "自动压枪", 190.0f);
         recoil_panel.render(snapshot, app_config, can_edit);
+        end_config_panel();
     }
 
     void render_trigger_config(const RuntimeSnapshot& snapshot, AppConfig& app_config,
             bool can_edit, const std::array<bool, 256>& key_active) {
         auto& trigger = app_config.trigger;
-        begin_config_panel("trigger_panel", "自动扳机", 300.0f);
-        ImGui::TextWrapped("准星进入任一有效头部或人体内域即可计时；不等待瞄准首选部位。框内域不保证弹道命中。");
+        begin_config_panel("trigger_panel", "自动扳机", 230.0f);
+        ImGui::TextWrapped("准星进入任一完整有效头部或人体检测框即判断开火，与自动急停使用相同范围；按共享GSI武器资料点射。检测框不保证弹道命中。");
         ImGui::BeginDisabled(!can_edit);
         if (begin_form("trigger_form", 150.0f)) {
             form_row("启用自动扳机", "默认关闭；启用后仍需全局武装、按住绑定键、健康输入、源端焦点与有效图像。启用GSI时还需有效武器上下文；切枪或失效会取消旧会话，恢复后须松键再按下。仅支持 KMBOX NET。");
             ImGui::BeginDisabled(app_config.mouse.backend != MouseBackend::KMBOX_NET && !trigger.enabled);
             toggle_switch("##trigger_enabled", &trigger.enabled);
             ImGui::EndDisabled();
-            form_row("允许开枪", "关闭后保留目标检测、资格判断和急停联动调试，不发送自动扳机左键按下；不会阻止你手动开枪。停止运行后修改，下次启动生效。");
-            toggle_switch("##trigger_fire_enabled", &trigger.fire_enabled);
             render_hotkey_row("开火许可（按住）", "##trigger_hold_key",
                 "可以与瞄准键或自动急停快捷键共用；禁止左键、WASD、安全急停和运行启停键。恢复或重新启动后须先松开再按下。Esc 清空。",
                 HotkeyBindingTarget::TRIGGER,
                 trigger.hold_virtual_key == 0 ? std::vector<int>{} : std::vector<int>{trigger.hold_virtual_key}, key_active);
-            form_row("头部内域宽 / %", "检测头框中心椭圆的宽占比；只影响扳机准星命中判断，不改变瞄准点。");
-            slider_float_control("trigger_head_width", &trigger.head_width_percent, 1.0f, 100.0f, "%.0f");
-            form_row("头部内域高 / %", "检测头框中心椭圆的高占比；缺头类别时不从人体框虚构头部。");
-            slider_float_control("trigger_head_height", &trigger.head_height_percent, 1.0f, 100.0f, "%.0f");
-            form_row("人体内域宽 / %", "检测人体或身体框中心椭圆的宽占比；范围越大越容易触发，也可能包含更多背景。");
-            slider_float_control("trigger_body_width", &trigger.body_width_percent, 1.0f, 100.0f, "%.0f");
-            form_row("人体内域高 / %", "检测人体或身体框中心椭圆的高占比；被画面边界截断的检测框不用于开火。");
-            slider_float_control("trigger_body_height", &trigger.body_height_percent, 1.0f, 100.0f, "%.0f");
-            form_row("通用类别（可选）", "仅将明确添加的模型类别纳入通用内域；不得与头部或人体类别重复，空列表不会默认接受全部类别。");
-            ImGui::SetNextItemWidth(80);
-            ImGui::InputInt("##trigger_general_class", &trigger_general_class, 0, 0);
-            ImGui::SameLine();
-            if (ImGui::Button("添加类别")) {
-                const auto contains = [&](const std::vector<int>& ids) { return std::find(ids.begin(), ids.end(), trigger_general_class) != ids.end(); };
-                if (trigger_general_class < 0 || contains(app_config.aim.person_class_ids) || contains(app_config.aim.head_class_ids) || contains(trigger.general_class_ids))
-                    hotkey_capture_message = "通用类别必须非负且不与已有头部、人体或通用类别重复";
-                else trigger.general_class_ids.push_back(trigger_general_class);
-            }
-            for (std::size_t i = 0; i < trigger.general_class_ids.size(); ++i) {
-                ImGui::Text("类别 %d", trigger.general_class_ids[i]); ImGui::SameLine(); ImGui::PushID(static_cast<int>(i));
-                const bool remove = ImGui::SmallButton("移除"); ImGui::PopID();
-                if (remove) { trigger.general_class_ids.erase(trigger.general_class_ids.begin() + i); break; }
-            }
-            form_row("通用内域宽 / %", "只作用于上方显式通用类别；空类别列表时无效，不改变头部或人体内域。");
-            slider_float_control("trigger_general_width", &trigger.general_width_percent, 1.0f, 100.0f, "%.0f");
-            form_row("通用内域高 / %", "通用检测框中心椭圆的高占比，不能从未知类别推断头身身份。");
-            slider_float_control("trigger_general_height", &trigger.general_height_percent, 1.0f, 100.0f, "%.0f");
-            form_row("最低置信度", "在检测器过滤后进一步筛选；不能恢复已被检测器剔除的框。类别映射沿用瞄准页的模型类别设置。");
-            slider_float_control("trigger_confidence", &trigger.min_confidence, 0.0f, 1.0f, "%.2f");
-            form_row("开火延迟 / ms", "准星连续位于同一人物有效内域的最短时间；离域或身份歧义重计，与急停等待并行。");
-            slider_int_control("trigger_delay", &trigger.fire_delay_ms, 0, 1000);
-            form_row("射击模式", "点射循环会主动松开；连续按住由武器自己决定射速，不能把按键间隔当游戏真实射速。");
-            int mode = static_cast<int>(trigger.fire_mode);
-            const char* modes[] = {"点射循环", "连续按住"};
-            if (ImGui::Combo("##trigger_mode", &mode, modes, 2)) trigger.fire_mode = static_cast<TriggerFireMode>(mode);
-            form_row("再次按下间隔 / ms", "两次按下提交的最小间隔；松键或换目标不清除冷却。开启共享武器资料时，点射使用后坐力页的武器参数。");
-            slider_int_control("trigger_interval", &trigger.shot_interval_ms, 1, 2000);
-            form_row("点射按下时长 / ms", "点射从按下回执起算；松许可键、失焦或出域时提前发起释放，不等待此时长结束。");
-            slider_int_control("trigger_press", &trigger.press_duration_ms, 1, 500);
-            form_row("连续持键上限 / ms", "连续按住模式每段的动作上限；到期主动释放，下一段仍需新图像与完整资格。不保证故障时物理释放期限。");
-            slider_int_control("trigger_hold", &trigger.max_hold_ms, 1, 1000);
-            form_row("图像有效期 / ms", "源图像年龄加时钟不确定性必须小于此值；无图也按原期限释放，重复读取旧帧不会续期。");
-            slider_int_control("trigger_age", &trigger.max_observation_age_ms, 1, 5000);
             form_row("要求急停联动", "开启后等待所选急停完成策略；关闭仅做几何扳机，不保证角色已停稳。");
             toggle_switch("##trigger_require_stop", &trigger.require_stop);
-            form_row("使用估计完成联动", "仅要求急停联动时生效：复用独立急停持续四键接管的估计完成状态，与点射冷却并行；不代表真实移速观察。关闭保留严格观察模式。");
-            toggle_switch("##trigger_estimated_stop", &trigger.allow_estimated_stop);
             ImGui::EndTable();
         }
         ImGui::EndDisabled();
@@ -3185,6 +3122,42 @@ struct Overlay::Impl {
         end_config_panel();
     }
 
+    void render_trigger_debug(AppConfig& app_config, bool can_edit) {
+        auto& trigger = app_config.trigger;
+        ImGui::BeginDisabled(!can_edit);
+        if (begin_form("trigger_debug_form", 150.0f)) {
+            form_row("允许开枪", "关闭后保留目标检测、资格判断和急停联动调试，不发送自动扳机左键按下；不会阻止你手动开枪。停止运行后修改，下次启动生效。");
+            toggle_switch("##trigger_fire_enabled", &trigger.fire_enabled);
+            form_row("通用类别（可选）", "仅将明确添加的模型类别纳入通用内域；不得与头部或人体类别重复，空列表不会默认接受全部类别。");
+            ImGui::SetNextItemWidth(80);
+            ImGui::InputInt("##trigger_general_class", &trigger_general_class, 0, 0);
+            ImGui::SameLine();
+            if (ImGui::Button("添加类别")) {
+                const auto contains = [&](const std::vector<int>& ids) { return std::find(ids.begin(), ids.end(), trigger_general_class) != ids.end(); };
+                if (trigger_general_class < 0 || contains(app_config.aim.person_class_ids) || contains(app_config.aim.head_class_ids) || contains(trigger.general_class_ids))
+                    hotkey_capture_message = "通用类别必须非负且不与已有头部、人体或通用类别重复";
+                else trigger.general_class_ids.push_back(trigger_general_class);
+            }
+            for (std::size_t i = 0; i < trigger.general_class_ids.size(); ++i) {
+                ImGui::Text("类别 %d", trigger.general_class_ids[i]); ImGui::SameLine(); ImGui::PushID(static_cast<int>(i));
+                const bool remove = ImGui::SmallButton("移除"); ImGui::PopID();
+                if (remove) { trigger.general_class_ids.erase(trigger.general_class_ids.begin() + i); break; }
+            }
+            form_row("通用内域宽 / %", "只作用于上方显式通用类别；空类别列表时无效，不改变头部或人体内域。");
+            slider_float_control("trigger_general_width", &trigger.general_width_percent, 1.0f, 100.0f, "%.0f");
+            form_row("通用内域高 / %", "通用检测框中心椭圆的高占比，不能从未知类别推断头身身份。");
+            slider_float_control("trigger_general_height", &trigger.general_height_percent, 1.0f, 100.0f, "%.0f");
+            form_row("最低置信度", "在检测器过滤后进一步筛选；不能恢复已被检测器剔除的框。类别映射沿用瞄准页的模型类别设置。");
+            slider_float_control("trigger_confidence", &trigger.min_confidence, 0.0f, 1.0f, "%.2f");
+            form_row("图像有效期 / ms", "源图像年龄加时钟不确定性必须小于此值；无图也按原期限释放，重复读取旧帧不会续期。");
+            slider_int_control("trigger_age", &trigger.max_observation_age_ms, 1, 5000);
+            form_row("使用估计完成联动", "仅要求急停联动时生效：复用独立急停持续四键接管的估计完成状态，与点射冷却并行；不代表真实移速观察。关闭保留严格观察模式。");
+            toggle_switch("##trigger_estimated_stop", &trigger.allow_estimated_stop);
+            ImGui::EndTable();
+        }
+        ImGui::EndDisabled();
+    }
+
     void render_debug(const RuntimeSnapshot& snapshot, AppConfig& app_config,
                       bool can_edit, OverlayActions& actions,
                       const debug_session::Snapshot* debug_snapshot) {
@@ -3215,6 +3188,10 @@ struct Overlay::Impl {
         }
         if (ImGui::BeginTabItem("射击节奏")) {
             debug_panel.render_fire(app_config, debug_snapshot, actions);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("扳机调试")) {
+            render_trigger_debug(app_config, can_edit);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("弹道工具")) {
@@ -3603,7 +3580,6 @@ struct Overlay::Impl {
                 return &app_config.auto_stop.release_virtual_keys;
             case HotkeyBindingTarget::AUTO_STOP:
             case HotkeyBindingTarget::TRIGGER:
-            case HotkeyBindingTarget::RECOIL:
             case HotkeyBindingTarget::NONE:
                 return nullptr;
         }
@@ -3622,7 +3598,7 @@ struct Overlay::Impl {
         return overlay::detail::hotkey_binding_conflicts(target, virtual_key,
             app_config.keyboard.runtime_toggle_virtual_keys, app_config.keyboard.aim_hold_virtual_keys,
             app_config.keyboard.emergency_virtual_keys, app_config.auto_stop.activation_virtual_key,
-            app_config.trigger.hold_virtual_key, app_config.recoil.hold_virtual_key,
+            app_config.trigger.hold_virtual_key, 0,
             app_config.keyboard.debug_test_virtual_keys);
     }
 
@@ -3686,18 +3662,6 @@ struct Overlay::Impl {
                     else if (std::find(binding->begin(),binding->end(),key) == binding->end()) {
                         binding->push_back(key); hotkey_capture_message = "调试测试键已追加；保存配置后生效，每次按下只执行一组";
                     } else hotkey_capture_message = "该按键已在调试测试绑定中";
-                }
-            } else if (hotkey_binding_target == HotkeyBindingTarget::RECOIL) {
-                if (capture_result.type == overlay::detail::HotkeyCaptureResultType::CLEARED) {
-                    app_config.recoil.hold_virtual_key = 0; hotkey_capture_message = "压枪额外许可键已清空";
-                } else if (capture_result.type == overlay::detail::HotkeyCaptureResultType::ASSIGNED) {
-                    const int key = capture_result.virtual_key;
-                    const auto assigned = [key](const std::vector<int>& keys) { return std::find(keys.begin(), keys.end(), key) != keys.end(); };
-                    if (key == 1 || key == VK_END || key == VK_F8 || key == 'W' || key == 'A' || key == 'S' || key == 'D' ||
-                        assigned(app_config.keyboard.emergency_virtual_keys) || assigned(app_config.keyboard.runtime_toggle_virtual_keys) ||
-                        assigned(app_config.keyboard.debug_test_virtual_keys))
-                        hotkey_capture_message = "压枪许可键不能使用左键、WASD、安全急停或运行启停键";
-                    else { app_config.recoil.hold_virtual_key = key; hotkey_capture_message = "压枪许可键已设置，可与瞄准或扳机共用"; }
                 }
             } else if (hotkey_binding_target == HotkeyBindingTarget::TRIGGER) {
                 if (capture_result.type == overlay::detail::HotkeyCaptureResultType::CLEARED) {
@@ -4111,8 +4075,7 @@ struct Overlay::Impl {
                  DetectorReloadState::LOADING);
         const WorkspacePage capture_page = hotkey_binding_target == HotkeyBindingTarget::DEBUG_TEST
             ? WorkspacePage::DEBUG :
-            (hotkey_binding_target == HotkeyBindingTarget::AUTO_STOP || hotkey_binding_target == HotkeyBindingTarget::AUTO_STOP_RELEASE || hotkey_binding_target == HotkeyBindingTarget::TRIGGER ||
-             hotkey_binding_target == HotkeyBindingTarget::RECOIL)
+            (hotkey_binding_target == HotkeyBindingTarget::AUTO_STOP || hotkey_binding_target == HotkeyBindingTarget::AUTO_STOP_RELEASE || hotkey_binding_target == HotkeyBindingTarget::TRIGGER)
                 ? WorkspacePage::AUXILIARY : WorkspacePage::SETTINGS;
         if (hotkey_capture_state.active &&
             (active_page != capture_page || !can_edit || show_log_panel)) {

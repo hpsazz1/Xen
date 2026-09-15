@@ -280,16 +280,11 @@ int wmain(int argc, wchar_t** argv) {
                 !actions.training_start_requested && !actions.training_stop_requested && !actions.training_load_requested &&
                 !actions.reload_detector_requested && !actions.save_config_requested && !actions.refresh_models_requested &&
                 actions.runtime_intents.empty() && actions.workspace_action == model_workspace::Action::NONE &&
-                !config.mouse.allow_send_input && !overlay.background_busy(), "预览触发了业务动作或后台作业");
+                !config.mouse.allow_send_input && (auxiliary || !overlay.background_busy()), "预览触发了业务动作或后台作业");
             frame_ms.push_back(std::chrono::duration<double,std::milli>(
                 std::chrono::steady_clock::now() - started).count());
         };
         frame(); frame(); frame();
-        if (auxiliary) {
-            // 本模式只验收急停区域；关闭会自动读取资料的独立共享资料折叠区。
-            auto* preview_content = preview_window("content");
-            preview_content->StateStorage.SetInt(preview_content->GetID("共享武器点射节奏"), 0);
-        }
         // 导航点击只进入本进程 ImGui 队列，不调用系统鼠标API。
         input.position = {70, 36.f + 12.f + 21.f + (auxiliary ? 3.f : 6.f) * (42.f + ImGui::GetStyle().ItemSpacing.y)};
         frame(); input.down = true; frame(); input.down = false; frame(); frame();
@@ -307,33 +302,98 @@ int wmain(int argc, wchar_t** argv) {
             require(table != nullptr, "辅助设置表缺失");
             require(panel->Scroll.y > 0, "辅助循环设置未滚动");
             save_window(capture, output / "auxiliary-cycle.png");
-            // 820×600最小窗口实绘核对：第二行帮助中心为(269,347)。
-            // 帧结束后的默认字体并非当前表单字体，不用其CalcTextSize反推帮助位置。
-            input.position = {269.f, 347.f};
-            for (int i = 0; i < 35; ++i) frame();
-            require_tooltip(capture, "持续按住方向键及允许键");
-            save_window(capture, output / "auxiliary-help.png");
+            const auto check_panel = [&](const char* name, const char* table_name,
+                                         const char* expected, const char* file_name) {
+                auto* card = preview_window(name);
+                ImGui::ScrollToRectEx(content, card->Rect(), ImGuiScrollFlags_AlwaysCenterY);
+                input.position = {400,40}; frame(); frame();
+                card = preview_window(name);
+                require_page_table(table_name);
+                require(card->ClipRect.GetWidth() > 100 && card->ClipRect.GetHeight() > 100,
+                    "辅助卡片未在滚动后显示有效正文");
+                require(card->Rect().Min.x >= content->ClipRect.Min.x - 1 &&
+                    card->Rect().Max.x <= content->ClipRect.Max.x + 1, "辅助卡片超出正文水平边界");
+                require(capture.text.find(expected) != std::string::npos, "辅助卡片缺少预期文字");
+                require(capture.text.find("连接与上下文设置") == std::string::npos &&
+                    capture.text.find("额外许可键") == std::string::npos &&
+                    capture.text.find("再次按下间隔") == std::string::npos &&
+                    capture.text.find("曲线草稿强度") == std::string::npos,
+                    "辅助卡片仍显示已移除的重复设置");
+                save_window(capture, output / file_name);
+            };
+            check_panel("trigger_panel", "trigger_form", "完整有效头部或人体检测框", "auxiliary-trigger.png");
+            check_panel("recoil_panel", "recoil_settings", "曲线校准、强度编辑与匹配配置", "auxiliary-recoil.png");
+            // 只进入本次变更的两个调试标签，不运行旧版完整导航流程。
+            input.position = {70, 36.f + 12.f + 21.f + 6.f * (42.f + ImGui::GetStyle().ItemSpacing.y)};
+            frame(); input.down = true; frame(); input.down = false; frame(); frame();
+            content = preview_window("content");
+            const auto select_debug_tab = [&](const char* label, const char* expected, const char* file_name) {
+                ImGui::SetScrollY(content, 0); frame(); frame();
+                auto* tabs = ImGui::GetCurrentContext()->TabBars.GetByKey(content->GetID("debug_tabs"));
+                require(tabs && tabs->Tabs.Size == 6, "调试导航没有显示六个标签");
+                const ImGuiTabItem* target = nullptr;
+                for (auto& tab : tabs->Tabs)
+                    if (std::string_view(ImGui::TabBarGetTabName(tabs, &tab)) == label) target = &tab;
+                require(target != nullptr, "本次变更的调试标签缺失");
+                const auto id = target->ID;
+                input.position = {tabs->BarRect.Min.x + target->Offset + target->Width * .5f,
+                                  tabs->BarRect.GetCenter().y};
+                require(content->ClipRect.Contains(input.position), "调试标签在最小窗口不可点击");
+                frame(); input.down = true; frame(); input.down = false; frame(); frame();
+                require(tabs->SelectedTabId == id, "未进入预期调试标签");
+                for (int i = 0; i < 30 && overlay.background_busy(); ++i) frame();
+                require(!overlay.background_busy(), "只读资料预览未在帧预算内结束");
+                input.position = {400,40}; frame();
+                require(capture.text.find(expected) != std::string::npos, "新调试页未呈现预期内容");
+                require(tabs->BarRect.Max.x <= ImGui::GetIO().DisplaySize.x, "调试标签栏超出窗口");
+                save_window(capture, output / file_name);
+            };
+            select_debug_tab("扳机调试", "允许开枪", "trigger-debug.png");
+            auto* trigger_tabs = ImGui::GetCurrentContext()->TabBars.GetByKey(content->GetID("debug_tabs"));
+            auto* trigger_table = ImGui::GetCurrentContext()->Tables.GetByKey(
+                ImHashStr("trigger_debug_form", 0, trigger_tabs->SelectedTabId));
+            require(trigger_table && trigger_table->LastFrameActive == ImGui::GetFrameCount(),
+                "扳机调试表未在当前标签真实绘制");
+            ImGui::SetScrollY(content, content->ScrollMax.y); frame(); frame();
+            require(capture.text.find("图像有效期 / ms") != std::string::npos &&
+                capture.text.find("使用估计完成联动") != std::string::npos,
+                "扳机调试缺少有效性与联动控制");
+            save_window(capture, output / "trigger-debug-bottom.png");
+            select_debug_tab("弹道工具", "武器点射资料", "recoil-tools.png");
+            auto* recoil_tabs = ImGui::GetCurrentContext()->TabBars.GetByKey(content->GetID("debug_tabs"));
+            content->StateStorage.SetInt(ImHashStr("压枪校准匹配配置", 0, recoil_tabs->SelectedTabId), 1);
+            content->StateStorage.SetInt(content->GetID("压枪校准匹配配置"), 1);
+            frame(); frame();
+            ImGui::SetScrollY(content, content->ScrollMax.y); frame(); frame();
+            require(capture.text.find("压枪校准匹配配置") != std::string::npos,
+                "弹道工具缺少可恢复的校准配置入口");
+            save_window(capture, output / "recoil-tools-bottom.png");
             ImGui::RemoveContextHook(ImGui::GetCurrentContext(),capture_hook_id);
             ImGui::RemoveContextHook(ImGui::GetCurrentContext(),frame_hook_id);
             ImGui::RemoveContextHook(ImGui::GetCurrentContext(),hook_id);
             overlay.shutdown(); Log::shutdown();
             std::ofstream result(output / "ui-preview-result.txt");
             result << "辅助页合成快照；Runtime实例=0；设备=0；业务动作=0；窗口=" << config.ui.width << 'x' << config.ui.height
-                   << "；帧=" << frames << "\n已检查统一M4A1-S名称、循环状态、循环设置可见性与帮助浮层边界；不证明真实设备行为。\n";
+                   << "；帧=" << frames << "\n已检查统一M4A1-S名称、循环状态、三张辅助卡片及两个调试页面的文案与水平边界；只读独立资料预览，不证明真实设备行为。\n";
             require(result.good(), "辅助预览结果写入失败");
             return 0;
         }
         auto* bar = ImGui::GetCurrentContext()->TabBars.GetByKey(content->GetID("debug_tabs"));
-        require(bar && bar->Tabs.Size == 5, "调试导航没有显示五个标签");
+        require(bar && bar->Tabs.Size == 6, "调试导航没有显示六个标签");
         require(bar->BarRect.Min.x >= 0 && bar->BarRect.Max.x <= ImGui::GetIO().DisplaySize.x,
             "最小窗口下标签栏超出右边界");
-        const char* file_names[]{"counterpulse.png","manual.png","fire.png","recoil.png","diagnostics.png"};
-        const char* expected[]{"实验草稿独立于生产急停", "原生人工模型录制", "独立原地测试", "弹道工具与射击归档", "请求"};
-        for (int tab_index = 0; tab_index < 5; ++tab_index) {
+        const char* file_names[]{"counterpulse.png","manual.png","fire.png","trigger-debug.png","recoil.png","diagnostics.png"};
+        const char* expected[]{"实验草稿独立于生产急停", "原生人工模型录制", "独立原地测试", "允许开枪", "弹道工具与射击归档", "请求"};
+        for (int tab_index = 0; tab_index < 6; ++tab_index) {
             debug.plan["baseline"] = tab_index == 2 ? "stationary" : "counter";
             ImGui::SetScrollY(content,0); frame(); frame();
             bar = ImGui::GetCurrentContext()->TabBars.GetByKey(content->GetID("debug_tabs"));
             const auto tab = bar->Tabs[tab_index];
+            if (tab_index == 4) {
+                // 旧版全导航模式不需要资料读取；专项辅助模式另外覆盖只读编辑器。
+                content->StateStorage.SetInt(ImHashStr("武器点射资料", 0, tab.ID), 0);
+                content->StateStorage.SetInt(content->GetID("武器点射资料"), 0);
+            }
             input.position = {bar->BarRect.Min.x + tab.Offset + tab.Width * .5f, bar->BarRect.GetCenter().y};
             require(content->ClipRect.Contains(input.position), "最小窗口中调试标签不可点击");
             input.down = false; frame(); input.down = true; frame(); input.down = false; frame(); frame();
@@ -356,7 +416,7 @@ int wmain(int argc, wchar_t** argv) {
                 content->StateStorage.SetInt(content->GetID("default_baseline"),1);
                 content->StateStorage.SetInt(content->GetID("actual_parameters"),1);
             }
-            if (tab_index == 0 || tab_index == 2 || tab_index == 4) {
+            if (tab_index == 0 || tab_index == 2 || tab_index == 5) {
                 ImGui::SetScrollY(content,content->ScrollMax.y); frame(); frame();
                 require(capture.text.find("DOWN ACK至UP提交") != std::string::npos, "报告图缺少协议ACK至UP提交时间域");
                 save_window(capture,output / (std::string("report-") + file_names[tab_index]));
@@ -390,7 +450,7 @@ int wmain(int argc, wchar_t** argv) {
         overlay.shutdown(); Log::shutdown();
         std::ofstream result(output / "ui-preview-result.txt");
         result << "合成快照；Runtime实例=0；设备=0；业务动作=0；窗口=" << config.ui.width << 'x' << config.ui.height
-               << "；帧=" << frames << "\n五个调试标签及默认关闭/deferred关闭契约已检查。截图仍需人工视觉核对。\n";
+               << "；帧=" << frames << "\n六个调试标签及默认关闭/deferred关闭契约已检查。截图仍需人工视觉核对。\n";
         result << "UI线程每帧墙钟/ms：samples=" << frame_ms.size()
                << "；P95=" << percentile(95) << "；P99=" << percentile(99)
                << "；max=" << (sorted.empty() ? 0.0 : sorted.back()) << "；分位数=nearest-rank；含全部预览帧，不剔除启动帧。\n"

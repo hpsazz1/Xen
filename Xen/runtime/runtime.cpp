@@ -302,7 +302,7 @@ struct Runtime::Impl {
         fps_started = std::chrono::steady_clock::now();
         fps_frame_count = 0;
         std::shared_ptr<const weapon::TimingCatalog> timing_catalog;
-        if (config.trigger.enabled && config.weapon_timing_enabled && config.trigger.fire_mode == TriggerFireMode::SINGLE) {
+        if (config.trigger.enabled) {
             auto catalog = weapon::default_timing_catalog();
             std::string error;
             const auto path = std::filesystem::u8path(config.weapon_timing_file);
@@ -407,14 +407,12 @@ struct Runtime::Impl {
                 [this, timing_catalog, selected = static_cast<const weapon::TimingProfile*>(nullptr),
                     previous_weapon = std::string{}, previous_epoch = std::uint64_t{0},
                     generation = std::uint64_t{0}, previous_valid = false, exhausted = false]() mutable {
-                    if (!config.gsi.enabled && !timing_catalog) return TriggerContext{};
                     if (exhausted) return TriggerContext{generation, true, false};
-                    const auto weapon = config.gsi.enabled ? gsi_receiver.snapshot() : weapon::WeaponSnapshot{};
-                    const std::string_view id = config.weapon_timing_manual_id.empty() || !timing_catalog ?
-                        std::string_view(weapon.canonical_id) : weapon::normalize_weapon_id(config.weapon_timing_manual_id);
-                    const bool valid = !config.gsi.enabled || (weapon.valid && weapon.identity_match && !weapon.canonical_id.empty() &&
-                        weapon.source_epoch != 0 && weapon.state == weapon::WeaponState::ACTIVE && id == weapon.canonical_id &&
-                        weapon.ammo_clip && *weapon.ammo_clip > 0 && weapon.valid_until > TriggerClock::now());
+                    const auto weapon = gsi_receiver.snapshot();
+                    const std::string_view id = weapon.canonical_id;
+                    const bool valid = weapon.valid && weapon.identity_match && !id.empty() &&
+                        weapon.source_epoch != 0 && weapon.state == weapon::WeaponState::ACTIVE &&
+                        weapon.ammo_clip && *weapon.ammo_clip > 0 && weapon.valid_until > TriggerClock::now();
                     // revision/timestamp 的正常心跳不改变会话；身份、连续性或有效性变化持续增代。
                     if (generation == 0 || id != previous_weapon ||
                         weapon.source_epoch != previous_epoch || valid != previous_valid) {
@@ -423,14 +421,14 @@ struct Runtime::Impl {
                             return TriggerContext{generation, true, false};
                         }
                         previous_weapon = id;
-                        selected = timing_catalog ? weapon::find_timing(*timing_catalog, id) : nullptr;
+                        selected = weapon::find_timing(*timing_catalog, id);
                         previous_epoch = weapon.source_epoch;
                         previous_valid = valid;
                         ++generation;
                     }
                     TriggerContext result{generation, true, valid};
-                    result.timing_required = timing_catalog != nullptr;
-                    result.timing_catalog_revision = timing_catalog ? timing_catalog->revision : 0;
+                    result.timing_required = true;
+                    result.timing_catalog_revision = timing_catalog->revision;
                     result.timing_weapon_id = selected ? selected->canonical_id : std::string_view{};
                     result.timing_valid = selected && selected->enabled;
                     if (result.timing_valid) {

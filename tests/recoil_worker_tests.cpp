@@ -16,6 +16,7 @@ class Mouse final : public IMouseController {
 public:
     std::atomic<bool> held{false}, unknown{false}, healthy{true}, block{false}, proceed{false}, entered{false},dirty{false},missing_time{false};
     std::atomic<bool> cancel_key{false};
+    std::atomic<bool> calibration_key{true};
     std::atomic<bool> pre_call_receipt{false};
     std::atomic<RecoilTime> last_poll_at{RecoilTime{}};
     std::function<void()> on_poll;
@@ -30,7 +31,7 @@ public:
         if(on_poll)on_poll();
         last_poll_at=RecoilClock::now();
         out={};out.state_valid = healthy; out.status = healthy?InputMonitorStatus::READY:InputMonitorStatus::STALE;
-        out.virtual_keys[1] = held;out.virtual_keys[18]=true;out.virtual_keys[27]=cancel_key; out.sequence = ++sequence; return true;
+        out.virtual_keys[1] = held;out.virtual_keys[18]=calibration_key;out.virtual_keys[27]=cancel_key; out.sequence = ++sequence; return true;
     }
     void close() noexcept override {}
     bool left_button_cleanup_required() const noexcept override {return dirty;}
@@ -53,7 +54,8 @@ struct Fixture {
     std::atomic<std::int64_t> synthetic_uncertainty_ns{-1};
     std::atomic<bool> replace_signal_after_read{false};
     std::unique_ptr<RecoilWorker> worker;
-    Fixture(bool rapid=false, bool change_generation=true, bool zero_curve=false, bool calibration=false) {
+    Fixture(bool rapid=false, bool change_generation=true, bool zero_curve=false, bool calibration=false,
+            int legacy_permission_key=0) {
         profile->id = "synthetic"; profile->weapon_id = "synthetic_weapon";
         profile->state = RecoilProfileState::CALIBRATED; profile->phase_tolerance_ms = 100; profile->recovery_ms = 20;
         profile->source.sha256 = std::string(64, 'a'); profile->source.source_unit = "synthetic";
@@ -84,7 +86,7 @@ struct Fixture {
             return signal;
         });
         if(rapid&&change_generation)mouse->on_poll=[this]{if(worker->snapshot().phase==RecoilPhase::FIRING&&generation==1)++generation;};
-        RecoilConfig config; config.enabled = true;
+        RecoilConfig config; config.enabled = true; config.hold_virtual_key = legacy_permission_key;
         if(calibration) {
             RecoilCalibrationManifest manifest;manifest.session_id="synthetic-calibration";
             manifest.profile_semantic_sha256=recoil_calibration_sha256(serialize_recoil_profile(*profile));
@@ -105,6 +107,17 @@ struct Fixture {
 }
 int main() {
     try {
+        {
+            // 普通压枪仅跟随实际射击来源，旧额外许可不能留下隐藏阻断。
+            Fixture f(false, true, false, false, 999); f.ready(); f.mouse->held = true;
+            check(until([&]{return f.mouse->moves.load() > 0;}), "普通压枪不等待已移除的额外许可键");
+        }
+        {
+            Fixture f(false, true, false, true); f.ready();
+            f.mouse->calibration_key = false; f.mouse->held = true;
+            std::this_thread::sleep_for(25ms);
+            check(f.mouse->moves == 0, "独立校准仍需人工保持键，不受普通压枪许可移除影响");
+        }
         {
             Fixture f(true,false,false,true);f.ready();f.mouse->held=true;
             check(until([&]{return f.worker->calibration_snapshot().terminal;}),"一次校准结束");
