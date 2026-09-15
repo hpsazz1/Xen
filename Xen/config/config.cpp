@@ -1048,7 +1048,7 @@ bool validate_app_config(const AppConfig& config,
         // 凭据只在启动时从环境注入；配置检查不读取/保存秘密。
         gsi_validation.token.assign(32, 'x');
         if (config.gsi.enabled && !weapon::valid_config(gsi_validation)) {
-            error = "GSI绑定、来源限制或玩家身份配置非法"; return false;
+            error = "GSI绑定地址、来源限制或接收参数非法"; return false;
         }
         const bool physical_keyboard_invalid =
             config.mouse.allow_send_input &&
@@ -1121,7 +1121,6 @@ bool load_app_config(const std::string& path,
         candidate.recoil.fire_mode = ini.GetValue("recoil", "fire_mode", candidate.recoil.fire_mode.c_str());
         candidate.recoil.trial_file = ini.GetValue("recoil", "trial_file", candidate.recoil.trial_file.c_str());
         candidate.gsi.bind_address = ini.GetValue("gsi", "bind_address", candidate.gsi.bind_address.c_str());
-        candidate.gsi.expected_player_id = ini.GetValue("gsi", "expected_player_id", candidate.gsi.expected_player_id.c_str());
         candidate.gsi.allowed_peer_ipv4 = ini.GetValue("gsi", "allowed_peer_ipv4", candidate.gsi.allowed_peer_ipv4.c_str());
         const auto gsi_port = ini.GetLongValue("gsi", "port", 5013);
         if (gsi_port < 1 || gsi_port > 65535) { error = "GSI端口非法"; return false; }
@@ -1611,7 +1610,6 @@ bool save_app_config(const std::string& path,
         ini.SetValue("recoil", "fire_mode", config.recoil.fire_mode.c_str());
         ini.SetValue("recoil", "trial_file", config.recoil.trial_file.c_str());
         ini.SetValue("gsi", "bind_address", config.gsi.bind_address.c_str());
-        ini.SetValue("gsi", "expected_player_id", config.gsi.expected_player_id.c_str());
         ini.SetValue("gsi", "allowed_peer_ipv4", config.gsi.allowed_peer_ipv4.c_str());
         ini.SetLongValue("gsi", "request_timeout_ms", config.gsi.request_timeout_ms);
         ini.SetLongValue("gsi", "port", config.gsi.port);

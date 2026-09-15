@@ -435,7 +435,6 @@ struct RecoilPanel::Impl {
                 row("Xen接收地址", "填写运行Xen的电脑地址；双机时为辅机IP，游戏机向此地址发送GSI。127.0.0.1只适用于游戏与Xen在同一台电脑。"); ImGui::InputText("##gsi_bind", &g.bind_address);
                 row("接收端口", "游戏GSI配置需指向此HTTP接收端口。"); int port = g.port;
                 if (ImGui::InputInt("##gsi_port", &port)) g.port = static_cast<std::uint16_t>(std::clamp(port, 1, 65535));
-                row("本玩家标识", "仅接受对应玩家；观战或身份不匹配不沿用旧武器。"); ImGui::InputText("##gsi_player", &g.expected_player_id);
                 row("游戏机IPv4", "填写运行游戏的主机IP，只接受这台电脑发送的GSI；这里不是辅机地址，认证值仍必须由环境提供。"); ImGui::InputText("##gsi_peer", &g.allowed_peer_ipv4);
                 row("上下文有效期 / ms", "同一源时间的重复包不续命；不是逐发时间精度。"); ImGui::InputInt("##gsi_ttl", &g.ttl_ms);
                 row("请求超时 / ms", "限制HTTP接收时间，不在设备实时线程解析请求。"); ImGui::InputInt("##gsi_timeout", &g.request_timeout_ms);
@@ -444,7 +443,7 @@ struct RecoilPanel::Impl {
             if (g.bind_address != "0.0.0.0" && g.bind_address != "127.0.0.1" && !g.bind_address.empty())
                 ImGui::TextWrapped("游戏端GSI URI：http://%s:%u/gsi", g.bind_address.c_str(), static_cast<unsigned>(g.port));
             else ImGui::TextWrapped("双机使用时，游戏端URI须填写辅机实际IP，不能填写127.0.0.1或0.0.0.0。");
-            ImGui::TextWrapped("认证由环境变量 XEN_GSI_TOKEN 提供；此处不输入或显示认证值。");
+            ImGui::TextWrapped("玩家身份自动跟随游戏客户端，观战对象身份不一致时暂停识别。认证由环境变量 XEN_GSI_TOKEN 提供。");
         }
     }
 

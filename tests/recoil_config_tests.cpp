@@ -12,7 +12,7 @@ int main() {
         AppConfig config; std::string error;
         config.recoil.enabled = true;
         check(!validate_app_config(config, error), "缺GSI与场景不能启用");
-        config.gsi.enabled = true; config.gsi.expected_player_id = "76561198000000000";
+        config.gsi.enabled = true;
         config.gsi.token = "SECRET_NOT_FOR_DISK_01234567890123456789";
         config.source_context.enabled = true; config.source_context.host = "127.0.0.1";
         config.source_context.port = 5014; config.source_context.process_name = "synthetic.exe";

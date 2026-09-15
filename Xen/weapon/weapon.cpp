@@ -48,7 +48,7 @@ std::optional<int> integer(const Json& object, const char* key) {
 }
 std::string fingerprint(const WeaponSnapshot& s) {
     const auto value = [](std::optional<int> v) { return v ? std::to_string(*v) : "?"; };
-    return s.raw_name + ":" + std::to_string(static_cast<int>(s.state)) + ":" +
+    return s.player_id + ":" + s.raw_name + ":" + std::to_string(static_cast<int>(s.state)) + ":" +
         value(s.ammo_clip) + ":" + value(s.ammo_clip_max) + ":" + value(s.ammo_reserve) + ":" +
         std::to_string(static_cast<int>(s.status));
 }
@@ -69,7 +69,6 @@ const char* status_name(Status status) noexcept {
 bool valid_config(const GsiConfig& c) noexcept {
     IN_ADDR bind{}, peer{};
     return c.enabled && c.port != 0 && c.token.size() >= 32 && c.token.size() <= 1024 &&
-        c.expected_player_id.size() <= 32 && digits(c.expected_player_id) &&
         c.ttl_ms >= 100 && c.ttl_ms <= 10000 && c.request_timeout_ms >= 20 && c.request_timeout_ms <= 2000 &&
         c.max_body_bytes >= 256 && c.max_body_bytes <= 65536 && c.max_clock_skew_ms >= 1000 && c.max_clock_skew_ms <= 10000 &&
         InetPtonA(AF_INET, c.bind_address.c_str(), &bind) == 1 &&
@@ -137,10 +136,12 @@ WeaponSnapshot parse_payload(std::string_view body, const GsiConfig& config, std
         if (integer(provider, "appid") != 730) return result;
         if (!provider.contains("steamid") || !provider["steamid"].is_string() ||
             !player.contains("steamid") || !player["steamid"].is_string() ||
-            provider["steamid"].get_ref<const std::string&>() != config.expected_player_id ||
-            player["steamid"].get_ref<const std::string&>() != config.expected_player_id) {
+            provider["steamid"].get_ref<const std::string&>().size() > 32 ||
+            !digits(provider["steamid"].get_ref<const std::string&>()) ||
+            provider["steamid"] != player["steamid"]) {
             result.status = Status::IDENTITY_MISMATCH; return result;
         }
+        result.player_id = provider["steamid"].get<std::string>();
         result.identity_match = true;
         if (!provider.contains("timestamp") || !provider["timestamp"].is_number_integer()) return result;
         if (provider["timestamp"].is_number_unsigned() && provider["timestamp"].get<std::uint64_t>() >
@@ -222,7 +223,7 @@ Status GsiState::ingest(std::string_view body, const GsiConfig& config,
             incoming.valid_until = timestamp_deadline_;
             if (now >= timestamp_deadline_) { incoming.valid = false; incoming.status = Status::EXPIRED; }
         }
-        if (current_.valid && (!incoming.valid || now >= current_.valid_until)) ++epoch_;
+        if (current_.valid && (!incoming.valid || now >= current_.valid_until || current_.player_id != incoming.player_id)) ++epoch_;
         incoming.source_epoch = epoch_;
         incoming.revision = ++revision_;
         incoming.received_at = now;

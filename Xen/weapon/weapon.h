@@ -22,7 +22,6 @@ struct GsiConfig {
     std::uint16_t port = 5013;
     // 仅由调用方从环境注入；不在模块日志、状态或错误中回显。
     std::string token;
-    std::string expected_player_id;
     std::string allowed_peer_ipv4;
     int ttl_ms = 2500;
     int request_timeout_ms = 1000;
@@ -34,6 +33,7 @@ struct WeaponSnapshot {
     bool valid = false;
     bool identity_match = false;
     Status status = Status::UNAVAILABLE;
+    std::string player_id; // 自动从已认证客户端身份取得，不是固定配置。
     std::string raw_name;
     std::string canonical_id;
     WeaponState state = WeaponState::UNKNOWN;

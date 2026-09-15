@@ -1229,7 +1229,7 @@ void test_auxiliary_cycle_config() {
     config.trigger.hold_virtual_key = 5;
     config.mouse.backend = MouseBackend::KMBOX_NET;
     config.gsi.enabled = config.weapon_timing_enabled = true;
-    config.gsi.expected_player_id = "76561198000000000";
+
     expect(save_app_config(path.string(), config, error) && load_app_config(path.string(), loaded, error) &&
         loaded.auto_stop.cycle_enabled && loaded.trigger.hold_virtual_key == 5,
         "GSI循环配置必须完整往返：" + error);

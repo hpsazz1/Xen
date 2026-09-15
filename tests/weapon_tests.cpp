@@ -11,8 +11,8 @@ void expect(bool condition, const char* message) {
 nlohmann::json payload(const weapon::GsiConfig& config, std::uint64_t timestamp = 1700000000) {
     return {
         {"auth", {{"token", config.token}}},
-        {"provider", {{"appid", 730}, {"steamid", config.expected_player_id}, {"timestamp", timestamp}}},
-        {"player", {{"steamid", config.expected_player_id}, {"activity", "playing"},
+        {"provider", {{"appid", 730}, {"steamid", "76561198000000000"}, {"timestamp", timestamp}}},
+        {"player", {{"steamid", "76561198000000000"}, {"activity", "playing"},
             {"state", {{"health", 100}}}, {"weapons", {{"weapon_0", {
                 {"name", "weapon_ak47"}, {"state", "active"}, {"ammo_clip", 30},
                 {"ammo_clip_max", 30}, {"ammo_reserve", 90}}}}}}}
@@ -26,7 +26,6 @@ int main() {
     GsiConfig config;
     expect(!valid_config(config), "GSI默认关闭");
     config.enabled = true;
-    config.expected_player_id = "76561198000000000"; // 合成测试身份，不是账号读取结果。
     config.token = std::string(32, 't');
     expect(valid_config(config), "显式本地配置");
     auto invalid_config = config;
@@ -34,8 +33,7 @@ int main() {
     expect(!valid_config(invalid_config), "LAN监听必须限制源peer");
     invalid_config.allowed_peer_ipv4 = "192.0.2.1";
     expect(valid_config(invalid_config), "LAN显式peer配置");
-    invalid_config.expected_player_id.clear();
-    expect(!valid_config(invalid_config), "必须明确本玩家身份");
+    expect(valid_config(invalid_config), "不需要固定玩家身份配置");
 
     constexpr std::int64_t utc = 1700000000000;
     auto full = payload(config);
@@ -60,7 +58,7 @@ int main() {
     bad["auth"]["token"] = "incorrect";
     expect(parse_payload(bad.dump(), config, utc).status == Status::AUTH_REJECTED, "错误token拒绝");
     bad = full; bad["player"]["steamid"] = "76561198000000001";
-    expect(parse_payload(bad.dump(), config, utc).status == Status::IDENTITY_MISMATCH, "观战或身份切换拒绝");
+    expect(parse_payload(bad.dump(), config, utc).status == Status::IDENTITY_MISMATCH, "观战身份不匹配拒绝");
     bad = full; bad["player"]["activity"] = "textinput";
     expect(parse_payload(bad.dump(), config, utc).status == Status::PLAYER_INACTIVE, "文本输入非有效玩家");
     bad = full; bad["player"]["weapons"]["weapon_0"].erase("ammo_clip");
@@ -92,6 +90,25 @@ int main() {
     expect(state.ingest(full.dump(), config, start, utc) == Status::READY, "首份完整快照");
     const auto first = state.snapshot(start);
     expect(first.source_epoch != 0 && first.revision != 0, "本地代际与revision存在");
+    GsiState accounts;
+    accounts.reset();
+    accounts.ingest(full.dump(), config, start, utc);
+    auto switched = full;
+    switched["provider"]["steamid"] = "76561198000000002";
+    switched["player"]["steamid"] = "76561198000000002";
+    expect(accounts.ingest(switched.dump(), config, start + 10ms, utc + 10) == Status::READY &&
+           accounts.snapshot(start + 10ms).source_epoch != first.source_epoch,
+           "同秒同枪同弹药换账号自动接受并撤销旧代际");
+    expect(accounts.ingest(full.dump(), config, start + 20ms, utc + 20) == Status::DUPLICATE &&
+           accounts.snapshot(start + 20ms).player_id == "76561198000000002",
+           "换账号不清空同秒去重，旧账号包不能回滚");
+    for (const auto* id : {"", "invalid", "123456789012345678901234567890123"}) {
+        auto invalid_identity = full;
+        invalid_identity["provider"]["steamid"] = id;
+        invalid_identity["player"]["steamid"] = id;
+        expect(parse_payload(invalid_identity.dump(), config, utc).status == Status::IDENTITY_MISMATCH,
+               "自动身份拒绝空值、非数字和超长值");
+    }
     expect(state.ingest(full.dump(), config, start + 2s, utc + 2000) == Status::DUPLICATE, "重复包不续TTL");
     expect(state.snapshot(start + 2500ms).status == Status::EXPIRED, "重复不能延长过期边界");
     auto late_change = full;

@@ -72,7 +72,7 @@ void controllers() {
 }
 void files(const std::filesystem::path& root) {
     auto p=profile();const auto source=root/"source.json";{std::ofstream output(source);output<<serialize_recoil_profile(*p);}
-    AppConfig config;config.gsi.enabled=true;config.gsi.expected_player_id="76561198000000000";
+    AppConfig config;config.gsi.enabled=true;
     config.source_context.enabled=true;config.source_context.host="127.0.0.1";config.source_context.port=5014;
     config.source_context.process_name="synthetic.exe";
     const auto cfg=root/"config.ini";std::string error;check(save_app_config(cfg.string(),config,error),error.c_str());
