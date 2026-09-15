@@ -1714,6 +1714,11 @@ if(BUILD_TESTING)
             -LeaseExecutable "$<TARGET_FILE:mouse_output_owner_lease_tests>"
             -TestRoot "${CMAKE_BINARY_DIR}/mouse-output-owner-lease-tests")
 
+    add_test(NAME source_context_session_tests
+        COMMAND "${CMAKE_COMMAND}" -E env --unset=PSModulePath --
+            "${XEN_POWERSHELL7_EXECUTABLE}" -NoProfile -ExecutionPolicy Bypass
+            -File "${PROJECT_SOURCE_DIR}/tests/source_context_session_tests.ps1")
+
     add_executable(mouse_benchmark_tests
         tests/mouse_benchmark_tests.cpp)
     target_link_libraries(mouse_benchmark_tests PRIVATE

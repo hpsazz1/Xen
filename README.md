@@ -540,6 +540,7 @@ KMBOX，Runtime停止时也可使用，不会启动检测或武装输出。回�
 程序不会自动运行源端工具；游戏持续发送数据也不等于游戏处于前台。该工具只提供焦点事实。
 部署工具 `scripts/install_source_context_credential.ps1` 从标准输入安装受 ACL 限制的 DPAPI 密文；
 `scripts/start_source_context_session.ps1` 仅向子进程环境传入认证，支持源服务、用户启动 Launcher 与只读 Probe。
+重复启动相同源服务时，脚本验证端点、进程参数和当前凭据后复用现有实例；其他端口占用会明确报错，不结束现有进程。
 已配对的辅机包使用 `Start-Xen.cmd` 启动，避免直接打开 Launcher 时缺少认证环境；主机源服务须在游戏所在交互会话运行。
 
 自动扳机与急停复用唯一 KMBOX owner；失焦、取消、帧过期或未知回执停止新动作并处理软件左键释放。
