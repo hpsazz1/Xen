@@ -1080,7 +1080,8 @@ bool load_app_config(const std::string& path,
         AppConfig candidate = config;
         // 旧配置无独立节时必须关闭，不能继承调用方已经开启的状态。
         candidate.auto_stop.enabled = ini.GetBoolValue("auto_stop", "enabled", false);
-        candidate.auto_stop.use_counterpulse_timing = ini.GetBoolValue("auto_stop", "use_counterpulse_timing", false);
+        // 旧开关已弃用；上方仍严格校验旧键，所有合法配置统一迁移到正式时序。
+        candidate.auto_stop.use_counterpulse_timing = true;
         candidate.auto_stop.counter_hold_ms = static_cast<int>(ini.GetLongValue("auto_stop", "counter_hold_ms", 40));
         candidate.auto_stop.shot_after_release_ms = static_cast<int>(ini.GetLongValue("auto_stop", "shot_after_release_ms", 18));
         candidate.auto_stop.activation_virtual_key = static_cast<int>(
@@ -1631,7 +1632,6 @@ bool save_app_config(const std::string& path,
         ini.SetDoubleValue("trigger", "general_height_percent", config.trigger.general_height_percent);
         ini.SetDoubleValue("trigger", "min_confidence", config.trigger.min_confidence);
         ini.SetBoolValue("auto_stop", "enabled", config.auto_stop.enabled);
-        ini.SetBoolValue("auto_stop", "use_counterpulse_timing", config.auto_stop.use_counterpulse_timing);
         ini.SetLongValue("auto_stop", "counter_hold_ms", config.auto_stop.counter_hold_ms);
         ini.SetLongValue("auto_stop", "shot_after_release_ms", config.auto_stop.shot_after_release_ms);
         ini.SetLongValue("auto_stop", "activation_virtual_key",

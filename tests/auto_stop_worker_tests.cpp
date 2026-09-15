@@ -136,13 +136,17 @@ void ready(AutoStopWorker& worker, const std::shared_ptr<Fake>& fake) {
 }
 int main() {
     try {
-        const AutoStopConfig config{true, 5};
+        const AutoStopConfig config = [] {
+            AutoStopConfig legacy{true, 5};
+            legacy.use_counterpulse_timing = false;
+            return legacy;
+        }();
         {
             auto fake = std::make_shared<Fake>(); fake->reverse_ack_delay_ms = 25;
             std::atomic<std::uint64_t> id{0};
             AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
                 [&] { return ++id; }, [] { return true; });
-            auto h40 = config; h40.use_counterpulse_timing = true;
+            AutoStopConfig h40{true, 5};
             require(worker.start(h40), "H40生产worker回归启动");
             ready(worker, fake);
             worker.publish_target(Clock::now() + std::chrono::seconds(1));

@@ -293,7 +293,7 @@ void DebugPanel::render_counterpulse(const AppConfig& config, const Snapshot* s,
                 if (plan.value("fire_delay_ms",0) == 0) edits["fire_delay_ms"] = 1;
             }
         }
-        tip("选择实验动作；原地关闭动态移动，已有非零等待保留。测试不改变生产H40策略。");
+        tip("选择实验动作；原地关闭动态移动，已有非零等待保留。测试不改变辅助页的自动急停参数。");
         ImGui::BeginDisabled(d.baseline == 2);
         if (ImGui::Checkbox("按武器间隔动态移动", &d.overlap)) {
             edits["overlap_fire_interval"] = d.overlap;

@@ -12,9 +12,10 @@ void expect(bool value, const char* message) {
 
 int main() {
     constexpr std::int64_t base = 1000000000, ms = 1000000;
+    AutoStopConfig legacy;
+    legacy.use_counterpulse_timing = false;
     for (const std::uint8_t direction : {1, 2, 4, 8, 3, 9, 6, 12}) {
-        AutoStopConfig h40; h40.use_counterpulse_timing = true;
-        AutoStopController c(h40); WasdInputHistory history;
+        AutoStopController c; WasdInputHistory history;
         c.observe(history.observe(0, 1, 1, base), base);
         c.observe(history.observe(direction, 1, 2, base + ms), base + ms);
         auto d = c.request(1, base + 2 * ms);
@@ -67,7 +68,7 @@ int main() {
         expect(!history.observe(2, 2, 1, base + 8 * ms).input_continuous, "新代际的持键不能复用旧输入资格");
     }
     auto duration = [&](int hold) {
-        AutoStopController controller;
+        AutoStopController controller(legacy);
         WasdInputHistory input;
         controller.observe(input.observe(0, 1, 1, base), base);
         controller.observe(input.observe(1, 1, 2, base + ms), base + ms);
@@ -96,7 +97,7 @@ int main() {
            "连续持键库存应区分短长按，不能固定75ms");
     {
         WasdInputHistory history;
-        AutoStopController completed;
+        AutoStopController completed(legacy);
         completed.observe(history.observe(0, 1, 1, base), base);
         const auto held = history.observe(1, 1, 2, base + ms);
         completed.observe(held, base + ms);
@@ -109,7 +110,7 @@ int main() {
         const auto unconfirmed = completed;
         completed.acknowledge(1, pending.command_id, 0, stopped_at);
         const auto returned_at = stopped_at + 300 * ms;
-        for (auto invalid_phase : {AutoStopController{}, waiting, active, unconfirmed})
+        for (auto invalid_phase : {AutoStopController{legacy}, waiting, active, unconfirmed})
             expect(!invalid_phase.resume_after_masked_hold(held, returned_at),
                    "只有零软件ACK后的完成阶段允许恢复");
         for (int kind = 0; kind < 12; ++kind) {
@@ -163,7 +164,7 @@ int main() {
                "取消已撤销受控保持资格，不得再次复活");
     }
     {
-        AutoStopController controller;
+        AutoStopController controller(legacy);
         WasdInputHistory input;
         controller.observe(input.observe(0, 1, 1, base), base + 100 * ms);
         controller.tick(base + 200 * ms);
@@ -180,7 +181,7 @@ int main() {
     }
     for (unsigned first : {1U, 2U, 4U, 8U}) for (unsigned second : {1U, 2U, 4U, 8U}) {
         if (first == second || (first | second) == 5 || (first | second) == 10) continue;
-        AutoStopController controller;
+        AutoStopController controller(legacy);
         WasdInputHistory input;
         controller.observe(input.observe(0, 1, 1, base), base);
         controller.observe(input.observe(first, 1, 2, base + ms), base + ms);
@@ -205,7 +206,7 @@ int main() {
                "取消后旧ACK不得复活请求");
     }
     {
-        AutoStopController controller;
+        AutoStopController controller(legacy);
         WasdInputHistory input;
         controller.observe(input.observe(0, 1, 1, base), base);
         controller.observe(input.observe(1, 1, 2, base + ms), base + ms);
@@ -216,7 +217,7 @@ int main() {
         expect(controller.tick(base).phase == AutoStopPhase::INVALID, "单调时间倒退撤销模型资格");
     }
     for (int kind = 0; kind < 3; ++kind) {
-        AutoStopController controller;
+        AutoStopController controller(legacy);
         WasdInputHistory input;
         controller.observe(input.observe(0, 1, 1, base), base);
         controller.observe(input.observe(1, 1, 2, base + ms), base + ms);
@@ -228,7 +229,7 @@ int main() {
                "冲突、缺口、代际切换必须撤销活动请求");
     }
     {
-        AutoStopController controller;
+        AutoStopController controller(legacy);
         WasdInputHistory input;
         controller.observe(input.observe(0, 1, 1, base), base);
         controller.observe(input.observe(1, 1, 2, base + ms), base + ms);

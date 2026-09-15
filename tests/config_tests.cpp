@@ -1258,9 +1258,34 @@ void test_shared_weapon_timing_config() {
     { std::ofstream out(path); out << "[trigger]\nenabled=false\n"; }
     expect(load_app_config(path.string(), loaded, error) && !loaded.weapon_timing_enabled &&
         !loaded.trigger.allow_estimated_stop && loaded.weapon_timing_manual_id.empty() &&
-        !loaded.auto_stop.use_counterpulse_timing && loaded.auto_stop.counter_hold_ms == 40 &&
+        loaded.auto_stop.use_counterpulse_timing && loaded.auto_stop.counter_hold_ms == 40 &&
         loaded.auto_stop.shot_after_release_ms == 18,
         "旧配置不继承调用方已启用共享或估计策略");
+    expect(AppConfig{}.auto_stop.use_counterpulse_timing,
+        "生产默认直接采用已验收反向保持时序");
+    for (const auto* legacy : {"", "use_counterpulse_timing=false\n", "use_counterpulse_timing=true\n"}) {
+        for (const bool custom : {false, true}) for (const bool enabled : {false, true}) {
+            { std::ofstream out(path);
+              out << "[auto_stop]\nenabled=" << (enabled ? "true" : "false")
+                  << "\nactivation_virtual_key=118\n" << legacy;
+              if (custom) out << "counter_hold_ms=55\nshot_after_release_ms=27\n";
+              out << "[trigger]\nenabled=false\n[weapon_timing]\nenabled=false\n"; }
+            loaded.auto_stop.enabled = !enabled;
+            loaded.auto_stop.use_counterpulse_timing = false;
+            loaded.trigger.enabled = true;
+            loaded.weapon_timing_enabled = true;
+            expect(load_app_config(path.string(), loaded, error) &&
+                loaded.auto_stop.use_counterpulse_timing &&
+                loaded.auto_stop.counter_hold_ms == (custom ? 55 : 40) &&
+                loaded.auto_stop.shot_after_release_ms == (custom ? 27 : 18) &&
+                loaded.auto_stop.enabled == enabled && loaded.auto_stop.activation_virtual_key == 118 &&
+                !loaded.trigger.enabled && !loaded.weapon_timing_enabled,
+                "旧时序键缺失或真假值均迁移，保留时长及急停开关，不启用其他模块: " + error);
+            expect(save_app_config(path.string(), loaded, error) &&
+                read_file_bytes(path).find("use_counterpulse_timing") == std::string::npos,
+                "保存迁移配置必须移除弃用时序开关: " + error);
+        }
+    }
     std::error_code ignored;
     std::filesystem::remove_all(directory, ignored);
 }

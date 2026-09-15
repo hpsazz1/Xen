@@ -2974,11 +2974,9 @@ struct Overlay::Impl {
                 "任意一个键即取消急停、释放软件按键并解除 WASD 屏蔽。默认数字1至5和Q；重复采集可追加多个键，Esc清空。不能使用WASD或急停允许键。设备失联时无法保证收到按键或确认释放。",
                 HotkeyBindingTarget::AUTO_STOP_RELEASE,
                 app_config.auto_stop.release_virtual_keys, key_active);
-            form_row("使用H40测试时序", "采用测试通过的反向保持40ms与释放后18ms等待；按真实WASD方向制动，不自动注入测试移动。旧指数模型保留供回退，切换后需组合复测。");
-            toggle_switch("##auto_stop_counterpulse", &app_config.auto_stop.use_counterpulse_timing);
-            form_row("反向保持 / ms", "H40策略从反向按下协议ACK起算，默认40ms；范围1至200ms。运行中不热改。");
+            form_row("反向保持 / ms", "从反向按下协议ACK起算，默认40ms；范围1至200ms。按实际WASD方向制动，运行中不热改。");
             slider_int_control("auto_stop_counter_hold", &app_config.auto_stop.counter_hold_ms, 1, 200);
-            form_row("反向释放后等待 / ms", "H40策略从反向UP协议ACK起算，默认18ms；范围0至200ms，到期才报告估计完成。与点射冷却并行，不叠加完整武器间隔。");
+            form_row("反向释放后等待 / ms", "从反向UP协议ACK起算，默认18ms；范围0至200ms，到期才报告估计完成。与点射冷却并行，不叠加完整武器间隔。");
             slider_int_control("auto_stop_after_release", &app_config.auto_stop.shot_after_release_ms, 0, 200);
             ImGui::EndTable();
         }
@@ -3016,7 +3014,7 @@ struct Overlay::Impl {
         ImGui::TextWrapped("会话：%s", status);
         if (snapshot.auto_stop.telemetry_available) {
             if (snapshot.auto_stop.use_counterpulse_timing)
-                ImGui::Text("运行H40时序：反向 %dms / 释放后 %dms", snapshot.auto_stop.counter_hold_ms,
+                ImGui::Text("运行急停时序：反向 %dms / 释放后 %dms", snapshot.auto_stop.counter_hold_ms,
                     snapshot.auto_stop.shot_after_release_ms);
             if (snapshot.auto_stop.status == AutoStopStatus::FAULT)
                 ImGui::TextWrapped("故障锁存仍保留；检查清理状态后停止并重新启动。");

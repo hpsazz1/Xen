@@ -145,7 +145,6 @@ void run_weapon(const char* weapon_id) {
             return result;
         }, [&] { return stop.estimated_completion_id(); });
     AutoStopConfig stop_config{true, 5};
-    stop_config.use_counterpulse_timing = true;
     stop_config.counter_hold_ms = 40; stop_config.shot_after_release_ms = 18;
     TriggerConfig trigger_config;
     trigger_config.enabled = true; trigger_config.hold_virtual_key = 5; trigger_config.fire_delay_ms = 0;

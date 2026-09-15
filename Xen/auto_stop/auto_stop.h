@@ -10,7 +10,8 @@ struct AutoStopConfig {
     bool enabled = false;
     int activation_virtual_key = 0;
     std::vector<int> release_virtual_keys{0x31, 0x32, 0x33, 0x34, 0x35, 0x51};
-    bool use_counterpulse_timing = false;
+    // 正式入口统一采用已验收时序；false 仅保留给旧模型回归。
+    bool use_counterpulse_timing = true;
     int counter_hold_ms = 40, shot_after_release_ms = 18;
 };
 
@@ -114,7 +115,7 @@ struct AutoStopDecision {
 // 纯状态机，不接触设备。旧230/180/110ms模型保留回退；H40仅迁移ACK时序，均非速度观察。
 class AutoStopController {
 public:
-    AutoStopController() noexcept = default;
+    AutoStopController() noexcept : AutoStopController(AutoStopConfig{}) {}
     explicit AutoStopController(const AutoStopConfig& config) noexcept;
     AutoStopDecision observe(const WasdMotionIntent& intent, std::int64_t now_ns) noexcept;
     AutoStopDecision request(std::uint64_t request_id, std::int64_t now_ns) noexcept;
