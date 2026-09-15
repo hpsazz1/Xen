@@ -59,6 +59,9 @@ int main() {
     expect(parse_payload(bad.dump(), config, utc).status == Status::IDENTITY_MISMATCH, "观战身份不匹配拒绝");
     bad = full; bad["player"]["activity"] = "textinput";
     expect(parse_payload(bad.dump(), config, utc).status == Status::PLAYER_INACTIVE, "文本输入非有效玩家");
+    bad = full; bad["player"]["state"]["health"] = 0;
+    parsed = parse_payload(bad.dump(), config, utc);
+    expect(!parsed.valid && parsed.status == Status::PLAYER_INACTIVE, "自身死亡使共享武器上下文无效，不能维持人工急停");
     bad = full; bad["player"]["weapons"]["weapon_0"].erase("ammo_clip");
     parsed = parse_payload(bad.dump(), config, utc);
     expect(!parsed.valid && !parsed.ammo_clip, "缺字段不继承上一状态");

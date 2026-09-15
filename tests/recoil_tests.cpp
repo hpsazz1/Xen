@@ -66,6 +66,46 @@ void schema_and_compile(){
     expect(std::abs(sample_recoil_profile(p,15).x_counts-0.6)<1e-12,"分段线性求值");
     expect(sample_recoil_profile(p,999).x_counts==1.6,"尾部不外推");
 }
+void manual_restart_keeps_accounting_and_boundaries(){
+    auto i=input();RecoilController c;c.advance(i,time(0));i.held=true;i.firing_started_at=time(1);c.advance(i,time(1));
+    auto d=c.advance(i,time(21));expect(d.has_intent,"接管前软件弹序产生意图");
+    expect(!c.restart_for_manual(time(21))&&c.snapshot().pending,"未决意图禁止人工重置");
+    acknowledge(c,d,21);auto old=c.snapshot();
+    expect(c.restart_for_manual(time(22)),"健康软件弹序可授权人工从首发重启");
+    expect(c.snapshot().confirmed_y==old.confirmed_y&&c.snapshot().session_id==1&&
+        c.snapshot().remainder_x==0&&c.snapshot().remainder_y==0,"重启保留旧执行账本并丢弃旧余数");
+    expect(std::abs(c.snapshot().discarded_x-old.discarded_x-old.remainder_x)<1e-12,"旧余数记录为丢弃量");
+    i.firing_started_at=time(22);auto restarted=c.advance(i,time(22));
+    expect(!restarted.has_intent&&restarted.snapshot.session_id==2,"人工上升沿从零开始且不等待50ms恢复");
+    auto first=c.advance(i,time(32));
+    expect(!first.has_intent&&std::abs(first.snapshot.remainder_y-0.6)<1e-12,"新弹序首10ms从第一段采样，不继承软件进度");
+    d=c.advance(i,time(42));acknowledge(c,d,42);
+    expect(c.snapshot().confirmed_y==old.confirmed_y+1,"新弹序确认量累加在历史账本");
+    c.cancel(RecoilReason::CONTEXT,time(43));
+    expect(c.restart_for_manual(time(44)),"已结算会话允许请求重启但不代替下一轮环境验证");
+    i.permission=false;i.firing_started_at=time(44);
+    expect(c.advance(i,time(44)).snapshot.reason==RecoilReason::CONTEXT,"重启不能绕过环境许可");
+    i.permission=true;expect(!c.advance(i,time(45)).has_intent&&c.snapshot().session_id==2,"失败准入不能留下一次隐藏重启");
+    RecoilController fault;auto f=input();fault.advance(f,time(0));f.held=true;fault.advance(f,time(1));
+    d=fault.advance(f,time(21));fault.acknowledge({d.intent.command_id,RecoilReceiptStatus::UNKNOWN,time(21)},time(21));
+    expect(!fault.restart_for_manual(time(22))&&fault.snapshot().faulted,"人工重启不能清UNKNOWN故障");
+    RecoilController not_sent;auto n=input();not_sent.advance(n,time(0));n.held=true;not_sent.advance(n,time(1));
+    d=not_sent.advance(n,time(21));not_sent.acknowledge({d.intent.command_id,RecoilReceiptStatus::NOT_SENT,time(21)},time(21));
+    expect(not_sent.restart_for_manual(time(22)),"二次复核拒绝旧意图后可接纳人工新弹序");
+    n.firing_started_at=time(22);auto ns=not_sent.advance(n,time(22));
+    expect(ns.snapshot.session_id==2&&ns.snapshot.confirmed_y==0&&!ns.has_intent,
+        "旧NOT_SENT不计成功，新人工弹序从零起点开始");
+    RecoilController late;auto l=input();late.advance(l,time(0));l.held=true;late.advance(l,time(1));
+    expect(late.restart_for_manual(time(40)),"重启准入不替代起点时效检查");
+    l.firing_started_at=time(2);
+    expect(late.advance(l,time(40)).snapshot.reason==RecoilReason::LATE&&late.snapshot().session_id==1,
+        "人工旧边沿超相位范围仍拒绝而不压缩补发");
+    RecoilController empty;expect(!empty.restart_for_manual(time(0)),"未建立软件会话不能凭空重启");
+    expect(!c.restart_for_manual(time(1)),"人工重启拒绝时间回退");
+    auto candidate=input();auto imported=profile();imported->state=RecoilProfileState::IMPORTED;candidate.profile=imported;
+    RecoilController invalid;invalid.advance(candidate,time(0));
+    expect(!invalid.restart_for_manual(time(1)),"人工重启不能让导入候选成为生产曲线");
+}
 void counts_and_phase(){
     auto i=input();RecoilController c;i.held=true;
     expect(!c.advance(i,time(0)).has_intent,"启动已持键不开始");
@@ -176,5 +216,5 @@ void candidate_large_zero_curve_is_bounded(){
     }
 }
 }
-int main(){schema_and_compile();counts_and_phase();receipts_and_context();candidate_validation_keeps_production_closed();
+int main(){schema_and_compile();manual_restart_keeps_accounting_and_boundaries();counts_and_phase();receipts_and_context();candidate_validation_keeps_production_closed();
     candidate_execution_rejects_compiler_only_limits();candidate_replay_checks_faults_and_bounds();candidate_large_zero_curve_is_bounded();return failures?1:0;}

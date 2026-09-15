@@ -208,12 +208,20 @@ RecoilDecision RecoilController::cancel(RecoilReason reason,RecoilTime now) noex
         state_.discarded_x+=pending_remainder_x_;state_.discarded_y+=pending_remainder_y_;
         pending_remainder_x_=pending_remainder_y_=0;
     }
-    active_=false;release_seen_=false;
+    active_=false;release_seen_=false;manual_restart_allowed_=false;
     state_.discarded_x+=state_.remainder_x;state_.discarded_y+=state_.remainder_y;
     state_.remainder_x=state_.remainder_y=0;
     state_.reason=reason;state_.phase=state_.faulted?RecoilPhase::FAULT:RecoilPhase::WAIT_RELEASE;
     last_now_=std::max(last_now_,now);
     return result();
+}
+bool RecoilController::restart_for_manual(RecoilTime now) noexcept {
+    if(now==RecoilTime{}||now<last_now_||state_.pending||state_.faulted||calibration_permit_||
+        offline_phase_budget_ms_>0||!has_fired_||!profile_valid_||!profile_||!execution_profile(*profile_))return false;
+    cancel(RecoilReason::RELEASED,now);
+    // 只为一次明确的人工上升沿跳过旧弹序恢复等待；所有运行许可仍由advance检查。
+    release_seen_=true;manual_restart_allowed_=true;
+    return true;
 }
 RecoilDecision RecoilController::advance(const RecoilInput& input,RecoilTime now) noexcept {
     if(now==RecoilTime{}||now<last_now_)return cancel(RecoilReason::INVALID_TIME,last_now_);
@@ -252,13 +260,13 @@ RecoilDecision RecoilController::advance(const RecoilInput& input,RecoilTime now
     }
     if(!active_) {
         if(!release_seen_){state_.reason=RecoilReason::WAIT_RELEASE;return result();}
-        const bool recovered=!has_fired_||input.recovery_qualified || (released_since_firing_&&profile_->recovery_ms &&
+        const bool recovered=manual_restart_allowed_||!has_fired_||input.recovery_qualified || (released_since_firing_&&profile_->recovery_ms &&
             elapsed(now,released_at_)>=*profile_->recovery_ms);
         if(!recovered)return cancel(RecoilReason::RESET_UNVERIFIED,now);
         const auto start=input.firing_started_at==RecoilTime{}?now:input.firing_started_at;
         if(start>now||elapsed(now,start)>phase_budget_ms())return cancel(RecoilReason::LATE,now);
         if(state_.session_id==std::numeric_limits<std::uint64_t>::max())return cancel(RecoilReason::LIMIT,now);
-        ++state_.session_id;active_=has_fired_=true;released_since_firing_=false;release_seen_=false;
+        ++state_.session_id;active_=has_fired_=true;released_since_firing_=false;release_seen_=false;manual_restart_allowed_=false;
         sampled_={};started_at_=last_sample_at_=start;
         state_.phase=RecoilPhase::FIRING;state_.reason=RecoilReason::NONE;
         if(now==start)return result();

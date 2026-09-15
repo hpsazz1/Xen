@@ -122,6 +122,9 @@ public:
     RecoilDecision advance(const RecoilInput& input, RecoilTime now) noexcept;
     RecoilDecision acknowledge(const RecoilReceipt& receipt, RecoilTime now) noexcept;
     RecoilDecision cancel(RecoilReason reason, RecoilTime now) noexcept;
+    // 普通运行的人工上升沿重启准入；未决意图须先结算。下一次advance仍复核全部条件，
+    // 新起点取input.firing_started_at；旧账本不清零，不提供校准或故障恢复许可。
+    bool restart_for_manual(RecoilTime now) noexcept;
     RecoilSnapshot snapshot() const noexcept { return state_; }
 private:
     struct OfflineReplayTag {};
@@ -143,5 +146,6 @@ private:
     std::uint64_t weapon_generation_ = 0, device_epoch_ = 0, next_command_id_ = 0;
     bool release_seen_ = false, active_ = false, has_fired_ = false, released_since_firing_ = false;
     bool profile_valid_ = false;
+    bool manual_restart_allowed_ = false;
 };
 #endif

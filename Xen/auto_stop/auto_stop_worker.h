@@ -75,6 +75,12 @@ public:
     std::uint64_t estimated_completion_id() const noexcept;
     // 点射UP确认后投递归还请求；只在worker线程操作设备，not_before前保持真实移动。
     bool resume_movement(std::uint64_t request_id, std::chrono::steady_clock::time_point not_before) noexcept;
+    // 人工左键接管当前独立估计完成请求；确认后锁存四键保持，不再依赖激活键或左键。
+    // 目标失效、武器上下文变化及公共安全撤销仍清理；保持期间拒绝点射归还。
+    bool retain_for_manual_fire(std::uint64_t request_id) noexcept;
+    // 独立目标存在事实，仅人工接管保持消费；准星离框不等于目标消失。
+    // 无目标/失败发布零期限，陈旧帧不能刷新；期限失效撤销原保持，不自动承接新目标。
+    void publish_tracking_target(std::chrono::steady_clock::time_point valid_until) noexcept;
     // 检测线程发布不可变目标事实；无目标/失败发布零期限，旧帧不能自行续期。
     // 目标仅准入；四键接管后制动与保持都锁存至松键或安全撤销，软件制动最多500ms。
     void publish_target(std::chrono::steady_clock::time_point valid_until,

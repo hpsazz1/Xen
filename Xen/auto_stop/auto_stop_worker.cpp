@@ -125,7 +125,8 @@ public:
     std::function<bool()> focused;
     std::function<AutoStopWeaponContext()> weapon_context;
     bool weapon_context_seen = false;
-    Clock::time_point target_until{};
+    Clock::time_point target_until{}, tracking_target_until{};
+    std::atomic<std::uint64_t> manual_fire_id{0};
     AutoStopBlockReason target_reason = AutoStopBlockReason::NO_TARGET;
     AutoStopConfig config;
     int command_timeout_ms = 300;
@@ -175,7 +176,8 @@ public:
                 input.state_valid && input.status == InputMonitorStatus::READY &&
                 !release_key_held(input) &&
                 !input.virtual_keys[0x23] && config.activation_virtual_key > 0 &&
-                config.activation_virtual_key < 256 && input.virtual_keys[config.activation_virtual_key] &&
+                config.activation_virtual_key < 256 &&
+                (input.virtual_keys[config.activation_virtual_key] || manual_fire_id.load() != 0) &&
                 !paused.load(std::memory_order_acquire) && !stopping.load(std::memory_order_acquire);
         } catch (...) { return false; }
     }
@@ -195,7 +197,9 @@ public:
             state.source_focused = source_focused;
             if (!source_focused) state.release_required = true;
             state.target_available = Clock::now() < target_until;
-            return source_focused && !state.release_required && (!require_target || state.target_available);
+            return source_focused && !state.release_required &&
+                (manual_fire_id.load() != 0 ? Clock::now() < tracking_target_until :
+                    (!require_target || state.target_available));
         } catch (...) { return false; }
     }
     void receipt(const KeyboardReceipt& result, std::int64_t started) {
@@ -294,7 +298,7 @@ public:
         };
         auto cancel_active = [&](bool force_fault, const char* reason, bool normal_activation_release = false,
                                  bool cycle_resume = false, bool manual_finished = false) {
-            { std::lock_guard<std::mutex> lock(mutex); estimated_id = 0; }
+            { std::lock_guard<std::mutex> lock(mutex); estimated_id = 0; manual_fire_id = 0; }
             AutoStopBlockReason block_reason;
             { std::lock_guard<std::mutex> lock(mutex); block_reason = state.block_reason; }
             LOG_INFO("auto_stop", "取消请求{}，原因={}，阻断={}", active_id, reason,
@@ -404,6 +408,10 @@ public:
                     // 全部屏蔽确认后，物理改向不再是施加给游戏的输入；制动沿原ACK模型推进。
                     if (!estimated && !independent_acquired && !manual_release) controller.observe(intent, event.received_at_steady_ns);
                 }
+                // 事件读取晚于快照：真实UP可能刚进入事件流，旧DOWN快照不能吃掉唯一全松边沿。
+                // 仅在该错配发生时刷新；后续许可与发送前事件复核仍拒绝新按下/缺口。
+                if (released_axes && events_ok && intent.held_mask == 0 && held_wasd(input) != 0)
+                    input_ok = mouse->poll_input(input) && input.state_valid && input.status == InputMonitorStatus::READY;
                 // 救援只信任本设备的新按键边沿；失联缓存不产生救援动作。
                 bool rescue_pressed = false;
                 if (input_ok) for (const int key : config.release_virtual_keys) {
@@ -595,8 +603,14 @@ public:
                     requested_resume = resume_id; requested_resume_generation = resume_generation;
                     requested_not_before = resume_not_before; resume_id = 0;
                 }
-                if (requested_resume && requested_resume == active_id) {
-                    const bool may_resume = config.cycle_enabled && independent && estimated && software_mask == 0 &&
+                if (requested_resume && requested_resume == active_id && manual_fire_id.load() == 0) {
+                    {
+                        std::lock_guard<std::mutex> lock(mutex);
+                        // 与人工接管线性化：接管先成功则丢弃归还，归还先认领则拒绝后来的接管。
+                        if (manual_fire_id.load() != 0) continue;
+                        estimated_id = 0;
+                    }
+                    const bool may_resume = manual_fire_id.load() == 0 && config.cycle_enabled && independent && estimated && software_mask == 0 &&
                         requested_resume_generation == active_generation && active_generation == cancel_generation.load() &&
                         input_ok && events_ok && intent.input_continuous && intent.epoch == active_input_epoch &&
                         permission(input) && session_permission(false);
@@ -616,7 +630,7 @@ public:
                     (!independent_acquired && !mask_only && !intent.history_valid) || !permission(input) ||
                     (!independent_acquired && !mask_only && held_wasd(input) != original_mask) || active_generation != cancel_generation.load() ||
                     ((!independent || (!estimated && !masked_hold) || software_mask != 0) && Clock::now() >= lease_end))) {
-                    const bool normal_release = independent && (estimated || masked_hold) && input_ok && events_ok &&
+                    const bool normal_release = manual_fire_id.load() == 0 && independent && (estimated || masked_hold) && input_ok && events_ok &&
                         intent.input_continuous && intent.epoch == active_input_epoch &&
                         !input.virtual_keys[config.activation_virtual_key] && !input.virtual_keys[0x23] &&
                         !release_key_held(input) && !paused.load() && !stopping.load() &&
@@ -839,6 +853,19 @@ void AutoStopWorker::publish_target(std::chrono::steady_clock::time_point valid_
         impl_->wake.notify_all();
     } catch (...) {}
 }
+void AutoStopWorker::publish_tracking_target(Clock::time_point valid_until) noexcept {
+    if (!impl_) return;
+    try {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        const auto now = Clock::now();
+        // 先检查旧期限：worker尚未处理过期时，新帧也不能复活已中断的人工保持。
+        if (impl_->manual_fire_id.load() != 0 &&
+            (impl_->tracking_target_until <= now || valid_until <= now))
+            impl_->cancel_generation.fetch_add(1, std::memory_order_acq_rel);
+        impl_->tracking_target_until = valid_until;
+        impl_->wake.notify_all();
+    } catch (...) {}
+}
 AutoStopWorker::~AutoStopWorker() { stop(); }
 bool AutoStopWorker::start(const AutoStopConfig& config, int command_timeout_ms) noexcept {
     if (!impl_) return false;
@@ -849,6 +876,8 @@ bool AutoStopWorker::start(const AutoStopConfig& config, int command_timeout_ms)
         impl_->state = {};
         impl_->weapon_context_seen = false;
         impl_->resume_id = 0;
+        impl_->manual_fire_id = 0;
+        impl_->tracking_target_until = {};
         impl_->movement_not_before = {};
         impl_->state.use_counterpulse_timing = config.use_counterpulse_timing;
         if (config.use_counterpulse_timing) {
@@ -923,12 +952,32 @@ bool AutoStopWorker::request(std::uint64_t id) noexcept {
         return true;
     } catch (...) { return false; }
 }
+bool AutoStopWorker::retain_for_manual_fire(std::uint64_t request_id) noexcept {
+    if (!impl_ || request_id == 0) return false;
+    try {
+        InputSnapshot input;
+        if (!impl_->mouse->poll_input(input) || !input.state_valid || input.status != InputMonitorStatus::READY ||
+            !input.virtual_keys[1] || input.virtual_keys[0x23] || impl_->release_key_held(input)) return false;
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        if (!impl_->running || !impl_->allocate_request || impl_->fault || impl_->state.cleanup_unknown ||
+            impl_->paused.load() || impl_->stopping.load() || impl_->arbiter->faulted_.load() ||
+            impl_->state.release_required || !impl_->state.source_focused ||
+            impl_->state.status != AutoStopStatus::ESTIMATED || impl_->estimated_id != request_id ||
+            impl_->estimated_generation != impl_->cancel_generation.load() ||
+            Clock::now() >= impl_->tracking_target_until ||
+            (impl_->state.weapon_context.required && !impl_->state.weapon_context.valid)) return false;
+        impl_->manual_fire_id = request_id;
+        impl_->resume_id = 0;
+        impl_->wake.notify_all();
+        return true;
+    } catch (...) { return false; }
+}
 bool AutoStopWorker::resume_movement(std::uint64_t request_id, Clock::time_point not_before) noexcept {
     if (!impl_ || request_id == 0) return false;
     try {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         const auto now = Clock::now();
-        if (!impl_->running || !impl_->config.cycle_enabled || !impl_->allocate_request || impl_->fault ||
+        if (!impl_->running || impl_->manual_fire_id.load() != 0 || !impl_->config.cycle_enabled || !impl_->allocate_request || impl_->fault ||
             impl_->paused.load() || impl_->stopping.load() || impl_->state.cleanup_unknown ||
             impl_->state.release_required || impl_->state.status != AutoStopStatus::ESTIMATED ||
             impl_->estimated_id != request_id || impl_->resume_id != 0 ||

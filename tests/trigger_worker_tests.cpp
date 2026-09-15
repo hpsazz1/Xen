@@ -168,6 +168,58 @@ void cycle_resume_after_safe_up() {
     }
 }
 
+void physical_left_takes_over_until_trigger_rearmed() {
+    auto mouse = std::make_shared<Mouse>();
+    auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+    std::atomic<unsigned> resumed{0}, canceled{0}, retained{0};
+    std::atomic<std::uint64_t> estimated_id{7};
+    TriggerWorker worker(mouse, arbiter, [] { return true; }, [] { return true; },
+        [] { return std::uint64_t{9}; }, [](std::uint64_t) { return true; },
+        [&](std::uint64_t) { ++canceled; }, {}, [&] { return estimated_id.load(); },
+        [&](std::uint64_t, TriggerTime) { ++resumed; },
+        [&](std::uint64_t id) { if (id != 7) return false; ++retained; return true; });
+    TriggerConfig config;
+    config.enabled = config.require_stop = config.allow_estimated_stop = true;
+    config.hold_virtual_key = 5; config.fire_delay_ms = 0;
+    config.press_duration_ms = 500; config.shot_interval_ms = 600;
+    config.max_observation_age_ms = 1000;
+    expect(worker.start(config), "人工接管回归启动");
+    expect(until([&] { return worker.snapshot().reason == TriggerReason::RELEASED; }),
+        "人工接管前先取得扳机键释放边沿");
+    mouse->held = true; worker.publish(observation());
+    expect(until([&] { return mouse->count(true) == 1 && worker.firing_signal().confirmed_down; }),
+        "人工接管前自动DOWN已经ACK确认");
+    mouse->physical_left = true;
+    worker.publish(observation(2));
+    expect(until([&] { return mouse->count(false) == 1 && !mouse->dirty &&
+        !worker.firing_signal().confirmed_down && retained == 1; }),
+        "人工左键接管后清理软件DOWN，同时保留急停");
+    // 提供新的急停资格并持续更新有效图像，排除旧stop ID、冷却和图像过期掩盖重发。
+    estimated_id = 8;
+    std::uint64_t sequence = 3;
+    const auto hold_until = TriggerClock::now() + 650ms;
+    while (TriggerClock::now() < hold_until) {
+        worker.publish(observation(sequence++));
+        std::this_thread::sleep_for(3ms);
+    }
+    expect(mouse->count(true) == 1 && mouse->count(false) == 1 && resumed == 0 && canceled == 0 && retained == 1 &&
+        worker.snapshot().reason == TriggerReason::PERMISSION,
+        "人工持续左键期间不发新DOWN、不重复UP且不归还移动");
+    mouse->physical_left = false;
+    worker.publish(observation(sequence++));
+    expect(until([&] { return worker.snapshot().reason == TriggerReason::WAIT_RELEASE; }),
+        "人工左键释放但扳机键仍按住时等待扳机键重新武装");
+    expect(mouse->count(true) == 1 && mouse->count(false) == 1 && resumed == 0,
+        "人工接管结束不会自动恢复旧点射或移动周期");
+    mouse->held = false;
+    expect(until([&] { return worker.snapshot().reason == TriggerReason::RELEASED; }),
+        "重新释放扳机键建立新许可边沿");
+    mouse->held = true; worker.publish(observation(sequence++));
+    expect(until([&] { return mouse->count(true) == 2 && worker.firing_signal().confirmed_down; }),
+        "扳机键重新按下后才可开始新的自动点射");
+    worker.stop();
+}
+
 void fire_disabled_no_output_or_receipt() {
     Fixture f; expect(f.start(false, 200, 1000, 10, false), "不开枪调试启动"); f.fire();
     expect(until([&] { return f.worker.snapshot().reason == TriggerReason::FIRE_DISABLED; }), "快照明确不开枪原因");
@@ -531,6 +583,7 @@ void exception_uses_bounded_cleanup() {
 }
 int main() {
     cycle_resume_after_safe_up();
+    physical_left_takes_over_until_trigger_rearmed();
     estimated_stop_callback_and_revalidation(); timing_change_at_down_revalidation();
     fire_disabled_no_output_or_receipt();
     autonomous_cleanup(); unknown_and_late_ack(); final_revalidation(); unverified_stop_and_contention();

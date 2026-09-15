@@ -19,6 +19,8 @@ public:
     std::function<std::uint64_t()> estimated_stop;
     // 只在本次LEFT UP确认后通知键盘owner归还；绝不由扳机线程直接操作WASD。
     std::function<void(std::uint64_t, TriggerTime)> resume_movement;
+    std::function<bool(std::uint64_t)> retain_manual_stop;
+    std::uint64_t manual_stop_id = 0;
     std::uint64_t cycle_stop_id = 0, consumed_cycle_stop_id = 0;
     TriggerTime cycle_next_down{};
     TriggerConfig config;
@@ -143,7 +145,6 @@ public:
             }
             const bool down = decision.button_action == TriggerButtonAction::DOWN;
             if (!down) {
-                { std::lock_guard state_lock(mutex); firing.confirmed_down = false; }
                 begin_cleanup(event.planned_at);
                 check_cleanup_budget(event.planned_at);
                 if (cleanup_exhausted || event.planned_at < cleanup_due) break;
@@ -215,6 +216,13 @@ public:
                         receipt.status == TriggerReceiptStatus::UNKNOWN ? "unknown_receipt" : "backend_not_sent";
                     receipt.completed_at = result.backend_completed_at;
                     if (receipt.status == TriggerReceiptStatus::UNKNOWN) arbiter->latch_output_fault();
+                    // 在归还输出门之前发布按钮结果，避免压枪读到已释放的旧DOWN。
+                    std::lock_guard state_lock(mutex);
+                    if (!down && receipt.status != TriggerReceiptStatus::NOT_SENT) firing.confirmed_down = false;
+                    if (down && receipt.status == TriggerReceiptStatus::ACKNOWLEDGED && !stopping.load() && !canceled.load())
+                        firing = {true, receipt.command_id, receipt.completed_at, event.call_started_at,
+                            event.backend_completed_at, event.protocol_ack_received_at, event.observed_at,
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(event.backend_completed_at - event.call_started_at)};
                 }
                 lock.unlock();
             }
@@ -223,12 +231,6 @@ public:
             if (receipt.status == TriggerReceiptStatus::NOT_SENT) receipt.completed_at = event.observed_at;
             event.receipt_status = receipt.status;
             record(event);
-            if (down && receipt.status == TriggerReceiptStatus::ACKNOWLEDGED && !stopping.load() && !canceled.load()) {
-                std::lock_guard state_lock(mutex);
-                firing = {true, receipt.command_id, receipt.completed_at, event.call_started_at,
-                    event.backend_completed_at, event.protocol_ack_received_at, event.observed_at,
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(event.backend_completed_at - event.call_started_at)};
-            }
             if (resume_movement && down && receipt.status == TriggerReceiptStatus::ACKNOWLEDGED) {
                 cycle_stop_id = event.snapshot.estimated_stop_request_id;
                 const auto& timing = event.snapshot.firing_context;
@@ -263,7 +265,11 @@ public:
                         // 显式取消、失焦、过期观测和未知回执仍撤销整个按住会话。
                         const bool recoverable = event.snapshot.reason == TriggerReason::RELEASED ||
                             event.snapshot.reason == TriggerReason::NO_CANDIDATE;
-                        if (recoverable && fresh.enabled && fresh.healthy &&
+                        const bool manual_retained = retain_manual_stop && fresh.enabled && fresh.healthy &&
+                            fresh.armed && fresh.focused && fresh.physical_left_down && same_context &&
+                            !stopping.load() && !canceled.load() && !controller.snapshot().faulted && retain_manual_stop(id);
+                        if (manual_retained) manual_stop_id = id;
+                        else if (recoverable && fresh.enabled && fresh.healthy &&
                             fresh.armed && fresh.held && fresh.focused && !fresh.physical_left_down && same_context &&
                             !stopping.load() && !canceled.load() && !controller.snapshot().faulted)
                             resume_movement(id, cycle_next_down);
@@ -279,6 +285,7 @@ public:
         state = next;
     }
     void finish_cleanup() {
+        if (manual_stop_id) { cancel_stop(manual_stop_id); manual_stop_id = 0; }
         // 停止/异常是一次独立的最终清理阶段，允许恢复运行阶段已耗尽的债务。
         // 三条路径共用execute；阶段内只有真实后端调用计数，截止时间不续期。
         cleanup_active = false;
@@ -315,11 +322,21 @@ public:
             while (!stopping.load()) {
                 const auto now = TriggerClock::now();
                 if (canceled.exchange(false)) {
+                    if (manual_stop_id) { cancel_stop(manual_stop_id); manual_stop_id = 0; }
                     reserved_stop_id = 0;
                     execute(controller.cancel(TriggerReason::CANCELED, now));
                 }
                 auto observation = latest.load();
                 const auto p = permit(true);
+                if (retain_manual_stop && config.require_stop && config.allow_estimated_stop &&
+                    p.healthy && p.armed && p.focused && p.physical_left_down &&
+                    (!p.context.required || p.context.valid)) {
+                    const auto id = cycle_stop_id ? cycle_stop_id : p.estimated_stop_request_id;
+                    if (id && id != manual_stop_id && retain_manual_stop(id)) {
+                        // 急停所有权交给人工保持；清理软件左键不再归还移动。
+                        manual_stop_id = id; consumed_cycle_stop_id = id; cycle_stop_id = 0;
+                    }
+                }
                 if (observation && observation != consumed) {
                     evaluated_observation = observation;
                     execute(controller.observe(*observation, p, now));
@@ -356,7 +373,8 @@ TriggerWorker::TriggerWorker(std::shared_ptr<IMouseController> mouse,
     std::function<bool()> focused, std::function<std::uint64_t()> next_stop_id,
     std::function<bool(std::uint64_t)> request_stop, std::function<void(std::uint64_t)> cancel_stop,
     std::function<TriggerContext()> context, std::function<std::uint64_t()> estimated_stop,
-    std::function<void(std::uint64_t, TriggerTime)> resume_movement)
+    std::function<void(std::uint64_t, TriggerTime)> resume_movement,
+    std::function<bool(std::uint64_t)> retain_manual_stop)
     : impl_(std::make_unique<Impl>()) {
     impl_->mouse = std::move(mouse); impl_->arbiter = std::move(arbiter);
     impl_->permission = std::move(permission); impl_->focused = std::move(focused);
@@ -365,6 +383,7 @@ TriggerWorker::TriggerWorker(std::shared_ptr<IMouseController> mouse,
     impl_->context = std::move(context);
     impl_->estimated_stop = std::move(estimated_stop);
     impl_->resume_movement = std::move(resume_movement);
+    impl_->retain_manual_stop = std::move(retain_manual_stop);
 }
 TriggerWorker::~TriggerWorker() { stop(); }
 bool TriggerWorker::start(const TriggerConfig& config, int cleanup_budget_ms) noexcept {

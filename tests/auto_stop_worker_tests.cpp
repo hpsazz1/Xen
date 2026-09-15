@@ -43,7 +43,7 @@ public:
     bool output_owner_exclusive() const noexcept override { return true; }
     bool supports_wasd_keyboard() const noexcept override { return true; }
     bool poll_input(InputSnapshot& input) noexcept override {
-        std::lock_guard<std::mutex> lock(mutex);
+        std::unique_lock<std::mutex> lock(mutex);
         input = {}; input.status = healthy ? InputMonitorStatus::READY : InputMonitorStatus::FAILURE;
         input.state_valid = healthy;
         input.sequence = sequence;
@@ -55,6 +55,9 @@ public:
         input.virtual_keys['A'] = (held & 2) != 0;
         input.virtual_keys['S'] = (held & 4) != 0;
         input.virtual_keys['D'] = (held & 8) != 0;
+        const bool inject_release = release_after_poll.exchange(false);
+        lock.unlock();
+        if (inject_release) physical(0);
         return true;
     }
     bool set_wasd_event_subscription(bool value) noexcept override {
@@ -148,6 +151,7 @@ public:
     std::vector<int> reports() { std::lock_guard<std::mutex> lock(mutex); return software; }
     Clock::time_point cleaned_at() { std::lock_guard<std::mutex> lock(mutex); return cleanup_at; }
     std::mutex mutex;
+    std::atomic<bool> release_after_poll{false};
     std::atomic<int> active_backend_calls{0}, max_backend_calls{0}, moves{0};
     std::deque<WasdEvent> events;
     std::vector<int> software, masks;
@@ -214,6 +218,19 @@ void bounded_aim_transaction_wait() {
 
 void manual_release_contracts() {
     using namespace std::chrono_literals;
+    {
+        auto fake = std::make_shared<Fake>(); fake->activation = false;
+        std::atomic<std::uint64_t> id{0};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [&] { return ++id; }, [] { return true; });
+        require(worker.start(AutoStopConfig{true, 0}), "跨快照松键回归启动");
+        fake->physical(0); wait_for([&] { return fake->drained(); });
+        fake->physical(1); wait_for([&] { return fake->drained(); });
+        // 固定交错：快照仍为W DOWN，紧接着事件流出现W UP，不能丢弃唯一释放边沿。
+        fake->release_after_poll = true;
+        wait_for([&] { const auto reports = fake->reports(); return std::find(reports.begin(), reports.end(), 4) != reports.end(); });
+        worker.stop();
+    }
     // 无目标、无允许键绑定也消费真实全松；仍有任一WASD按住时不制动。
     for (const auto masks : {std::array<std::uint8_t, 3>{1, 0, 4}, {8, 0, 2}, {2, 0, 8}, {4, 0, 1},
              {9, 8, 2}, {9, 1, 4}, {9, 0, 6}}) {
@@ -438,13 +455,82 @@ void ready(AutoStopWorker& worker, const std::shared_ptr<Fake>& fake) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 }
 }
+void manual_fire_retains_stop_contracts() {
+    for (int ending = 0; ending < 8; ++ending) {
+        auto fake = std::make_shared<Fake>();
+        auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+        std::atomic<std::uint64_t> id{0}, generation{1};
+        std::atomic<bool> valid{true}, focused{true}, block_context{false}, context_entered{false};
+        AutoStopWorker worker(fake, arbiter, [] { return true; }, [&] { return ++id; },
+            [&] { return focused.load(); }, [&] {
+                if (block_context.load()) {
+                    context_entered = true;
+                    while (block_context.load()) std::this_thread::yield();
+                }
+                return AutoStopWeaponContext{true, valid.load(), generation.load(), "ak47"};
+            });
+        AutoStopConfig config{true, 5}; config.cycle_enabled = true;
+        require(worker.start(config), "人工开火保持回归启动");
+        ready(worker, fake);
+        worker.publish_target(Clock::now() + std::chrono::seconds(2));
+        worker.publish_tracking_target(Clock::now() + std::chrono::seconds(2));
+        wait_for([&] { return worker.estimated_completion_id() != 0; });
+        const auto stop_id = worker.estimated_completion_id();
+        require(!worker.retain_for_manual_fire(stop_id), "没有物理左键不得声明人工接管");
+        { std::lock_guard lock(fake->mutex); fake->extra_keys[1] = true; }
+        require(!worker.retain_for_manual_fire(stop_id + 1), "人工接管不能冒用其他请求");
+        require(worker.retain_for_manual_fire(stop_id), "物理左键可接管当前已完成急停");
+        require(!worker.resume_movement(stop_id, Clock::now()), "人工保持拒绝点射归还");
+        { std::lock_guard lock(fake->mutex); fake->extra_keys[1] = false; fake->activation = false; }
+        worker.publish_target({}, AutoStopBlockReason::CROSSHAIR_OUTSIDE_TARGET);
+        const auto deadline = Clock::now() + std::chrono::milliseconds(650);
+        while (Clock::now() < deadline) {
+            worker.publish_tracking_target(Clock::now() + std::chrono::milliseconds(50));
+            std::this_thread::sleep_for(std::chrono::milliseconds(3));
+        }
+        require(!fake->released() && worker.estimated_completion_id() == stop_id &&
+            worker.snapshot().cycle_count == 0, "人工接管后松开两个键仍保持原急停且不归还移动");
+        if (ending == 0) worker.publish_tracking_target({});
+        if (ending == 1) worker.publish_tracking_target(Clock::now() - std::chrono::milliseconds(1));
+        if (ending == 2) valid = false; // Runtime将换弹、死亡映射为无效武器上下文。
+        if (ending == 3) ++generation;
+        if (ending == 4) focused = false;
+        if (ending == 5) worker.cancel(stop_id);
+        if (ending == 6) { std::lock_guard lock(fake->mutex); fake->end = true; }
+        if (ending == 7) {
+            // 阻塞在外部上下文读取，不占worker mutex；主线程仍能发布真实期限。
+            worker.publish_tracking_target(Clock::now() + std::chrono::seconds(1));
+            block_context = true;
+            wait_for([&] { return context_entered.load(); });
+            const auto expired_at = Clock::now() + std::chrono::milliseconds(20);
+            worker.publish_tracking_target(expired_at);
+            std::this_thread::sleep_until(expired_at + std::chrono::milliseconds(1));
+            worker.publish_tracking_target(Clock::now() + std::chrono::seconds(1));
+            block_context = false;
+        }
+        wait_for([&] {
+            if (ending >= 2) worker.publish_tracking_target(Clock::now() + std::chrono::milliseconds(50));
+            return fake->released() && worker.estimated_completion_id() == 0;
+        });
+        require(worker.snapshot().requests == 1 && worker.snapshot().cycle_count == 0,
+            "人工保持结束只清理原请求，不恢复点射周期或分配新请求");
+        worker.stop();
+    }
+}
+
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--manual-fire") {
+            manual_fire_retains_stop_contracts();
+            std::cout << "人工开火保持急停专项通过\n";
+            return 0;
+        }
         manual_release_contracts();
         if (argc == 2 && std::string_view(argv[1]) == "--manual-release") {
             std::cout << "手动松键急停worker专项通过\n";
             return 0;
         }
+        manual_fire_retains_stop_contracts();
         bounded_aim_transaction_wait();
         const AutoStopConfig config = [] {
             AutoStopConfig legacy{true, 5};

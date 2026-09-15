@@ -34,6 +34,7 @@ public:
     bool event_sequence_exhausted = false;
     std::optional<RecoilExecutionEvent> active_batch;
     bool physical_previous = false, source_blocked = false;
+    bool manual_restart_pending = false, manual_takeover = false, automatic_firing_seen = false;
     int last_source = 0;
     std::uint64_t last_synthetic_id = 0;
     std::uint64_t sampled_firing_id = 0;
@@ -48,7 +49,18 @@ public:
         const auto synthetic = firing();
         if ((mouse->left_button_cleanup_required() && !synthetic.confirmed_down) ||
             (synthetic.confirmed_down && (!synthetic.id || synthetic.started_at==RecoilTime{}))) result.healthy=false;
-        if (result.healthy && physical && !physical_previous) physical_started = RecoilClock::now();
+        if (!result.permission || !result.focused || !result.profile_conditions_match) source_blocked = true;
+        if (result.healthy && synthetic.confirmed_down && !physical) automatic_firing_seen = true;
+        if (result.healthy && physical && !physical_previous) {
+            physical_started = RecoilClock::now();
+            // 人工上升沿优先于软件点射；一次接管只请求一次从头起压。
+            if (!source_blocked && !calibration_budget && !canceled.load() && !stopping.load() &&
+                (last_source == 2 || synthetic.confirmed_down || automatic_firing_seen)) {
+                manual_restart_pending = true;
+                manual_takeover = true;
+            }
+            automatic_firing_seen = false;
+        }
         // 不可信输入不能伪造释放或新按下；下一次健康快照需完整释放再建立来源。
         if (result.healthy) physical_previous = physical;
         else source_blocked = true;
@@ -60,10 +72,12 @@ public:
             synthetic.uncertainty.count() >= 0 && synthetic.uncertainty ==
                 synthetic.backend_completed_at - synthetic.call_started_at)
             sampled_firing_uncertainty_ns = synthetic.uncertainty.count();
-        if ((physical && synthetic.confirmed_down) || (source && last_source && source != last_source) ||
+        if ((source == 2 && last_source == 1) ||
             (source==2 && last_source==2 && synthetic.id!=last_synthetic_id)) source_blocked = true;
-        if (result.healthy && !physical && !synthetic.confirmed_down) {
+        if (result.healthy && result.permission && result.focused && result.profile_conditions_match &&
+            !physical && !synthetic.confirmed_down) {
             source_blocked = false; last_source = 0; last_synthetic_id = 0;
+            manual_takeover = false; manual_restart_pending = false;
         } else if (source) { last_source = source; if(source==2) last_synthetic_id=synthetic.id; }
         result.enabled = config.enabled && !stopping.load();
         result.held = physical || synthetic.confirmed_down;
@@ -146,11 +160,20 @@ public:
         try {
             while (!stopping.load()) {
                 if (canceled.exchange(false)) {
+                    manual_restart_pending = false;
+                    source_blocked = true; manual_takeover = false; automatic_firing_seen = false;
                     if(calibration_budget)calibration_budget->finish(RecoilCalibrationEnd::CANCELED);
                     controller.cancel(RecoilReason::CANCELED, RecoilClock::now());finish_if_ended();
                 }
                 const auto sampled_at = RecoilClock::now();
                 const auto before = input();
+                if (manual_restart_pending) {
+                    // 二次复核时遇到接管，旧意图先按NOT_SENT结算，再在此处重启。
+                    if (before.healthy && before.permission && !source_blocked)
+                        controller.restart_for_manual(RecoilClock::now());
+                    manual_restart_pending = false;
+                    finish_if_ended();
+                }
                 const auto before_source = last_source;
                 const auto before_firing_id = sampled_firing_id;
                 const auto before_firing_uncertainty_ns = sampled_firing_uncertainty_ns;
@@ -162,6 +185,23 @@ public:
                     OutputArbiterRejection arbitration_rejection{};
                     auto lock = arbiter->try_enter_aim(OutputArbiterSource::RECOIL, &arbitration_rejection);
                     const auto& intent = decision.intent;
+                    while (!lock.owns_lock() && arbitration_rejection == OutputArbiterRejection::LOCK_BUSY && manual_takeover) {
+                        // 人工接管时允许软件UP短事务先清债；复用原意图与期限，不补规划、不续期。
+                        const auto fresh = input();
+                        if (!fresh.healthy || !fresh.permission || !fresh.focused || !fresh.held ||
+                            fresh.firing_started_at != before.firing_started_at || fresh.profile != before.profile ||
+                            fresh.weapon_generation != before.weapon_generation || fresh.device_epoch != before.device_epoch ||
+                            !fresh.profile_conditions_match || stopping.load() || canceled.load() ||
+                            RecoilClock::now() >= intent.expires_at) break;
+                        const auto retry_until = std::min(intent.expires_at, RecoilClock::now() + std::chrono::milliseconds(2));
+                        {
+                            std::unique_lock state_lock(mutex);
+                            wake.wait_until(state_lock, retry_until, [&] { return stopping.load() || canceled.load(); });
+                        }
+                        if (!stopping.load() && !canceled.load() && RecoilClock::now() < intent.expires_at)
+                            lock = arbiter->try_enter_aim(OutputArbiterSource::RECOIL, &arbitration_rejection);
+                        else break;
+                    }
                     RecoilReceipt receipt{intent.command_id, RecoilReceiptStatus::NOT_SENT, RecoilClock::now()};
                     bool backend_called = false;
                     RecoilDispatchRejection rejection = RecoilDispatchRejection::NONE;

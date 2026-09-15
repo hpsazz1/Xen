@@ -438,7 +438,10 @@ struct Runtime::Impl {
                     return result;
                 },
                 [this] { auto stop = auto_stop_worker.load(); return stop ? stop->estimated_completion_id() : 0; },
-                std::move(resume_movement));
+                std::move(resume_movement), [this](std::uint64_t id) {
+                    auto stop = auto_stop_worker.load();
+                    return stop && stop->retain_for_manual_fire(id);
+                });
             if (!worker->start(trigger_config)) { set_error("自动扳机启动失败或设备不支持左键"); return false; }
             trigger_worker.store(std::move(worker));
         }
@@ -874,7 +877,9 @@ struct Runtime::Impl {
                 frame_detector_generation = active_detector_generation;
             }
             if (profile.detector.status != DetectionStatus::SUCCESS) {
-                if (auto stop = auto_stop_worker.load()) stop->publish_target({});
+                if (auto stop = auto_stop_worker.load()) {
+                    stop->publish_target({}); stop->publish_tracking_target({});
+                }
                 if (auto trigger = trigger_worker.load()) trigger->publish(std::make_shared<TriggerObservation>());
                 recoil_observation_ns.store(0);
                 if (config.recoil.mixed_aim) if (auto recoil = recoil_worker.load()) recoil->cancel();
@@ -891,7 +896,9 @@ struct Runtime::Impl {
                     *frame, std::move(detections), observation_clock,
                     camera_motion, safety_gate.can_dispatch());
                 if (prepared.reset_aim) {
-                    if (auto stop = auto_stop_worker.load()) stop->publish_target({});
+                    if (auto stop = auto_stop_worker.load()) {
+                        stop->publish_target({}); stop->publish_tracking_target({});
+                    }
                     if (auto recoil = recoil_worker.load()) recoil->cancel();
                     aim->reset();
                 }
@@ -903,6 +910,8 @@ struct Runtime::Impl {
                         aim_frame.detections, config.aim, frame->timing, std::chrono::steady_clock::now(),
                         aim_frame.control_center_x, aim_frame.control_center_y, &reason);
                     stop->publish_target(deadline, reason);
+                    stop->publish_tracking_target(runtime::detail::tracking_target_deadline(
+                        aim_frame.detections, config.aim, frame->timing, std::chrono::steady_clock::now()));
                 }
                 profile.background_motion_ms = prepared.background_motion_ms;
                 if (auto trigger = trigger_worker.load()) {

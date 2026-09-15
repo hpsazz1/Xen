@@ -712,6 +712,63 @@ int main() {
         timing.source_clock_uncertainty_ms = 0; timing.source_time_timing_valid = false;
         expect(valid() == std::chrono::steady_clock::time_point{}, "无源时钟有效事实不可触发");
     }
+    {
+        AimConfig config;
+        config.person_class_ids = {2}; config.head_class_ids = {3}; config.high_confidence = 0.5f;
+        const auto now = std::chrono::steady_clock::time_point{std::chrono::milliseconds(1000)};
+        FrameTiming timing;
+        timing.source_time_timing_valid = true;
+        timing.source_time_at = now - std::chrono::milliseconds(10);
+        timing.source_clock_uncertainty_ms = 5;
+        std::array<Detection, 1> detections{{{100, 100, 110, 110, 0.5f, 2}}};
+        AutoStopBlockReason reason = AutoStopBlockReason::NO_TARGET;
+        const auto deadline = [&] {
+            return runtime::detail::tracking_target_deadline(detections, config, timing, now, &reason);
+        };
+        expect(deadline() == now + std::chrono::milliseconds(35) && reason == AutoStopBlockReason::NONE,
+            "人工保持只需有效人物仍在，期限沿用源时间且扣除不确定度");
+        expect(runtime::detail::auto_stop_target_deadline(detections, config, timing, now, 160, 160) ==
+            std::chrono::steady_clock::time_point{} && deadline() != std::chrono::steady_clock::time_point{},
+            "准星离框仅阻止首次急停，不把仍可见目标判为消失");
+        detections[0].class_id = 3;
+        expect(deadline() != std::chrono::steady_clock::time_point{}, "仅有配置头部仍提供人工保持目标");
+        detections[0].class_id = 9;
+        expect(deadline() == std::chrono::steady_clock::time_point{} && reason == AutoStopBlockReason::NO_TARGET,
+            "无配置目标类别撤销保持期限");
+        detections[0].class_id = 2;
+        detections[0].confidence = 0.49f;
+        expect(deadline() == std::chrono::steady_clock::time_point{}, "低置信度不得维持人工保持");
+        detections[0].confidence = std::numeric_limits<float>::quiet_NaN();
+        expect(deadline() == std::chrono::steady_clock::time_point{}, "无效置信度不得维持人工保持");
+        detections[0].confidence = 0.5f;
+        detections[0].x2 = 100;
+        expect(deadline() == std::chrono::steady_clock::time_point{}, "退化框不得维持人工保持");
+        detections[0].x2 = std::numeric_limits<float>::infinity();
+        expect(deadline() == std::chrono::steady_clock::time_point{}, "无限坐标不得维持人工保持");
+        detections[0].x2 = 110;
+        expect(runtime::detail::tracking_target_deadline({}, config, timing, now, &reason) ==
+            std::chrono::steady_clock::time_point{} && reason == AutoStopBlockReason::NO_TARGET,
+            "空检测帧明确撤销保持目标");
+        std::array<Detection, 2> multiple{{{0, 0, 1, 1, 0.9f, 9}, detections[0]}};
+        expect(runtime::detail::tracking_target_deadline(multiple, config, timing, now) !=
+            std::chrono::steady_clock::time_point{}, "遍历完整当前检测集合寻找有效保持目标");
+        timing.source_time_at = now - std::chrono::milliseconds(45);
+        expect(deadline() == std::chrono::steady_clock::time_point{} && reason == AutoStopBlockReason::TARGET_STALE,
+            "当前目标检测不能给已到期源图像续命");
+        timing.source_time_at = now + std::chrono::milliseconds(1);
+        expect(deadline() == std::chrono::steady_clock::time_point{} && reason == AutoStopBlockReason::SOURCE_TIMING_INVALID,
+            "未来源图像不可维持人工保持");
+        timing.source_time_at = now;
+        for (const double uncertainty : {-1.0, 50.0, std::numeric_limits<double>::quiet_NaN()}) {
+            timing.source_clock_uncertainty_ms = uncertainty;
+            expect(deadline() == std::chrono::steady_clock::time_point{} && reason == AutoStopBlockReason::SOURCE_UNCERTAINTY,
+                "非法或占满期限的不确定度不可维持人工保持");
+        }
+        timing.source_clock_uncertainty_ms = 0;
+        timing.source_time_timing_valid = false;
+        expect(deadline() == std::chrono::steady_clock::time_point{} && reason == AutoStopBlockReason::SOURCE_TIMING_INVALID,
+            "缺少可信源时间不可维持人工保持");
+    }
     test_processed_frame_timing_evidence_preserves_raw_identity();
     test_latest_frame_queue();
     test_malformed_capture_frame_is_not_counted_as_published();

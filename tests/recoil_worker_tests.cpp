@@ -17,6 +17,8 @@ public:
     std::atomic<bool> held{false}, unknown{false}, healthy{true}, block{false}, proceed{false}, entered{false},dirty{false},missing_time{false};
     std::atomic<bool> cancel_key{false};
     std::atomic<bool> calibration_key{true};
+    std::atomic<bool> trigger_key{false}, block_up{false}, up_entered{false}, release_up{false};
+    std::atomic<int> downs{0}, ups{0};
     std::atomic<bool> pre_call_receipt{false};
     std::atomic<RecoilTime> last_poll_at{RecoilTime{}};
     std::function<void()> on_poll;
@@ -31,10 +33,18 @@ public:
         if(on_poll)on_poll();
         last_poll_at=RecoilClock::now();
         out={};out.state_valid = healthy; out.status = healthy?InputMonitorStatus::READY:InputMonitorStatus::STALE;
-        out.virtual_keys[1] = held;out.virtual_keys[18]=calibration_key;out.virtual_keys[27]=cancel_key; out.sequence = ++sequence; return true;
+        out.virtual_keys[1] = held;out.virtual_keys[5]=trigger_key;out.virtual_keys[18]=calibration_key;out.virtual_keys[27]=cancel_key; out.sequence = ++sequence; return true;
     }
     void close() noexcept override {}
     bool left_button_cleanup_required() const noexcept override {return dirty;}
+    bool supports_left_button() const noexcept override {return true;}
+    ButtonReceipt set_left_button(bool down) noexcept override {
+        if(down){++downs;dirty=true;}
+        else {++ups;up_entered=true;while(block_up&&!release_up)std::this_thread::sleep_for(1ms);dirty=false;}
+        ButtonReceipt receipt;receipt.disposition=ButtonDisposition::ACKNOWLEDGED;
+        receipt.backend_completed_at=receipt.protocol_ack_received_at=RecoilClock::now();
+        receipt.cleanup_required=dirty;receipt.datagram_sent=true;return receipt;
+    }
     MouseStatus status() const noexcept override { return MouseStatus::READY; }
     std::string last_error() const override { return {}; }
 private:
@@ -53,11 +63,12 @@ struct Fixture {
     std::atomic<bool> throw_context{false};
     std::atomic<std::int64_t> synthetic_uncertainty_ns{-1};
     std::atomic<bool> replace_signal_after_read{false};
+    std::atomic<std::shared_ptr<TriggerWorker>> live_trigger;
     std::unique_ptr<RecoilWorker> worker;
     Fixture(bool rapid=false, bool change_generation=true, bool zero_curve=false, bool calibration=false,
-            int legacy_permission_key=0) {
+            int legacy_permission_key=0, double recovery_ms=20) {
         profile->id = "synthetic"; profile->weapon_id = "synthetic_weapon";
-        profile->state = RecoilProfileState::CALIBRATED; profile->phase_tolerance_ms = 100; profile->recovery_ms = 20;
+        profile->state = RecoilProfileState::CALIBRATED; profile->phase_tolerance_ms = 100; profile->recovery_ms = recovery_ms;
         profile->source.sha256 = std::string(64, 'a'); profile->source.source_unit = "synthetic";
         profile->calibration = {"synthetic", "fake", "synthetic", "synthetic:test_only", 1.0};
         profile->points = rapid?std::vector<RecoilPoint>{{0,0,0},{1,0,10}}:std::vector<RecoilPoint>{{0,0,0},{400,0,80}};
@@ -73,6 +84,7 @@ struct Fixture {
             input.focused = focused; input.profile = profile; input.device_epoch = 1; input.weapon_generation = generation;
             return input;
         }, [this] {
+            if(auto trigger=live_trigger.load())return trigger->firing_signal();
             TriggerFiringSignal signal{synthetic_down.load(),synthetic_id.load(),synthetic_start.load()};
             const auto uncertainty=synthetic_uncertainty_ns.load();
             if(uncertainty>=0) {
@@ -107,6 +119,45 @@ struct Fixture {
 }
 int main() {
     try {
+        {
+            Fixture f(false,true,false,false,0,1000);f.ready();
+            f.synthetic_start=RecoilClock::now();f.synthetic_down=true;
+            check(until([&]{return f.mouse->moves>0;}),"冷却接管前先完成软件点射");
+            const auto session=f.worker->snapshot().session_id;f.synthetic_down=false;f.ready();
+            f.mouse->held=true;
+            check(until([&]{return f.worker->snapshot().session_id==session+1;}),
+                "点射UP后的冷却空档人工按下也从第一发开始，不等待旧弹道恢复");
+        }
+        {
+            // 两个真实worker共享owner：UP在途时不把known-down误当失联，人工重新起压只执行一次。
+            Fixture f;f.ready();
+            auto trigger=std::make_shared<TriggerWorker>(f.mouse,f.arbiter,[]{return true;},[]{return true;},
+                []{return std::uint64_t{1};},[](std::uint64_t){return true;},[](std::uint64_t){});
+            TriggerConfig cfg;cfg.enabled=true;cfg.require_stop=false;cfg.hold_virtual_key=5;
+            cfg.fire_delay_ms=0;cfg.press_duration_ms=500;cfg.shot_interval_ms=600;cfg.max_observation_age_ms=1000;
+            check(trigger->start(cfg),"双worker测试启动扳机");f.live_trigger.store(trigger);
+            check(until([&]{return trigger->snapshot().reason==TriggerReason::RELEASED;}),"双worker取得释放边沿");
+            auto observation=std::make_shared<TriggerObservation>();
+            observation->detections.push_back({30,30,70,70,0.9f,0});observation->center_x=observation->center_y=50;
+            observation->roi_width=observation->roi_height=100;observation->epoch=observation->sequence=1;
+            observation->valid=observation->timing_valid=true;observation->observed_at=TriggerClock::now();
+            f.mouse->trigger_key=true;trigger->publish(observation);
+            check(until([&]{return f.mouse->moves>1;}),"自动点射先启动压枪");
+            const auto session=f.worker->snapshot().session_id;
+            f.mouse->block_up=true;f.mouse->held=true;
+            const bool entered=until([&]{return f.mouse->up_entered.load();});
+            std::this_thread::sleep_for(10ms);
+            const bool retained_signal=trigger->firing_signal().confirmed_down;
+            f.mouse->release_up=true;
+            check(entered&&retained_signal,"UP在途保留已确认DOWN，不提前伪造释放");
+            check(until([&]{return f.worker->snapshot().session_id==session+1&&f.worker->snapshot().phase==RecoilPhase::FIRING;}),
+                "人工接管从第一发重新压，UP短事务不永久取消新弹序");
+            const auto count=f.mouse->moves.load();
+            check(until([&]{return f.mouse->moves>count;}),"UP确认后人工持续补偿");
+            check(f.mouse->downs==1&&f.mouse->ups==1&&!trigger->firing_signal().confirmed_down,
+                "人工优先期间只清理自有软件按下，没有第二次自动DOWN");
+            trigger->stop();f.worker->stop();
+        }
         {
             // 普通压枪仅跟随实际射击来源，旧额外许可不能留下隐藏阻断。
             Fixture f(false, true, false, false, 999); f.ready(); f.mouse->held = true;
@@ -237,10 +288,21 @@ int main() {
             check(f.worker->execution_log().records.front().source_firing_id==1&&
                 !f.worker->execution_log().records.front().firing_uncertainty_ns,
                 "旧三字段信号保留命令id但不能伪造零不确定区间");
+            const auto old_session=f.worker->snapshot().session_id;
             f.mouse->held=true;
-            check(until([&]{return f.worker->snapshot().reason==RecoilReason::CONTEXT;}),"实体与软件重叠需取消");
-            auto count=f.mouse->moves.load();f.synthetic_down=false;std::this_thread::sleep_for(25ms);
-            check(f.mouse->moves==count,"直接切至实体不能续压");
+            check(until([&]{return f.worker->snapshot().session_id==old_session+1;}),"人工接管只建立一次从第一发开始的新弹序");
+            auto count=f.mouse->moves.load();f.synthetic_down=false;
+            check(until([&]{return f.mouse->moves>count;}),"软件UP后持续人工左键继续压枪");
+            std::this_thread::sleep_for(25ms);
+            check(f.worker->snapshot().session_id==old_session+1,"持续人工按住不能逐帧重置弹序");
+            const auto events=f.worker->read_execution_events(0);
+            std::vector<RecoilExecutionEvent> begins;
+            for(const auto& event:events.events)if(event.kind==RecoilExecutionEventKind::BEGIN)begins.push_back(event);
+            check(begins.size()==2&&begins[1].firing_source==RecoilFiringSource::INPUT_ESTIMATED&&
+                begins[1].firing_started_at>begins[0].firing_started_at,"新人工批次记录自己的起点而不继承软件点射起点");
+            f.mouse->healthy=false;
+            check(until([&]{return f.worker->snapshot().reason==RecoilReason::CONTEXT;}),"接管后失联仍取消");
+            count=f.mouse->moves.load();
             f.mouse->held=false;f.mouse->healthy=false;std::this_thread::sleep_for(10ms);
             f.mouse->held=true;f.mouse->healthy=true;std::this_thread::sleep_for(25ms);
             check(f.mouse->moves==count,"不可信释放不能解除来源冲突");
@@ -250,7 +312,7 @@ int main() {
             Fixture f;f.ready();f.mouse->block=true;f.mouse->held=true;
             check(until([&]{return f.mouse->entered.load();}),"取消前move在途");
             f.worker->cancel();f.mouse->proceed=true;
-            check(until([&]{return f.worker->snapshot().reason==RecoilReason::WAIT_RELEASE;}),"迟到ACK后取消不复活");
+            check(until([&]{return f.worker->snapshot().phase==RecoilPhase::WAIT_RELEASE;}),"迟到ACK后取消不复活，保持等待健康释放");
             check(f.mouse->moves==1&&f.worker->execution_log().records.size()==1,"在途完成仍有执行证据且不追发");
         }
         {

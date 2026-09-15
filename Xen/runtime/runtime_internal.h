@@ -40,11 +40,12 @@ inline const char* auto_stop_startup_error(const AutoStopConfig& stop,
         : nullptr;
 }
 
-inline std::chrono::steady_clock::time_point auto_stop_target_deadline(
+// 首次急停与人工保持共用检测有效性和源时间期限，只有首次准入要求准星在框内。
+inline std::chrono::steady_clock::time_point target_deadline(
         std::span<const Detection> detections, const AimConfig& config,
         const FrameTiming& timing, std::chrono::steady_clock::time_point now,
-        float center_x, float center_y,
-        AutoStopBlockReason* reason = nullptr) noexcept {
+        std::optional<std::pair<float, float>> center,
+        AutoStopBlockReason* reason) noexcept {
     const auto blocked = [&](AutoStopBlockReason value) {
         if (reason) *reason = value;
         return std::chrono::steady_clock::time_point{};
@@ -70,15 +71,29 @@ inline std::chrono::steady_clock::time_point auto_stop_target_deadline(
             (contains(config.person_class_ids) || contains(config.head_class_ids))) {
             target_found = true;
             // 检测框与控制中心都位于当前 ROI 坐标系；完整框包含边界，不套用扳机内域比例。
-            if (std::isfinite(center_x) && std::isfinite(center_y) &&
-                center_x >= detection.x1 && center_x <= detection.x2 &&
-                center_y >= detection.y1 && center_y <= detection.y2) {
+            if (!center || (std::isfinite(center->first) && std::isfinite(center->second) &&
+                center->first >= detection.x1 && center->first <= detection.x2 &&
+                center->second >= detection.y1 && center->second <= detection.y2)) {
                 if (reason) *reason = AutoStopBlockReason::NONE;
                 return deadline;
             }
         }
     }
     return blocked(target_found ? AutoStopBlockReason::CROSSHAIR_OUTSIDE_TARGET : AutoStopBlockReason::NO_TARGET);
+}
+
+inline std::chrono::steady_clock::time_point auto_stop_target_deadline(
+        std::span<const Detection> detections, const AimConfig& config,
+        const FrameTiming& timing, std::chrono::steady_clock::time_point now,
+        float center_x, float center_y, AutoStopBlockReason* reason = nullptr) noexcept {
+    return target_deadline(detections, config, timing, now, std::pair{center_x, center_y}, reason);
+}
+
+inline std::chrono::steady_clock::time_point tracking_target_deadline(
+        std::span<const Detection> detections, const AimConfig& config,
+        const FrameTiming& timing, std::chrono::steady_clock::time_point now,
+        AutoStopBlockReason* reason = nullptr) noexcept {
+    return target_deadline(detections, config, timing, now, std::nullopt, reason);
 }
 
 // 同一生产入口维护 observation 时间基准及连续性；不重新判定 Capture 的映射质量。
