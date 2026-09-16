@@ -161,14 +161,14 @@ bool RecoilStore::rollback(const std::string& weapon,std::string& error) const n
 }
 std::shared_ptr<const RecoilProfile> RecoilStore::resolve(const RecoilConfig& config,const std::string& weapon,std::string& error) const noexcept {
     try {
-        if(reparse(directory_)||!id(weapon)||config.game_build.empty()||config.input_path.empty()||config.conditions.empty()||
+        if(reparse(directory_)||!id(weapon)||config.input_path!="kmbox_net"||
             !std::isfinite(config.sensitivity)||config.sensitivity<=0)throw std::runtime_error("曲线匹配条件未知");
-        std::string file;
-        if(config.use_trial)file=config.trial_file;
-        else {const auto value=index(directory_);if(!value["active"].contains(weapon))throw std::runtime_error("武器未明确选择活动曲线");file=value["active"][weapon]["file"].get<std::string>();}
+        const auto value=index(directory_);
+        if(!value["active"].contains(weapon))throw std::runtime_error("武器未明确选择活动曲线");
+        const auto file=value["active"][weapon]["file"].get<std::string>();
         RecoilProfile p;if(!load(file,p,error))return {};
-        if(!calibrated(p)||p.weapon_id!=weapon||p.fire_mode!=config.fire_mode||p.calibration.game_build!=config.game_build||
-            p.calibration.input_path!=config.input_path||p.calibration.conditions!=config.conditions||
+        if(!calibrated(p)||p.weapon_id!=weapon||p.fire_mode!=config.fire_mode||
+            p.calibration.input_path!=config.input_path||
             !p.calibration.sensitivity||*p.calibration.sensitivity!=config.sensitivity)
             throw std::runtime_error("曲线校准状态、模式或输入条件不精确匹配");
         error.clear();return std::make_shared<const RecoilProfile>(std::move(p));

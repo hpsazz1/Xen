@@ -19,10 +19,10 @@ int main() {
         check(validate_app_config(config, error), error.c_str());
         auto missing = config;
         missing.recoil.game_build.clear(); missing.recoil.conditions.clear();
-        check(!validate_app_config(missing, error) && error.find("游戏版本") != std::string::npos &&
-            error.find("适用条件") != std::string::npos && error.find("GSI") == std::string::npos &&
-            error.find("源焦点") == std::string::npos,
-            "已配置GSI和源焦点时仅指出实际缺少的游戏版本与适用条件");
+        check(validate_app_config(missing, error), "精简后不再要求填写游戏版本与适用条件");
+        missing.recoil.sensitivity = 0;
+        check(!validate_app_config(missing, error) && error.find("游戏灵敏度") != std::string::npos,
+            "移除可选字段不放宽真实灵敏度要求");
         check(save_app_config(path.string(), config, error), error.c_str());
         AppConfig loaded;
         check(load_app_config(path.string(), loaded, error), error.c_str());
@@ -41,8 +41,14 @@ int main() {
           const auto end = bytes.find('[', section + 1);
           check(section != std::string::npos && bytes.substr(section, end - section).find("hold_virtual_key") == std::string::npos,
               "保存移除压枪额外许可"); }
-        config.recoil.hold_virtual_key = 0; config.recoil.use_trial = true;
-        check(!validate_app_config(config, error), "试验模式需要明确独立引用");
+        config.recoil.hold_virtual_key = 0;
+        { std::ofstream old(path); old << "[recoil]\nuse_trial=invalid\ntrial_file=old.json\ninput_path=other\n"; }
+        check(load_app_config(path.string(), loaded, error) && loaded.recoil.input_path == "kmbox_net",
+            "旧覆盖选项停用且普通输入路径固定KMBOX");
+        check(save_app_config(path.string(), loaded, error), error.c_str());
+        { std::ifstream migrated(path); std::string bytes((std::istreambuf_iterator<char>(migrated)), {});
+          check(bytes.find("use_trial") == std::string::npos && bytes.find("trial_file") == std::string::npos &&
+              bytes.find("input_path") == std::string::npos, "保存移除旧覆盖和可编辑输入路径"); }
         { std::ofstream old(path); old << "[recoil]\nenabled=invalid\n"; }
         check(!load_app_config(path.string(), loaded, error), "坏类型不能默默转换");
         { std::ofstream old(path); old << "[ui]\nwidth=900\n"; }

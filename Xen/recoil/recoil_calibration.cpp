@@ -53,7 +53,8 @@ bool validate_recoil_calibration_manifest(const RecoilCalibrationManifest& m, co
             m.profile_semantic_sha256 != recoil_calibration_sha256(serialize_recoil_profile(p)))
             throw std::runtime_error("校准候选或配置摘要无效");
         const auto& e=m.environment;
-        if(e.weapon_id != p.weapon_id || !bounded(e.game_build) || !bounded(e.conditions) || e.input_path != "kmbox_net" ||
+        if(e.weapon_id != p.weapon_id || (!e.game_build.empty() && !bounded(e.game_build)) ||
+            (!e.conditions.empty() && !bounded(e.conditions)) || e.input_path != "kmbox_net" ||
             !std::isfinite(e.sensitivity) || e.sensitivity <= 0 ||
             m.environment_fingerprint != recoil_calibration_environment_fingerprint(e))
             throw std::runtime_error("校准环境缺失或绑定不符");

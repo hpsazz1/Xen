@@ -21,6 +21,18 @@ void acknowledge(RecoilController& c,const RecoilDecision& d,double ms){
 }
 void schema_and_compile(){
     auto p=*profile();std::string error;expect(validate_recoil_profile(p,error),"合成profile合法");
+    auto minimal=p;minimal.calibration.game_build.clear();minimal.calibration.conditions.clear();
+    expect(validate_recoil_profile(minimal,error),"版本与条件可空的校准声明合法");
+    if(validate_recoil_profile(minimal,error)) {
+        RecoilProfile restored;
+        expect(load_recoil_profile(serialize_recoil_profile(minimal),restored,error)&&restored.calibration.game_build.empty()&&
+            restored.calibration.conditions.empty(),"空校准元数据往返不伪造值");
+    }
+    minimal.calibration.evidence.clear();expect(!validate_recoil_profile(minimal,error),"简化元数据仍需校准证据");
+    minimal=p;minimal.calibration.conditions=std::string(1025,'x');
+    expect(!validate_recoil_profile(minimal,error),"校准条件元数据有界");
+    minimal=p;minimal.calibration.game_build="bad\nmetadata";
+    expect(!validate_recoil_profile(minimal,error),"校准版本元数据拒绝换行");
     auto text=serialize_recoil_profile(p);RecoilProfile roundtrip;
     expect(load_recoil_profile(text,roundtrip,error)&&serialize_recoil_profile(roundtrip)==text,"schema往返确定性");
     auto named=p;named.weapon_id="M4A1-S";

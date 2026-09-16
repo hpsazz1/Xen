@@ -11,6 +11,7 @@
     [string]$ManualAcceptancePath = '',
     [string]$SourceContextExecutable = '',
     [switch]$IncludeLauncher,
+    [switch]$IncludeRecoilTools,
     [switch]$ChangesOnly
 )
 
@@ -139,6 +140,17 @@ foreach ($route in $manifest.runtimes) {
 }
 $workerRelative = "runtimes/$Runtime/Xen.exe"
 $overrides = @{ $workerRelative = $workerPath }
+$recoilToolHashes = @{}
+if ($IncludeRecoilTools) {
+    foreach ($tool in @('xen_recoil_calibration.exe', 'xen_recoil_tuner.exe')) {
+        $relative = "runtimes/$Runtime/$tool"
+        if (-not $records.ContainsKey($relative) -or $records[$relative].runtime -cne $Runtime) {
+            throw "压枪工具必须已存在于当前运行时清单：$relative"
+        }
+        $overrides[$relative] = Resolve-UpdateFile (Join-Path $buildRoot "Release/$tool")
+        $recoilToolHashes[$relative] = (Get-FileHash -LiteralPath $overrides[$relative] -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+}
 if ($IncludeLauncher) {
     $overrides['XenLauncher.exe'] = Resolve-UpdateFile (Join-Path $buildRoot 'Release\XenLauncher.exe')
 }
@@ -186,9 +198,12 @@ try {
             if ($relative -eq $workerRelative -and
                 ($sourceHash -cne $workerHash -or $length -ne $workerLength)) { throw 'Worker 在发布期间变化。' }
             if ($relative -eq $sourceToolRelative -and $sourceHash -cne $sourceToolHash) { throw '源桥接工具在发布期间变化。' }
+            if ($recoilToolHashes.ContainsKey($relative) -and $sourceHash -cne $recoilToolHashes[$relative]) {
+                throw '压枪工具在发布期间变化。'
+            }
             $record.size = [long]$length
             $record.sha256 = $sourceHash
-            $record.source = if ($relative -in @($workerRelative, $sourceToolRelative)) { "$source@$commit" } else { $source }
+            $record.source = if ($relative -in @($workerRelative, $sourceToolRelative) -or $recoilToolHashes.ContainsKey($relative)) { "$source@$commit" } else { $source }
         } elseif ($length -ne [long]$record.size) { throw "继承载荷复制长度错误：$relative" }
         $copiedBytes += $length
         Write-Progress -Activity '继承统一包显式载荷' -Status "$copiedBytes / $totalBytes 字节" `
@@ -223,6 +238,12 @@ try {
         $updateEvidence.updated_components += [ordered]@{
             runtime = ''; path = $sourceToolRelative; git_commit = $commit.ToLowerInvariant()
             sha256 = $sourceToolHash; build_identity_sha256 = $identityHash
+        }
+    }
+    foreach ($relative in @($recoilToolHashes.Keys | Sort-Object)) {
+        $updateEvidence.updated_components += [ordered]@{
+            runtime = $Runtime; path = $relative; git_commit = $commit.ToLowerInvariant()
+            sha256 = $recoilToolHashes[$relative]; build_identity_sha256 = $identityHash
         }
     }
     # 来源证据属于独立载荷；生产 Launcher 的 manifest 顶层严格固定为五字段。

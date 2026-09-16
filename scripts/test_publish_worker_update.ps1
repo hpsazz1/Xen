@@ -58,6 +58,9 @@ try {
     Write-UpdateFixture (Join-Path $buildRoot 'Release\Xen.exe') 'updated-worker-fixture'
     Write-UpdateFixture (Join-Path $buildRoot 'Release\xen_source_context.exe') 'updated-source-context-fixture'
     Write-UpdateFixture (Join-Path $buildRoot 'Release\XenLauncher.exe') 'new-launcher-with-current-config'
+    foreach ($tool in @('xen_recoil_calibration.exe', 'xen_recoil_tuner.exe')) {
+        Write-UpdateFixture (Join-Path $buildRoot "Release/$tool") "updated-$tool"
+    }
     $identityPath = Join-Path $buildRoot 'xen-build-identity.json'
     $identity = [ordered]@{ schema = 1; source_root = $sourceRoot; git_commit = $commit; git_dirty = $false; runtime = 'nvidia' }
     Write-UpdateFixture $identityPath ($identity | ConvertTo-Json)
@@ -67,6 +70,9 @@ try {
     foreach ($runtime in @('nvidia', 'directml', 'openvino')) {
         $relative = "runtimes/$runtime/Xen.exe"
         Write-UpdateFixture (Join-Path $baseRoot $relative) "old-$runtime-worker"
+        foreach ($tool in @('xen_recoil_calibration.exe', 'xen_recoil_tuner.exe')) {
+            Write-UpdateFixture (Join-Path $baseRoot "runtimes/$runtime/$tool") "old-$runtime-$tool"
+        }
         $backends = if ($runtime -eq 'nvidia') { @('cpu', 'cuda', 'tensorrt') } else { @($runtime) }
         $routes += [ordered]@{ id = $runtime; executable = $relative; backends = @($backends) }
     }
@@ -193,6 +199,20 @@ try {
     $deltaParameters.OutputDirectory = $deltaOutput
     $deltaParameters.ChangesOnly = $true
     $deltaParameters.SourceContextExecutable = Join-Path $buildRoot 'Release\xen_source_context.exe'
+    $deltaParameters.IncludeRecoilTools = $true
+    foreach ($tool in @('xen_recoil_calibration.exe', 'xen_recoil_tuner.exe')) {
+        $missingTool = $deltaParameters.Clone()
+        $missingTool.OutputDirectory = Join-Path $runRoot "missing-$tool"
+        $toolPath = Join-Path $buildRoot "Release/$tool"
+        Remove-Item -LiteralPath $toolPath
+        Assert-UpdateReject $missingTool "启用压枪工具时缺少 $tool 必须拒绝"
+        Write-UpdateFixture $toolPath "updated-$tool"
+        $missingRecord = $baseJson | ConvertFrom-Json
+        $missingRecord.files = @($missingRecord.files | Where-Object { $_.path -cne "runtimes/nvidia/$tool" })
+        Write-UpdateFixture $baseManifestPath ($missingRecord | ConvertTo-Json -Depth 10)
+        Assert-UpdateReject $missingTool "基包清单不存在 $tool 时不可扩充载荷"
+        Write-UpdateFixture $baseManifestPath $baseJson
+    }
     $invalidTool = $deltaParameters.Clone()
     $invalidTool.OutputDirectory = Join-Path $runRoot 'wrong-source-tool'
     $invalidTool.SourceContextExecutable = Join-Path $buildRoot 'Release\Xen.exe'
@@ -200,12 +220,13 @@ try {
     Write-UpdateFixture (Join-Path $baseRoot 'config.ini') 'user changed configuration after original publication'
     Write-UpdateFixture (Join-Path $baseRoot 'cache/model-workspace/settings.json') '{"user_changed":true}'
     & $publisher @deltaParameters
-    Assert-UpdateTest (@(Get-ChildItem -LiteralPath $deltaOutput -Recurse -File).Count -eq 4) '差量只生成 Worker、选中桥接工具、来源证据和清单'
+    Assert-UpdateTest (@(Get-ChildItem -LiteralPath $deltaOutput -Recurse -File).Count -eq 6) '差量只生成 Worker、选中桥接与两个压枪工具、来源证据和清单'
     Assert-UpdateTest (-not (Test-Path -LiteralPath (Join-Path $deltaOutput 'config.ini'))) '差量不复制配置'
     $deltaStage = Join-Path $baseRoot $deltaName
     [IO.Directory]::Move($deltaOutput, $deltaStage)
     $deltaEntries = @()
-    foreach ($relative in @('runtimes/nvidia/Xen.exe', 'tools/source/xen_source_context.exe', 'tools/acceptance/WORKER-UPDATE.json', 'manifest.json')) {
+    foreach ($relative in @('runtimes/nvidia/Xen.exe', 'runtimes/nvidia/xen_recoil_calibration.exe',
+        'runtimes/nvidia/xen_recoil_tuner.exe', 'tools/source/xen_source_context.exe', 'tools/acceptance/WORKER-UPDATE.json', 'manifest.json')) {
         $oldPath = Join-Path $baseRoot $relative
         $oldHash = if (Test-Path -LiteralPath $oldPath) { (Get-FileHash -LiteralPath $oldPath).Hash.ToLowerInvariant() } else { '' }
         $deltaEntries += [ordered]@{ path = $relative; old_sha256 = $oldHash
@@ -224,6 +245,18 @@ try {
         $runningRejected = $_.Exception.Message -match 'XEN_WORKER_RUNNING'
     }
     Assert-UpdateTest $runningRejected '路径不可读的 Xen 进程保守拒绝'
+    foreach ($tool in @('xen_recoil_calibration', 'xen_recoil_tuner')) {
+        $runningRecoilTool = $tool
+        Set-Item Function:Get-Process -Value ({
+            param($Name, $ErrorAction)
+            if ($runningRecoilTool -in $Name) { [pscustomobject]@{ Path = $null } }
+        }.GetNewClosure())
+        $runningRejected = $false
+        try { & $apply -PackageRoot $baseRoot -StageName $deltaName -CheckOnly } catch {
+            $runningRejected = $_.Exception.Message -match 'XEN_WORKER_RUNNING'
+        }
+        Assert-UpdateTest $runningRejected "选中压枪工具运行时拒绝 $tool"
+    }
     function Get-Process { param($Name, $ErrorAction); return @() }
     $lock = [IO.File]::Open((Join-Path $baseRoot 'runtimes/nvidia/Xen.exe'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
     $lockedRejected = $false
@@ -254,6 +287,14 @@ try {
     $deltaEvidence = Get-Content -LiteralPath (Join-Path $baseRoot 'tools/acceptance/WORKER-UPDATE.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     $toolIdentity = @($deltaEvidence.updated_components | Where-Object { $_.path -ceq 'tools/source/xen_source_context.exe' })
     Assert-UpdateTest ($toolIdentity.Count -eq 1 -and $toolIdentity[0].git_commit -ceq $commit) '桥接工具绑定同提交身份'
+    foreach ($tool in @('xen_recoil_calibration.exe', 'xen_recoil_tuner.exe')) {
+        $relative = "runtimes/nvidia/$tool"
+        Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $baseRoot $relative) -Raw) -ceq "updated-$tool") "选中压枪工具已更新 $tool"
+        $toolIdentity = @($deltaEvidence.updated_components | Where-Object { $_.path -ceq $relative })
+        Assert-UpdateTest ($toolIdentity.Count -eq 1 -and $toolIdentity[0].git_commit -ceq $commit) "压枪工具绑定同提交身份 $tool"
+        $record = @((Get-Content -LiteralPath $baseManifestPath -Raw | ConvertFrom-Json).files | Where-Object { $_.path -ceq $relative })[0]
+        Assert-UpdateTest ($record.source.EndsWith("@$commit")) "压枪工具清单来源绑定提交 $tool"
+    }
     foreach ($entry in $protected) {
         Assert-UpdateTest ((Get-FileHash -LiteralPath (Join-Path $baseRoot $entry.path)).Hash.ToLowerInvariant() -ceq $entry.sha256) '差量后用户配置原字节保留'
     }

@@ -9,6 +9,7 @@
     [string]$PackageNotesPath = '',
     [string]$ManualAcceptancePath = '',
     [switch]$IncludeLauncher,
+    [switch]$IncludeRecoilTools,
     [string]$SourceContextExecutable = '',
     [string]$SshIdentityFile = (Join-Path $env:USERPROFILE '.ssh\xen_foxos_ed25519'),
     [string]$KnownHostsFile = (Join-Path $env:USERPROFILE '.ssh\known_hosts'),
@@ -76,13 +77,16 @@ try {
         -BuildDirectory $BuildDirectory -Runtime $Runtime -OutputDirectory $generated `
         -RepositoryRoot $RepositoryRoot -GitExecutable $GitExecutable -ChangesOnly `
         -PackageNotesPath $PackageNotesPath -ManualAcceptancePath $ManualAcceptancePath `
-        -SourceContextExecutable $SourceContextExecutable -IncludeLauncher:$IncludeLauncher
+        -SourceContextExecutable $SourceContextExecutable -IncludeLauncher:$IncludeLauncher -IncludeRecoilTools:$IncludeRecoilTools
     $ownedStages.Add([pscustomobject]@{ parent = (Split-Path -Parent $localRoot); name = $stageName })
     $null = Resolve-XenDirectChildPath $localRoot $stageName '移入主机包前暂存'
     [IO.Directory]::Move($generated, $localStage)
     $ownedStages.Add([pscustomobject]@{ parent = $localRoot; name = $stageName })
     $relativeFiles = @("runtimes/$Runtime/Xen.exe", 'tools/acceptance/WORKER-UPDATE.json', 'manifest.json')
     if ($IncludeLauncher) { $relativeFiles += 'XenLauncher.exe' }
+    if ($IncludeRecoilTools) {
+        $relativeFiles += @("runtimes/$Runtime/xen_recoil_calibration.exe", "runtimes/$Runtime/xen_recoil_tuner.exe")
+    }
     if ($PackageNotesPath) { $relativeFiles += 'tools/acceptance/PACKAGE-NOTES.md' }
     if ($ManualAcceptancePath) { $relativeFiles += 'tools/acceptance/MANUAL-ACCEPTANCE.md' }
     if ($SourceContextExecutable) { $relativeFiles += 'tools/source/xen_source_context.exe' }

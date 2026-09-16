@@ -44,15 +44,19 @@ int main(int argc, char** argv){
     expect(store.set_active(p.weapon_id,file2,error),"显式发布已校准版本");
     auto resolved=store.resolve(cfg,p.weapon_id,error);expect(resolved&&resolved->revision==2,"活动引用精确解析");
     cfg.sensitivity=2;expect(!store.resolve(cfg,p.weapon_id,error),"灵敏度失配拒绝");cfg.sensitivity=1;
-    cfg.game_build.clear();expect(!store.resolve(cfg,p.weapon_id,error),"未知build拒绝");cfg.game_build="test_build";
+    cfg.game_build.clear();cfg.conditions.clear();expect(bool(store.resolve(cfg,p.weapon_id,error)),"版本与条件可空且不阻断已校准活动曲线");
+    cfg.game_build="other_build";cfg.conditions="other_conditions";
+    expect(bool(store.resolve(cfg,p.weapon_id,error)),"旧版本与条件仅作元数据不参与运行匹配");
+    cfg.game_build="test_build";cfg.conditions="test_conditions";
     cfg.input_path="other";expect(!store.resolve(cfg,p.weapon_id,error),"输入路径失配拒绝");cfg.input_path="kmbox_net";
     expect(!store.resolve(cfg,"other_weapon",error),"不猜相似武器");
     p.points.back().y_counts=3;expect(store.save_new(p,file3,error,true),"新校准修订保存");
     expect(store.set_active(p.weapon_id,file3,error)&&store.resolve(cfg,p.weapon_id,error)->revision==3,"第二次发布");
     expect(store.rollback(p.weapon_id,error)&&store.resolve(cfg,p.weapon_id,error)->revision==2,"显式回退原版本");
-    cfg.use_trial=true;cfg.trial_file=file3;expect(store.resolve(cfg,p.weapon_id,error)->revision==3,"试验引用独立选择");
-    cfg.use_trial=false;expect(store.resolve(cfg,p.weapon_id,error)->revision==2,"试验不覆盖活动版本");
-    cfg.use_trial=true;cfg.trial_file=file1;expect(!store.resolve(cfg,p.weapon_id,error),"试验也不可执行未校准候选");
+    expect(store.load(file3,loaded,error)&&loaded.revision==3,"可读取其它保存版本用于调试");
+    expect(store.resolve(cfg,p.weapon_id,error)->revision==2,"读取其它版本不改变活动曲线选择");
+    expect(!store.set_active(p.weapon_id,file1,error),"未校准候选不能替换已有活动版本");
+    expect(store.resolve(cfg,p.weapon_id,error)->revision==2,"拒绝未校准发布后保留原活动版本");
     expect(!store.load("../escape.json",loaded,error),"拒绝目录穿越");
     std::vector<RecoilStoredProfile> profiles;expect(store.list(profiles,error)&&profiles.size()==3,"限量列举保存版本");
     {std::ofstream broken(directory/"broken.json");broken<<"{}";}

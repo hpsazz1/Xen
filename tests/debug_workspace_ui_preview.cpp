@@ -323,13 +323,9 @@ int wmain(int argc, wchar_t** argv) {
             };
             check_panel("trigger_panel", "trigger_form", "触发范围 / %", "auxiliary-trigger.png");
             check_panel("recoil_panel", "recoil_settings", "配置缺项", "auxiliary-recoil.png");
-            auto* recoil_card = preview_window("recoil_panel");
-            ImGui::SetScrollY(recoil_card, recoil_card->ScrollMax.y); frame(); frame();
-            require(capture.text.find("游戏版本") != std::string::npos &&
-                capture.text.find("适用条件") != std::string::npos &&
-                capture.text.find("游戏灵敏度") != std::string::npos,
-                "主压枪页必须呈现可填写的校准匹配条件");
-            save_window(capture, output / "auxiliary-recoil-settings.png");
+            require(capture.text.find("压枪校准配置") == std::string::npos &&
+                capture.text.find("曲线目录") == std::string::npos,
+                "辅助页不再展示校准表单");
             // 只进入本次变更的两个调试标签，不运行旧版完整导航流程。
             input.position = {70, 36.f + 12.f + 21.f + 6.f * (42.f + ImGui::GetStyle().ItemSpacing.y)};
             frame(); input.down = true; frame(); input.down = false; frame(); frame();
@@ -368,8 +364,12 @@ int wmain(int argc, wchar_t** argv) {
             save_window(capture, output / "trigger-debug-bottom.png");
             select_debug_tab("弹道工具", "武器点射资料", "recoil-tools.png");
             ImGui::SetScrollY(content, content->ScrollMax.y); frame(); frame();
-            require(capture.text.find("辅助 / 自动压枪") != std::string::npos,
-                "弹道工具必须指向主压枪页的匹配配置");
+            require(capture.text.find("压枪校准配置") != std::string::npos &&
+                capture.text.find("曲线目录") != std::string::npos &&
+                capture.text.find("游戏灵敏度") != std::string::npos,
+                "调试弹道工具必须呈现精简后的校准设置");
+            for (const auto* removed : {"游戏版本", "输入路径", "适用条件", "混合图像有效期", "固定版本覆盖", "覆盖文件"})
+                require(capture.text.find(removed) == std::string::npos, "调试校准设置仍包含移除字段");
             save_window(capture, output / "recoil-tools-bottom.png");
             ImGui::RemoveContextHook(ImGui::GetCurrentContext(),capture_hook_id);
             ImGui::RemoveContextHook(ImGui::GetCurrentContext(),frame_hook_id);

@@ -89,7 +89,6 @@ public:
                 {"hold_virtual_key",config.recoil.hold_virtual_key},{"game_build",config.recoil.game_build},
                 {"conditions",config.recoil.conditions},{"input_path",config.recoil.input_path},
                 {"sensitivity",config.recoil.sensitivity},{"fire_mode",config.recoil.fire_mode},
-                {"use_trial",config.recoil.use_trial},{"trial_file",config.recoil.trial_file},
                 {"budget_window_ms",config.recoil.budget_window_ms},{"max_observation_age_ms",config.recoil.max_observation_age_ms}}},
             {"execution",{{"clock_domain","local_steady"},{"batch",std::move(batch)},
                 {"records",std::move(records)},{"profiles",std::move(profiles)}}}}}};

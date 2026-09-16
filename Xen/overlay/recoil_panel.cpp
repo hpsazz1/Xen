@@ -276,19 +276,16 @@ struct RecoilPanel::Impl {
         help("读取并绑定这份已保存INI的身份；当前界面尚未保存的更改不会进入校准会话。");
         ImGui::InputText("新的校准目录", &calibration_output);
         help("保存此次请求、候选身份和前台命令。默认归入cache/recoil/calibration；必须使用新目录，旧会话不会覆盖。");
-        if (ImGui::Button("带入当前环境声明")) {
-            calibration_request.environment = {base.weapon_id, config.recoil.game_build, config.recoil.input_path,
-                config.recoil.conditions, config.recoil.sensitivity};
+        if (ImGui::Button("带入当前武器与灵敏度")) {
+            calibration_request.environment = {base.weapon_id, "", "kmbox_net", "", config.recoil.sensitivity};
             calibration_request.hold_virtual_key = config.recoil.hold_virtual_key;
         }
-        help("把当前已加载曲线的武器及应用中的环境声明复制到准备表单；仍需核对与本次试验一致，不产生校准结果。");
+        help("复制当前曲线的武器和游戏灵敏度；输入路径固定为KMBOX NET，不产生校准结果。");
         if (ImGui::TreeNode("环境与一次性预算")) {
             auto& e = calibration_request.environment; auto& l = calibration_request.limits;
             ImGui::TextWrapped("预算必须按本次试验明确填写；命令相位预算仅约束发送时限，不是已验证的物理相位容差。");
             ImGui::InputText("武器标识", &e.weapon_id); help("必须与所选磁盘曲线的武器标识相同；不会根据此字段生成新弹道。");
-            ImGui::InputText("游戏版本", &e.game_build); help("填写本次试验实际游戏版本，变化后旧校准声明不能直接复用。");
-            ImGui::InputText("输入路径", &e.input_path); help("本次真实设备输入路径标识，需与应用配置和之后的校准记录一致。");
-            ImGui::InputText("适用条件", &e.conditions); help("记录本次姿态、开镜等固定条件；GSI武器识别不证明这些条件已满足。");
+            e.input_path = "kmbox_net";
             ImGui::InputDouble("灵敏度", &e.sensitivity);
             help("本次游戏使用的正值灵敏度；改变它会改变候选适用环境，不是草稿强度滑块。");
             ImGui::InputInt("保持键 / VK", &calibration_request.hold_virtual_key);
@@ -420,12 +417,9 @@ struct RecoilPanel::Impl {
         require(config.gsi.enabled, "启用 GSI（设置 / GSI自动武器识别配置）");
         require(config.source_context.enabled, "启用源端焦点（设置）");
         require(std::isfinite(c.sensitivity) && c.sensitivity > 0, "游戏灵敏度");
-        require(!c.game_build.empty(), "游戏版本");
-        require(!c.conditions.empty(), "适用条件");
         require(!c.profile_directory.empty(), "曲线目录");
-        require(!c.use_trial || !c.trial_file.empty(), "覆盖文件");
-        if (!missing.empty()) ImGui::TextWrapped("配置缺项：%s。填写下方匹配配置；连接设置见括号位置。", missing.c_str());
-        ImGui::TextWrapped("GSI 自动识别武器；执行仍需匹配的已校准曲线。导入曲线的校准、强度编辑和活动版本选择见调试 / 弹道工具。");
+        if (!missing.empty()) ImGui::TextWrapped("配置缺项：%s。校准配置见调试 / 弹道工具；连接设置见括号位置。", missing.c_str());
+        ImGui::TextWrapped("校准配置、曲线编辑和活动版本选择见调试 / 弹道工具。GSI 自动识别武器，执行仍需已校准曲线。");
         ImGui::TextWrapped("武器：%s（%s）", weapon::display_name(snapshot.weapon_snapshot.canonical_id).data(),
             weapon::status_name(snapshot.weapon_snapshot.status));
         if (!snapshot.recoil_profile_status.empty()) ImGui::TextWrapped("曲线匹配：%s", snapshot.recoil_profile_status.c_str());
@@ -436,17 +430,11 @@ struct RecoilPanel::Impl {
     }
     void calibration_settings(AppConfig& config) {
         auto& c = config.recoil;
-        if (!ImGui::CollapsingHeader("压枪校准匹配配置", ImGuiTreeNodeFlags_DefaultOpen)) return;
+        if (!ImGui::CollapsingHeader("压枪校准配置", ImGuiTreeNodeFlags_DefaultOpen)) return;
         if (form("recoil_calibration_settings")) {
-            row("曲线目录", "新配置默认使用cache/recoil/profiles；旧配置中的自定义目录保留。只加载活动索引或固定版本覆盖，新文件不会自动激活。");
+            row("曲线目录", "新配置默认使用cache/recoil/profiles；旧配置中的自定义目录保留。按武器加载明确选定的活动版本，新文件不会自动激活。");
             ImGui::InputText("##recoil_directory", &c.profile_directory);
-            row("游戏版本", "必须与所选曲线的校准条件一致；改变后旧曲线不可伪装适配。"); ImGui::InputText("##recoil_build", &c.game_build);
-            row("输入路径", "校准时使用的设备输入路径，不是压枪增益。"); ImGui::InputText("##recoil_path", &c.input_path);
             row("游戏灵敏度", "与实际游戏设置一致；不能把灵敏度当某一把武器的力度滑块。"); ImGui::InputDouble("##recoil_sensitivity", &c.sensitivity, 0, 0, "%.4f");
-            row("适用条件", "填写校准时的姿态与开镜条件标识；GSI识别武器不证明这些条件。"); ImGui::InputText("##recoil_conditions", &c.conditions);
-            row("混合图像有效期 / ms", "包含映射不确定度；过期图像不能支撑Aim混合补偿。"); ImGui::InputInt("##recoil_age", &c.max_observation_age_ms);
-            row("固定版本覆盖", "使用下方已校准文件，保持活动索引不变。保存配置后持续有效，不会在会话结束时自动关闭；需手动关闭后恢复活动版本匹配。"); ImGui::Checkbox("##recoil_trial", &c.use_trial);
-            row("覆盖文件", "曲线目录内的已保存文件名，禁止路径逃逸；仍须匹配武器与校准条件，不能执行未校准候选。"); ImGui::InputText("##recoil_trial_file", &c.trial_file);
             ImGui::EndTable();
         }
     }
@@ -475,7 +463,7 @@ struct RecoilPanel::Impl {
         help("重新列出所配置目录中的已保存曲线；不会挑选最新文件或自动切换活动版本。");
         ImGui::SameLine();
         if (ImGui::Button("加载当前武器活动版本")) {
-            auto lookup = config.recoil; lookup.use_trial = false;
+            auto lookup = config.recoil;
             const auto weapon_id = snapshot.weapon_snapshot.canonical_id;
             launch([lookup, weapon_id](Impl& state) {
                 RecoilStore store(std::filesystem::u8path(lookup.profile_directory));
@@ -483,7 +471,7 @@ struct RecoilPanel::Impl {
                 if (p) { state.selected_file.clear(); state.set_draft(*p); }
             });
         }
-        help("按当前GSI武器和配置条件读取活动版本作为草稿；不会修改正在执行的版本或固定版本覆盖设置。");
+        help("按当前GSI武器读取已校准且灵敏度匹配的活动版本作为草稿；不会修改正在执行的版本。");
         if (ImGui::BeginCombo("已保存版本", selected_file.empty() ? "选择独立版本" : selected_file.c_str())) {
             for (const auto& file : files) if (ImGui::Selectable(file.file.c_str(), selected_file == file.file)) load_file(config.recoil, file.file);
             ImGui::EndCombo();
@@ -492,8 +480,6 @@ struct RecoilPanel::Impl {
         ImGui::InputText("文件名", &manual_file); help("填写曲线目录内的文件名；目录外路径和不合规曲线会被拒绝。"); ImGui::SameLine();
         if (ImGui::Button("加载文件")) load_file(config.recoil, manual_file);
         help("从曲线目录读取上面的文件到编辑草稿，保留活动索引。");
-        if (ImGui::Button("加载覆盖文件")) load_file(config.recoil, config.recoil.trial_file);
-        help("读取配置中固定覆盖的文件到草稿；不会开启覆盖或改变其保存状态。");
         if (!loaded) { ImGui::TextWrapped("先加载已有曲线，再编辑草稿；不会自动创建虚构弹道。"); return; }
         ImGui::TextWrapped("编辑对象固定：%s / %s / 基线 %llu；GSI换枪不会切走当前草稿。", weapon::display_name(base.weapon_id).data(), base.id.c_str(),
             static_cast<unsigned long long>(base.revision));
@@ -558,9 +544,7 @@ struct RecoilPanel::Impl {
         prepare_panel(config);
         if (ImGui::TreeNode("人工校准证据与版本发布")) {
             ImGui::TextWrapped("只填写已完成实机的真实证据；输入字段不会产生实测，修改草稿后需重新确认。");
-            ImGui::InputText("校准游戏版本", &calibration.game_build); help("填写真实校准Run使用的游戏版本，须与之后应用配置一致。");
-            ImGui::InputText("校准输入路径", &calibration.input_path); help("填写真实校准Run的设备输入路径，不能把不同设备的校准直接替用。");
-            ImGui::InputText("校准适用条件", &calibration.conditions); help("填写已人工核对的姿态、开镜等条件；只保存声明，不自动测量。");
+            if (calibration.input_path.empty()) calibration.input_path = "kmbox_net";
             ImGui::InputText("真实Run证据路径", &calibration.evidence); help("指向当前草稿对应的真实Run记录；必须由你核对曲线、配置、环境及结果，路径存在本身不证明校准通过。");
             double sensitivity = calibration.sensitivity.value_or(0);
             if (ImGui::InputDouble("校准灵敏度", &sensitivity, 0, 0, "%.4f")) calibration.sensitivity = sensitivity;
@@ -597,8 +581,6 @@ struct RecoilPanel::Impl {
                 });
             }
             help("发布上面显示的磁盘文件，更新该武器的活动索引；不会发布未保存草稿，下一会话使用新选择。");
-            ImGui::SameLine(); if (ImGui::Button("设为固定版本覆盖")) { config.recoil.use_trial = true; config.recoil.trial_file = selected_file; status = "已设置固定版本覆盖；活动索引不变。保存配置后持续有效，需手动关闭，不会随会话结束失效。"; }
-            help("将已选磁盘文件设为配置中的固定覆盖；生产仍要求已校准并匹配条件。保存后持续有效，需手动关闭。");
             ImGui::EndDisabled();
             if (ImGui::Button("回退该武器活动版本")) {
                 const auto directory = config.recoil.profile_directory;
@@ -607,7 +589,7 @@ struct RecoilPanel::Impl {
                     if (store.rollback(state.base.weapon_id, state.status)) state.status = "已回退活动索引；下一会话生效。";
                 });
             }
-            help("回退当前编辑武器的活动索引到之前的已保存版本，下一会话生效；不会删除候选或自动关闭固定版本覆盖。");
+            help("回退当前编辑武器的活动索引到之前的已保存版本，下一会话生效；不会删除候选。");
             ImGui::TreePop();
         }
         tuner();
@@ -722,7 +704,6 @@ void RecoilPanel::render(const RuntimeSnapshot& snapshot, AppConfig& config, boo
         if (busy()) { ImGui::TextUnformatted("弹道任务正在后台处理；完成后可继续编辑。"); return; }
         DisabledScope disabled(!can_edit || busy());
         impl_->settings(snapshot, config);
-        impl_->calibration_settings(config);
         if (!snapshot.recoil_archive.error.empty()) ImGui::TextWrapped("射击归档异常：%s；详细状态见调试 / 运行诊断。", snapshot.recoil_archive.error.c_str());
         if (!impl_->status.empty()) ImGui::TextWrapped("%s", impl_->status.c_str());
     } catch (...) { impl_->status = "弹道面板操作失败；请检查文件与数据。"; }
@@ -756,8 +737,8 @@ void RecoilPanel::render_tools(const RuntimeSnapshot& snapshot, AppConfig& confi
             return;
         }
         impl_->timing_settings(snapshot, config, can_edit);
-        ImGui::TextWrapped("曲线目录、游戏版本、灵敏度和适用条件在辅助 / 自动压枪中配置。");
         { DisabledScope disabled(!can_edit || busy());
+            impl_->calibration_settings(config);
             ImGui::Checkbox("打开弹道编辑与优化", &impl_->show_editor);
             help("展开曲线草稿、人工校准与离线优化工具；不会自动加载、激活或执行曲线。");
             if (impl_->show_editor) impl_->editor(snapshot, config);

@@ -59,8 +59,8 @@ Json environment_json(const RecoilCalibrationEnvironment& e) {
     return {{"weapon_id",e.weapon_id},{"game_build",e.game_build},{"input_path",e.input_path},{"conditions",e.conditions},{"sensitivity",e.sensitivity}};
 }
 RecoilCalibrationEnvironment environment(const Json& j) {
-    return {j.at("weapon_id").get<std::string>(),j.at("game_build").get<std::string>(),j.at("input_path").get<std::string>(),
-        j.at("conditions").get<std::string>(),j.at("sensitivity").get<double>()};
+    return {j.at("weapon_id").get<std::string>(),j.value("game_build",std::string{}),j.value("input_path",std::string{"kmbox_net"}),
+        j.value("conditions",std::string{}),j.at("sensitivity").get<double>()};
 }
 Json limits_json(const RecoilCalibrationLimits& l) {
     return {{"max_firing_sessions",l.max_firing_sessions},{"max_session_duration_ms",l.max_session_duration_ms},

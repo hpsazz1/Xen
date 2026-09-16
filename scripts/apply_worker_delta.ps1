@@ -12,9 +12,10 @@ if ($StageName -notmatch '^\.worker-delta-[0-9a-f]{32}$') { throw '差量暂存�
 $packet = Get-Content -LiteralPath (Join-Path $stage 'delta.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($packet.schema -ne 1 -or $packet.runtime -notin @('nvidia', 'directml', 'openvino')) { throw '差量协议无效。' }
 $workerRelative = "runtimes/$($packet.runtime)/Xen.exe"
+$recoilTools = @("runtimes/$($packet.runtime)/xen_recoil_calibration.exe", "runtimes/$($packet.runtime)/xen_recoil_tuner.exe")
 $allowed = @($workerRelative, 'tools/acceptance/WORKER-UPDATE.json',
     'tools/acceptance/PACKAGE-NOTES.md', 'tools/acceptance/MANUAL-ACCEPTANCE.md',
-    'tools/source/xen_source_context.exe', 'XenLauncher.exe', 'manifest.json')
+    'tools/source/xen_source_context.exe', 'XenLauncher.exe', 'manifest.json') + $recoilTools
 function Resolve-DeltaFile([string]$Base, [string]$Relative) {
     if ($Relative -cnotin $allowed -and $Relative -cnotin @('config.ini', 'cache/model-workspace/settings.json')) {
         throw '差量文件不在允许集合。'
@@ -33,10 +34,12 @@ function Assert-WorkerStopped {
     if (@($packet.files | Where-Object { $_.path -ceq 'tools/source/xen_source_context.exe' }).Count -gt 0) {
         $names += 'xen_source_context'
     }
+    $selectedRecoilTools = @($recoilTools | Where-Object { $relative = $_; @($packet.files | Where-Object { $_.path -ceq $relative }).Count -gt 0 })
+    foreach ($relative in $selectedRecoilTools) { $names += [IO.Path]::GetFileNameWithoutExtension($relative) }
     foreach ($process in @(Get-Process -Name $names -ErrorAction SilentlyContinue)) {
         $processPath = $process.Path
         if (-not $processPath -or $processPath.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) {
-            throw 'XEN_WORKER_RUNNING: 请先退出该包 Worker/Launcher 后再更新；不会强制结束进程。'
+            throw 'XEN_WORKER_RUNNING: 请先退出该包 Worker/Launcher 及本次更新工具后再更新；不会强制结束进程。'
         }
     }
     # 同时拒绝不能独占打开的目标 Worker，避免未列入进程快照的已加载映像。
@@ -45,6 +48,11 @@ function Assert-WorkerStopped {
     $handle.Dispose()
     if ($names -contains 'xen_source_context') {
         $tool = Resolve-DeltaFile $root 'tools/source/xen_source_context.exe'
+        $handle = [IO.File]::Open($tool, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        $handle.Dispose()
+    }
+    foreach ($relative in $selectedRecoilTools) {
+        $tool = Resolve-DeltaFile $root $relative
         $handle = [IO.File]::Open($tool, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
         $handle.Dispose()
     }

@@ -9,8 +9,8 @@ std::string recoil_metadata_json(const RecoilConfig& config, const RuntimeSnapsh
     Json result = {{"schema",1}, {"physical_acceptance",nullptr}, {"config",{
         {"enabled",config.enabled},{"mixed_aim",config.mixed_aim},{"hold_virtual_key",config.hold_virtual_key},
         {"game_build",config.game_build},{"conditions",config.conditions},{"input_path",config.input_path},
-        {"sensitivity",config.sensitivity},{"fire_mode",config.fire_mode},{"use_trial",config.use_trial},
-        {"trial_file",config.trial_file},{"budget_window_ms",config.budget_window_ms},
+        {"sensitivity",config.sensitivity},{"fire_mode",config.fire_mode},
+        {"budget_window_ms",config.budget_window_ms},
         {"max_observation_age_ms",config.max_observation_age_ms}}}};
     result["final"] = nullptr; result["execution"] = nullptr;
     result["output_arbitration"] = Json::parse(output_arbitration_json(snapshot));

@@ -238,8 +238,6 @@ int wmain(int argc, wchar_t** argv) {
         { std::ofstream file(fixture_path, std::ios::binary); file << fixture_text; require(file.good(), "UI夹具写入失败"); }
         const auto directory_utf8 = fixture_directory.u8string();
         config.recoil.profile_directory.assign(reinterpret_cast<const char*>(directory_utf8.data()), directory_utf8.size());
-        config.recoil.trial_file = fixture_path.filename().string();
-        config.recoil.use_trial = false;
         require(overlay.init(config.ui), "Overlay 初始化失败");
         RuntimeSnapshot runtime;
         runtime.state = RuntimeState::STOPPED;
@@ -291,7 +289,7 @@ int wmain(int argc, wchar_t** argv) {
                     !actions.stop_requested && !actions.reload_detector_requested && !actions.refresh_models_requested &&
                     !actions.save_config_requested && !actions.log_level_changed && !actions.preview_enabled &&
                     actions.workspace_action == model_workspace::Action::NONE && !config.mouse.allow_send_input &&
-                    !config.auto_stop.enabled && !config.trigger.enabled && !config.recoil.enabled && !config.recoil.use_trial,
+                    !config.auto_stop.enabled && !config.trigger.enabled && !config.recoil.enabled,
                     "验收输入误触业务动作，停止执行");
         };
         for (int index = 0; index < 3; ++index) frame();
@@ -365,7 +363,7 @@ int wmain(int argc, wchar_t** argv) {
         };
         auto activate_view_item = [&](const char* label) {
             const std::string_view name(label);
-            require(name == "打开弹道编辑与优化" || name == "加载覆盖文件" || name == "独立弹道自动优化器",
+            require(name == "打开弹道编辑与优化" || name == "加载文件" || name == "独立弹道自动优化器",
                 "预览只允许展开界面和读取临时曲线");
             focus_item(label, content);
             input.down = true; frame(); input.down = false; frame(); frame();
@@ -404,13 +402,7 @@ int wmain(int argc, wchar_t** argv) {
         save_window(capture, output / "auxiliary-trigger.png");
         ImGui::SetScrollY(trigger_panel, trigger_panel->ScrollMax.y); frame(); frame();
         save_window(capture, output / "auxiliary-trigger-bottom.png");
-        const auto override_rect = focus_item("##recoil_trial", content, "recoil_settings");
-        auto* settings_table = ImGui::GetCurrentContext()->Tables.GetByKey(content->GetID("recoil_settings"));
-        require(settings_table != nullptr, "固定版本覆盖表单不存在");
-        input.position = {settings_table->OuterRect.Min.x + 20, override_rect.GetCenter().y}; frame(); frame();
-        require_tooltip(capture, "保存配置后持续有效");
-        save_window(capture, output / "recoil-override-help.png");
-        // 弹道工具已迁至调试页，先完成辅助页覆盖配置检查，再按生产导航进入。
+        // 弹道配置与编辑统一在调试页，已移除固定版本覆盖入口。
         select_page(6);
         content = preview_window("content");
         ImGui::SetScrollY(content, 0); frame(); frame();
@@ -421,7 +413,10 @@ int wmain(int argc, wchar_t** argv) {
         save_window(capture, output / "recoil-editor-help.png");
         activate_view_item("打开弹道编辑与优化");
         require(capture.text.find("先加载已有曲线") != std::string::npos, "编辑器没有按要求展开");
-        activate_view_item("加载覆盖文件");
+        focus_item("文件名", content);
+        input.down = true; frame(); input.down = false; frame();
+        ImGui::GetIO().AddInputCharactersUTF8("ui-only-candidate.json"); frame();
+        activate_view_item("加载文件");
         focus_item("还原草稿", content);
         require_page_table("recoil_tuning");
         require(capture.text.find("ui_only_candidate") != std::string::npos, "临时曲线未载入生产编辑预览");

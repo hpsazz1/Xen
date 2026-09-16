@@ -25,6 +25,16 @@ void contracts() {
     auto p=profile();auto m=manifest(*p);std::string error;
     check(recoil_calibration_sha256("abc")=="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","SHA256标准向量");
     check(validate_recoil_calibration_manifest(m,*p,error),error.c_str());
+    m.environment.game_build.clear();m.environment.conditions.clear();
+    m.environment_fingerprint=recoil_calibration_environment_fingerprint(m.environment);
+    check(validate_recoil_calibration_manifest(m,*p,error),"空版本与条件允许准备校准且仍绑定环境摘要");
+    m.environment.conditions=std::string(1025,'x');
+    m.environment_fingerprint=recoil_calibration_environment_fingerprint(m.environment);
+    check(!validate_recoil_calibration_manifest(m,*p,error),"可选元数据仍有长度界限");
+    m=manifest(*p);m.environment.game_build="bad\nmetadata";
+    m.environment_fingerprint=recoil_calibration_environment_fingerprint(m.environment);
+    check(!validate_recoil_calibration_manifest(m,*p,error),"可选元数据仍拒绝换行");
+    m=manifest(*p);
     auto changed=*p;changed.points[1].x_counts+=1;
     check(!validate_recoil_calibration_manifest(m,changed,error),"点变化拒绝");
     changed=*p;changed.state=RecoilProfileState::IMPORTED;m=manifest(changed);
@@ -79,7 +89,17 @@ void files(const std::filesystem::path& root) {
     RecoilCalibrationPrepareRequest request;request.profile_path=source;request.config_path=cfg;
     request.output_directory=root/"session";request.executable_path=root/"tool.exe";
     {std::ofstream executable(request.executable_path);executable<<"test-only-placeholder";}
-    const auto m=manifest(*p);request.environment=m.environment;request.limits=m.limits;request.hold_virtual_key=m.hold_virtual_key;request.cancel_virtual_key=m.cancel_virtual_key;
+    const auto request_file=root/"minimal-request.json";
+    {std::ofstream json(request_file);json<<R"({"environment":{"weapon_id":"ak47","sensitivity":1.0},
+        "limits":{"max_firing_sessions":1,"max_session_duration_ms":1000,"max_firing_duration_ms":100,
+        "max_sent_l1_counts":10,"max_command_l1_counts":8,"rolling_window_ms":16,"rolling_window_counts":14,
+        "command_phase_budget_ms":20},"hold_virtual_key":18,"cancel_virtual_key":35})";}
+    RecoilCalibrationPrepareRequest minimal_request;
+    check(load_recoil_calibration_request(request_file,minimal_request,error),"可省略版本条件与固定输入路径的准备请求");
+    check(minimal_request.environment.game_build.empty()&&minimal_request.environment.conditions.empty()&&
+        minimal_request.environment.input_path=="kmbox_net","请求不虚构元数据且固定默认输入路径");
+    request.environment=minimal_request.environment;request.limits=minimal_request.limits;
+    request.hold_virtual_key=minimal_request.hold_virtual_key;request.cancel_virtual_key=minimal_request.cancel_virtual_key;
     RecoilCalibrationPrepared prepared;check(prepare_recoil_calibration(request,prepared,error),error.c_str());
     check(std::filesystem::exists(prepared.directory/"TASK.md")&&!std::filesystem::exists(prepared.directory/"CONSUMED"),"prepare只准备");
     RecoilCalibrationPrepared loaded;
@@ -91,8 +111,8 @@ void files(const std::filesystem::path& root) {
     check(write_recoil_calibration_result(prepared,"TEST_ONLY",{},"INCOMPLETE",error),error.c_str());
     check(!write_recoil_calibration_result(prepared,"OVERWRITE",{},"COMPLETE",error),"报告不可覆盖");
     RecoilStore store(root/"profiles");std::string file;check(store.save_new(*p,file,error),error.c_str());
-    RecoilConfig rc;rc.use_trial=true;rc.trial_file=file;rc.game_build="synthetic";rc.conditions="test-only";rc.sensitivity=1;
-    check(!store.resolve(rc,"ak47",error),"普通use_trial保持拒绝SCHEMA_VALID");
+    RecoilConfig rc;rc.sensitivity=1;
+    check(!store.resolve(rc,"ak47",error),"普通执行不自动选用SCHEMA_VALID候选");
     check(!store.set_active("ak47",file,error),"不得发布未校准版本");
     {std::ofstream append(cfg,std::ios::app);append<<"\n;changed\n";}
     check(!load_recoil_calibration_prepared(prepared.directory,loaded,error),"配置变化需要重新准备");

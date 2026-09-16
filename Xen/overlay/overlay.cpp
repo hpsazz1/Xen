@@ -3061,7 +3061,7 @@ struct Overlay::Impl {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         render_trigger_config(snapshot, app_config, can_edit, key_active);
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        begin_config_panel("recoil_panel", "自动压枪", 440.0f);
+        begin_config_panel("recoil_panel", "自动压枪", 240.0f);
         recoil_panel.render(snapshot, app_config, can_edit);
         end_config_panel();
     }

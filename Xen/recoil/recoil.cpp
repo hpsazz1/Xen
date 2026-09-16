@@ -12,6 +12,9 @@ using Json = nlohmann::json;
 constexpr int kCommandAxisLimitCounts = 32767;
 constexpr std::uint64_t kReplayAdvanceLimit = 500000;
 bool finite(double x) { return std::isfinite(x); }
+bool optional_metadata(const std::string& value) {
+    return value.size() <= 1024 && value.find_first_of("\r\n\0", 0, 3) == std::string::npos;
+}
 bool hash(const std::string& value) {
     return value.size()==64 && std::all_of(value.begin(),value.end(),[](char c) {
         return c>='0'&&c<='9' || c>='a'&&c<='f' || c>='A'&&c<='F';
@@ -67,12 +70,14 @@ bool validate_recoil_profile(const RecoilProfile& p,std::string& error) noexcept
         if(p.calibration.sensitivity && (!finite(*p.calibration.sensitivity)||*p.calibration.sensitivity<=0))
             return reject("校准灵敏度无效");
         if(!p.source.sha256.empty() && !hash(p.source.sha256))return reject("来源SHA256无效");
+        if(!optional_metadata(p.calibration.game_build)||!optional_metadata(p.calibration.conditions))
+            return reject("校准版本或条件元数据无效");
         if(p.state==RecoilProfileState::CALIBRATED || p.state==RecoilProfileState::ACCEPTED) {
             const auto canonical = weapon::normalize_weapon_id(p.weapon_id);
             if (!canonical.empty() && canonical != p.weapon_id)
                 return reject("已校准曲线武器身份使用别名；请以规范ID建立新候选并重新校准，不可直接改写校准证据");
-            if(!p.phase_tolerance_ms || !p.calibration.sensitivity || p.calibration.game_build.empty() ||
-                p.calibration.input_path.empty() || p.calibration.conditions.empty() || p.calibration.evidence.empty() ||
+            if(!p.phase_tolerance_ms || !p.calibration.sensitivity ||
+                p.calibration.input_path.empty() || p.calibration.evidence.empty() ||
                 !hash(p.source.sha256)) return reject("已校准状态缺少条件、相位或证据来源");
         }
         error.clear();return true;
