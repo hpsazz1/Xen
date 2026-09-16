@@ -438,6 +438,7 @@ std::string trigger_metadata_json(const TriggerConfig& config,
     field("max_hold_ms", config.max_hold_ms);
     field("max_observation_age_ms", config.max_observation_age_ms);
     field("head_width_percent", config.head_width_percent);
+    field("range_percent", config.range_percent);
     field("head_height_percent", config.head_height_percent);
     field("body_width_percent", config.body_width_percent);
     field("body_height_percent", config.body_height_percent);

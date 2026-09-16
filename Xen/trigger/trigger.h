@@ -28,6 +28,7 @@ struct TriggerConfig {
     bool enabled = false;
     bool fire_enabled = true;
     int hold_virtual_key = 0;
+    float range_percent = 100.0f;
     float head_width_percent = 60.0f, head_height_percent = 60.0f;
     float body_width_percent = 50.0f, body_height_percent = 60.0f;
     float general_width_percent = 50.0f, general_height_percent = 50.0f;

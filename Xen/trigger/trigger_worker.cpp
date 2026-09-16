@@ -262,9 +262,16 @@ public:
                             (!fresh.context.required || (fresh.context.valid && firing_context.valid &&
                                 fresh.context.generation == firing_context.generation));
                         // 候选丢失只中止本发：确认UP且会话仍安全后归还移动，下一发重新取得候选和急停资格。
-                        // 显式取消、失焦、过期观测和未知回执仍撤销整个按住会话。
+                        // 显式取消、失焦和未知回执仍撤销；图像局部失效不越权归还独立急停。
                         const bool recoverable = event.snapshot.reason == TriggerReason::RELEASED ||
                             event.snapshot.reason == TriggerReason::NO_CANDIDATE;
+                        const bool session_safe = fresh.enabled && fresh.healthy && fresh.armed &&
+                            fresh.focused && same_context && !stopping.load() && !canceled.load() &&
+                            !controller.snapshot().faulted;
+                        const bool observation_released = event.snapshot.reason == TriggerReason::INVALID_OBSERVATION ||
+                            event.snapshot.reason == TriggerReason::TIMING_UNAVAILABLE ||
+                            event.snapshot.reason == TriggerReason::STALE ||
+                            event.snapshot.reason == TriggerReason::TARGET_CHANGED;
                         const bool manual_retained = retain_manual_stop && fresh.enabled && fresh.healthy &&
                             fresh.armed && fresh.focused && fresh.physical_left_down && same_context &&
                             !stopping.load() && !canceled.load() && !controller.snapshot().faulted && retain_manual_stop(id);
@@ -273,7 +280,18 @@ public:
                             fresh.armed && fresh.held && fresh.focused && !fresh.physical_left_down && same_context &&
                             !stopping.load() && !canceled.load() && !controller.snapshot().faulted)
                             resume_movement(id, cycle_next_down);
-                        else cancel_stop(id);
+                        else if (session_safe && fresh.held && fresh.estimated_stop_request_id == id &&
+                            ((retain_manual_stop && fresh.physical_left_down) || observation_released)) {
+                            // 扳机只清理本发LEFT；局部图像撤销或人工保持未获准不能取消仍按住的独立键盘owner。
+                            // 不伪造人工锁存。新有效帧可重新使用原资格，所有者仍独立处理松键和安全撤销。
+                            if (observation_released && !fresh.physical_left_down) consumed_cycle_stop_id = 0;
+                            LOG_INFO("trigger", "请求{}软件UP已确认，保留按住急停，扳机原因={}，人工左键={}",
+                                id, TriggerReasonName(event.snapshot.reason), fresh.physical_left_down);
+                        } else {
+                            LOG_INFO("trigger", "请求{}软件UP已确认，取消急停，扳机原因={}，公共许可={}，允许键={}，人工左键={}",
+                                id, TriggerReasonName(event.snapshot.reason), session_safe, fresh.held, fresh.physical_left_down);
+                            cancel_stop(id);
+                        }
                     }
                     if (deferred_cancel_id) { cancel_stop(deferred_cancel_id); deferred_cancel_id = 0; }
                 } else check_cleanup_budget(event.observed_at);

@@ -219,6 +219,68 @@ void physical_left_takes_over_until_trigger_rearmed() {
         "扳机键重新按下后才可开始新的自动点射");
     worker.stop();
 }
+void rejected_manual_takeover_preserves_held_stop() {
+    for (const bool lose_focus : {false, true}) {
+        auto mouse = std::make_shared<Mouse>();
+        std::atomic<bool> focused{true};
+        std::atomic<unsigned> canceled{0}, resumed{0}, attempts{0};
+        TriggerWorker worker(mouse, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [&] { return focused.load(); }, [] { return std::uint64_t{8}; },
+            [](std::uint64_t) { return true; }, [&](std::uint64_t) { ++canceled; },
+            {}, [] { return std::uint64_t{7}; },
+            [&](std::uint64_t, TriggerTime) { ++resumed; },
+            [&](std::uint64_t) { ++attempts; return false; });
+        TriggerConfig config;
+        config.enabled = config.require_stop = config.allow_estimated_stop = true;
+        config.hold_virtual_key = 5; config.fire_delay_ms = 0;
+        config.press_duration_ms = 500; config.shot_interval_ms = 600;
+        config.max_observation_age_ms = 1000;
+        expect(worker.start(config), "人工保持拒绝测试启动");
+        expect(until([&] { return worker.snapshot().reason == TriggerReason::RELEASED; }), "先释放扳机许可");
+        mouse->held = true; worker.publish(observation());
+        expect(until([&] { return worker.firing_signal().confirmed_down; }), "人工接管前确认DOWN");
+        if (lose_focus) focused = false;
+        mouse->physical_left = true; worker.publish(observation(2));
+        expect(until([&] { return mouse->count(false) == 1 && !worker.firing_signal().confirmed_down; }),
+            "接管拒绝也必须确认软件UP");
+        std::this_thread::sleep_for(10ms);
+        expect(resumed == 0 && canceled == (lose_focus ? 1u : 0u),
+            "安全按住时人工保持拒绝不得取消独立急停，失焦仍须取消");
+        if (!lose_focus) expect(attempts > 0, "确实经过人工保持拒绝分支");
+        worker.stop();
+    }
+}
+void observation_release_preserves_independent_stop() {
+    for (int cause = 0; cause != 4; ++cause) {
+        auto mouse = std::make_shared<Mouse>();
+        std::atomic<unsigned> canceled{0}, resumed{0};
+        TriggerWorker worker(mouse, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [] { return true; }, [] { return std::uint64_t{8}; }, [](std::uint64_t) { return true; },
+            [&](std::uint64_t) { ++canceled; }, {}, [] { return std::uint64_t{7}; },
+            [&](std::uint64_t, TriggerTime) { ++resumed; });
+        TriggerConfig config;
+        config.enabled = config.require_stop = config.allow_estimated_stop = true;
+        config.hold_virtual_key = 5; config.fire_delay_ms = 0;
+        config.press_duration_ms = 200; config.shot_interval_ms = 250; config.max_observation_age_ms = 1000;
+        expect(worker.start(config), "观测撤销与独立急停所有权测试启动");
+        expect(until([&] { return worker.snapshot().reason == TriggerReason::RELEASED; }), "先观察许可释放");
+        mouse->held = true; worker.publish(observation());
+        expect(until([&] { return worker.firing_signal().confirmed_down; }), "观测撤销前确认DOWN");
+        auto rejected = observation(2);
+        if (cause == 0) rejected->valid = false;
+        if (cause == 1) rejected->observed_at -= 2s;
+        if (cause == 2) rejected->timing_valid = false;
+        if (cause == 3) rejected->detections = {{48, 48, 52, 52, 0.9f, 0}};
+        worker.publish(rejected);
+        expect(until([&] { return mouse->count(false) == 1 && !worker.firing_signal().confirmed_down; }),
+            "观测失效或候选变化必须清理软件LEFT");
+        std::this_thread::sleep_for(10ms);
+        expect(canceled == 0 && resumed == 0, "扳机局部观测撤销不得归还或取消仍有效的独立急停");
+        worker.publish(observation(3));
+        expect(until([&] { return mouse->count(true) == 2; }), "新有效帧与原急停资格可在冷却后恢复扳机");
+        worker.stop();
+    }
+}
 
 void fire_disabled_no_output_or_receipt() {
     Fixture f; expect(f.start(false, 200, 1000, 10, false), "不开枪调试启动"); f.fire();
@@ -584,6 +646,8 @@ void exception_uses_bounded_cleanup() {
 int main() {
     cycle_resume_after_safe_up();
     physical_left_takes_over_until_trigger_rearmed();
+    rejected_manual_takeover_preserves_held_stop();
+    observation_release_preserves_independent_stop();
     estimated_stop_callback_and_revalidation(); timing_change_at_down_revalidation();
     fire_disabled_no_output_or_receipt();
     autonomous_cleanup(); unknown_and_late_ack(); final_revalidation(); unverified_stop_and_contention();

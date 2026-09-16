@@ -1251,6 +1251,16 @@ void test_trigger_legacy_timing_migration() {
     const auto path = directory / "config.ini";
     AppConfig loaded;
     std::string error;
+    expect(write_file_bytes(path, "[trigger]\nrange_percent=55\n"), "写入框内范围比例");
+    expect(load_app_config(path.string(), loaded, error) && loaded.trigger.range_percent == 55.0f,
+        "用户范围比例必须读取而非被默认值覆盖");
+    loaded.trigger.range_percent = 72.0f;
+    expect(save_app_config(path.string(), loaded, error) && load_app_config(path.string(), loaded, error) &&
+        loaded.trigger.range_percent == 72.0f, "框内范围比例保存往返");
+    for (const auto* value : {"nan", "0", "100.1"}) {
+        expect(write_file_bytes(path, std::string("[trigger]\nrange_percent=") + value + "\n") &&
+            !load_app_config(path.string(), loaded, error), "范围比例不能超出检测框");
+    }
     expect(AppConfig{}.trigger.fire_delay_ms == 0 && AppConfig{}.trigger.fire_mode == TriggerFireMode::SINGLE,
         "生产扳机默认首发无额外延迟且使用共享点射");
     expect(AppConfig{}.trigger.head_width_percent == 100.0f && AppConfig{}.trigger.head_height_percent == 100.0f &&

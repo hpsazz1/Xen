@@ -1406,18 +1406,25 @@ void test_report_captures_optional_aim_startup_config() {
                    json.find("\"stop_evidence_available\":false,\"fire_permitted\":false") != std::string::npos &&
                    csv.find("# auto_stop,") != std::string::npos,
                "辅助元数据须冻结启动配置且区分协议能力与停稳证据，CSV/JSON同时留档");
+        // 字段可增量扩展；只在本对象中核对值，不要求请求ID与计数紧邻。
+        const auto stop_begin = json.find("\"auto_stop\": {");
+        const auto stop_json = stop_begin == std::string::npos ? std::string{} :
+            json.substr(stop_begin, json.find('\n', stop_begin) - stop_begin);
         if (mode == 0) {
-            expect(json.find("\"telemetry_available\":false,\"request_id\":null,\"requests\":null") != std::string::npos &&
+            expect(stop_json.find("\"telemetry_available\":false,\"request_id\":null,") != std::string::npos &&
+                       stop_json.find("\"requests\":null,") != std::string::npos &&
                        json.find("\"cleanup_unknown\":null") != std::string::npos &&
                        csv.find("\"\"requests\"\":null") != std::string::npos,
                    "没有执行采集时必须报告未知，不能把默认零计数当实测");
         } else if (mode == 1) {
-            expect(json.find("\"telemetry_available\":true,\"request_id\":null,\"requests\":0") != std::string::npos &&
+            expect(stop_json.find("\"telemetry_available\":true,\"request_id\":null,") != std::string::npos &&
+                       stop_json.find("\"requests\":0,") != std::string::npos &&
                        json.find("\"max_release_overshoot_ns\":null,\"max_ack_wait_ns\":null,\"max_arbiter_wait_ns\":null") != std::string::npos,
                    "已采集但无请求可记录零计数，没有耗时样本仍须为null");
         } else {
             expect(json.find("\"status\":\"ESTIMATED\"") != std::string::npos &&
-                       json.find("\"request_id\":71,\"requests\":3,\"completed\":1,\"canceled\":2,\"aim_skips\":4") != std::string::npos &&
+                       stop_json.find("\"request_id\":71,") != std::string::npos &&
+                       stop_json.find("\"requests\":3,\"completed\":1,\"canceled\":2,\"aim_skips\":4") != std::string::npos &&
                        json.find("\"acknowledged_commands\":5,\"cleanup_attempts\":2,\"cleanup_failures\":1,\"release_commands\":2,\"arbiter_wait_samples\":6") != std::string::npos &&
                        json.find("\"cleanup_unknown\":true") != std::string::npos &&
                        csv.find("\"\"cleanup_unknown\"\":true") != std::string::npos,
@@ -1466,6 +1473,7 @@ void test_trigger_startup_and_final_metadata() {
         config.trigger_config.reset();
         if (mode != 0) {
             TriggerConfig trigger;
+            trigger.range_percent = 63.0f;
             trigger.enabled = true;
             trigger.fire_mode = TriggerFireMode::AUTOMATIC;
             trigger.head_width_percent = 37.5f;
@@ -1521,6 +1529,7 @@ void test_trigger_startup_and_final_metadata() {
         expect(csv.find("# trigger,\"" + escaped + "\"") != std::string::npos,
                "CSV和JSON输出同一份完整Trigger元数据");
         expect(metadata.find("\"schema\":1") != std::string::npos &&
+               metadata.find("\"range_percent\":63") != std::string::npos &&
                metadata.find("\"fire_delay_ms\":43") != std::string::npos &&
                metadata.find("\"shot_interval_ms\":157") != std::string::npos &&
                metadata.find("\"head_width_percent\":37.5") != std::string::npos &&

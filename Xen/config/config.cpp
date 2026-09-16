@@ -621,6 +621,7 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"aim", "max_prediction_lead_percent"},
         {"aim", "predicted_gain"},
         {"trigger", "general_width_percent"},
+        {"trigger", "range_percent"},
         {"trigger", "general_height_percent"},
         {"trigger", "min_confidence"}, {"recoil", "sensitivity"},
     };
@@ -1018,12 +1019,28 @@ bool validate_app_config(const AppConfig& config,
         if (recoil.budget_window_ms < 1 || recoil.budget_window_ms > 100 ||
             recoil.max_observation_age_ms < 1 || recoil.max_observation_age_ms > 500 || recoil.input_path != "kmbox_net" ||
             !std::isfinite(recoil.sensitivity) || recoil.sensitivity < 0 ||
-            recoil.fire_mode != "automatic" ||
-            (recoil.enabled && (config.mouse.backend != MouseBackend::KMBOX_NET ||
-                !config.gsi.enabled || !config.source_context.enabled || recoil.sensitivity <= 0 ||
-                recoil.game_build.empty() || recoil.conditions.empty() || recoil.profile_directory.empty() ||
-                (recoil.use_trial && recoil.trial_file.empty())))) {
-            error = "压枪配置需要GSI、源焦点和明确校准条件"; return false;
+            recoil.fire_mode != "automatic") {
+            error = "压枪参数非法：检查时间范围、kmbox_net输入路径、灵敏度和automatic模式"; return false;
+        }
+        if (recoil.enabled) {
+            std::string missing;
+            const auto require = [&missing](bool present, const char* label) {
+                if (present) return;
+                if (!missing.empty()) missing += "、";
+                missing += label;
+            };
+            require(config.mouse.backend == MouseBackend::KMBOX_NET, "KMBOX NET后端");
+            require(config.gsi.enabled, "启用GSI");
+            require(config.source_context.enabled, "启用源焦点");
+            require(recoil.sensitivity > 0, "游戏灵敏度");
+            require(!recoil.game_build.empty(), "游戏版本");
+            require(!recoil.conditions.empty(), "适用条件");
+            require(!recoil.profile_directory.empty(), "曲线目录");
+            require(!recoil.use_trial || !recoil.trial_file.empty(), "固定版本覆盖文件");
+            if (!missing.empty()) {
+                error = "压枪配置缺项：" + missing + "；匹配条件见辅助/自动压枪，连接见设置";
+                return false;
+            }
         }
         if (config.gsi.enabled && !weapon::valid_config(config.gsi)) {
             error = "GSI绑定地址、来源限制或接收参数非法"; return false;
@@ -1111,6 +1128,7 @@ bool load_app_config(const std::string& path,
         candidate.source_context.ttl_ms = static_cast<int>(ini.GetLongValue("source_context", "ttl_ms", 200));
         // 旧首发延迟、独立节奏与头身缩放不再覆盖统一生产契约。
         candidate.trigger = AppConfig{}.trigger;
+        candidate.trigger.range_percent = static_cast<float>(ini.GetDoubleValue("trigger", "range_percent", candidate.trigger.range_percent));
         candidate.trigger.general_class_ids = parse_int_list(ini.GetValue("trigger", "general_class_ids"), {});
         candidate.trigger.enabled = ini.GetBoolValue("trigger", "enabled", false);
         candidate.trigger.fire_enabled = ini.GetBoolValue("trigger", "fire_enabled", true);
@@ -1587,6 +1605,7 @@ bool save_app_config(const std::string& path,
         ini.SetLongValue("source_context", "ttl_ms", config.source_context.ttl_ms);
         ini.SetValue("trigger", "general_class_ids", format_int_list(config.trigger.general_class_ids).c_str());
         ini.SetBoolValue("trigger", "enabled", config.trigger.enabled);
+        ini.SetDoubleValue("trigger", "range_percent", config.trigger.range_percent);
         ini.SetBoolValue("trigger", "fire_enabled", config.trigger.fire_enabled);
         ini.SetBoolValue("trigger", "require_stop", config.trigger.require_stop);
         ini.SetBoolValue("trigger", "allow_estimated_stop", config.trigger.allow_estimated_stop);

@@ -89,6 +89,24 @@ void full_detection_bounds() {
     expect(outside.observe(o, permit(), at(1)).button_action == TriggerButtonAction::NONE,
         "矩形外不因范围统一获得资格");
 }
+void configured_range() {
+    auto cfg = config(); cfg.fire_delay_ms = 0;
+    cfg.head_width_percent = cfg.head_height_percent = 100;
+    cfg.body_width_percent = cfg.body_height_percent = 100;
+    cfg.range_percent = 50;
+    auto o = frame(1); o.center_x = 175.01f;
+    TriggerController outside; arm(outside, cfg);
+    expect(outside.observe(o, permit(), at(1)).button_action == TriggerButtonAction::NONE,
+        "50%范围拒绝框内但位于中央一半以外的准星");
+    o.center_x = 175; o.center_y = 175;
+    TriggerController edge; arm(edge, cfg);
+    expect(edge.observe(o, permit(), at(1)).button_action == TriggerButtonAction::DOWN,
+        "50%范围包含中央矩形边角且不增加首发等待");
+    for (const float invalid : {0.0f, 100.01f, std::numeric_limits<float>::quiet_NaN()}) {
+        cfg.range_percent = invalid;
+        expect(!valid_trigger_config(cfg), "范围必须有限且位于1到100%，不允许框外开火");
+    }
+}
 void association() {
     TriggerController c; arm(c);
     auto o = frame(1);
@@ -404,7 +422,7 @@ void estimated_stop_is_explicit_and_parallel() {
 int main() {
     weapon_timing_submission_and_cleanup(); estimated_stop_is_explicit_and_parallel();
     fire_disabled_preserves_qualification_and_stop();
-    geometry_and_timing(); full_detection_bounds(); association(); permissions_and_receipts(); stop_and_automatic();
+    geometry_and_timing(); full_detection_bounds(); configured_range(); association(); permissions_and_receipts(); stop_and_automatic();
     weapon_context_cancels_qualification(); weapon_context_invalidity_and_held_cleanup();
     auto bad = config(); bad.person_class_ids.push_back(1);
     expect(!valid_trigger_config(bad), "头身映射相交必须拒绝");

@@ -321,8 +321,15 @@ int wmain(int argc, wchar_t** argv) {
                     "辅助卡片仍显示已移除的重复设置");
                 save_window(capture, output / file_name);
             };
-            check_panel("trigger_panel", "trigger_form", "完整有效头部或人体检测框", "auxiliary-trigger.png");
-            check_panel("recoil_panel", "recoil_settings", "曲线校准、强度编辑与匹配配置", "auxiliary-recoil.png");
+            check_panel("trigger_panel", "trigger_form", "触发范围 / %", "auxiliary-trigger.png");
+            check_panel("recoil_panel", "recoil_settings", "配置缺项", "auxiliary-recoil.png");
+            auto* recoil_card = preview_window("recoil_panel");
+            ImGui::SetScrollY(recoil_card, recoil_card->ScrollMax.y); frame(); frame();
+            require(capture.text.find("游戏版本") != std::string::npos &&
+                capture.text.find("适用条件") != std::string::npos &&
+                capture.text.find("游戏灵敏度") != std::string::npos,
+                "主压枪页必须呈现可填写的校准匹配条件");
+            save_window(capture, output / "auxiliary-recoil-settings.png");
             // 只进入本次变更的两个调试标签，不运行旧版完整导航流程。
             input.position = {70, 36.f + 12.f + 21.f + 6.f * (42.f + ImGui::GetStyle().ItemSpacing.y)};
             frame(); input.down = true; frame(); input.down = false; frame(); frame();
@@ -360,13 +367,9 @@ int wmain(int argc, wchar_t** argv) {
                 "扳机调试缺少有效性与联动控制");
             save_window(capture, output / "trigger-debug-bottom.png");
             select_debug_tab("弹道工具", "武器点射资料", "recoil-tools.png");
-            auto* recoil_tabs = ImGui::GetCurrentContext()->TabBars.GetByKey(content->GetID("debug_tabs"));
-            content->StateStorage.SetInt(ImHashStr("压枪校准匹配配置", 0, recoil_tabs->SelectedTabId), 1);
-            content->StateStorage.SetInt(content->GetID("压枪校准匹配配置"), 1);
-            frame(); frame();
             ImGui::SetScrollY(content, content->ScrollMax.y); frame(); frame();
-            require(capture.text.find("压枪校准匹配配置") != std::string::npos,
-                "弹道工具缺少可恢复的校准配置入口");
+            require(capture.text.find("辅助 / 自动压枪") != std::string::npos,
+                "弹道工具必须指向主压枪页的匹配配置");
             save_window(capture, output / "recoil-tools-bottom.png");
             ImGui::RemoveContextHook(ImGui::GetCurrentContext(),capture_hook_id);
             ImGui::RemoveContextHook(ImGui::GetCurrentContext(),frame_hook_id);

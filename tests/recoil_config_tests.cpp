@@ -17,6 +17,12 @@ int main() {
         config.source_context.port = 5014; config.source_context.process_name = "synthetic.exe";
         config.recoil.sensitivity = 1.25; config.recoil.game_build = "synthetic"; config.recoil.conditions = "synthetic_standing";
         check(validate_app_config(config, error), error.c_str());
+        auto missing = config;
+        missing.recoil.game_build.clear(); missing.recoil.conditions.clear();
+        check(!validate_app_config(missing, error) && error.find("游戏版本") != std::string::npos &&
+            error.find("适用条件") != std::string::npos && error.find("GSI") == std::string::npos &&
+            error.find("源焦点") == std::string::npos,
+            "已配置GSI和源焦点时仅指出实际缺少的游戏版本与适用条件");
         check(save_app_config(path.string(), config, error), error.c_str());
         AppConfig loaded;
         check(load_app_config(path.string(), loaded, error), error.c_str());

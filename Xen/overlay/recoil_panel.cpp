@@ -410,7 +410,22 @@ struct RecoilPanel::Impl {
             ImGui::Checkbox("##recoil_mixed", &c.mixed_aim);
             ImGui::EndTable();
         }
-        ImGui::TextWrapped("曲线校准、强度编辑与匹配配置见调试 / 弹道工具。");
+        std::string missing;
+        const auto require = [&missing](bool valid, const char* name) {
+            if (valid) return;
+            if (!missing.empty()) missing += "、";
+            missing += name;
+        };
+        require(config.mouse.backend == MouseBackend::KMBOX_NET, "KMBOX NET 后端（设置）");
+        require(config.gsi.enabled, "启用 GSI（设置 / GSI自动武器识别配置）");
+        require(config.source_context.enabled, "启用源端焦点（设置）");
+        require(std::isfinite(c.sensitivity) && c.sensitivity > 0, "游戏灵敏度");
+        require(!c.game_build.empty(), "游戏版本");
+        require(!c.conditions.empty(), "适用条件");
+        require(!c.profile_directory.empty(), "曲线目录");
+        require(!c.use_trial || !c.trial_file.empty(), "覆盖文件");
+        if (!missing.empty()) ImGui::TextWrapped("配置缺项：%s。填写下方匹配配置；连接设置见括号位置。", missing.c_str());
+        ImGui::TextWrapped("GSI 自动识别武器；执行仍需匹配的已校准曲线。导入曲线的校准、强度编辑和活动版本选择见调试 / 弹道工具。");
         ImGui::TextWrapped("武器：%s（%s）", weapon::display_name(snapshot.weapon_snapshot.canonical_id).data(),
             weapon::status_name(snapshot.weapon_snapshot.status));
         if (!snapshot.recoil_profile_status.empty()) ImGui::TextWrapped("曲线匹配：%s", snapshot.recoil_profile_status.c_str());
@@ -421,7 +436,7 @@ struct RecoilPanel::Impl {
     }
     void calibration_settings(AppConfig& config) {
         auto& c = config.recoil;
-        if (!ImGui::CollapsingHeader("压枪校准匹配配置")) return;
+        if (!ImGui::CollapsingHeader("压枪校准匹配配置", ImGuiTreeNodeFlags_DefaultOpen)) return;
         if (form("recoil_calibration_settings")) {
             row("曲线目录", "新配置默认使用cache/recoil/profiles；旧配置中的自定义目录保留。只加载活动索引或固定版本覆盖，新文件不会自动激活。");
             ImGui::InputText("##recoil_directory", &c.profile_directory);
@@ -707,6 +722,7 @@ void RecoilPanel::render(const RuntimeSnapshot& snapshot, AppConfig& config, boo
         if (busy()) { ImGui::TextUnformatted("弹道任务正在后台处理；完成后可继续编辑。"); return; }
         DisabledScope disabled(!can_edit || busy());
         impl_->settings(snapshot, config);
+        impl_->calibration_settings(config);
         if (!snapshot.recoil_archive.error.empty()) ImGui::TextWrapped("射击归档异常：%s；详细状态见调试 / 运行诊断。", snapshot.recoil_archive.error.c_str());
         if (!impl_->status.empty()) ImGui::TextWrapped("%s", impl_->status.c_str());
     } catch (...) { impl_->status = "弹道面板操作失败；请检查文件与数据。"; }
@@ -740,9 +756,7 @@ void RecoilPanel::render_tools(const RuntimeSnapshot& snapshot, AppConfig& confi
             return;
         }
         impl_->timing_settings(snapshot, config, can_edit);
-        { DisabledScope disabled(!can_edit || busy());
-            impl_->calibration_settings(config);
-        }
+        ImGui::TextWrapped("曲线目录、游戏版本、灵敏度和适用条件在辅助 / 自动压枪中配置。");
         { DisabledScope disabled(!can_edit || busy());
             ImGui::Checkbox("打开弹道编辑与优化", &impl_->show_editor);
             help("展开曲线草稿、人工校准与离线优化工具；不会自动加载、激活或执行曲线。");

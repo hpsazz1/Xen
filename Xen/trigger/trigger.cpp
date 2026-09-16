@@ -54,7 +54,7 @@ std::size_t anchor_index(const TriggerConfig& config, const TriggerObservation& 
 
 bool valid_trigger_config(const TriggerConfig& c) noexcept {
     if (c.hold_virtual_key < 0 || c.hold_virtual_key > 255 || c.hold_virtual_key == 1 ||
-        !percent(c.head_width_percent) || !percent(c.head_height_percent) ||
+        !percent(c.range_percent) || !percent(c.head_width_percent) || !percent(c.head_height_percent) ||
         !percent(c.body_width_percent) || !percent(c.body_height_percent) ||
         !percent(c.general_width_percent) || !percent(c.general_height_percent) ||
         !std::isfinite(c.min_confidence) || c.min_confidence < 0.0f || c.min_confidence > 1.0f ||
@@ -187,11 +187,12 @@ bool TriggerController::select_candidate(const TriggerObservation& observation, 
             region == TriggerRegion::BODY ? config_.body_width_percent : config_.general_width_percent;
         const float height = region == TriggerRegion::HEAD ? config_.head_height_percent :
             region == TriggerRegion::BODY ? config_.body_height_percent : config_.general_height_percent;
+        const double scale = config_.range_percent / 100.0;
         const double dx = (observation.center_x - (static_cast<double>(box.x1) + box.x2) / 2.0) /
-            ((static_cast<double>(box.x2) - box.x1) * width / 200.0);
+            ((static_cast<double>(box.x2) - box.x1) * width * scale / 200.0);
         const double dy = (observation.center_y - (static_cast<double>(box.y1) + box.y2) / 2.0) /
-            ((static_cast<double>(box.y2) - box.y1) * height / 200.0);
-        // 与自动急停使用同一矩形范围；不再把框内角部误判成未到位。
+            ((static_cast<double>(box.y2) - box.y1) * height * scale / 200.0);
+        // 围绕检测框中心等比缩小；100%沿用完整矩形，不扩大到框外。
         const double distance = std::max(std::abs(dx), std::abs(dy));
         if (distance > 1.0) continue;
         const float margin = static_cast<float>(1.0 - distance);

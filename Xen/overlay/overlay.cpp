@@ -3061,7 +3061,7 @@ struct Overlay::Impl {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         render_trigger_config(snapshot, app_config, can_edit, key_active);
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        begin_config_panel("recoil_panel", "自动压枪", 190.0f);
+        begin_config_panel("recoil_panel", "自动压枪", 440.0f);
         recoil_panel.render(snapshot, app_config, can_edit);
         end_config_panel();
     }
@@ -3069,8 +3069,8 @@ struct Overlay::Impl {
     void render_trigger_config(const RuntimeSnapshot& snapshot, AppConfig& app_config,
             bool can_edit, const std::array<bool, 256>& key_active) {
         auto& trigger = app_config.trigger;
-        begin_config_panel("trigger_panel", "自动扳机", 230.0f);
-        ImGui::TextWrapped("准星进入任一完整有效头部或人体检测框即判断开火，与自动急停使用相同范围；按共享GSI武器资料点射。检测框不保证弹道命中。");
+        begin_config_panel("trigger_panel", "自动扳机", 285.0f);
+        ImGui::TextWrapped("准星进入有效头部或人体检测框的设定范围即判断开火；100%%覆盖完整目标框，按共享GSI武器资料点射。检测框不保证弹道命中。");
         ImGui::BeginDisabled(!can_edit);
         if (begin_form("trigger_form", 150.0f)) {
             form_row("启用自动扳机", "默认关闭；启用后仍需全局武装、按住绑定键、健康输入、源端焦点与有效图像。启用GSI时还需有效武器上下文；切枪或失效会取消旧会话，恢复后须松键再按下。仅支持 KMBOX NET。");
@@ -3083,6 +3083,8 @@ struct Overlay::Impl {
                 trigger.hold_virtual_key == 0 ? std::vector<int>{} : std::vector<int>{trigger.hold_virtual_key}, key_active);
             form_row("要求急停联动", "开启后等待所选急停完成策略；关闭仅做几何扳机，不保证角色已停稳。");
             toggle_switch("##trigger_require_stop", &trigger.require_stop);
+            form_row("触发范围 / %", "以检测框中心等比缩小宽高，100%为完整目标框；1%到100%，只允许框内触发。到达范围不追加首发等待，急停联动与有效输入条件仍须满足。停止运行后修改生效。");
+            slider_float_control("trigger_range", &trigger.range_percent, 1.0f, 100.0f, "%.0f");
             ImGui::EndTable();
         }
         ImGui::EndDisabled();
@@ -3145,7 +3147,7 @@ struct Overlay::Impl {
             }
             form_row("通用内域宽 / %", "只作用于上方显式通用类别；空类别列表时无效，不改变头部或人体内域。");
             slider_float_control("trigger_general_width", &trigger.general_width_percent, 1.0f, 100.0f, "%.0f");
-            form_row("通用内域高 / %", "通用检测框中心椭圆的高占比，不能从未知类别推断头身身份。");
+            form_row("通用内域高 / %", "通用检测框中央矩形的高占比，另受触发范围比例约束，不能从未知类别推断头身身份。");
             slider_float_control("trigger_general_height", &trigger.general_height_percent, 1.0f, 100.0f, "%.0f");
             form_row("最低置信度", "在检测器过滤后进一步筛选；不能恢复已被检测器剔除的框。类别映射沿用瞄准页的模型类别设置。");
             slider_float_control("trigger_confidence", &trigger.min_confidence, 0.0f, 1.0f, "%.2f");
