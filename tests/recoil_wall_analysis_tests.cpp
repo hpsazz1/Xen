@@ -1,8 +1,14 @@
 #include "recoil_tuner/wall_capture_analysis.h"
+#include "recoil_tuner/wall_registration_internal.h"
 #include <opencv2/imgproc.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <iostream>
 #include <cmath>
 #include <chrono>
+#include <algorithm>
+#include <numeric>
+#include <fstream>
+#include <nlohmann/json.hpp>
 using namespace recoil_tuner;
 namespace {
 int failures=0;
@@ -18,7 +24,48 @@ std::vector<WallFrame> frames(){
  return {{0,base},{20,base.clone()},{40,a},{60,a.clone()},{80,b}};
 }
 }
-int main(){
+int main(int argc,char** argv){
+ if(argc==3&&std::string(argv[1])=="--registration-replay"){
+  const std::filesystem::path path=argv[2];std::ifstream input(path);nlohmann::json report;input>>report;
+  const auto before=cv::imread((path.parent_path()/report.at("frames").at(0).at("file").get<std::string>()).string());
+  nlohmann::json rows=nlohmann::json::array();
+  const auto inspect=[&](const std::string& file){
+   const auto after=cv::imread((path.parent_path()/file).string());
+   const auto r=detail::register_wall(before,after,{40,40,80,80});
+   rows.push_back({{"file",file},{"failure",r.failure},{"shift",{r.shift.x,r.shift.y}},
+    {"response",r.response},{"residual",r.residual},{"peak_separation",r.peak_separation}});
+  };
+  for(std::size_t i=1;i<report.at("frames").size();++i)inspect(report.at("frames").at(i).at("file"));
+  if(report.contains("registration_failure")&&report.at("registration_failure").contains("image_file"))
+   inspect(report.at("registration_failure").at("image_file"));
+  std::cout<<rows.dump(2)<<'\n';return 0;
+ }
+ if(argc==2&&std::string(argv[1])=="--registration-benchmark"){
+  const auto fixtures=std::filesystem::path(__FILE__).parent_path()/"fixtures/recoil_registration";
+  const auto a=cv::imread((fixtures/"reference.png").string()),b=cv::imread((fixtures/"shot-b.png").string());
+  if(a.empty()||b.empty())return 1;
+  for(bool legacy:{true,false}){
+   std::vector<double> times;int rejected=0;
+   for(int i=-20;i<200;++i){
+    const auto start=std::chrono::steady_clock::now();bool valid=false;
+    if(legacy){
+     cv::Mat af,bf,window;cv::cvtColor(a(cv::Rect(40,40,80,80)),af,cv::COLOR_BGR2GRAY);
+     cv::cvtColor(b(cv::Rect(40,40,80,80)),bf,cv::COLOR_BGR2GRAY);
+     af.convertTo(af,CV_64F);bf.convertTo(bf,CV_64F);cv::createHanningWindow(window,af.size(),CV_64F);
+     double response=0;const auto shift=cv::phaseCorrelate(af,bf,window,&response);
+     valid=response>=0.5&&std::abs(shift.x)<=24&&std::abs(shift.y)<=24;
+    }else valid=detail::register_wall(a,b,{40,40,80,80}).failure.empty();
+    const auto elapsed=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+    if(i>=0){times.push_back(elapsed);if(!valid)++rejected;}
+   }
+   std::sort(times.begin(),times.end());
+   std::cout<<(legacy?"legacy":"bounded")<<" n=200 rejected="<<rejected<<" mean_ms="
+    <<std::accumulate(times.begin(),times.end(),0.0)/times.size()<<" p50="<<times[99]
+    <<" p95="<<times[189]<<" p99="<<times[197]<<" max="<<times.back()<<'\n';
+  }
+  return 0;
+ }
+
  auto r=request();auto f=frames();auto result=analyze_wall_capture(f,r);
  expect(result.valid&&result.candidate.has_value(),"无既有曲线也能生成候选");
  if(result.candidate){auto& p=*result.candidate;expect(p.state==RecoilProfileState::SCHEMA_VALID&&!p.phase_tolerance_ms&&!p.recovery_ms&&p.calibration.evidence.empty(),"不伪造校准声明");
@@ -53,6 +100,45 @@ int main(){
  const cv::Mat boundary_transform=(cv::Mat_<double>(2,3)<<1,0,130,0,1,0);
  cv::warpAffine(wide,wide_shift,boundary_transform,wide.size(),cv::INTER_LINEAR,cv::BORDER_REFLECT_101);
  expect(!analyze_wall_capture({{0,wide},{40,wide_shift}},wide_request).valid,"超过ROI30%边缘拒绝外推");
+ // 真实失败帧必须通过生产分析接口复现，不用无射击标定帧代替。
+ const auto fixtures=std::filesystem::path(__FILE__).parent_path()/"fixtures/recoil_registration";
+ const auto shot_reference=cv::imread((fixtures/"reference.png").string());
+ auto shot_request=camera_request;shot_request.image.registration_roi={40,40,80,80};
+ shot_request.image.reference={160,160};
+ for(const auto* name:{"shot-a.png","shot-b.png"}){
+  const auto shot=cv::imread((fixtures/name).string());
+  const auto reference=std::string(name)=="shot-a.png"?cv::imread((fixtures/"reference-a.png").string()):shot_reference;
+  auto observed=analyze_wall_capture({{0,reference},{120,shot}},shot_request);
+  if(!observed.valid)std::cerr<<name<<": "<<observed.message<<'\n';
+  expect(observed.valid,"真实开枪帧在原ROI30%范围内必须能匹配对应背景");
+  if(observed.valid)expect(std::abs(observed.observations.back().center.x-163.5)<0.6&&
+   std::abs(observed.observations.back().center.y-183.3)<0.6,"真实图像对应文字位移必须一致，不能仅提高响应");
+ }
+ const auto preceding=cv::imread((fixtures/"shot-before-a.png").string());
+ const auto preceding_reference=cv::imread((fixtures/"reference-a.png").string());
+ expect(analyze_wall_capture({{0,preceding_reference},{100,preceding}},shot_request).valid,
+  "真实失败前段图也须通过，不能只修最后一帧的相关响应");
+ // 对错误对应保持拒绝：高频多解、无关图像、局部遮挡和真实边界。
+ cv::Mat periodic(320,320,CV_8UC1);
+ for(int y=0;y<periodic.rows;++y)for(int x=0;x<periodic.cols;++x)
+  periodic.at<unsigned char>(y,x)=static_cast<unsigned char>(((x/4+y/4)%2)*180+30);
+ expect(!analyze_wall_capture({{0,periodic},{40,periodic.clone()}},shot_request).valid,"周期多解不能因相位响应高而放行");
+ cv::Mat tiled(320,320,CV_8UC1),tile(16,16,CV_32F);cv::RNG tiled_random(33);
+ tiled_random.fill(tile,cv::RNG::UNIFORM,-30,30);
+ for(int y=0;y<tiled.rows;++y){const double row_noise=tiled_random.gaussian(2);
+  for(int x=0;x<tiled.cols;++x)tiled.at<unsigned char>(y,x)=cv::saturate_cast<unsigned char>(
+   tile.at<float>(y%16,x%16)+0.7*x+row_noise+tiled_random.gaussian(0.1)+30);}
+ expect(!analyze_wall_capture({{0,tiled},{40,tiled.clone()}},shot_request).valid,
+  "最强竞争峰残差不通过也不能漏掉后续满足残差的周期异解");
+ cv::Mat unrelated(camera_base.size(),camera_base.type());camera_random.fill(unrelated,cv::RNG::UNIFORM,0,255);
+ expect(!analyze_wall_capture({{0,camera_base},{40,unrelated}},camera_request).valid,"独立随机画面不得作为背景平移");
+ auto occluded=moved.clone();occluded(camera_request.image.registration_roi).setTo(128);
+ expect(!analyze_wall_capture({{0,camera_base},{40,occluded}},camera_request).valid,"背景被遮挡必须停止");
+ auto edge_request=camera_request;edge_request.image.registration_roi={0,0,64,64};
+ expect(!analyze_wall_capture({{0,camera_base},{40,moved}},edge_request).valid,"中点两侧插值不得借边缘复制补造内容");
+ const auto unmodified=shot_reference.clone();
+ (void)analyze_wall_capture({{0,shot_reference},{40,shot_reference}},shot_request);
+ expect(cv::norm(shot_reference,unmodified,cv::NORM_INF)==0,"配准不得原地修改输入图像");
  const auto directory=std::filesystem::temp_directory_path()/("xen-wall-tests-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
  std::filesystem::create_directories(directory);
  expect(save_wall_report(directory/"measurement.json",result,error),"报告独立保存");

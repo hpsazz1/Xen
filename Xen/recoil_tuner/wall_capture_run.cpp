@@ -1,4 +1,5 @@
 #include "recoil_tuner/wall_capture_run.h"
+#include "recoil_tuner/wall_registration_internal.h"
 #include "recoil/recoil_calibration.h"
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
@@ -22,6 +23,7 @@ std::int64_t nanoseconds(Clock::time_point value) {
 struct StoredFrame { CapturedFrame frame; Clock::time_point received; cv::Size input_size; };
 Json geometry_json(const StoredFrame& saved) {
     return {{"processing", "wall_processing_v1_max960x540_area"},
+        {"registration", detail::kWallRegistration},
         {"input_size", {saved.input_size.width, saved.input_size.height}},
         {"processing_size", {saved.frame.bgr.cols, saved.frame.bgr.rows}},
         {"source_size", {saved.frame.source_width, saved.frame.source_height}},
@@ -53,12 +55,6 @@ void write_json(const std::filesystem::path& path, const Json& value) {
     file << value.dump(2); file.close();
     if (!file) throw std::runtime_error("采集报告写入失败");
     std::filesystem::rename(temporary, path);
-}
-cv::Mat gray_float(const cv::Mat& image) {
-    cv::Mat gray, result;
-    if (image.channels() == 1) gray = image;
-    else cv::cvtColor(image, gray, image.channels() == 4 ? cv::COLOR_BGRA2GRAY : cv::COLOR_BGR2GRAY);
-    gray.convertTo(result, CV_64F); return result;
 }
 bool pressed(const InputSnapshot& input, int key) { return key > 0 && key < 256 && input.virtual_keys[key]; }
 }
@@ -172,32 +168,25 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
                                 buffer.recovery_action = "recalibrate";
                                 buffer.error = "采集区域或图像几何发生变化，请重新标定"; break;
                             }
-                            const auto a = gray_float(buffer.reference(roi)), b = gray_float(frame.bgr(roi));
-                            cv::Mat window; cv::createHanningWindow(window, a.size(), CV_64F);
-                            cv::Scalar mean, deviation; cv::meanStdDev(a, mean, deviation);
-                            double response = 0;
-                            const auto shift = cv::phaseCorrelate(a, b, window, &response);
-                            // 只以观测ROI比例判断是否仍能注册，不用固定速度档。
-                            std::string reason;
-                            if (deviation[0] < 5) {
-                                reason = "insufficient_texture";
-                                buffer.error = "背景纹理不足，已停止本组；请换有清晰细节的固定靶面，重新标定后采集";
-                            } else if (!std::isfinite(shift.x) || !std::isfinite(shift.y) || !std::isfinite(response)) {
-                                reason = "nonfinite_registration";
-                                buffer.error = "背景匹配结果无效，已停止本组；请重新对准固定靶面并标定";
-                            } else if (response < 0.5) {
-                                reason = "unreliable_registration";
-                                buffer.error = "背景匹配不可靠，已停止本组；请换清晰且非重复的固定靶面，重新标定后采集";
-                            } else if (std::abs(shift.x) / roi.width > 0.30 || std::abs(shift.y) / roi.height > 0.30) {
-                                reason = "registration_range_exceeded";
-                                buffer.error = "背景位移接近观测范围边缘，已停止本组；请重新对准并减少本阶段发数";
-                            }
+                            const auto registration=detail::register_wall(buffer.reference,frame.bgr,roi);
+                            const auto shift=registration.shift;
+                            const auto response=registration.response;
+                            const auto& reason=registration.failure;
+                            if(reason=="insufficient_texture")
+                                buffer.error="背景纹理不足，已停止本组；请换有清晰细节的固定靶面，重新标定后采集";
+                            else if(reason=="registration_range_exceeded")
+                                buffer.error="背景位移接近观测范围边缘，已停止本组；请重新对准并减少本阶段发数";
+                            else if(!reason.empty())
+                                buffer.error="背景匹配不可靠，已停止本组；请重新对准固定靶面并标定";
                             if (!reason.empty()) {
                                 buffer.recovery_action = reason == "registration_range_exceeded" ? "reduce_shots" : "recalibrate";
                                 const auto number = [](double value) { return std::isfinite(value) ? Json(value) : Json(nullptr); };
                                 buffer.registration_failure = {{"reason",reason},{"sequence",frame.timing.sequence},
-                                    {"texture_stddev",number(deviation[0])},{"response",number(response)},
-                                    {"shift_pixels",{number(shift.x),number(shift.y)}},{"roi",{roi.x,roi.y,roi.width,roi.height}}};
+                                    {"texture_stddev",number(registration.texture_stddev)},{"response",number(response)},
+                                    {"shift_pixels",{number(shift.x),number(shift.y)}},{"roi",{roi.x,roi.y,roi.width,roi.height}},
+                                    {"method",detail::kWallRegistration},{"midpoint_residual",number(registration.residual)},
+                                    {"template_score",number(registration.template_score)},
+                                    {"peak_separation",number(registration.peak_separation)}};
                                 // 首枪可能早于30Hz归档间隔失败；保留已拥有的本帧，释放后独立落盘，不进入训练序列。
                                 buffer.registration_failure_frame = buffer.latest;
                                 break;
@@ -299,11 +288,10 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
                 if ((roi & cv::Rect(0, 0, before.frame.bgr.cols, before.frame.bgr.rows)) != roi || roi.width < 32 || roi.height < 32 ||
                     before.frame.bgr.size() != after.frame.bgr.size() || after.received <= receipt.backend_completed_at)
                     throw std::runtime_error("标定图像区域、几何或时间无效");
-                auto a = gray_float(before.frame.bgr(roi)), b = gray_float(after.frame.bgr(roi));
-                cv::Scalar mean, deviation; cv::meanStdDev(a, mean, deviation);
-                cv::Mat window; cv::createHanningWindow(window, a.size(), CV_64F);
-                double response = 0; const auto delta = cv::phaseCorrelate(a, b, window, &response);
-                if (deviation[0] < 5 || !std::isfinite(delta.x) || !std::isfinite(delta.y) || !std::isfinite(response) || response < 0.5 || cv::norm(delta) > 64)
+                const auto registration=detail::register_wall(before.frame.bgr,after.frame.bgr,roi,{64,64});
+                const auto delta=registration.shift;
+                const auto response=registration.response;
+                if(!registration.failure.empty() || cv::norm(delta)>64)
                     throw std::runtime_error("墙面纹理或标定配准不足，请选择有纹理的固定墙面");
                 const auto id = std::to_string(result.calibration.size() + 1);
                 result.calibration.push_back({{static_cast<double>(command.dx_counts), static_cast<double>(command.dy_counts)},

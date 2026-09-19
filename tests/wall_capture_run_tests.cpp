@@ -1,5 +1,6 @@
 #include "recoil_tuner/wall_capture_run.h"
 #include <atomic>
+#include <opencv2/imgcodecs.hpp>
 #include <filesystem>
 #include <iostream>
 #include <thread>
@@ -26,6 +27,23 @@ public:
     CaptureStatus status() const noexcept override { return CaptureStatus::READY; }
     std::string last_error() const override { return {}; }
 private: std::uint64_t sequence_ = 0; cv::Mat image_; std::function<bool()> lose_;
+};
+class RecordedCapture final : public ICapture {
+public:
+    RecordedCapture(cv::Mat before,cv::Mat after,std::function<bool()> fired)
+        : before_(std::move(before)),after_(std::move(after)),fired_(std::move(fired)) {}
+    bool open() noexcept override{return !before_.empty()&&!after_.empty();}
+    CaptureStatus grab(CapturedFrame& frame) noexcept override {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        frame.bgr=fired_()?after_:before_;frame.width=frame.bgr.cols;frame.height=frame.bgr.rows;
+        frame.timing.sequence=++sequence_;frame.timing.captured_at=std::chrono::steady_clock::now();
+        return CaptureStatus::FRAME;
+    }
+    void close() noexcept override{}
+    CaptureStatus status() const noexcept override{return CaptureStatus::READY;}
+    std::string last_error() const override{return {};}
+private:
+    cv::Mat before_,after_;std::function<bool()> fired_;std::uint64_t sequence_=0;
 };
 class FakeDevice final : public IMouseController {
 public:
@@ -107,6 +125,20 @@ int main() {
     check(result.completed && !result.cleanup_unknown, "正常ACK的DOWN清理债务不得当作失败");
     check(device->downs == 1 && device->ups == 1 && !device->down, "完成必须单次DOWN和UP");
     check(!result.frames.empty() && std::filesystem::is_regular_file(request.output_directory / "run.json"), "图像与报告必须落盘");
+
+    const auto fixtures=std::filesystem::path(__FILE__).parent_path()/"fixtures/recoil_registration";
+    for(const auto* name:{"shot-a.png","shot-b.png","shot-before-a.png"}){
+        device=std::make_shared<FakeDevice>();request.output_directory=root/name;
+        const auto before=cv::imread((fixtures/(std::string(name)=="shot-b.png"?"reference.png":"reference-a.png")).string());
+        const auto after=cv::imread((fixtures/name).string());
+        request.capture_factory=[device,before,after](const CaptureConfig&){
+            return std::make_unique<RecordedCapture>(before,after,[device]{return device->ever_down.load();});
+        };
+        const auto replay=recoil_tuner::run_wall_capture(request,device,canceled);
+        check(replay.completed&&device->downs==1&&device->ups==1&&!device->down,
+            "真实开枪失败图回放必须完成有界采集并释放假设备");
+    }
+    request.capture_factory=[](const CaptureConfig&){return std::make_unique<FakeCapture>();};
 
     device = std::make_shared<FakeDevice>();
     request.output_directory = root / "focus-lost";

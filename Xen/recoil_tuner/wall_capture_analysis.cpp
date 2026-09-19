@@ -6,10 +6,12 @@
 #endif
 #include <Windows.h>
 #include "recoil_tuner/wall_capture_analysis.h"
+#include "recoil_tuner/wall_registration_internal.h"
 #include "recoil/recoil_calibration.h"
 #include <algorithm>
 #include <cmath>
 #include <set>
+#include <limits>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <opencv2/imgproc.hpp>
@@ -24,38 +26,104 @@ bool well_conditioned(const cv::Mat& m, double limit) {
 }
 bool camera_translation(const cv::Mat& before, const cv::Mat& after, const cv::Rect& roi,
     cv::Point2d& translation, std::string& error) {
-    if (before.empty() || before.size() != after.size() || before.type() != after.type() || before.depth() != CV_8U ||
-        (before.channels()!=1 && before.channels()!=3 && before.channels()!=4) || before.total()>33554432 ||
-        roi.width<32 || roi.height<32 || roi.x<0 || roi.y<0 ||
-        static_cast<std::int64_t>(roi.x)+roi.width>before.cols || static_cast<std::int64_t>(roi.y)+roi.height>before.rows) {
-        error="视角配准图像或背景区域无效。"; return false;
-    }
-    const auto grayscale=[](const cv::Mat& image) {
-        cv::Mat gray;
-        if(image.channels()==1) gray=image;
-        else cv::cvtColor(image,gray,image.channels()==3?cv::COLOR_BGR2GRAY:cv::COLOR_BGRA2GRAY);
-        return gray;
-    };
-    const auto a=grayscale(before),b=grayscale(after);
-    cv::Scalar mean,deviation; cv::meanStdDev(a(roi),mean,deviation);
-    if(deviation[0]<5) { error="背景纹理不足，不能建立视角配准。"; return false; }
-    cv::Mat af,bf,window; a(roi).convertTo(af,CV_64F); b(roi).convertTo(bf,CV_64F);
-    cv::createHanningWindow(window,af.size(),CV_64F);
-    double response=0; translation=cv::phaseCorrelate(af,bf,window,&response);
-    if(!finite(translation.x)||!finite(translation.y)||!finite(response)||response<0.5 ||
-        std::abs(translation.x)/roi.width>0.30 || std::abs(translation.y)/roi.height>0.30) {
-        error="背景观测失配或接近范围边缘，请减少本阶段弹数。"; return false;
-    }
-    // 配准背景不得借边界填充补造观测；比例边界与实时采集一致。
-    if(roi.x+translation.x<0 || roi.y+translation.y<0 ||
-        roi.x+roi.width+translation.x>before.cols || roi.y+roi.height+translation.y>before.rows) {
-        error="背景配准已超出实际图像边界。"; return false;
-    }
-    const cv::Mat transform=(cv::Mat_<double>(2,3)<<1,0,-translation.x,0,1,-translation.y);
-    cv::Mat aligned,difference;cv::warpAffine(b,aligned,transform,a.size(),cv::INTER_LINEAR,cv::BORDER_REFLECT_101);
-    cv::absdiff(a(roi),aligned(roi),difference);
-    if(cv::mean(difference)[0]>8) { error="平移后背景仍不一致，拒绝视角补偿候选。"; return false; }
+    const auto registration=detail::register_wall(before,after,roi);
+    translation=registration.shift;
+    if(!registration.failure.empty()) { error="背景配准失败："+registration.failure; return false; }
     return true;
+}
+}
+namespace detail {
+WallRegistration register_wall(const cv::Mat& before, const cv::Mat& after,
+        const cv::Rect& roi, cv::Size search_limit) {
+    WallRegistration result;
+    const auto reject=[&](const char* reason){result.failure=reason;return result;};
+    if(before.empty() || before.size()!=after.size() || before.type()!=after.type() ||
+        before.depth()!=CV_8U || (before.channels()!=1&&before.channels()!=3&&before.channels()!=4) ||
+        before.total()>33554432 || roi.width<32 || roi.height<32 || roi.x<0 || roi.y<0 ||
+        static_cast<std::int64_t>(roi.x)+roi.width>before.cols ||
+        static_cast<std::int64_t>(roi.y)+roi.height>before.rows)
+        return reject("invalid_registration_geometry");
+    const auto gray=[](const cv::Mat& image){
+        cv::Mat value;
+        if(image.channels()==1)value=image;
+        else cv::cvtColor(image,value,image.channels()==3?cv::COLOR_BGR2GRAY:cv::COLOR_BGRA2GRAY);
+        return value;
+    };
+    const auto a=gray(before),b=gray(after);
+    cv::Scalar mean,deviation;cv::meanStdDev(a(roi),mean,deviation);
+    result.texture_stddev=deviation[0];
+    if(result.texture_stddev<5)return reject("insufficient_texture");
+    const double limit_x=search_limit.width>0?search_limit.width:roi.width*0.30;
+    const double limit_y=search_limit.height>0?search_limit.height:roi.height*0.30;
+    const int left=std::max(0,roi.x-static_cast<int>(std::ceil(limit_x)));
+    const int top=std::max(0,roi.y-static_cast<int>(std::ceil(limit_y)));
+    const int right=std::min(a.cols,roi.x+roi.width+static_cast<int>(std::ceil(limit_x)));
+    const int bottom=std::min(a.rows,roi.y+roi.height+static_cast<int>(std::ceil(limit_y)));
+    cv::Mat scores;
+    cv::matchTemplate(b(cv::Rect(left,top,right-left,bottom-top)),a(roi),scores,cv::TM_CCOEFF_NORMED);
+    cv::Point peak;double best_score=0;cv::minMaxLoc(scores,nullptr,&best_score,nullptr,&peak);
+    // 5×5对应相位质心邻域；其外最强峰约束全部竞争位置，不只复核第二峰的残差。
+    const auto neighborhood=cv::Rect(peak.x-2,peak.y-2,5,5)&cv::Rect(0,0,scores.cols,scores.rows);
+    scores(neighborhood).setTo(-2);
+    double second_score=-2;cv::minMaxLoc(scores,nullptr,&second_score);
+    const double separation=best_score-second_score;
+    // NCC分离度是独立歧义契约，不是phase response；0.1由真实帧和周期负例验证。
+    if(second_score>-2 && separation<0.1){
+        result.template_score=best_score;result.peak_separation=separation;
+        return reject("ambiguous_registration");
+    }
+    cv::Mat af,window;a(roi).convertTo(af,CV_64F);
+    cv::createHanningWindow(window,roi.size(),CV_64F);
+    const auto evaluate=[&](cv::Point location){
+        WallRegistration candidate;candidate.texture_stddev=result.texture_stddev;
+        cv::Mat bf;b(cv::Rect(left+location.x,top+location.y,roi.width,roi.height)).convertTo(bf,CV_64F);
+        // OpenCV加窗可能原地修改浮点输入；每个候选独立持有参考副本。
+        auto reference=af.clone();
+        const auto fine=cv::phaseCorrelate(reference,bf,window,&candidate.response);
+        candidate.shift={left+location.x-roi.x+fine.x,top+location.y-roi.y+fine.y};
+        if(!finite(candidate.shift.x)||!finite(candidate.shift.y)||!finite(candidate.response))
+            candidate.failure="nonfinite_registration";
+        else if(candidate.response<0.5)candidate.failure="unreliable_registration";
+        else if(std::abs(candidate.shift.x)>limit_x || std::abs(candidate.shift.y)>limit_y)
+            candidate.failure="registration_range_exceeded";
+        if(!candidate.failure.empty())return candidate;
+        const cv::Point2f center(roi.x+(roi.width-1)*0.5f,roi.y+(roi.height-1)*0.5f);
+        const auto inside=[&](cv::Point2f c){
+            return c.x-(roi.width-1)*0.5>=0 && c.y-(roi.height-1)*0.5>=0 &&
+                c.x+(roi.width-1)*0.5<=a.cols-1 && c.y+(roi.height-1)*0.5<=a.rows-1;
+        };
+        const auto residual_at=[&](cv::Point2d shift){
+            const cv::Point2f half(static_cast<float>(shift.x*0.5),static_cast<float>(shift.y*0.5));
+            if(std::abs(shift.x)>limit_x || std::abs(shift.y)>limit_y ||
+                !inside(center-half)||!inside(center+half) ||
+                roi.x+shift.x<0 || roi.y+shift.y<0 ||
+                roi.x+roi.width+shift.x>a.cols || roi.y+roi.height+shift.y>a.rows)
+                return std::numeric_limits<double>::infinity();
+            // 两图都在中点空间插值，避免仅模糊当前图再与锐利参考图比较。
+            cv::Mat first,second,difference;
+            cv::getRectSubPix(a,roi.size(),center-half,first);
+            cv::getRectSubPix(b,roi.size(),center+half,second);
+            cv::absdiff(first,second,difference);return cv::mean(difference)[0];
+        };
+        candidate.residual=residual_at(candidate.shift);
+        if(!finite(candidate.residual)){
+            candidate.failure="invalid_registration_geometry";return candidate;
+        }
+        // 相位质心是初值；在每轴不到半像素邻域内最小化同一残差，不放宽8的验收阈值。
+        for(double step:{0.25,0.125,0.0625}){
+            const auto origin=candidate.shift;
+            for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x){
+                const cv::Point2d refined=origin+cv::Point2d(x*step,y*step);
+                const double residual=residual_at(refined);
+                if(residual<candidate.residual){candidate.shift=refined;candidate.residual=residual;}
+            }
+        }
+        if(candidate.residual>8)candidate.failure="inconsistent_registration";
+        return candidate;
+    };
+    result=evaluate(peak);
+    result.template_score=best_score;result.peak_separation=separation;
+    return result;
 }
 }
 bool fit_wall_calibration(const std::vector<WallCalibrationSample>& samples,double max_condition,
