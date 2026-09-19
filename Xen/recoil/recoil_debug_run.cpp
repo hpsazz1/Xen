@@ -234,6 +234,9 @@ Json run_recoil_debug(const Json& plan,const AppConfig& config,const std::shared
     result["archive_directory"]=utf8(directory/"batches");
     if(testing){
         result["base_profile_path"]=utf8(directory/"candidate.json");
+        // 历史载入须恢复同一阶段；锁定属于优化约束，绑定实际执行曲线而不是当前界面选择。
+        result["locked_prefix_ms"]=plan.value("locked_prefix_ms",0.0);
+        result["executed_profile_sha256"]=recoil_calibration_sha256(serialize_recoil_profile(*profile));
         const auto state=worker?worker->snapshot():RecoilSnapshot{};
         if(state.faulted||state.pending)result["cleanup_known"]=false;
         const auto archived=archive.snapshot();

@@ -11,6 +11,7 @@
 #include "overlay/overlay.h"
 #include "overlay/recoil_panel.h"
 #include "recoil/recoil.h"
+#include "recoil/recoil_calibration.h"
 #include "recoil_tuner/wall_capture_analysis.h"
 #include "log/log.h"
 #include <imgui.h>
@@ -252,12 +253,16 @@ void recoil_flow_preview(const std::filesystem::path& output) {
         for (int i=0;i<5000;++i) { frame(); if (!panel->busy() && i>5) return; std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
         throw std::runtime_error("面板后台任务未在有界时间内完成");
     };
-    auto click = [&](const char* label, bool popup = false, const char* scope = nullptr) {
+    auto click = [&](const char* label, bool popup = false, const char* scope = nullptr, const char* parent_scope = nullptr) {
         settle(); pending_focus_window=popup?"##Combo_00":"recoil-flow";
         auto* window = ImGui::FindWindowByName(pending_focus_window.c_str()); require(window != nullptr,"流程窗口缺失");
-        const auto target = scope?ImHashStr(label,0,window->GetID(scope)):window->GetID(label);
+        const auto scope_id=scope?(parent_scope?ImHashStr(scope,0,window->GetID(parent_scope)):window->GetID(scope)):0;
+        const auto target = scope?ImHashStr(label,0,scope_id):window->GetID(label);
         io.AddMousePosEvent(1290,1590); pending_focus=label; pending_focus_id=target;frame();
         require(ImGui::GetCurrentContext()->NavId==target,"真实目标控件未获得导航焦点");
+        // 显式滚动目标，SetFocusID 本身不会将长列表条目滚入可点击区域。
+        ImGui::ScrollToRect(window,ImGui::WindowRectRelToAbs(window,window->NavRectRel[ImGuiNavLayer_Main]),ImGuiScrollFlags_KeepVisibleEdgeY);
+        frame();
         const auto rectangle = ImGui::WindowRectRelToAbs(window,window->NavRectRel[ImGuiNavLayer_Main]);
         const ImVec2 point=rectangle.GetCenter();
         require(window->ClipRect.Contains(point)&&rectangle.GetWidth()>0&&rectangle.GetHeight()>0,"真实目标控件没有可点击矩形");
@@ -563,6 +568,12 @@ void recoil_flow_preview(const std::filesystem::path& output) {
             {"capture_path",name},{"measurement_path","stage-measurement.json"},
             {"candidate_path",std::string(mode)=="capture"?"stage-candidate.json":""},
             {"base_profile_path",std::string(mode)=="test"?"stage-candidate.json":""}};
+        if (std::string(mode)=="test") {
+            nlohmann::json executed; { std::ifstream source("stage-candidate.json"); source>>executed; }
+            std::filesystem::create_directories(directory/"run");
+            std::ofstream plan(directory/"run/plan.json");
+            plan<<nlohmann::json{{"kind","recoil_test"},{"target_shots",2},{"locked_prefix_ms",0},{"profile",executed}};
+        }
     };
     history_result("history-a","ak47",true,"capture");
     history_result("history-b","ak47",true,"test");
@@ -661,6 +672,130 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     require(emitted.size()==1 && std::filesystem::path(emitted.back().debug_request.recoil_profile_path).filename()=="known.json",
         "重开后保存的武器选择不能被另一武器覆盖");
     emitted.clear();
+    // 追加阶段：历史只切换待核对记录，不能吞掉已确认组或将锁前段恢复为零。
+    settle(); panel.reset(); debug={};
+    auto prefix_base=imported; prefix_base.id="ak47-3shots-"+std::string(32,'e');
+    prefix_base.state=RecoilProfileState::SCHEMA_VALID;
+    const auto prefix_text=serialize_recoil_profile(prefix_base);
+    { std::ofstream file("profiles/stage3.json"); file<<prefix_text; }
+    auto other_base=prefix_base; other_base.id="ak47-3shots-"+std::string(32,'f');
+    { std::ofstream file("profiles/stage-other.json"); file<<serialize_recoil_profile(other_base); }
+    { std::ofstream file("cache/recoil/workflow-settings.json");
+      file<<R"({"ak47":{"target_shots":3,"group_shots":30,"selected_file":"stage3.json","calibration_path":"ui-calibration.json"}})"; }
+    auto extended_history=[&](const std::string& name,int shots,const RecoilProfile& executed,int unique,double locked,bool metadata) {
+        const auto directory=std::filesystem::path("cache/recoil/workflow")/name;
+        std::filesystem::create_directories(directory/"run");
+        auto residual=prefix_base; residual.id="residual-"+std::to_string(unique);
+        residual.points={{0,0,0},{100,0,0},{200,1,2}}; residual.source.sha256=std::string(64,static_cast<char>('1'+unique));
+        recoil_tuner::WallCaptureReport measured;
+        measured.valid=true; measured.message="追加阶段独立残差"; measured.environment_fingerprint="stage-8-environment";
+        measured.pixel_response={1,0,0,1}; measured.candidate=residual;
+        std::string error;
+        require(recoil_tuner::save_wall_report(directory/"measurement.json",measured,error),"追加阶段测量保存失败");
+        { std::ofstream file(directory/"run/candidate.json"); file<<serialize_recoil_profile(executed); }
+        { std::ofstream file(directory/"run/plan.json"); file<<nlohmann::json{{"kind","recoil_test"},
+            {"target_shots",shots},{"locked_prefix_ms",locked},{"profile",nlohmann::json::parse(serialize_recoil_profile(executed))}}; }
+        nlohmann::json result{{"weapon_id","ak47"},{"success",true},{"completed",true},{"cleanup_known",true},
+            {"mode","test"},{"training_eligible",true},{"requested_shots",shots},{"firing_ammo_delta",shots},
+            {"observed_ammo_delta",0},{"capture_path",(directory/"run/capture").string()},
+            {"measurement_path",(directory/"measurement.json").string()},
+            {"base_profile_path",(directory/"run/candidate.json").string()}};
+        if (metadata) { result["locked_prefix_ms"]=locked;
+            result["executed_profile_sha256"]=recoil_calibration_sha256(serialize_recoil_profile(executed)); }
+        std::ofstream file(directory/"result-index.json"); file<<result;
+        return result;
+    };
+    for(int i=0;i<5;++i) extended_history("stage-eight-"+std::to_string(i),8,prefix_base,i,i==0?100:0,i==1);
+    extended_history("stage-nine",9,prefix_base,6,100,false);
+    auto mismatched=extended_history("stage-other",8,other_base,7,100,false);
+    panel=std::make_unique<RecoilPanel>(); settle();
+    auto load_extended=[&](const char* run,int shots) {
+        if(!screen_contains("历史采集记录"))click("载入以前的采集");
+        click("历史采集记录",false,"载入以前的采集");
+        const auto label="AK-47 | "+std::to_string(shots)+"发 | 曲线测试 | "+run;
+        click(label.c_str(),true); click("载入所选记录",false,"载入以前的采集");
+    };
+    load_extended("stage-eight-0",8);
+    require(emitted.empty()&&screen_contains("当前测试基线：3发；目标：8发")&&screen_contains("已锁定前段：100.000 ms")&&
+        screen_contains("追加段待优化"),"载入追加阶段须从原计划恢复前段和实际3发基线，不能把8发目标当新曲线");
+    // 即使结果自身合格，另一条执行基线也不能混入当前选择。
+    debug.generation=500; debug.state=debug_session::State::COMPLETED;
+    debug.result=std::make_shared<const nlohmann::json>(mismatched); settle(); settle();
+    click("画面已核对：加入优化数据");
+    require(screen_contains("本组实际执行基线与当前测试曲线不一致")&&screen_contains("训练 0/3，验证 0/2"),
+        "加入前须核对实际执行基线，不能混入另一个候选");
+    debug={}; load_extended("stage-eight-0",8); click("画面已核对：加入优化数据");
+    require(screen_contains("训练 1/3，验证 0/2"),"第一组须由人工明确加入");
+    load_extended("stage-eight-0",8); click("画面已核对：加入优化数据");
+    require(screen_contains("本组已加入，不能重复计数")&&screen_contains("训练 1/3，验证 0/2")&&
+        screen_contains("已锁定前段：100.000 ms"),"重复载入须保留已确认组和锁定并拒绝重复加入");
+    load_extended("stage-eight-1",8);
+    require(screen_contains("训练 1/3，验证 0/2")&&screen_contains("已锁定前段：100.000 ms"),
+        "同阶段另一记录不得清组或用旧故障零锁覆盖当前锁定");
+    click("画面已核对：加入优化数据");
+    load_extended("stage-nine",9);
+    require(screen_contains("当前有已确认的待用组")&&screen_contains("训练 2/3，验证 0/2")&&
+        screen_contains("当前测试基线：3发；目标：8发"),"跨阶段历史载入必须拒绝且保留组与目标");
+    load_extended("stage-other",8);
+    require(screen_contains("当前有已确认的待用组")&&screen_contains("已锁定前段：100.000 ms"),
+        "同发数不同执行曲线必须拒绝且保留锁定");
+    for(int i=2;i<5;++i) { const auto run="stage-eight-"+std::to_string(i); load_extended(run.c_str(),8); click("画面已核对：加入优化数据"); }
+    require(emitted.empty()&&screen_contains("训练 3/3，验证 2/2")&&screen_contains("当前测试基线：3发；目标：8发"),
+        "五组人工加入只增加计数，未点击优化前仍使用原3发基线");
+    click("优化本阶段并载入候选");
+    require(emitted.size()==1&&emitted.back().debug_request.mode==debug_session::Mode::RECOIL_TEST&&
+        emitted.back().debug_request.recoil_target_shots==8&&emitted.back().debug_request.recoil_locked_prefix_ms==100,
+        "五组优化后仅准备8发新候选且保持原锁前段");
+    const auto optimized_path=std::filesystem::path(emitted.back().debug_request.recoil_profile_path);
+    require(optimized_path.filename().string().starts_with("ak47-8shots-"),"优化后必须保存明确8发的新文件");
+    RecoilProfile optimized; std::string optimized_error;
+    { std::ifstream file(optimized_path); const std::string text{std::istreambuf_iterator<char>(file),{}};
+      require(load_recoil_profile(text,optimized,optimized_error),"优化候选必须可读"); }
+    require(optimized.points.back().time_ms==200,"8发优化候选须实际延长采集时域");
+    for(double time:{0.,50.,100.}) {
+        const auto before=sample_recoil_profile(prefix_base,time),after=sample_recoil_profile(optimized,time);
+        require(before.x_counts==after.x_counts&&before.y_counts==after.y_counts,"优化前段插值不得改变");
+    }
+    emitted.clear(); settle(); panel.reset(); debug={}; panel=std::make_unique<RecoilPanel>(); settle();
+    require(screen_contains("已锁定前段：100.000 ms")&&screen_contains("训练 0/3，验证 0/2"),
+        "重开须按基线身份恢复锁定，但不能自动恢复人工加入或训练");
+    click("验证已有弹道");
+    require(emitted.size()==1&&emitted.back().debug_request.recoil_locked_prefix_ms==100&&
+        std::filesystem::path(emitted.back().debug_request.recoil_profile_path)==optimized_path,"重开验证须携带已绑定的新基线与原锁定");
+    emitted.clear(); settle(); panel.reset();
+    optimized.points.back().x_counts+=0.25;
+    { std::ofstream file(optimized_path); file<<serialize_recoil_profile(optimized); }
+    panel=std::make_unique<RecoilPanel>(); settle();
+    require(screen_contains("已锁定前段：0.000 ms"),"磁盘基线改变后不得恢复过期的锁定绑定");
+    settle(); panel.reset();
+    { std::ofstream file("cache/recoil/workflow-settings.json");
+      file<<R"({"ak47":{"target_shots":8,"group_shots":30,"selected_file":"stage3.json","calibration_path":"ui-calibration.json"}})"; }
+    panel=std::make_unique<RecoilPanel>(); settle();
+    load_extended("stage-eight-2",8); click("画面已核对：加入优化数据");
+    require(screen_contains("已锁定前段：0.000 ms")&&screen_contains("训练 1/3，验证 0/2"),
+        "先载旧零锁计划只能如实恢复零锁，不得自动猜前段");
+    click("锁定当前基线前段（不增加发数）");
+    require(emitted.empty()&&screen_contains("已锁定前段：100.000 ms")&&screen_contains("训练 1/3，验证 0/2")&&
+        screen_contains("当前测试基线：3发；目标：8发"),"人工恢复前段不得把8发追加成13发、清组或准备输出");
+    debug.generation=600; debug.state=debug_session::State::FAILED;
+    debug.result=std::make_shared<const nlohmann::json>(nlohmann::json{{"weapon_id","ak47"},{"success",false},
+        {"recovery_action","recalibrate"}}); settle();
+    panel.reset(); debug={}; panel=std::make_unique<RecoilPanel>(); settle();
+    require(screen_contains("已锁定前段：0.000 ms")&&screen_contains("训练 0/3，验证 0/2"),
+        "重标定失败后重开不得恢复已失效的正锁定");
+    panel.reset();
+    { std::ofstream file("cache/recoil/workflow-settings.json");
+      file<<R"({"ak47":{"target_shots":3,"group_shots":30,"selected_file":"stage3.json"}})"; }
+    panel=std::make_unique<RecoilPanel>(); settle();
+    const auto advanced=extended_history("stage-advanced",8,prefix_base,8,100,false);
+    { std::ofstream file("cache/recoil/workflow/stage-advanced/run/result.json"); file<<advanced; }
+    if(!screen_contains("历史采集记录")) click("载入以前的采集");
+    if(!screen_contains("本组结果 JSON")) click("高级：按路径载入",false,"载入以前的采集");
+    click("本组结果 JSON",false,"高级：按路径载入","载入以前的采集");
+    io.AddInputCharactersUTF8("cache/recoil/workflow/stage-advanced/run/result.json"); frame();
+    io.AddKeyEvent(ImGuiKey_Enter,true); frame(); io.AddKeyEvent(ImGuiKey_Enter,false); settle();
+    click("载入采集结果",false,"高级：按路径载入","载入以前的采集");
+    require(screen_contains("已锁定前段：100.000 ms"),"高级载入旧run/result.json须从同目录计划恢复锁定");
     std::ofstream report(output/"recoil-flow.txt"); report << "真实RecoilPanel无设备交互回归通过；自动动作仅PREPARE，等待下一次人工按键。\n";
 }
 }
@@ -863,6 +998,7 @@ int wmain(int argc, wchar_t** argv) {
             require(import_tabs != nullptr,"导入截图缺少弹道标签");
             input.focus_window=content;
             input.focus_id=ImHashStr("导入已有曲线 JSON",0,import_tabs->SelectedTabId); frame();
+            ImGui::ScrollToRect(content,ImGui::WindowRectRelToAbs(content,content->NavRectRel[ImGuiNavLayer_Main]),ImGuiScrollFlags_KeepVisibleEdgeY); frame(); frame();
             input.position=ImGui::WindowRectRelToAbs(content,content->NavRectRel[ImGuiNavLayer_Main]).GetCenter();
             require(content->ClipRect.Contains(input.position),"导入折叠标题不可点击");
             frame(); input.down=true; frame(); input.down=false; frame(); frame();
@@ -872,6 +1008,7 @@ int wmain(int argc, wchar_t** argv) {
             save_window(capture,output/"recoil-import.png");
             input.focus_window=content;
             input.focus_id=ImHashStr("载入以前的采集",0,import_tabs->SelectedTabId); frame();
+            ImGui::ScrollToRect(content,ImGui::WindowRectRelToAbs(content,content->NavRectRel[ImGuiNavLayer_Main]),ImGuiScrollFlags_KeepVisibleEdgeY); frame(); frame();
             input.position=ImGui::WindowRectRelToAbs(content,content->NavRectRel[ImGuiNavLayer_Main]).GetCenter();
             require(content->ClipRect.Contains(input.position),"历史采集标题在最小窗口不可点击");
             frame(); input.down=true; frame(); input.down=false; frame(); frame();
@@ -881,6 +1018,7 @@ int wmain(int argc, wchar_t** argv) {
             input.position={400,40}; frame();save_window(capture,output/"recoil-history.png");
             input.focus_window=content;
             input.focus_id=ImHashStr("历史采集记录",0,ImHashStr("载入以前的采集",0,import_tabs->SelectedTabId)); frame();
+            ImGui::ScrollToRect(content,ImGui::WindowRectRelToAbs(content,content->NavRectRel[ImGuiNavLayer_Main]),ImGuiScrollFlags_KeepVisibleEdgeY); frame(); frame();
             input.position=ImGui::WindowRectRelToAbs(content,content->NavRectRel[ImGuiNavLayer_Main]).GetCenter();
             require(content->ClipRect.Contains(input.position),"历史列表在最小窗口不可点击");
             frame(); input.down=true; frame(); input.down=false; frame(); frame();

@@ -30,6 +30,19 @@
 #include <wrl/client.h>
 
 namespace {
+std::string workflow_profile_text(const std::string& text) {
+    RecoilProfile profile; std::string error;
+    if (!load_recoil_profile(text,profile,error)) throw std::runtime_error("历史执行曲线无效："+error);
+    return serialize_recoil_profile(profile);
+}
+std::string workflow_execution_text(const RecoilProfile& source,const RecoilTuning& tuning = {}) {
+    RecoilProfile profile; std::string error;
+    if (!compile_recoil_profile(source,{tuning.x_strength,tuning.y_strength,0,1},profile,error))
+        throw std::runtime_error("执行基线无效："+error);
+    profile.state=RecoilProfileState::SCHEMA_VALID; profile.calibration.evidence.clear();
+    profile.phase_tolerance_ms.reset(); profile.recovery_ms.reset();
+    return serialize_recoil_profile(profile);
+}
 int workflow_named_shots(const RecoilProfile& profile) {
     const auto prefix=profile.weapon_id+"-";
     if (!profile.id.starts_with(prefix)) return -1;
@@ -272,6 +285,8 @@ struct RecoilPanel::Impl {
     std::string workflow_weapon = "ak47", workflow_calibration_path, workflow_run;
     int workflow_duration_ms = 3000, workflow_target_shots = 5, workflow_group_shots = 30, workflow_step_shots = 5;
     double workflow_locked_prefix_ms = 0;
+    std::string workflow_locked_baseline_hash;
+    int workflow_locked_target_shots = 0;
     std::uint64_t workflow_result_generation = 0;
     std::uint64_t workflow_abort_generation = std::numeric_limits<std::uint64_t>::max();
     std::string workflow_preview_path, workflow_import_path, workflow_candidate_path;
@@ -342,11 +357,65 @@ struct RecoilPanel::Impl {
         if (measurement_path.empty() || !recoil_tuner::load_wall_report(std::filesystem::u8path(measurement_path),measurement,error) || !measurement.valid) {
             status = "历史测量载入失败，当前阶段未改变：" + (error.empty() ? "测量无效或路径缺失。" : error); return;
         }
-        const auto executed=result.value("base_profile_path",std::string{});
-        if (!executed.empty()) read_workflow_file(executed);
+        const auto executed_path=result.value("base_profile_path",std::string{});
+        const auto executed=executed_path.empty()?std::string{}:workflow_profile_text(read_workflow_file(executed_path));
+        const auto executed_hash=executed.empty()?std::string{}:recoil_calibration_sha256(executed);
+        const bool same_execution=loaded && base.weapon_id==workflow_weapon &&
+            !executed.empty() && workflow_execution_text(base,tuning)==executed;
+        const bool same_current=same_execution && shots==workflow_target_shots;
+        if (!workflow_samples.empty() && (!same_current || workflow_samples.front().executed_profile!=executed ||
+            workflow_samples.front().requested_shots!=shots)) {
+            status="当前有已确认的待用组；历史记录属于不同阶段或执行基线，未载入。请先完成优化或明确清空待用数据。"; return;
+        }
+        double restored_lock=0;
+        const RecoilStoredProfile* matched=nullptr;
+        if (!executed.empty()) {
+            if (same_current && (workflow_locked_baseline_hash==executed_hash && workflow_locked_target_shots==shots))
+                restored_lock=workflow_locked_prefix_ms;
+            else if (same_current && !workflow_samples.empty()) restored_lock=workflow_locked_prefix_ms;
+            else {
+                nlohmann::json evidence;
+                if (result.contains("locked_prefix_ms") || result.contains("executed_profile_sha256")) {
+                    if (!result.contains("locked_prefix_ms") || !result.contains("executed_profile_sha256") ||
+                        !result.at("executed_profile_sha256").is_string() ||
+                        result.at("executed_profile_sha256").get<std::string>()!=executed_hash)
+                        throw std::runtime_error("历史阶段元数据与实际执行基线不匹配，未载入。");
+                    evidence=result;
+                } else {
+                    const auto result_directory=std::filesystem::u8path(path).parent_path();
+                    auto plan_path=result_directory/"plan.json";
+                    if (!std::filesystem::exists(plan_path)) plan_path=result_directory/"run"/"plan.json";
+                    evidence=nlohmann::json::parse(read_workflow_file(plan_path.string()));
+                    if (evidence.value("kind",std::string{})!="recoil_test" || !evidence.contains("profile") ||
+                        workflow_profile_text(evidence.at("profile").dump())!=executed ||
+                        !evidence.contains("target_shots") || !evidence.at("target_shots").is_number_integer() ||
+                        evidence.at("target_shots")!=shots)
+                        throw std::runtime_error("历史计划与发数或实际执行基线不匹配，未载入。");
+                }
+                RecoilProfile actual; std::string profile_error;
+                if (!load_recoil_profile(executed,actual,profile_error) || actual.weapon_id!=workflow_weapon ||
+                    !evidence.contains("locked_prefix_ms") || !evidence.at("locked_prefix_ms").is_number())
+                    throw std::runtime_error("历史记录缺少可信前段锁定信息，未载入。");
+                restored_lock=evidence.at("locked_prefix_ms").get<double>();
+                if (!std::isfinite(restored_lock) || restored_lock<0 || restored_lock>actual.points.back().time_ms)
+                    throw std::runtime_error("历史前段锁定越界，未载入。");
+            }
+            if (!same_execution) {
+                for (const auto& file:files) if (file.profile->weapon_id==workflow_weapon && workflow_execution_text(*file.profile)==executed) {
+                    matched=&file; break;
+                }
+                if (!matched) { status="历史执行基线不在当前曲线目录中，未改变阶段；请先载入对应原始曲线。"; return; }
+            }
+        } else if (result.value("mode",std::string{})=="test") {
+            status="历史测试缺少实际执行基线，未载入。"; return;
+        }
         workflow_after_calibration.reset(); workflow_prepare_next.reset();
-        workflow_samples.clear(); workflow_locked_prefix_ms = 0;
+        if (matched) { selected_file=matched->file; set_draft(*matched->profile); }
+        workflow_locked_prefix_ms=restored_lock;
+        workflow_locked_baseline_hash=executed_hash;
+        workflow_locked_target_shots=executed.empty()?0:shots;
         workflow_target_shots = shots; workflow_group_shots = std::max(workflow_group_shots,shots);
+        workflow_record_measurement=!executed.empty();
         remember_workflow_weapon();
         import_workflow_result(result);
         if (workflow_measurement_ready)
@@ -359,6 +428,7 @@ struct RecoilPanel::Impl {
     struct WallSample {
         recoil_tuner::WallCaptureReport measurement;
         std::string source_run, executed_profile;
+        int requested_shots=0;
     };
     std::vector<WallSample> workflow_samples;
     nlohmann::json workflow_weapon_settings = nlohmann::json::object();
@@ -369,9 +439,28 @@ struct RecoilPanel::Impl {
     void remember_workflow_weapon() {
         workflow_weapon_settings[workflow_weapon] = {{"target_shots",workflow_target_shots},{"step_shots",workflow_step_shots},
             {"group_shots",workflow_group_shots},{"duration_ms",workflow_duration_ms},
+            {"locked_prefix_ms",workflow_locked_prefix_ms},{"locked_baseline_sha256",workflow_locked_baseline_hash},
+            {"locked_target_shots",workflow_locked_target_shots},
             {"calibration_path",workflow_calibration_path},
             {"selected_file",loaded && base.weapon_id != workflow_weapon ? std::string{} : selected_file}};
         workflow_settings_dirty = true;
+    }
+    void bind_workflow_lock(double prefix) {
+        workflow_locked_prefix_ms=prefix;
+        workflow_locked_target_shots=loaded?workflow_target_shots:0;
+        workflow_locked_baseline_hash=loaded?recoil_calibration_sha256(workflow_execution_text(base,tuning)):std::string{};
+    }
+    void restore_workflow_lock(const nlohmann::json& saved) {
+        workflow_locked_prefix_ms=0; workflow_locked_baseline_hash.clear(); workflow_locked_target_shots=0;
+        if (!loaded || !saved.contains("locked_prefix_ms") || !saved.at("locked_prefix_ms").is_number() ||
+            !saved.contains("locked_target_shots") || !saved.at("locked_target_shots").is_number_integer() ||
+            saved.at("locked_target_shots")!=workflow_target_shots ||
+            !saved.contains("locked_baseline_sha256") || !saved.at("locked_baseline_sha256").is_string()) return;
+        const auto prefix=saved.at("locked_prefix_ms").get<double>();
+        if (!std::isfinite(prefix) || prefix<0 || base.points.empty() || prefix>base.points.back().time_ms ||
+            saved.at("locked_baseline_sha256").get<std::string>()!=recoil_calibration_sha256(workflow_execution_text(base,tuning))) return;
+        bind_workflow_lock(prefix);
+        workflow_record_measurement=true;
     }
     void select_workflow_weapon(const std::string& weapon) {
         remember_workflow_weapon(); workflow_weapon = weapon;
@@ -383,7 +472,8 @@ struct RecoilPanel::Impl {
         workflow_calibration_path = value.value("calibration_path",std::string{});
         selected_file = value.value("selected_file",std::string{}); loaded = false;
         workflow_record_measurement = false; workflow_after_calibration.reset(); workflow_prepare_next.reset();
-        workflow_locked_prefix_ms = 0; workflow_samples.clear(); workflow_measurement_ready = false;
+        workflow_locked_prefix_ms = 0; workflow_locked_baseline_hash.clear(); workflow_locked_target_shots=0;
+        workflow_samples.clear(); workflow_measurement_ready = false;
     }
 
     void prepare_workflow(debug_session::Mode mode, const AppConfig& config, OverlayActions& actions) {
@@ -429,7 +519,7 @@ struct RecoilPanel::Impl {
             }
         }
         const auto executed = result.value("base_profile_path", std::string{});
-        workflow_executed_profile = executed.empty() ? "" : read_workflow_file(executed);
+        workflow_executed_profile = executed.empty() ? "" : workflow_profile_text(read_workflow_file(executed));
         workflow_requested_shots = result.value("requested_shots",0);
         workflow_observed_shots = workflow_firing_shots(result);
         workflow_count_ok = result.value("completed", false) && result.value("success", false) &&
@@ -455,8 +545,8 @@ struct RecoilPanel::Impl {
                 if (debug->result->value("weapon_id",std::string{}) == workflow_weapon &&
                     !debug->result->value("success",false) &&
                     debug->result->value("recovery_action",std::string{}) == "recalibrate") {
-                    workflow_calibration_path.clear(); remember_workflow_weapon();
-                    workflow_samples.clear(); workflow_locked_prefix_ms = 0;
+                    workflow_calibration_path.clear(); workflow_samples.clear();
+                    bind_workflow_lock(0); remember_workflow_weapon();
                 }
                 workflow_measurement_ready = false; workflow_count_ok = false; workflow_confirmed = false;
                 workflow_candidate_path.clear(); workflow_executed_profile.clear();
@@ -489,6 +579,7 @@ struct RecoilPanel::Impl {
                     if (store.save_new(candidate, s.selected_file, s.status)) {
                         s.load_file(settings, s.selected_file); s.refresh(settings);
                         s.workflow_samples.clear(); s.workflow_locked_prefix_ms = 0;
+                        s.bind_workflow_lock(0); s.remember_workflow_weapon();
                         s.workflow_record_measurement = true; s.workflow_prepare_next = debug_session::Mode::RECOIL_TEST;
                         s.workflow_candidate_path.clear(); s.workflow_measurement_ready = false;
                         s.status = "采集候选已载入，正在准备测试；仍须回游戏重新按测试键。";
@@ -500,14 +591,38 @@ struct RecoilPanel::Impl {
                 const auto duplicate = std::any_of(workflow_samples.begin(), workflow_samples.end(), [&](const auto& item) { return item.source_run == workflow_run; });
                 if (duplicate) status = "本组已加入，不能重复计数。";
                 else if (workflow_samples.size() >= 5) status = "本轮已有5组，先优化或清空后重新采集。";
-                else if (!workflow_samples.empty() && workflow_samples.front().executed_profile != workflow_executed_profile)
+                else if (!loaded || workflow_requested_shots!=workflow_target_shots || workflow_execution_text(base,tuning)!=workflow_executed_profile)
+                    status="本组实际执行基线与当前测试曲线不一致，未加入；请先载入对应历史阶段。";
+                else if (!workflow_samples.empty() && (workflow_samples.front().executed_profile != workflow_executed_profile ||
+                    workflow_samples.front().requested_shots!=workflow_requested_shots))
                     status = "本组执行曲线不同；请先清空旧阶段数据，不能混合优化。";
-                else { workflow_samples.push_back({workflow_measurement, workflow_run, workflow_executed_profile}); status = "已加入独立测试数据。"; }
+                else { workflow_samples.push_back({workflow_measurement, workflow_run, workflow_executed_profile, workflow_requested_shots});
+                    bind_workflow_lock(workflow_locked_prefix_ms); remember_workflow_weapon();
+                    status = "已加入独立测试数据；仅更新组数，尚未修改测试曲线。"; }
             }
             ImGui::EndDisabled();
             help("点击即人工确认固定靶点、画面可用且没有人物或手动视角移动，并执行对应保存/加入操作；程序不会代替确认，不代表物理验收通过。");
         }
         ImGui::SeparatorText("优化与阶段推进");
+        if (loaded && base.weapon_id==workflow_weapon) {
+            const int baseline_shots=workflow_named_shots(base);
+            if (baseline_shots>0) ImGui::Text("当前测试基线：%d发；目标：%d发",baseline_shots,workflow_target_shots);
+            else ImGui::Text("当前测试基线：发数未标注；目标：%d发",workflow_target_shots);
+            ImGui::Text("已锁定前段：%.3f ms",workflow_locked_prefix_ms);
+            if (baseline_shots>0 && baseline_shots<workflow_target_shots)
+                ImGui::TextWrapped("追加段待优化：加入数据只计数；5组齐后点击优化，才生成目标发数的新候选。");
+            if (baseline_shots>0 && baseline_shots<workflow_target_shots && workflow_locked_prefix_ms==0 &&
+                ImGui::Button("锁定当前基线前段（不增加发数）")) {
+                const auto actual=workflow_execution_text(base,tuning);
+                if (!workflow_samples.empty() && workflow_samples.front().executed_profile!=actual)
+                    status="待用组执行基线不一致，未修改锁定。";
+                else {
+                    bind_workflow_lock(base.points.back().time_ms); remember_workflow_weapon();
+                    actions.debug_plan_edited=true;
+                    status="已按人工确认锁定当前基线前段；目标发数和已确认组保持不变。";
+                }
+            }
+        }
         ImGui::Text("本轮优化数据：训练 %d/3，验证 %d/2", static_cast<int>(std::min<std::size_t>(3,workflow_samples.size())),
             static_cast<int>(workflow_samples.size() > 3 ? workflow_samples.size() - 3 : 0));
         ImGui::TextWrapped("一次有效初始采集即可生成候选。保存后先实测；效果满意可直接锁定前段并追加发数。需要优化时，再用同一曲线收集5组：3组训练、2组独立验证，失败组不计入。");
@@ -527,6 +642,9 @@ struct RecoilPanel::Impl {
                 std::vector<recoil_tuner::WallTrial> trials;
                 for (std::size_t i=0; i<s.workflow_samples.size(); ++i) {
                     const auto& sample=s.workflow_samples[i];
+                    if (sample.requested_shots!=s.workflow_target_shots || sample.executed_profile!=s.workflow_samples.front().executed_profile) {
+                        s.status="待用组发数或执行基线不一致，未优化。"; return;
+                    }
                     trials.push_back({sample.measurement,sample.source_run,sample.executed_profile,true,
                         i<3 ? recoil_tuner::TrialUse::FIT : recoil_tuner::TrialUse::HOLDOUT});
                 }
@@ -544,7 +662,9 @@ struct RecoilPanel::Impl {
                 const auto directory = new_output_directory("tuning");
                 std::filesystem::create_directories(std::filesystem::u8path(directory));
                 if (!recoil_tuner::save_wall_report(std::filesystem::u8path(directory)/"analysis.json",result,s.status)) return;
-                s.load_file(settings,s.selected_file); s.refresh(settings); s.workflow_samples.clear();
+                const auto locked_prefix=s.workflow_locked_prefix_ms;
+                s.workflow_samples.clear(); s.load_file(settings,s.selected_file); s.refresh(settings);
+                s.bind_workflow_lock(locked_prefix); s.remember_workflow_weapon();
                 s.workflow_measurement_ready = false;
                 s.workflow_record_measurement = true; s.workflow_prepare_next = debug_session::Mode::RECOIL_TEST;
                 s.status = "优化候选已载入，正在准备复测；仍须重新按测试键，实测变好后再推进阶段。";
@@ -572,13 +692,13 @@ struct RecoilPanel::Impl {
                 launch([path](Impl& s) { s.import_history_result(path); });
             }
             ImGui::EndDisabled();
-            help("载入并恢复该记录的发数，清空当前未使用的优化选择；原始记录保留，不连接设备。");
+            help("同阶段和执行基线保留待用组及前段锁定；有待用组时拒绝不同阶段。其他历史须核对原计划后恢复，不连接设备。");
             if (!has_history) ImGui::TextWrapped("当前武器暂无成功的图像采集记录；失败或仅执行未测量的记录不列入。");
             if (!workflow_history_status.empty()) ImGui::TextWrapped("%s",workflow_history_status.c_str());
             if (ImGui::TreeNode("高级：按路径载入")) {
             ImGui::InputText("本组结果 JSON", &workflow_import_path);
             if (ImGui::Button("载入采集结果")) launch([](Impl& s) {
-                s.import_workflow_result(nlohmann::json::parse(read_workflow_file(s.workflow_import_path)));
+                s.import_history_result(s.workflow_import_path);
             });
             help("载入已完成会话的结果，重新核对后加入本轮；不连接设备。");
             ImGui::TreePop();
@@ -595,6 +715,7 @@ struct RecoilPanel::Impl {
             workflow_locked_prefix_ms = base.points.empty() ? 0 : base.points.back().time_ms;
             tuning = {};
             workflow_target_shots = std::min(workflow_group_shots, workflow_target_shots + workflow_step_shots);
+            bind_workflow_lock(workflow_locked_prefix_ms);
             remember_workflow_weapon();
             actions.debug_plan_edited = true; workflow_measurement_ready = false;
             workflow_record_measurement = true;
@@ -604,6 +725,7 @@ struct RecoilPanel::Impl {
         ImGui::EndDisabled();
         if (ImGui::Button("整组微调：解除前段锁定")) {
             workflow_locked_prefix_ms = 0; workflow_target_shots = workflow_group_shots;
+            bind_workflow_lock(0);
             remember_workflow_weapon();
             actions.debug_plan_edited = true; workflow_measurement_ready = false;
         }
@@ -1038,9 +1160,13 @@ struct RecoilPanel::Impl {
     }
     void load_file(const RecoilConfig& config, const std::string& file) {
         if (!working_copy) { launch([config, file](Impl& state) { state.load_file(config, file); }); return; }
-        loaded = false;
         try { RecoilStore store(std::filesystem::u8path(config.profile_directory)); RecoilProfile p;
-        if (store.load(file, p, status)) { selected_file = file; set_draft(p);
+        if (store.load(file, p, status)) {
+            if (!workflow_samples.empty() && workflow_execution_text(p)!=workflow_samples.front().executed_profile) {
+                status="当前有待用组，不能切换执行基线；请先优化或明确清空数据。"; return;
+            }
+            const auto saved=workflow_weapon_settings.value(workflow_weapon,nlohmann::json::object());
+            selected_file = file; set_draft(p); restore_workflow_lock(saved);
             if (workflow_settings_loaded && base.weapon_id == workflow_weapon) remember_workflow_weapon();
             status = "已加载独立草稿；活动曲线未改变。"; } } catch (...) { status = "曲线文件或目录无效。"; }
     }
