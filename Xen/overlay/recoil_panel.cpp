@@ -30,6 +30,34 @@
 #include <wrl/client.h>
 
 namespace {
+int workflow_named_shots(const RecoilProfile& profile) {
+    const auto prefix=profile.weapon_id+"-";
+    if (!profile.id.starts_with(prefix)) return -1;
+    const auto marker=profile.id.find("shots-",prefix.size());
+    if (marker==std::string::npos) return -1;
+    const auto digits=profile.id.substr(prefix.size(),marker-prefix.size());
+    const auto unique=profile.id.substr(marker+6);
+    if (digits.empty() || digits.size()>2 || digits.front()=='0' || unique.size()!=32 ||
+        !std::all_of(digits.begin(),digits.end(),[](char c){return c>='0'&&c<='9';}) ||
+        !std::all_of(unique.begin(),unique.end(),[](char c){return (c>='0'&&c<='9')||(c>='a'&&c<='f');})) return -1;
+    int shots=0; for (const char c:digits) shots=shots*10+c-'0';
+    return shots>=1&&shots<=50?shots:-1;
+}
+std::string new_workflow_profile_id(const std::string& weapon,int shots) {
+    if (shots<1 || shots>50) throw std::runtime_error("采集候选发数无效，未保存。");
+    GUID guid{}; wchar_t text[39]{};
+    if (FAILED(CoCreateGuid(&guid)) || !StringFromGUID2(guid,text,39))
+        throw std::runtime_error("无法生成独立候选标识，未保存。");
+    std::string unique;
+    for (const auto c:text) {
+        if (c>=L'0'&&c<=L'9') unique+=static_cast<char>(c);
+        else if (c>=L'a'&&c<=L'f') unique+=static_cast<char>(c);
+        else if (c>=L'A'&&c<=L'F') unique+=static_cast<char>(c-L'A'+'a');
+    }
+    const auto id=weapon+"-"+std::to_string(shots)+"shots-"+unique;
+    if (unique.size()!=32 || id.size()>128) throw std::runtime_error("候选标识无效，未保存。");
+    return id;
+}
 int workflow_firing_shots(const nlohmann::json& result) {
     // 新报告区分本次射击段与停枪后的补弹；新字段无效时不能退回旧字段掩盖错误。
     const auto field = result.find(result.contains("firing_ammo_delta") ? "firing_ammo_delta" : "observed_ammo_delta");
@@ -247,7 +275,7 @@ struct RecoilPanel::Impl {
     std::uint64_t workflow_result_generation = 0;
     std::uint64_t workflow_abort_generation = std::numeric_limits<std::uint64_t>::max();
     std::string workflow_preview_path, workflow_import_path, workflow_candidate_path;
-    struct WallHistory { std::string weapon, path, label; int shots = 0; };
+    struct WallHistory { std::string weapon, path, label, run; int shots = 0; bool initial = false; std::string source_hash; };
     std::vector<WallHistory> workflow_history;
     std::string workflow_history_selected, workflow_history_status;
     void refresh_workflow_history() {
@@ -268,14 +296,33 @@ struct RecoilPanel::Impl {
                     workflow_firing_shots(result) != shots ||
                     shots < 1 || shots > 50 || result.value("measurement_path",std::string{}).empty()) continue;
                 const auto weapon = result.value("weapon_id",std::string{});
-                workflow_history.push_back({weapon,path.string(),std::to_string(shots) + "发 | " +
-                    (mode == "capture" ? "初始采集 | " : "曲线测试 | ") + entry.path().filename().string(),shots});
+                const auto run=entry.path().filename().string();
+                workflow_history.push_back({weapon,path.string(),std::string(weapon::display_name(weapon))+" | "+
+                    std::to_string(shots) + "发 | " + (mode == "capture" ? "初始采集 | " : "曲线测试 | ") + run,
+                    run,shots,mode=="capture",result.value("source_hash",std::string{})});
             } catch (...) { ++unreadable; }
         }
         std::sort(workflow_history.begin(),workflow_history.end(),[](const auto& a,const auto& b) {
             return a.shots != b.shots ? a.shots < b.shots : a.path > b.path;
         });
         workflow_history_status = unreadable ? "部分历史结果无法读取，已略过；可用结果仍可选择。" : "历史记录已刷新。";
+    }
+    std::string workflow_curve_label(const RecoilStoredProfile& file) const {
+        const auto& profile=*file.profile;
+        int shots=workflow_named_shots(profile);
+        if (shots<0 && profile.id.starts_with("debug-")) {
+            for (const auto& history:workflow_history) if (history.initial &&
+                history.weapon==profile.weapon_id && history.run==profile.id && history.source_hash.size()==64 &&
+                history.source_hash==profile.source.sha256) {
+                if (shots>=0 && shots!=history.shots) { shots=-1; break; }
+                shots=history.shots;
+            }
+        }
+        const auto short_file=file.file.size()<=28?file.file:
+            (workflow_named_shots(profile)>0?profile.id.substr(profile.id.size()-8):file.file.substr(0,12)+"…"+file.file.substr(file.file.size()-12));
+        return std::string(weapon::display_name(profile.weapon_id))+" | "+
+            (shots>0?std::to_string(shots)+"发":"发数未标注")+" | v"+std::to_string(profile.revision)+
+            " | "+short_file+"###"+file.file;
     }
     void import_history_result(const std::string& path) {
         const auto result = nlohmann::json::parse(read_workflow_file(path));
@@ -437,6 +484,7 @@ struct RecoilPanel::Impl {
                 launch([settings](Impl& s) {
                     RecoilProfile candidate;
                     if (!load_recoil_profile(read_workflow_file(s.workflow_candidate_path), candidate, s.status)) return;
+                    candidate.id=new_workflow_profile_id(candidate.weapon_id,s.workflow_requested_shots);
                     RecoilStore store(std::filesystem::u8path(settings.profile_directory));
                     if (store.save_new(candidate, s.selected_file, s.status)) {
                         s.load_file(settings, s.selected_file); s.refresh(settings);
@@ -488,6 +536,7 @@ struct RecoilPanel::Impl {
                     std::filesystem::u8path("cache/recoil/wall-usage"));
                 s.status = result.message;
                 if (!result.valid || !result.candidate) return;
+                result.candidate->id=new_workflow_profile_id(result.candidate->weapon_id,s.workflow_target_shots);
                 RecoilCandidateReplayReport replay;
                 if (!validate_recoil_candidate_execution(*result.candidate,{},replay,s.status)) return;
                 RecoilStore store(std::filesystem::u8path(settings.profile_directory));
@@ -634,13 +683,19 @@ struct RecoilPanel::Impl {
             ImGui::TreePop();
         }
         const bool has_saved_curve = std::any_of(files.begin(),files.end(),[&](const auto& file) { return file.profile->weapon_id == workflow_weapon; });
-        if (ImGui::BeginCombo("测试曲线", selected_file.empty() ? (has_saved_curve ? "请选择已有曲线" : "暂无曲线：可导入或采集") : selected_file.c_str())) {
-            for (const auto& file : files) if (file.profile->weapon_id == workflow_weapon &&
-                ImGui::Selectable(file.file.c_str(), selected_file == file.file)) {
-                load_file(config.recoil, file.file); changed = true;
+        const auto selected_curve=std::find_if(files.begin(),files.end(),[&](const auto& file){return file.file==selected_file&&file.profile->weapon_id==workflow_weapon;});
+        auto selected_label=selected_curve==files.end()?std::string(has_saved_curve?"请选择已有曲线":"暂无曲线：可导入或采集"):workflow_curve_label(*selected_curve);
+        if (const auto marker=selected_label.find("###");marker!=std::string::npos) selected_label.resize(marker);
+        if (ImGui::BeginCombo("测试曲线",selected_label.c_str())) {
+            for (const auto& file : files) if (file.profile->weapon_id == workflow_weapon) {
+                if (ImGui::Selectable(workflow_curve_label(file).c_str(), selected_file == file.file)) {
+                    load_file(config.recoil, file.file); changed = true;
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s",file.file.c_str());
             }
             ImGui::EndCombo();
         }
+        if (selected_curve!=files.end()&&ImGui::IsItemHovered()) ImGui::SetTooltip("%s",selected_curve->file.c_str());
         help("已有曲线统一从此列表选择，验证直接使用所选文件，无需再次导入；新武器可直接采集。");
         if (ImGui::TreeNode("导入已有曲线 JSON")) {
             if(ImGui::Button("选择曲线文件")) {

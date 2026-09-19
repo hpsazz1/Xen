@@ -375,7 +375,7 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     { std::ofstream file("profiles/second.json"); file<<serialize_recoil_profile(second); }
     { std::ofstream file("cache/recoil/workflow-settings.json"); file<<R"({"ak47":{}})"; }
     panel=std::make_unique<RecoilPanel>(); settle();
-    click("测试曲线"); click("second.json",true); click("验证已有弹道");
+    click("测试曲线"); click("AK-47 | 发数未标注 | v2 | second.json###second.json",true); click("验证已有弹道");
     require(emitted.size()==1 && std::filesystem::path(emitted.back().debug_request.recoil_profile_path).filename()=="second.json",
         "多条已有曲线必须能实际下拉选择并验证所选文件");
     emitted.clear(); settle(); panel.reset(); panel=std::make_unique<RecoilPanel>(); settle();
@@ -501,6 +501,13 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     click("画面已核对：保存候选并准备测试");
     require(emitted.size()==1 && emitted.back().debug_request.mode==debug_session::Mode::RECOIL_CALIBRATE,
         "恢复旧成功候选但标定已失效时，记录优化数据不得静默降为无测量测试");
+    const auto first_named_curve=std::filesystem::path(emitted.back().debug_request.recoil_profile_path);
+    require(first_named_curve.filename().string().starts_with("ak47-2shots-") && std::filesystem::is_regular_file(first_named_curve),
+        "采集保存文件必须明确武器和本次发数");
+    std::ifstream first_named_input(first_named_curve);
+    const std::string first_named_text{std::istreambuf_iterator<char>(first_named_input),{}};
+    first_named_input.close();
+    std::filesystem::copy_file(first_named_curve,"stage-candidate.json",std::filesystem::copy_options::overwrite_existing);
     debug.generation=101;debug.result=std::make_shared<const nlohmann::json>(nlohmann::json{
         {"weapon_id","ak47"},{"success",true},{"completed",true},{"cleanup_known",true},
         {"calibration_path","ui-calibration.json"}});
@@ -509,6 +516,17 @@ void recoil_flow_preview(const std::filesystem::path& output) {
         "恢复候选完成标定后必须仅准备该候选测试，不得退回重新采集");
     require(screen_contains("实测满意可直接追加") && screen_contains("若需要优化"),
         "五组数据只能是优化要求，不能伪装为生成候选或追加阶段的前置条件");
+    emitted.clear();
+    stage_result(-2,true);
+    click("画面已核对：保存候选并准备测试");
+    require(emitted.size()==1 && emitted.back().debug_request.mode==debug_session::Mode::RECOIL_TEST,
+        "同发数再次人工保存仅准备当前新候选测试");
+    const auto second_named_curve=std::filesystem::path(emitted.back().debug_request.recoil_profile_path);
+    require(second_named_curve!=first_named_curve && second_named_curve.filename().string().starts_with("ak47-2shots-"),
+        "同武器同发数两次保存必须生成独立可识别文件");
+    { std::ifstream file(first_named_curve); const std::string unchanged{std::istreambuf_iterator<char>(file),{}};
+      require(unchanged==first_named_text,"保存第二条候选不得覆盖第一次文件"); }
+    std::filesystem::copy_file(second_named_curve,"stage-candidate.json",std::filesystem::copy_options::overwrite_existing);
     emitted.clear();
     for(int index=1;index<=5;++index) {
         stage_result(index,false);
@@ -567,24 +585,41 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     change_history("history-a","observed_ammo_delta",0);
     change_history("history-a","firing_ammo_delta",2);
     change_history("history-invalid-firing","firing_ammo_delta","2");
+    auto curve_fixture=[&](const char* file,const std::string& id,const char* weapon) {
+        auto profile=imported; profile.id=id; profile.weapon_id=weapon;
+        profile.source.sha256=std::string(64,std::string(file)=="legacy-optimized.json"?'b':'a');
+        std::ofstream output_file(std::filesystem::path("profiles")/file); output_file<<serialize_recoil_profile(profile);
+    };
+    curve_fixture("known.json","ak47-2shots-"+std::string(32,'a'),"ak47");
+    curve_fixture("bad-count.json","ak47-02shots-"+std::string(32,'b'),"ak47");
+    curve_fixture("bad-suffix.json","ak47-2shots-short","ak47");
+    curve_fixture("bad-weapon.json","m4a1_s-2shots-"+std::string(32,'c'),"ak47");
+    curve_fixture("legacy.json","debug-history-source","ak47");
+    curve_fixture("legacy-optimized.json","debug-history-source","ak47");
+    curve_fixture("legacy-prefix.json","debug-history-source-extra","ak47");
+    curve_fixture("legacy-test.json","debug-history-test","ak47");
+    curve_fixture("m4.json","m4a1_s-3shots-"+std::string(32,'d'),"m4a1_s");
+    history_result("debug-history-source","ak47",true,"capture");
+    change_history("debug-history-source","source_hash",std::string(64,'a'));
+    history_result("debug-history-test","ak47",true,"test");
     settle(); panel.reset(); debug={}; emitted.clear();
     { std::ofstream file("cache/recoil/workflow-settings.json");
       file << R"({"ak47":{"target_shots":3,"selected_file":"imported.json"}})"; }
     panel=std::make_unique<RecoilPanel>(); settle();
     click("载入以前的采集");
     click("历史采集记录",false,"载入以前的采集");
-    require(screen_contains("2发 | 初始采集 | history-a") && screen_contains("2发 | 曲线测试 | history-b") &&
+    require(screen_contains("AK-47 | 2发 | 初始采集 | history-a") && screen_contains("AK-47 | 2发 | 曲线测试 | history-b") &&
         !screen_contains("history-failed") && !screen_contains("history-other") &&
         !screen_contains("history-ineligible") && !screen_contains("history-overshot") &&
         !screen_contains("history-invalid-firing"),
         "历史列表须接受已闭合射击段、排除无效新字段且不得退回旧字段，保留旧超发排除");
-    click("2发 | 初始采集 | history-missing-measurement",true);
+    click("AK-47 | 2发 | 初始采集 | history-missing-measurement",true);
     click("载入所选记录",false,"载入以前的采集");
     require(emitted.empty() && screen_contains("历史测量载入失败，当前阶段未改变") &&
         screen_contains("测量报告读取失败") && screen_contains("阶段目标：3 / 30 发"),
         "缺失历史测量必须保留明确读失败和原阶段，不得伪称载入成功或恢复发数");
     click("历史采集记录",false,"载入以前的采集");
-    click("2发 | 初始采集 | history-a",true);
+    click("AK-47 | 2发 | 初始采集 | history-a",true);
     click("载入所选记录",false,"载入以前的采集");
     require(emitted.empty() && screen_contains("本次发数恢复为2发") && screen_contains("候选已生成：先核对画面") &&
         screen_contains("目标 2 发；GSI观测 2 发"),
@@ -593,17 +628,39 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     // 面板重建不销毁ImGui上下文；树的展开状态仍由宿主保留。
     if(!screen_contains("历史采集记录"))click("载入以前的采集");
     click("历史采集记录",false,"载入以前的采集");
-    require(screen_contains("2发 | 初始采集 | history-a") && screen_contains("2发 | 曲线测试 | history-b"),
+    require(screen_contains("AK-47 | 2发 | 初始采集 | history-a") && screen_contains("AK-47 | 2发 | 曲线测试 | history-b"),
         "重开面板必须从原持久结果恢复历史，无需复制路径");
-    click("2发 | 曲线测试 | history-b",true);
+    click("AK-47 | 2发 | 曲线测试 | history-b",true);
     click("载入所选记录",false,"载入以前的采集");
     require(emitted.empty() && screen_contains("画面已核对：加入优化数据") && screen_contains("训练 0/3，验证 0/2"),
         "历史测试结果只载入预览，不得自动计入训练或发出设备动作");
+    click("测试曲线");
+    require(screen_contains("AK-47 | 2发 | v1 | known.json") && screen_contains("AK-47 | 2发 | v1 | legacy.json") &&
+        screen_contains("AK-47 | 发数未标注 | v1 | bad-count.json") &&
+        screen_contains("AK-47 | 发数未标注 | v1 | bad-suffix.json") &&
+        screen_contains("AK-47 | 发数未标注 | v1 | bad-weapon.json") &&
+        screen_contains("AK-47 | 发数未标注 | v1 | legacy-prefix.json") &&
+        screen_contains("AK-47 | 发数未标注 | v1 | legacy-optimized.json") &&
+        screen_contains("AK-47 | 发数未标注 | v1 | legacy-test.json") && !screen_contains("m4.json"),
+        "曲线名称须严格识别新id或精确capture Run；旧导入、前缀近似和test Run不可猜发数");
+    click("AK-47 | 2发 | v1 | known.json###known.json",true);
     click("武器"); click("M4A1-S",true);
+    require(screen_contains("M4A1-S | 3发 | v1 | m4.json"),"切武器后测试曲线须显示该武器与已知发数");
     click("历史采集记录",false,"载入以前的采集");
-    require(screen_contains("2发 | 初始采集 | history-other") && !screen_contains("history-a") &&
+    require(screen_contains("M4A1-S | 2发 | 初始采集 | history-other") && !screen_contains("history-a") &&
         !screen_contains("history-b") && emitted.empty(),"切换武器后只列对应历史，不得沿用上个武器记录");
-    click("2发 | 初始采集 | history-other",true);
+    click("M4A1-S | 2发 | 初始采集 | history-other",true);
+    click("验证已有弹道");
+    require(emitted.size()==1 && std::filesystem::path(emitted.back().debug_request.recoil_profile_path).filename()=="m4.json",
+        "切换武器验证必须使用对应武器所选曲线");
+    emitted.clear(); click("武器"); click("AK-47",true);
+    require(screen_contains("AK-47 | 2发 | v1 | known.json"),"切回武器须恢复它自己的明确曲线名称");
+    settle(); panel.reset(); debug={}; panel=std::make_unique<RecoilPanel>(); settle();
+    require(screen_contains("AK-47 | 2发 | v1 | known.json"),"重开面板须持久恢复武器与发数标签");
+    click("验证已有弹道");
+    require(emitted.size()==1 && std::filesystem::path(emitted.back().debug_request.recoil_profile_path).filename()=="known.json",
+        "重开后保存的武器选择不能被另一武器覆盖");
+    emitted.clear();
     std::ofstream report(output/"recoil-flow.txt"); report << "真实RecoilPanel无设备交互回归通过；自动动作仅PREPARE，等待下一次人工按键。\n";
 }
 }
@@ -636,6 +693,19 @@ int wmain(int argc, wchar_t** argv) {
             if (option == L"--dark") config.ui.theme = UiTheme::DARK;
             else if (option == L"--auxiliary") auxiliary = true;
             else require(false, "未知参数");
+        }
+        if (auxiliary) {
+            RecoilProfile named; named.id="ak47-3shots-"+std::string(32,'a'); named.weapon_id="ak47";
+            named.state=RecoilProfileState::IMPORTED; named.points={{0,0,0},{100,2,4}};
+            std::filesystem::create_directories(config.recoil.profile_directory);
+            { std::ofstream file(std::filesystem::path(config.recoil.profile_directory)/(named.id+"-r1.json"));
+              file<<serialize_recoil_profile(named); }
+            const auto run=std::filesystem::path("cache/recoil/workflow/debug-preview-weapon-shots");
+            std::filesystem::create_directories(run);
+            { std::ofstream file(run/"result-index.json");
+              file<<nlohmann::json{{"weapon_id","ak47"},{"requested_shots",3},{"observed_ammo_delta",0},
+                {"firing_ammo_delta",3},{"mode","capture"},{"success",true},{"completed",true},
+                {"cleanup_known",true},{"training_eligible",true},{"measurement_path","preview-only.json"}}; }
         }
         require(overlay.init(config.ui), "Overlay 初始化失败");
         RuntimeSnapshot runtime; runtime.state = RuntimeState::STOPPED;
@@ -779,6 +849,9 @@ int wmain(int argc, wchar_t** argv) {
                 "扳机调试缺少有效性与联动控制");
             save_window(capture, output / "trigger-debug-bottom.png");
             select_debug_tab("弹道工具", "采集新弹道", "recoil-tools.png");
+            ImGui::SetScrollY(content,350); frame(); frame();
+            input.position={400,40}; frame();
+            save_window(capture,output/"recoil-curve-name.png");
             require(capture.text.find("验证已有弹道") != std::string::npos &&
                 capture.text.find("曲线目录") == std::string::npos &&
                 capture.text.find("游戏灵敏度") == std::string::npos,
@@ -806,6 +879,15 @@ int wmain(int argc, wchar_t** argv) {
                 "历史入口展开后必须显示选择及载入控件");
             ImGui::SetScrollY(content,content->ScrollMax.y); frame(); frame();
             input.position={400,40}; frame();save_window(capture,output/"recoil-history.png");
+            input.focus_window=content;
+            input.focus_id=ImHashStr("历史采集记录",0,ImHashStr("载入以前的采集",0,import_tabs->SelectedTabId)); frame();
+            input.position=ImGui::WindowRectRelToAbs(content,content->NavRectRel[ImGuiNavLayer_Main]).GetCenter();
+            require(content->ClipRect.Contains(input.position),"历史列表在最小窗口不可点击");
+            frame(); input.down=true; frame(); input.down=false; frame(); frame();
+            require(capture.text.find("AK-47 | 3发 | 初始采集 | debug-preview-weapon-shots")!=std::string::npos,
+                "历史列表截图必须包含武器和发数");
+            save_window(capture,output/"recoil-history-options.png");
+            input.position={400,40}; input.down=true; frame(); input.down=false; frame();
             ImGui::SetScrollY(content, 0); frame(); frame();
             auto* recoil_tabs = ImGui::GetCurrentContext()->TabBars.GetByKey(content->GetID("debug_tabs"));
             require(recoil_tabs != nullptr,"弹道标签状态丢失");
