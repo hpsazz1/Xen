@@ -7,7 +7,8 @@
     [ValidateRange(1, 65535)][int]$Port = 5012,
     [ValidatePattern('^[A-Za-z0-9_.-]+\.exe$')][string]$ProcessName = 'cs2.exe',
     [ValidateRange(20, 2000)][int]$TtlMs = 200,
-    [ValidateRange(100, 10000)][int]$TimeoutMs = 3000
+    [ValidateRange(100, 10000)][int]$TimeoutMs = 3000,
+    [ValidatePattern('^udp://[0-9.]+:[0-9]+$')][string]$ClockBindUrl = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,8 +50,40 @@ function Get-SourceExitDiagnostic {
     "源服务启动后退出，退出码=$Code，端点=${Address}:$ListenPort；$reason"
 }
 
+function Start-SourceClock {
+    if (-not $ClockBindUrl) { return }
+    $clockUri = [Uri]$ClockBindUrl
+    $clockAddress = $null
+    if (-not [Net.IPAddress]::TryParse($clockUri.Host, [ref]$clockAddress) -or
+        $clockAddress.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or
+        $clockUri.Port -lt 1 -or $clockUri.Port -gt 65535) { throw '时钟旁路必须使用有效 IPv4 UDP 端点。' }
+    $clockBinary = Join-Path (Split-Path -Parent $binaryPath) 'XenClockSource.exe'
+    if (-not (Test-Path -LiteralPath $clockBinary -PathType Leaf)) { throw "缺少只读时钟程序：$clockBinary" }
+    $clockSession = (Get-Process -Id $PID).SessionId
+    $owners = @(Get-SourceListenerOwner -Address $clockUri.Host -ListenPort $clockUri.Port)
+    if ($owners.Count -gt 0) {
+        if ($owners.Count -eq 1) {
+            $owner = Get-CimInstance Win32_Process -Filter "ProcessId=$($owners[0])" -ErrorAction Stop
+            $expected = '"' + $clockBinary + '" --bind ' + $ClockBindUrl
+            $unquoted = $clockBinary + ' --bind ' + $ClockBindUrl
+            if ($owner -and $owner.ExecutablePath -ieq $clockBinary -and $owner.SessionId -eq $clockSession -and
+                ($owner.CommandLine -ieq $expected -or $owner.CommandLine -ieq $unquoted)) {
+                Write-Output "只读 NDI 时钟已运行，PID=$($owners[0])；复用现有服务。"
+                return
+            }
+        }
+        throw "时钟端点 $ClockBindUrl 已占用且进程不匹配；未停止任何进程。"
+    }
+    $clockChild = Start-Process -FilePath $clockBinary -ArgumentList @('--bind', $ClockBindUrl) -WorkingDirectory (Split-Path -Parent $clockBinary) -WindowStyle Hidden -PassThru
+    if ($clockChild.WaitForExit(300)) { throw "只读时钟启动失败，退出码=$($clockChild.ExitCode)。" }
+    $startedOwners = @(Get-SourceListenerOwner -Address $clockUri.Host -ListenPort $clockUri.Port)
+    if ($clockChild.Id -notin $startedOwners) { throw '时钟进程尚未监听指定端点，请检查启动状态。' }
+    Write-Output "只读 NDI 时钟已启动，PID=$($clockChild.Id)，端点=$ClockBindUrl；不发送设备输入。"
+}
+
 Add-Type -AssemblyName System.Security
 $binaryPath = (Resolve-Path -LiteralPath $Executable).Path
+if ($ClockBindUrl -and $Mode -ne 'Source') { throw 'ClockBindUrl 仅用于 Source 模式。' }
 $credentialPath = Join-Path ([IO.Path]::GetFullPath($CredentialDirectory)) 'token.dpapi'
 for ($ancestor = $credentialPath; $ancestor; $ancestor = [IO.Path]::GetDirectoryName($ancestor)) {
     if (Test-Path -LiteralPath $ancestor) {
@@ -127,6 +160,7 @@ try {
                 throw "源服务已运行，PID=$reusePid，但当前凭据的只读探测失败，退出码=$($child.ExitCode)；请核对凭据或源服务状态，未启动第二实例。"
             }
             Write-Output "只读源桥接已运行并通过当前凭据探测，PID=$reusePid；复用现有服务，不发送设备输入。"
+            Start-SourceClock
             return
         }
         if ($stdout) { [Console]::Out.Write($stdout) }
@@ -136,6 +170,7 @@ try {
     if ($Mode -eq 'Source') {
         if ($child.WaitForExit(300)) { throw (Get-SourceExitDiagnostic -Code $child.ExitCode -Address $HostAddress -ListenPort $Port) }
         Write-Output "只读源桥接已启动，PID=$($child.Id)；不发送设备输入。"
+        Start-SourceClock
     } else {
         Write-Output "用户启动的 Launcher 已创建，PID=$($child.Id)。"
     }

@@ -60,6 +60,7 @@ enum class RecoilReason {
     EXHAUSTED, NOT_SENT, UNKNOWN_RECEIPT, COMMAND_PENDING, INVALID_TIME, LIMIT
 };
 const char* RecoilReasonName(RecoilReason reason) noexcept;
+enum class RecoilContextBlock { NONE, INPUT_UNHEALTHY, NOT_FOCUSED, PROFILE_CONDITIONS, PERMISSION, GENERATION };
 struct RecoilInput {
     bool enabled = false, held = false, healthy = false, focused = false, permission = false;
     bool profile_conditions_match = false, recovery_qualified = false;
@@ -76,6 +77,7 @@ struct RecoilIntent {
 struct RecoilSnapshot {
     RecoilPhase phase = RecoilPhase::DISABLED;
     RecoilReason reason = RecoilReason::DISABLED;
+    RecoilContextBlock context_block = RecoilContextBlock::NONE;
     std::uint64_t session_id = 0, command_id = 0;
     bool faulted = false, pending = false;
     double planned_x = 0, planned_y = 0, confirmed_x = 0, confirmed_y = 0;

@@ -10,6 +10,7 @@
     [string]$ManualAcceptancePath = '',
     [switch]$IncludeLauncher,
     [switch]$IncludeRecoilTools,
+    [switch]$IncludeSourceSessionScript,
     [string]$SourceContextExecutable = '',
     [string]$SshIdentityFile = (Join-Path $env:USERPROFILE '.ssh\xen_foxos_ed25519'),
     [string]$KnownHostsFile = (Join-Path $env:USERPROFILE '.ssh\known_hosts'),
@@ -77,7 +78,8 @@ try {
         -BuildDirectory $BuildDirectory -Runtime $Runtime -OutputDirectory $generated `
         -RepositoryRoot $RepositoryRoot -GitExecutable $GitExecutable -ChangesOnly `
         -PackageNotesPath $PackageNotesPath -ManualAcceptancePath $ManualAcceptancePath `
-        -SourceContextExecutable $SourceContextExecutable -IncludeLauncher:$IncludeLauncher -IncludeRecoilTools:$IncludeRecoilTools
+        -SourceContextExecutable $SourceContextExecutable -IncludeLauncher:$IncludeLauncher -IncludeRecoilTools:$IncludeRecoilTools `
+        -IncludeSourceSessionScript:$IncludeSourceSessionScript
     $ownedStages.Add([pscustomobject]@{ parent = (Split-Path -Parent $localRoot); name = $stageName })
     $null = Resolve-XenDirectChildPath $localRoot $stageName '移入主机包前暂存'
     [IO.Directory]::Move($generated, $localStage)
@@ -90,6 +92,7 @@ try {
     if ($PackageNotesPath) { $relativeFiles += 'tools/acceptance/PACKAGE-NOTES.md' }
     if ($ManualAcceptancePath) { $relativeFiles += 'tools/acceptance/MANUAL-ACCEPTANCE.md' }
     if ($SourceContextExecutable) { $relativeFiles += 'tools/source/xen_source_context.exe' }
+    if ($IncludeSourceSessionScript) { $relativeFiles += 'tools/source/start_source_context_session.ps1' }
     $baseManifest = Get-Content -LiteralPath (Join-Path $localRoot 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     foreach ($relative in $relativeFiles) {
         if ($relative -ceq 'manifest.json') { continue }

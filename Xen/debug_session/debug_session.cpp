@@ -557,12 +557,14 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
                     effective.recoil_x_strength,effective.recoil_y_strength) :
                 (effective.mode==Mode::RECOIL_CAPTURE||effective.mode==Mode::RECOIL_CALIBRATE) ?
                 prepare_wall_debug_plan(effective.mode==Mode::RECOIL_CALIBRATE,effective.weapon_id,effective.recoil_duration_ms,
-                    std::filesystem::u8path(effective.recoil_calibration_path),context.config) : request_plan(effective);
+                    std::filesystem::u8path(effective.recoil_calibration_path),context.config,effective.recoil_follow_crosshair) : request_plan(effective);
             if(recoil_mode(effective.mode)) {
                 if(effective.recoil_target_shots<1||effective.recoil_target_shots>50||
                     !std::isfinite(effective.recoil_locked_prefix_ms)||effective.recoil_locked_prefix_ms<0)
                     throw std::runtime_error("阶段目标须1–50发且锁定前缀时间有效");
                 plan["target_shots"]=effective.recoil_target_shots;
+                if(effective.recoil_follow_crosshair && effective.mode==Mode::RECOIL_CAPTURE && effective.recoil_target_shots>5)
+                    throw std::runtime_error("跟随后坐力准星采集最多5发，请减少本次发数");
                 plan["locked_prefix_ms"]=effective.recoil_locked_prefix_ms;
                 if(effective.mode==Mode::RECOIL_TEST) {
                     if(effective.recoil_duration_ms<100||effective.recoil_duration_ms>10000)
@@ -575,8 +577,9 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
                     plan["measurement_enabled"]=!effective.recoil_calibration_path.empty();
                     if(!effective.recoil_calibration_path.empty()){
                         auto calibrated=prepare_wall_debug_plan(false,plan.at("profile").at("weapon_id"),
-                            effective.recoil_duration_ms,std::filesystem::u8path(effective.recoil_calibration_path),context.config);
+                            effective.recoil_duration_ms,std::filesystem::u8path(effective.recoil_calibration_path),context.config,effective.recoil_follow_crosshair);
                         plan["calibration"]=calibrated.at("calibration");
+                        plan["follow_recoil"]=effective.recoil_follow_crosshair;
                     }
                 }
             }

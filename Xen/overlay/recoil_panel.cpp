@@ -433,6 +433,7 @@ struct RecoilPanel::Impl {
     nlohmann::json workflow_weapon_settings = nlohmann::json::object();
     bool workflow_settings_loaded = false, workflow_settings_dirty = false;
     bool workflow_record_measurement = false;
+    bool workflow_follow_crosshair = true;
     std::optional<debug_session::Mode> workflow_after_calibration, workflow_prepare_next;
     std::string workflow_profiles_directory;
     void remember_workflow_weapon() {
@@ -485,6 +486,7 @@ struct RecoilPanel::Impl {
         auto& r = actions.debug_request;
         r.mode = mode; r.weapon_id = workflow_weapon; r.output_root = "cache/recoil/workflow";
         r.recoil_duration_ms = workflow_duration_ms; r.recoil_target_shots = workflow_target_shots;
+        r.recoil_follow_crosshair = workflow_follow_crosshair;
         r.recoil_locked_prefix_ms = workflow_locked_prefix_ms;
         r.recoil_calibration_path = mode == debug_session::Mode::RECOIL_TEST && !workflow_record_measurement
             ? std::string{} : workflow_calibration_path;
@@ -768,9 +770,15 @@ struct RecoilPanel::Impl {
             workflow_after_calibration.reset(); workflow_prepare_next.reset();
             refresh_workflow_selection(config.recoil); return;
         }
-        ImGui::TextWrapped("流程：标定一次 → 采集1组生成候选 → 保存并实测 → 满意后追加发数。需要优化时收集3组训练+2组验证。每次按键只执行一组，不会一直采集。");
+        ImGui::TextWrapped("流程：设置准星 → 重新标定 → 采集最多5发 → 核对轨迹、保存并实测。每次按键只执行一组，不会一直采集。");
         ImGui::TextWrapped("对准固定靶点，准备后回游戏按顶部测试键。标定只移动，采集和测试会自动射击。");
         bool changed = false;
+        if(ImGui::Checkbox("跟随后坐力准星采集", &workflow_follow_crosshair)){
+            workflow_calibration_path.clear();changed=true;
+        }
+        help("开启后同时记录洋红准星与背景位移；需要重新标定。不使用弹孔。关闭可读取原背景采集流程。");
+        if(workflow_follow_crosshair)
+            ImGui::TextWrapped("游戏内开启跟随后坐力；准星自定义RGB 255/0/255、不透明、关闭轮廓，仅保留实心中心点（画面中2–5像素）。选择有清晰纹理、没有其他洋红标记的墙面。首次新采集最多5发；GSI超发时本组作废。");
         if (ImGui::BeginCombo("武器", weapon::display_name(workflow_weapon).data())) {
             for (const auto& item : weapon::kWeaponNames) if (ImGui::Selectable(item.display_name.data(), workflow_weapon == item.canonical_id)) {
                 select_workflow_weapon(std::string(item.canonical_id));
@@ -848,6 +856,7 @@ struct RecoilPanel::Impl {
         }
         ImGui::BeginDisabled(pending_action != nullptr || (debug && debug->busy));
         if (ImGui::Button("采集新弹道")) {
+            if(workflow_follow_crosshair)workflow_target_shots=std::min(workflow_target_shots,5);
             workflow_record_measurement = true;
             workflow_after_calibration = workflow_calibration_path.empty() ? std::optional{debug_session::Mode::RECOIL_CAPTURE} : std::nullopt;
             workflow_prepare_next = workflow_after_calibration ? debug_session::Mode::RECOIL_CALIBRATE : debug_session::Mode::RECOIL_CAPTURE;
@@ -864,6 +873,7 @@ struct RecoilPanel::Impl {
         ImGui::EndDisabled();
         ImGui::SameLine();
         if (ImGui::Button("重新标定并采集")) {
+            if(workflow_follow_crosshair)workflow_target_shots=std::min(workflow_target_shots,5);
             workflow_calibration_path.clear(); remember_workflow_weapon();
             workflow_samples.clear(); workflow_measurement_ready = false; workflow_locked_prefix_ms = 0;
             workflow_record_measurement = true;
@@ -885,7 +895,7 @@ struct RecoilPanel::Impl {
             ImGui::TextWrapped("本组状态：%s",debug->message.c_str());
         if (debug && debug->repeat_ready && !candidate_pending && workflow_samples.size() < 5)
             ImGui::TextWrapped("已准备：回游戏对准靶点，按一下测试键后松开，等待本组完成。修改参数后请重新准备。");
-        ImGui::TextWrapped("采集的是视角/靶点运动候选，不把准星动画当弹着点。固定位置和姿态；每组对准新的干净靶面。");
+        ImGui::TextWrapped("采集的是准星相对墙面的轨迹候选，效果仍需人工实测。固定位置和姿态，不要手动压枪；程序自动停枪，无需人为控制五发。");
         workflow_results(config, actions, debug);
         if (workflow_settings_dirty && !ImGui::IsAnyItemActive() && actions.debug_action == debug_session::Action::NONE && !pending_action) {
             workflow_settings_dirty = false;
@@ -1208,7 +1218,16 @@ struct RecoilPanel::Impl {
             weapon::status_name(snapshot.weapon_snapshot.status));
         if (!snapshot.recoil_profile_status.empty()) ImGui::TextWrapped("曲线匹配：%s", snapshot.recoil_profile_status.c_str());
         if (snapshot.recoil_telemetry_available) {
-            ImGui::TextWrapped("压枪状态：%s；已确认 X %.2f / Y %.2f counts", reason_text(snapshot.recoil.reason),
+            const char* detail=reason_text(snapshot.recoil.reason);
+            if(snapshot.recoil.reason==RecoilReason::CONTEXT)switch(snapshot.recoil.context_block){
+            case RecoilContextBlock::INPUT_UNHEALTHY: detail="等待KMBOX原始输入监听就绪";break;
+            case RecoilContextBlock::NOT_FOCUSED: detail=snapshot.source_context.available?"源端游戏不在前台，请切回游戏":"源焦点桥接不可用，请检查源端服务";break;
+            case RecoilContextBlock::PROFILE_CONDITIONS: detail="GSI武器、弹药或曲线匹配条件未满足";break;
+            case RecoilContextBlock::PERMISSION: detail="物理输出许可未满足";break;
+            case RecoilContextBlock::GENERATION: detail="上下文已更换，请松开按键后重试";break;
+            default:break;
+            }
+            ImGui::TextWrapped("压枪状态：%s；已确认 X %.2f / Y %.2f counts", detail,
                 snapshot.recoil.confirmed_x, snapshot.recoil.confirmed_y);
         } else ImGui::TextUnformatted("本会话暂无压枪执行记录。");
     }

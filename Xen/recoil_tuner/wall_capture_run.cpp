@@ -99,6 +99,7 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
         if (!device || !device->output_owner_exclusive() || !request.context_valid ||
             request.duration_ms < 100 || request.duration_ms > 15000 || request.weapon_id.empty() ||
             request.target_shots < 0 || request.target_shots > 100 ||
+            (request.follow_recoil && request.mode==WallRunMode::CAPTURE && (request.target_shots<1 || request.target_shots>5)) ||
             (request.target_shots > 0 && !request.observed_ammo_delta) ||
             !std::isfinite(request.sensitivity) || request.sensitivity <= 0 ||
             request.trigger_virtual_key <= 0 || request.trigger_virtual_key >= 256 ||
@@ -153,6 +154,13 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
                     std::lock_guard lock(buffer.mutex);
                     buffer.latest = {frame, received, input_size};
                     if (buffer.recording) {
+                        if(request.follow_recoil){
+                            cv::Point2d crosshair; std::string crosshair_error;
+                            if(!locate_follow_recoil_crosshair(frame.bgr,crosshair,crosshair_error)){
+                                buffer.error=crosshair_error; buffer.recovery_action="retarget";
+                                buffer.registration_failure_frame=buffer.latest; break;
+                            }
+                        }
                         if (input_size != buffer.reference_input_size ||
                             frame.source_pixels_per_pixel_x != buffer.reference_source_scale_x ||
                             frame.source_pixels_per_pixel_y != buffer.reference_source_scale_y ||
@@ -259,6 +267,11 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
         if(measurement_required){
             std::lock_guard lock(buffer.mutex);
             result.report["geometry"] = geometry_json(buffer.latest);
+            if(request.follow_recoil){
+                cv::Point2d crosshair;std::string crosshair_error;
+                if(!locate_follow_recoil_crosshair(buffer.latest.frame.bgr,crosshair,crosshair_error))
+                    throw std::runtime_error(crosshair_error);
+            }
             if (request.geometry_valid && !request.geometry_valid(result.report["geometry"])) {
                 buffer.recovery_action = "recalibrate";
                 throw std::runtime_error("当前实际画面几何与标定不一致，请重新标定");
@@ -278,6 +291,7 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
             while (Clock::now() < until) { input_valid(true); std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
         };
         if (request.mode == WallRunMode::CALIBRATE) {
+            double delay_low=0,delay_high=0;
             notify("正在进行一次X/Y画面标定，不射击；请勿移动鼠标");
             const std::array<MouseMoveCommand, 4> commands{{{12, 0}, {-12, 0}, {0, 12}, {0, -12}}};
             for (const auto& command : commands) {
@@ -302,6 +316,46 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
                 const auto response=registration.response;
                 if(!registration.failure.empty() || cv::norm(delta)>64)
                     throw std::runtime_error("墙面纹理或标定配准不足，请选择有纹理的固定墙面");
+                if(request.follow_recoil){
+                    cv::Point2d q_before,q_after;std::string crosshair_error;
+                    if(!locate_follow_recoil_crosshair(before.frame.bgr,q_before,crosshair_error) ||
+                       !locate_follow_recoil_crosshair(after.frame.bgr,q_after,crosshair_error))
+                        throw std::runtime_error(crosshair_error);
+                    if(cv::norm(q_after-q_before)>1.0)
+                        throw std::runtime_error("标定时准星中心随鼠标移动，不能采用当前坐标换算；请保持静止并检查准星样式");
+                    const cv::Rect2d before_roi(roi.x-12,roi.y-12,roi.width+24,roi.height+24);
+                    const cv::Rect2d after_roi(roi.x+delta.x-12,roi.y+delta.y-12,roi.width+24,roi.height+24);
+                    if(before_roi.contains(q_before)||after_roi.contains(q_after))
+                        throw std::runtime_error("准星进入标定背景区域，请重新对准");
+                    result.report["crosshair_calibration"].push_back({{"before",{q_before.x,q_before.y}},
+                        {"after",{q_after.x,q_after.y}},{"maximum_center_delta_pixels",1.0}});
+                    // 由独立已知位移确定接收链首次可见区间；不从射击峰值猜测末发时间。
+                    std::vector<StoredFrame> response_frames;
+                    {std::lock_guard lock(buffer.mutex);response_frames=buffer.frames;}
+                    const double response_threshold=std::max(1.0,cv::norm(delta)*0.2);
+                    if(cv::norm(delta)<2.0)throw std::runtime_error("标定位移画面响应过小，无法估计视频延迟");
+                    auto last_unchanged=started;
+                    bool response_found=false;
+                    double low=0,high=0;
+                    for(const auto& observed:response_frames){
+                        if(observed.received<=started || observed.received>after.received)continue;
+                        const auto observed_registration=detail::register_wall(before.frame.bgr,observed.frame.bgr,roi,{64,64});
+                        if(!observed_registration.failure.empty())throw std::runtime_error("标定响应时序中的背景匹配失败，请重新对准固定墙面");
+                        if(cv::norm(observed_registration.shift)>=response_threshold){
+                            low=milliseconds(last_unchanged,receipt.backend_completed_at);
+                            high=milliseconds(observed.received,started);
+                            response_found=true;break;
+                        }
+                        last_unchanged=observed.received;
+                    }
+                    if(!response_found || low < -100 || high>250 || high-low>100)
+                        throw std::runtime_error("视频响应延迟无法可靠对齐或超过尾帧覆盖范围，请检查采集链路后重新标定");
+                    if(result.calibration.empty()){delay_low=low;delay_high=high;}
+                    else{delay_low=std::min(delay_low,low);delay_high=std::max(delay_high,high);}
+                    if(delay_high-delay_low>100)throw std::runtime_error("视频延迟波动超过100ms，不能生成可信五发候选");
+                    result.report["crosshair_calibration"].back()["receive_delay_interval_ms"]={low,high};
+                    result.report["crosshair_calibration"].back()["response_threshold_pixels"]=response_threshold;
+                }
                 const auto id = std::to_string(result.calibration.size() + 1);
                 result.calibration.push_back({{static_cast<double>(command.dx_counts), static_cast<double>(command.dy_counts)},
                     {delta.x, delta.y}, true, (request.output_directory / ("calibration-" + id)).string()});
@@ -316,6 +370,11 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
                         "命令已收到ACK，但前后画面完全相同，标定未通过；已停止本组，请核对游戏焦点与画面响应后重新标定");
                 }
             }
+            result.report["follow_recoil_mouse_invariance_verified"]=request.follow_recoil;
+            if(request.follow_recoil)result.report["follow_recoil_receive_alignment"]={
+                {"delay_ms",(delay_low+delay_high)*0.5},{"uncertainty_ms",(delay_high-delay_low)*0.5},
+                {"interval_ms",{delay_low,delay_high}},{"basis","independent_mouse_background_first_visible"},
+                {"actual_shot_time_known",false}};
         } else {
             if (request.on_ready) { worker_ready = true; if (!request.on_ready()) throw std::runtime_error("候选测试调度器准备失败"); }
             input_valid(true);

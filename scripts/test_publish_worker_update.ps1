@@ -50,7 +50,8 @@ try {
     & $git -C $sourceRoot init --quiet
     if ($LASTEXITCODE -ne 0) { throw 'fixture git init failed' }
     Write-UpdateFixture (Join-Path $sourceRoot 'fixture.txt') 'worker source'
-    & $git -C $sourceRoot add fixture.txt
+    Write-UpdateFixture (Join-Path $sourceRoot 'scripts/start_source_context_session.ps1') 'updated-source-session-script'
+    & $git -C $sourceRoot add fixture.txt scripts/start_source_context_session.ps1
     & $git -C $sourceRoot -c user.name=XenTest -c user.email=xen-test@example.invalid commit --quiet -m '发布夹具'
     if ($LASTEXITCODE -ne 0) { throw 'fixture git commit failed' }
     $commit = (& $git -C $sourceRoot rev-parse HEAD).Trim()
@@ -82,6 +83,7 @@ try {
     Write-UpdateFixture (Join-Path $baseRoot 'tools/acceptance/PACKAGE-NOTES.md') 'old package notes'
     Write-UpdateFixture (Join-Path $baseRoot 'tools/acceptance/MANUAL-ACCEPTANCE.md') 'old manual acceptance'
     Write-UpdateFixture (Join-Path $baseRoot 'tools/source/xen_source_context.exe') 'old source context'
+    Write-UpdateFixture (Join-Path $baseRoot 'tools/source/start_source_context_session.ps1') 'old source session script'
     foreach ($file in Get-ChildItem -LiteralPath $baseRoot -Recurse -File) {
         $relative = $file.FullName.Substring($baseRoot.Length + 1).Replace('\', '/')
         $runtime = if ($relative -match '^runtimes/([^/]+)/') { $Matches[1] } else { '' }
@@ -200,6 +202,7 @@ try {
     $deltaParameters.ChangesOnly = $true
     $deltaParameters.SourceContextExecutable = Join-Path $buildRoot 'Release\xen_source_context.exe'
     $deltaParameters.IncludeRecoilTools = $true
+    $deltaParameters.IncludeSourceSessionScript = $true
     foreach ($tool in @('xen_recoil_calibration.exe', 'xen_recoil_tuner.exe')) {
         $missingTool = $deltaParameters.Clone()
         $missingTool.OutputDirectory = Join-Path $runRoot "missing-$tool"
@@ -220,13 +223,13 @@ try {
     Write-UpdateFixture (Join-Path $baseRoot 'config.ini') 'user changed configuration after original publication'
     Write-UpdateFixture (Join-Path $baseRoot 'cache/model-workspace/settings.json') '{"user_changed":true}'
     & $publisher @deltaParameters
-    Assert-UpdateTest (@(Get-ChildItem -LiteralPath $deltaOutput -Recurse -File).Count -eq 6) '差量只生成 Worker、选中桥接与两个压枪工具、来源证据和清单'
+    Assert-UpdateTest (@(Get-ChildItem -LiteralPath $deltaOutput -Recurse -File).Count -eq 7) '差量只生成 Worker、选中桥接及启动脚本与两个压枪工具、来源证据和清单'
     Assert-UpdateTest (-not (Test-Path -LiteralPath (Join-Path $deltaOutput 'config.ini'))) '差量不复制配置'
     $deltaStage = Join-Path $baseRoot $deltaName
     [IO.Directory]::Move($deltaOutput, $deltaStage)
     $deltaEntries = @()
     foreach ($relative in @('runtimes/nvidia/Xen.exe', 'runtimes/nvidia/xen_recoil_calibration.exe',
-        'runtimes/nvidia/xen_recoil_tuner.exe', 'tools/source/xen_source_context.exe', 'tools/acceptance/WORKER-UPDATE.json', 'manifest.json')) {
+        'runtimes/nvidia/xen_recoil_tuner.exe', 'tools/source/xen_source_context.exe', 'tools/source/start_source_context_session.ps1', 'tools/acceptance/WORKER-UPDATE.json', 'manifest.json')) {
         $oldPath = Join-Path $baseRoot $relative
         $oldHash = if (Test-Path -LiteralPath $oldPath) { (Get-FileHash -LiteralPath $oldPath).Hash.ToLowerInvariant() } else { '' }
         $deltaEntries += [ordered]@{ path = $relative; old_sha256 = $oldHash
@@ -284,6 +287,7 @@ try {
     Remove-Item Function:Get-Process
     Assert-ProductionManifest $baseRoot -MutableFilesMayDiffer
     Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $baseRoot 'tools/source/xen_source_context.exe') -Raw) -ceq 'updated-source-context-fixture') '选中桥接工具已更新'
+    Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $baseRoot 'tools/source/start_source_context_session.ps1') -Raw) -ceq 'updated-source-session-script') '选中源启动脚本已更新'
     $deltaEvidence = Get-Content -LiteralPath (Join-Path $baseRoot 'tools/acceptance/WORKER-UPDATE.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     $toolIdentity = @($deltaEvidence.updated_components | Where-Object { $_.path -ceq 'tools/source/xen_source_context.exe' })
     Assert-UpdateTest ($toolIdentity.Count -eq 1 -and $toolIdentity[0].git_commit -ceq $commit) '桥接工具绑定同提交身份'

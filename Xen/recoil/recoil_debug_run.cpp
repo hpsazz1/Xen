@@ -52,14 +52,14 @@ void write(const std::filesystem::path& path, const Json& json) {
 
 
 Json prepare_wall_debug_plan(bool calibrate,const std::string& weapon_id,int duration_ms,
-        const std::filesystem::path& calibration_path,const AppConfig& config) {
+        const std::filesystem::path& calibration_path,const AppConfig& config,bool follow_recoil) {
     if (config.keyboard.debug_test_virtual_keys.size()!=1 || config.keyboard.emergency_virtual_keys.empty() ||
         !valid_keyboard_config(config.keyboard)) throw std::runtime_error("请绑定一个独立测试键及紧急停止键");
     if (weapon_id.empty()||weapon_id.size()>128||!std::isfinite(config.recoil.sensitivity)||config.recoil.sensitivity<=0||
         duration_ms<100||duration_ms>10000) throw std::runtime_error("请填写武器、有效灵敏度和100–10000ms采集时长");
     RecoilCalibrationEnvironment environment{weapon_id,"","kmbox_net","",config.recoil.sensitivity};
     Json plan{{"schema_version",1},{"kind",calibrate?"recoil_calibrate":"recoil_capture"},{"weapon_id",weapon_id},
-        {"duration_ms",duration_ms},{"sensitivity",config.recoil.sensitivity},
+        {"duration_ms",duration_ms},{"sensitivity",config.recoil.sensitivity},{"follow_recoil",follow_recoil},
         {"environment_fingerprint",wall_fingerprint(weapon_id,config.recoil.sensitivity,config.capture)},
         {"hold_key",config.keyboard.debug_test_virtual_keys.front()},{"cancel_key",config.keyboard.emergency_virtual_keys.front()}};
     if (!calibrate) {
@@ -80,6 +80,14 @@ Json prepare_wall_debug_plan(bool calibrate,const std::string& weapon_id,int dur
             sample.at("acknowledged").get<bool>(),sample.at("evidence_id").get<std::string>()});
         std::array<double,4> response{};std::string fit_error;
         if(!recoil_tuner::fit_wall_calibration(samples,20,response,fit_error))throw std::runtime_error(fit_error);
+        if(follow_recoil && !calibration.value("follow_recoil_mouse_invariance_verified",false))
+            throw std::runtime_error("跟随准星采集需要重新标定：请先设置洋红中心点并开启游戏内跟随后坐力");
+        if(follow_recoil){
+            const auto& alignment=calibration.at("follow_recoil_receive_alignment");
+            const double delay=alignment.at("delay_ms"),uncertainty=alignment.at("uncertainty_ms");
+            if(!std::isfinite(delay)||!std::isfinite(uncertainty)||delay< -100||delay>250||uncertainty<0||uncertainty>50)
+                throw std::runtime_error("准星标定的视频延迟无效，请重新标定");
+        }
         plan["calibration"]=calibration;
     }
     return plan;
@@ -140,6 +148,7 @@ Json run_recoil_debug(const Json& plan,const AppConfig& config,const std::shared
     recoil_tuner::WallRunRequest request;
     request.mode=testing?recoil_tuner::WallRunMode::TEST:calibrating?recoil_tuner::WallRunMode::CALIBRATE:recoil_tuner::WallRunMode::CAPTURE;
     request.measurement_required=!testing||plan.contains("calibration");
+    request.follow_recoil=plan.value("follow_recoil",false);
     request.capture=config.capture;request.output_directory=directory/"capture";request.weapon_id=weapon_id;
     request.environment_fingerprint=fingerprint;request.sensitivity=environment.sensitivity;
     request.duration_ms=plan.at("duration_ms").get<int>();
@@ -250,7 +259,9 @@ Json run_recoil_debug(const Json& plan,const AppConfig& config,const std::shared
             for(const auto& sample:run.calibration)samples.push_back({{"counts",sample.counts},{"pixel_delta",sample.pixel_delta},
                 {"acknowledged",sample.acknowledged},{"evidence_id",sample.evidence_id}});
             write(directory/"calibration.json",{{"schema_version",1},{"environment_fingerprint",fingerprint},
-                {"weapon_id",weapon_id},{"sensitivity",environment.sensitivity},{"samples",samples},{"geometry",run.report.at("geometry")}});
+                {"weapon_id",weapon_id},{"sensitivity",environment.sensitivity},{"samples",samples},{"geometry",run.report.at("geometry")},
+                {"follow_recoil_mouse_invariance_verified",run.report.value("follow_recoil_mouse_invariance_verified",false)},
+                {"follow_recoil_receive_alignment",run.report.value("follow_recoil_receive_alignment",Json::object())}});
             result["calibration_path"]=utf8(directory/"calibration.json");
         }else{result["success"]=false;result["message"]=fit_error;result["recovery_action"]="recalibrate";}
     }
@@ -266,6 +277,10 @@ Json run_recoil_debug(const Json& plan,const AppConfig& config,const std::shared
     }
     if(!calibrating&&run.completed&&plan.contains("calibration")&&run.frames.size()>1){
         recoil_tuner::WallCaptureRequest analysis;analysis.mode=recoil_tuner::WallCaptureRequest::Mode::CAMERA_MOTION;
+        if(request.follow_recoil){
+            analysis.mode=recoil_tuner::WallCaptureRequest::Mode::FOLLOW_RECOIL;
+            analysis.follow_recoil_mouse_invariance_confirmed=plan.at("calibration").value("follow_recoil_mouse_invariance_verified",false);
+        }
         analysis.weapon_id=weapon_id;analysis.profile_id=directory.parent_path().filename().string();
         analysis.environment_fingerprint=fingerprint;analysis.sensitivity=environment.sensitivity;
         std::string frame_hashes;
@@ -288,6 +303,7 @@ Json run_recoil_debug(const Json& plan,const AppConfig& config,const std::shared
         std::vector<recoil_tuner::WallFrame> firing_frames;
         if(run.report.contains("firing")&&run.report.contains("frames")){
             const auto start=run.report.at("firing").value("completed_ns",std::int64_t{});
+            const auto before_down=run.report.at("firing").value("call_started_ns",start);
             const auto finish=run.report.at("firing").value("release_call_started_ns",std::numeric_limits<std::int64_t>::max());
             std::optional<std::size_t> baseline;
             const auto& frames=run.report.at("frames");
@@ -299,28 +315,52 @@ Json run_recoil_debug(const Json& plan,const AppConfig& config,const std::shared
                 if(metadata.contains("source_uncertainty_ms")&&metadata.at("source_uncertainty_ms").is_number())
                     uncertainty_ms=std::max(uncertainty_ms,metadata.at("source_uncertainty_ms").get<double>());
             }
+            // 跟随准星使用独立标定的接收延迟；不能与映射源时间再叠加一次延迟。
+            double alignment_delay_ms=0;
+            if(request.follow_recoil){
+                mapped=false;
+                const auto& alignment=plan.at("calibration").at("follow_recoil_receive_alignment");
+                alignment_delay_ms=alignment.at("delay_ms").get<double>();
+                result["follow_recoil_receive_alignment"]=alignment;
+            }
+            const auto alignment_ns=static_cast<std::int64_t>(alignment_delay_ms*1000000.0);
             const auto frame_time=[&](std::size_t i){return frames[i].at(mapped?"source_time_ns":"received_ns").get<std::int64_t>();};
             result["measurement_time_basis"]=mapped?"source_mapped_vs_command_ack":"receive_vs_command_ack";
             result["measurement_source_uncertainty_ms"]=mapped?Json(uncertainty_ms):Json(nullptr);
             // 接收域与映射源时域不得作为同一组训练样本混用；绑定实际几何与时间基准。
             analysis.environment_fingerprint=recoil_calibration_sha256(Json{{"calibration_environment",fingerprint},
-                {"measurement_time_basis",result["measurement_time_basis"]},{"geometry",run.report.at("geometry")}}.dump());
+                {"measurement_time_basis",result["measurement_time_basis"]},{"geometry",run.report.at("geometry")},
+                {"follow_recoil",request.follow_recoil},{"receive_alignment_delay_ms",alignment_delay_ms}}.dump());
             for(std::size_t i=0;i<run.frames.size()&&i<frames.size();++i)
-                if(frame_time(i)<=start)baseline=i;
+                if(frame_time(i)<=(request.follow_recoil?before_down:start))baseline=i;
             if(baseline){
                 firing_frames.push_back({0,run.frames[*baseline].image});
                 for(std::size_t i=*baseline+1;i<run.frames.size()&&i<frames.size();++i){
                     const auto received=frame_time(i);
-                    if(received>start&&received<=finish)
-                        firing_frames.push_back({static_cast<double>(received-start)/1000000.0,run.frames[i].image});
+                    if(received>start+alignment_ns&&received<=finish+alignment_ns)
+                        firing_frames.push_back({static_cast<double>(received-start-alignment_ns)/1000000.0,run.frames[i].image});
                 }
             }
         }
         const auto measured=recoil_tuner::analyze_wall_capture(firing_frames,analysis);
+        if(request.follow_recoil&&measured.valid&&!firing_frames.empty()){
+            auto preview=firing_frames.back().image.clone();
+            auto previous=measured.reference;
+            for(const auto& observation:measured.observations){
+                cv::line(preview,previous,observation.crosshair_center,{255,0,255},1,cv::LINE_AA);
+                previous=observation.crosshair_center;
+            }
+            cv::drawMarker(preview,measured.reference,{0,255,255},cv::MARKER_CROSS,9,1);
+            std::vector<unsigned char> bytes;
+            if(cv::imencode(".png",preview,bytes)){
+                std::ofstream out(directory/"preview.png",std::ios::binary);
+                out.write(reinterpret_cast<const char*>(bytes.data()),static_cast<std::streamsize>(bytes.size()));
+            }
+        }
         Json observations=Json::array();
         for(const auto& observation:measured.observations)observations.push_back({{"center",{observation.center.x,observation.center.y}},
             {"earliest_ms",observation.earliest_ms},{"first_visible_ms",observation.first_visible_ms},{"cumulative_counts",observation.cumulative_counts}});
-        Json report{{"schema_version",1},{"mode","CAMERA_MOTION"},{"valid",measured.valid},{"message",measured.message},
+        Json report{{"schema_version",1},{"mode",request.follow_recoil?"FOLLOW_RECOIL":"CAMERA_MOTION"},{"valid",measured.valid},{"message",measured.message},
             {"environment_fingerprint",measured.environment_fingerprint},{"requires_manual_confirmation",true},
             {"shot_timing_available",false},{"pixel_response",measured.pixel_response},
             {"reference",{measured.reference.x,measured.reference.y}},{"calibration_evidence",measured.calibration_evidence},{"observations",observations}};

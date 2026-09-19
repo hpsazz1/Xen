@@ -29,6 +29,7 @@ struct Request {
     double recoil_x_strength = 1, recoil_y_strength = 1;
     int recoil_duration_ms = 1500;
     int recoil_target_shots = 5;
+    bool recoil_follow_crosshair = false;
     double recoil_locked_prefix_ms = 0;
     std::string output_root = "cache/debug";
     int recording_duration_ms = 120000;

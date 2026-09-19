@@ -594,6 +594,19 @@ void test_recoil_freeze_and_admission(const std::filesystem::path& root) {
         require(rejected,"坏标定必须在准备阶段拒绝，不能先射击再分析失败");
     }
     {std::ofstream file(calibration_path);file<<calibration.dump();}
+    {
+        bool rejected=false;
+        try{prepare_wall_debug_plan(false,"ak47",1500,calibration_path,context.config,true);}catch(...){rejected=true;}
+        require(rejected,"背景旧标定不能自动授权跟随准星坐标换算");
+        auto follow=calibration;
+        follow["follow_recoil_mouse_invariance_verified"]=true;
+        follow["follow_recoil_receive_alignment"]={{"delay_ms",50},{"uncertainty_ms",15}};
+        {std::ofstream file(calibration_path);file<<follow.dump();}
+        const auto plan=prepare_wall_debug_plan(false,"ak47",1500,calibration_path,context.config,true);
+        require(plan.at("follow_recoil")==true && plan.at("calibration").at("follow_recoil_receive_alignment").at("delay_ms")==50,
+            "准星准备须冻结独立视频对齐标定");
+        {std::ofstream file(calibration_path);file<<calibration.dump();}
+    }
     Request request;request.mode=Mode::RECOIL_TEST;request.recoil_profile_path=utf8(path);
     request.recoil_calibration_path=utf8(calibration_path);request.output_root=utf8(root/"recoil-debug");
     Session session;require(session.dispatch(Action::PREPARE,request,context),"弹道准备接收");wait_idle(session);

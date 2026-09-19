@@ -12,6 +12,7 @@
     [string]$SourceContextExecutable = '',
     [switch]$IncludeLauncher,
     [switch]$IncludeRecoilTools,
+    [switch]$IncludeSourceSessionScript,
     [switch]$ChangesOnly
 )
 
@@ -140,6 +141,13 @@ foreach ($route in $manifest.runtimes) {
 }
 $workerRelative = "runtimes/$Runtime/Xen.exe"
 $overrides = @{ $workerRelative = $workerPath }
+$sourceScriptRelative = 'tools/source/start_source_context_session.ps1'
+$sourceScriptHash = ''
+if ($IncludeSourceSessionScript) {
+    if (-not $records.ContainsKey($sourceScriptRelative)) { throw '源启动脚本必须已存在于基包清单。' }
+    $overrides[$sourceScriptRelative] = Resolve-UpdateFile (Join-Path $sourceRoot 'scripts/start_source_context_session.ps1')
+    $sourceScriptHash = (Get-FileHash -LiteralPath $overrides[$sourceScriptRelative] -Algorithm SHA256).Hash.ToLowerInvariant()
+}
 $recoilToolHashes = @{}
 if ($IncludeRecoilTools) {
     foreach ($tool in @('xen_recoil_calibration.exe', 'xen_recoil_tuner.exe')) {
@@ -198,12 +206,13 @@ try {
             if ($relative -eq $workerRelative -and
                 ($sourceHash -cne $workerHash -or $length -ne $workerLength)) { throw 'Worker 在发布期间变化。' }
             if ($relative -eq $sourceToolRelative -and $sourceHash -cne $sourceToolHash) { throw '源桥接工具在发布期间变化。' }
+            if ($relative -eq $sourceScriptRelative -and $sourceHash -cne $sourceScriptHash) { throw '源启动脚本在发布期间变化。' }
             if ($recoilToolHashes.ContainsKey($relative) -and $sourceHash -cne $recoilToolHashes[$relative]) {
                 throw '压枪工具在发布期间变化。'
             }
             $record.size = [long]$length
             $record.sha256 = $sourceHash
-            $record.source = if ($relative -in @($workerRelative, $sourceToolRelative) -or $recoilToolHashes.ContainsKey($relative)) { "$source@$commit" } else { $source }
+            $record.source = if ($relative -in @($workerRelative, $sourceToolRelative, $sourceScriptRelative) -or $recoilToolHashes.ContainsKey($relative)) { "$source@$commit" } else { $source }
         } elseif ($length -ne [long]$record.size) { throw "继承载荷复制长度错误：$relative" }
         $copiedBytes += $length
         Write-Progress -Activity '继承统一包显式载荷' -Status "$copiedBytes / $totalBytes 字节" `
@@ -238,6 +247,11 @@ try {
         $updateEvidence.updated_components += [ordered]@{
             runtime = ''; path = $sourceToolRelative; git_commit = $commit.ToLowerInvariant()
             sha256 = $sourceToolHash; build_identity_sha256 = $identityHash
+        }
+    }
+    if ($IncludeSourceSessionScript) {
+        $updateEvidence.updated_components += [ordered]@{
+            runtime = ''; path = $sourceScriptRelative; git_commit = $commit.ToLowerInvariant(); sha256 = $sourceScriptHash
         }
     }
     foreach ($relative in @($recoilToolHashes.Keys | Sort-Object)) {

@@ -419,7 +419,34 @@ void estimated_stop_is_explicit_and_parallel() {
         "严格模式不能拿估计完成冒充观察停稳");
 }
 
+void blocked_status_does_not_alternate_with_observations() {
+    TriggerController c; arm(c);
+    auto p = permit(); p.focused = false;
+    auto o = frame(1); o.timing_valid = false;
+    for (int n = 1; n <= 20; ++n) {
+        o.sequence = n; o.observed_at = at(n * 2);
+        expect(c.observe(o, p, at(n * 2)).snapshot.reason == TriggerReason::PERMISSION,
+            "焦点持续不满足时新帧不能覆盖为缺少时序");
+        expect(c.tick(p, at(n * 2 + 1)).snapshot.reason == TriggerReason::PERMISSION,
+            "观察与轮询报告同一持续许可阻断");
+        expect(c.snapshot().permission_block == TriggerPermissionBlock::NOT_FOCUSED,
+            "许可阻断明确指出源焦点");
+    }
+    p.focused = true; p.held = false;
+    c.tick(p, at(42)); p.held = true;
+    o.sequence = 21; o.observed_at = at(43);
+    expect(c.observe(o, p, at(43)).snapshot.reason == TriggerReason::TIMING_UNAVAILABLE,
+        "许可恢复后显示实际图像时序不足");
+    expect(c.tick(p, at(44)).snapshot.reason == TriggerReason::TIMING_UNAVAILABLE,
+        "没有新帧时不得把时序不足覆写为无候选");
+    o = frame(45, 22);
+    c.observe(o, p, at(45));
+    expect(c.snapshot().permission_block == TriggerPermissionBlock::NONE &&
+        c.snapshot().reason == TriggerReason::DELAY, "有效新帧清除旧时序失败并重新驻留");
+}
+
 int main() {
+    blocked_status_does_not_alternate_with_observations();
     weapon_timing_submission_and_cleanup(); estimated_stop_is_explicit_and_parallel();
     fire_disabled_preserves_qualification_and_stop();
     geometry_and_timing(); full_detection_bounds(); configured_range(); association(); permissions_and_receipts(); stop_and_automatic();

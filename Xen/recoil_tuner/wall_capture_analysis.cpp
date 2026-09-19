@@ -140,6 +140,53 @@ WallRegistration register_wall(const cv::Mat& before, const cv::Mat& after,
     return result;
 }
 }
+bool locate_follow_recoil_crosshair(const cv::Mat& image, cv::Point2d& center, std::string& error) noexcept {
+    center={};
+    try {
+        const auto reject=[&](const char* why){error=why;return false;};
+        if(image.empty()||image.depth()!=CV_8U||(image.channels()!=3&&image.channels()!=4)||image.total()>33554432)
+            return reject("跟随后坐力采集需要彩色原图。");
+        cv::Mat bgr,hsv,mask;
+        if(image.channels()==4)cv::cvtColor(image,bgr,cv::COLOR_BGRA2BGR);else bgr=image;
+        cv::cvtColor(bgr,hsv,cv::COLOR_BGR2HSV);
+        cv::inRange(hsv,cv::Scalar(142,180,180),cv::Scalar(158,255,255),mask);
+        cv::Mat labels,stats,centroids;
+        const int count=cv::connectedComponentsWithStats(mask,labels,stats,centroids,8);
+        // 不对全画面的同色像素求质心；任何第二个有面积的色块均视作歧义。
+        int selected=-1;
+        for(int i=1;i<count;++i)if(stats.at<int>(i,cv::CC_STAT_AREA)>=2){
+            if(selected!=-1)return reject("洋红准星存在多个同色目标，请换干净背景。");
+            selected=i;
+        }
+        if(selected<0)return reject("未找到洋红准星，请使用不透明洋红中心点。");
+        const cv::Rect box(stats.at<int>(selected,cv::CC_STAT_LEFT),stats.at<int>(selected,cv::CC_STAT_TOP),
+            stats.at<int>(selected,cv::CC_STAT_WIDTH),stats.at<int>(selected,cv::CC_STAT_HEIGHT));
+        if(box.x<2||box.y<2||box.br().x>image.cols-2||box.br().y>image.rows-2)
+            return reject("准星接近采集边界，停止采集并重新居中。");
+        if(box.width<2||box.height<2||box.width>15||box.height>15||std::abs(box.width-box.height)>1)
+            return reject("准星尺寸或形状无效，请使用小中心点或无间隙对称短十字。");
+        const cv::Mat shape=mask(box);
+        const int area=cv::countNonZero(shape);
+        const bool dot=box.width<=5&&box.height<=5&&area==box.area();
+        bool cross=false;
+        if(!dot&&box.width>=5&&box.height>=5){
+            cross=true;
+            for(int y=0;y<box.height;++y)for(int x=0;x<box.width;++x){
+                const bool v=shape.at<unsigned char>(y,x)!=0;
+                if(v!=(shape.at<unsigned char>(box.height-1-y,x)!=0)||
+                    v!=(shape.at<unsigned char>(y,box.width-1-x)!=0))cross=false;
+            }
+            const int cx=box.width/2,cy=box.height/2;
+            if(cv::countNonZero(shape.row(cy))!=box.width||cv::countNonZero(shape.col(cx))!=box.height||area>=box.area()*0.7)
+                cross=false;
+            // 四个角必须为空，排除实心场景色块。
+            for(const cv::Point p: {cv::Point(0,0),cv::Point(box.width-1,0),cv::Point(0,box.height-1),cv::Point(box.width-1,box.height-1)})
+                if(shape.at<unsigned char>(p))cross=false;
+        }
+        if(!dot&&!cross)return reject("准星形状不完整或被遮挡，请使用实心中心点。");
+        center={box.x+(box.width-1)*0.5,box.y+(box.height-1)*0.5};error.clear();return true;
+    } catch(...) {error="准星定位失败。";return false;}
+}
 bool fit_wall_calibration(const std::vector<WallCalibrationSample>& samples,double max_condition,
         std::array<double,4>& pixel_response,std::string& error) noexcept {
     pixel_response={};
@@ -194,9 +241,40 @@ WallCaptureReport analyze_wall_capture(const std::vector<WallFrame>& frames, con
         profile.source.source_unit = "registered_wall_pixels"; profile.source.conversion_revision = "wall_capture_v1";
         profile.calibration.sensitivity = request.sensitivity; profile.calibration.input_path = "kmbox_net";
         profile.points.push_back({0, 0, 0});
+        cv::Point2d initial_crosshair;
+        if(request.mode==WallCaptureRequest::Mode::FOLLOW_RECOIL){
+            if(!request.follow_recoil_mouse_invariance_confirmed)
+                return reject("尚未校核鼠标标定期间准星屏幕位置不变，请重新标定。");
+            std::string error;
+            if(!locate_follow_recoil_crosshair(frames.front().image,initial_crosshair,error))return reject(error.c_str());
+            result.reference=initial_crosshair;
+            profile.source.source_unit="follow_recoil_display_geometry";
+            profile.source.conversion_revision="follow_recoil_q_minus_background_v1";
+        }
         for (std::size_t i = 1; i < frames.size(); ++i) {
             if (!finite(frames[i].time_ms) || frames[i].time_ms <= frames[i - 1].time_ms || frames[i].time_ms > 60000)
                 return reject("帧时间必须有限、严格递增并以真实采集时间为准。");
+            if(request.mode==WallCaptureRequest::Mode::FOLLOW_RECOIL){
+                cv::Point2d q,b;std::string error;
+                if(!locate_follow_recoil_crosshair(frames[i].image,q,error))return reject(error.c_str());
+                const auto roi=request.image.registration_roi;
+                const auto near_roi=[](cv::Point2d p,cv::Rect2d r){
+                    r.x-=12;r.y-=12;r.width+=24;r.height+=24;return r.contains(p);
+                };
+                if(near_roi(initial_crosshair,cv::Rect2d(roi)))return reject("背景配准区域包含准星，请调整背景区域。");
+                if(!camera_translation(frames.front().image,frames[i].image,roi,b,error))return reject(error.c_str());
+                if(near_roi(q,cv::Rect2d(roi.x+b.x,roi.y+b.y,roi.width,roi.height)))
+                    return reject("移动准星进入背景配准区域，请调整背景区域。");
+                const auto e=(q-initial_crosshair)-b;
+                const cv::Mat displacement=(cv::Mat_<double>(2,1)<<e.x,e.y);
+                const cv::Mat compensation=inverse*displacement;
+                WallObservation o;o.center=result.reference+e;o.crosshair_center=q;o.background_translation=b;
+                o.earliest_ms=frames[i-1].time_ms;o.first_visible_ms=frames[i].time_ms;
+                o.cumulative_counts={compensation.at<double>(0),compensation.at<double>(1)};
+                result.observations.push_back(o);
+                profile.points.push_back({o.first_visible_ms,o.cumulative_counts[0],o.cumulative_counts[1]});
+                continue;
+            }
             if (request.mode == WallCaptureRequest::Mode::CAMERA_MOTION) {
                 cv::Point2d translation;std::string error;
                 if (!camera_translation(frames.front().image,frames[i].image,request.image.registration_roi,translation,error))
@@ -237,7 +315,9 @@ WallCaptureReport analyze_wall_capture(const std::vector<WallFrame>& frames, con
         std::string error;
         if (!validate_recoil_profile(profile, error)) return reject(error.c_str());
         result.candidate = std::move(profile); result.valid = true;
-        result.message = request.mode == WallCaptureRequest::Mode::CAMERA_MOTION ?
+        result.message = request.mode == WallCaptureRequest::Mode::FOLLOW_RECOIL ?
+            "已生成跟随后坐力准星与背景相对轨迹候选，需人工验证；显示轨迹不代表随机弹着或真实逐发时间。" :
+            request.mode == WallCaptureRequest::Mode::CAMERA_MOTION ?
             "已生成待核对的视角补偿候选，非弹着校准；不能把准星动画当作弹道。" :
             "已生成待人工核对的SCHEMA_VALID候选；节点为首次可见时间，不代表真实逐发时间或已校准。";
     } catch (...) { result.valid = false; result.candidate.reset(); result.message = "对墙图像分析失败。"; }
@@ -260,7 +340,9 @@ bool wall_measurement_to_trial(const WallCaptureReport& report, std::size_t inde
                 !finite(receipt.x_counts) || !finite(receipt.y_counts)) { error = "执行回执不完整或未确认。"; return false; }
         }
         Trial trial = metadata;
-        trial.measurement_source = "wall_capture_confirmed_endpoint_v1";
+        trial.measurement_source = report.mode==WallCaptureRequest::Mode::FOLLOW_RECOIL ?
+            "follow_recoil_display_geometry_confirmed_endpoint_v1" : "wall_capture_confirmed_endpoint_v1";
+        // Trial残差是观测量，后续端点优化必须独立拟合其响应Jq-H；不能复用背景H。
         trial.residual = {o.center.x - report.reference.x, o.center.y - report.reference.y};
         output = std::move(trial); error.clear(); return true;
     } catch (...) { error = "测量转换失败。"; return false; }
@@ -306,6 +388,7 @@ WallCaptureReport optimize_wall_trials(const RecoilProfile& base, const std::vec
         const auto mean_residual = [&](double time) {
             std::array<double, 2> mean{};
             for (const auto& report : fit) {
+                // candidate已经是带模式符号的counts：camera=-H^-1 b，follow=H^-1 e。
                 const auto residual = sample_recoil_profile(*report.candidate, time);
                 mean[0] += residual.x_counts / fit.size(); mean[1] += residual.y_counts / fit.size();
             }
@@ -379,13 +462,15 @@ bool save_wall_report(const std::filesystem::path& path, const WallCaptureReport
     try {
         if (std::filesystem::exists(path)) { error = "结果文件已存在，禁止覆盖原始证据。"; return false; }
         nlohmann::json j = {{"schema_version",1},{"valid",report.valid},{"message",report.message},
-            {"mode",report.mode == WallCaptureRequest::Mode::CAMERA_MOTION ? "camera_motion" : "bullet_marks"},
+            {"mode",report.mode == WallCaptureRequest::Mode::FOLLOW_RECOIL ? "follow_recoil" : report.mode == WallCaptureRequest::Mode::CAMERA_MOTION ? "camera_motion" : "bullet_marks"},
             {"environment_fingerprint",report.environment_fingerprint},{"pixel_response",report.pixel_response},
             {"reference",{report.reference.x,report.reference.y}},{"calibration_evidence",report.calibration_evidence},
             {"requires_manual_confirmation",true},{"shot_timing_available",false},{"observations",nlohmann::json::array()}};
         if (report.candidate) j["candidate"] = nlohmann::json::parse(serialize_recoil_profile(*report.candidate));
         for (const auto& o : report.observations) j["observations"].push_back({{"center",{o.center.x,o.center.y}},
-            {"earliest_ms",o.earliest_ms},{"first_visible_ms",o.first_visible_ms},{"cumulative_counts",o.cumulative_counts}});
+            {"earliest_ms",o.earliest_ms},{"first_visible_ms",o.first_visible_ms},{"cumulative_counts",o.cumulative_counts},
+            {"crosshair_center",{o.crosshair_center.x,o.crosshair_center.y}},
+            {"background_translation",{o.background_translation.x,o.background_translation.y}}});
         const auto text = j.dump(2);
         const HANDLE file = CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
         if (file == INVALID_HANDLE_VALUE) { error = "测量报告无法独占创建。"; return false; }
@@ -441,8 +526,8 @@ bool load_wall_report(const std::filesystem::path& path, WallCaptureReport& repo
         }
         WallCaptureReport r; r.valid = j.at("valid").get<bool>(); r.message = j.at("message").get<std::string>();
         const auto mode = j.at("mode").get<std::string>();
-        if (mode != "camera_motion" && mode != "bullet_marks") { error = "测量模式无效。"; return false; }
-        r.mode = mode == "camera_motion" ? WallCaptureRequest::Mode::CAMERA_MOTION : WallCaptureRequest::Mode::BULLET_MARKS;
+        if (mode != "camera_motion" && mode != "bullet_marks" && mode != "follow_recoil") { error = "测量模式无效。"; return false; }
+        r.mode = mode == "follow_recoil" ? WallCaptureRequest::Mode::FOLLOW_RECOIL : mode == "camera_motion" ? WallCaptureRequest::Mode::CAMERA_MOTION : WallCaptureRequest::Mode::BULLET_MARKS;
         r.environment_fingerprint = j.at("environment_fingerprint").get<std::string>();
         r.pixel_response = j.at("pixel_response").get<std::array<double,4>>();
         for (const auto v : r.pixel_response) if (!finite(v)) { error = "标定矩阵无效。"; return false; }
@@ -461,6 +546,13 @@ bool load_wall_report(const std::filesystem::path& path, WallCaptureReport& repo
             WallObservation p; p.center = {o.at("center").at(0).get<double>(),o.at("center").at(1).get<double>()};
             p.earliest_ms = o.at("earliest_ms"); p.first_visible_ms = o.at("first_visible_ms");
             p.cumulative_counts = o.at("cumulative_counts").get<std::array<double,2>>();
+            if(r.mode==WallCaptureRequest::Mode::FOLLOW_RECOIL){
+                p.crosshair_center={o.at("crosshair_center").at(0).get<double>(),o.at("crosshair_center").at(1).get<double>()};
+                p.background_translation={o.at("background_translation").at(0).get<double>(),o.at("background_translation").at(1).get<double>()};
+                if(!finite(p.crosshair_center.x)||!finite(p.crosshair_center.y)||!finite(p.background_translation.x)||!finite(p.background_translation.y)){
+                    error="准星或背景观测无效。";return false;
+                }
+            }
             if (!finite(p.center.x) || !finite(p.center.y) || !finite(p.earliest_ms) || !finite(p.first_visible_ms) ||
                 !finite(p.cumulative_counts[0]) || !finite(p.cumulative_counts[1]) || p.earliest_ms < 0 ||
                 p.first_visible_ms <= p.earliest_ms || p.first_visible_ms <= previous || p.first_visible_ms > 60000 || r.observations.size() >= 10000) {

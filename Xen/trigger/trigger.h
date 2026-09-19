@@ -14,6 +14,7 @@ enum class TriggerButtonAction { NONE, DOWN, UP };
 enum class TriggerStopAction { NONE, REQUEST, CANCEL };
 enum class TriggerReceiptStatus { ACKNOWLEDGED, NOT_SENT, UNKNOWN };
 enum class TriggerPhase { DISABLED, WAITING, QUALIFYING, WAIT_STOP, DOWN_PENDING, HELD, UP_PENDING, COOLDOWN, FAULT };
+enum class TriggerPermissionBlock { NONE, INPUT_UNHEALTHY, NOT_FOCUSED, NOT_ARMED, MANUAL_FIRE };
 enum class TriggerReason {
     NONE, DISABLED, INVALID_CONFIG, WAIT_RELEASE, PERMISSION, INVALID_OBSERVATION,
     TIMING_UNAVAILABLE, STALE, NO_CANDIDATE, TARGET_CHANGED, DELAY, COOLDOWN,
@@ -86,6 +87,7 @@ struct TriggerPermit {
 struct TriggerSnapshot {
     TriggerPhase phase = TriggerPhase::DISABLED;
     TriggerReason reason = TriggerReason::DISABLED;
+    TriggerPermissionBlock permission_block = TriggerPermissionBlock::NONE;
     TriggerRegion region = TriggerRegion::NONE;
     std::uint64_t candidate_id = 0, observation_epoch = 0, observation_sequence = 0;
     std::uint64_t command_id = 0, stop_request_id = 0;
@@ -133,6 +135,7 @@ private:
     TriggerDecision result(TriggerTime now) const noexcept;
     TriggerDecision release(TriggerReason reason, TriggerTime now) noexcept;
     std::optional<TriggerDecision> check_context(const TriggerPermit& permit, TriggerTime now) noexcept;
+    std::optional<TriggerDecision> check_permission(const TriggerPermit& permit, TriggerTime now) noexcept;
     bool select_candidate(const TriggerObservation& observation, TriggerTime now) noexcept;
     TriggerConfig config_;
     TriggerSnapshot state_;
@@ -143,6 +146,7 @@ private:
     std::uint64_t next_command_id_ = 0, next_candidate_id_ = 0, last_stop_id_ = 0;
     std::uint64_t last_down_epoch_ = 0, last_down_sequence_ = 0;
     TriggerButtonAction pending_ = TriggerButtonAction::NONE;
+    TriggerReason observation_failure_ = TriggerReason::NONE;
     bool config_valid_ = true, candidate_valid_ = false, release_seen_ = false, unconfirmed_down_ = false;
     float center_x_ = 0.0f, center_y_ = 0.0f;
     int roi_width_ = 0, roi_height_ = 0;

@@ -15,7 +15,7 @@ $workerRelative = "runtimes/$($packet.runtime)/Xen.exe"
 $recoilTools = @("runtimes/$($packet.runtime)/xen_recoil_calibration.exe", "runtimes/$($packet.runtime)/xen_recoil_tuner.exe")
 $allowed = @($workerRelative, 'tools/acceptance/WORKER-UPDATE.json',
     'tools/acceptance/PACKAGE-NOTES.md', 'tools/acceptance/MANUAL-ACCEPTANCE.md',
-    'tools/source/xen_source_context.exe', 'XenLauncher.exe', 'manifest.json') + $recoilTools
+    'tools/source/xen_source_context.exe', 'tools/source/start_source_context_session.ps1', 'XenLauncher.exe', 'manifest.json') + $recoilTools
 function Resolve-DeltaFile([string]$Base, [string]$Relative) {
     if ($Relative -cnotin $allowed -and $Relative -cnotin @('config.ini', 'cache/model-workspace/settings.json')) {
         throw '差量文件不在允许集合。'

@@ -23,6 +23,52 @@ std::vector<WallFrame> frames(){
  auto a=base.clone();cv::circle(a,{160,85},2,cv::Scalar(0),-1);auto b=a.clone();cv::circle(b,{170,70},2,cv::Scalar(0),-1);
  return {{0,base},{20,base.clone()},{40,a},{60,a.clone()},{80,b}};
 }
+void follow_recoil_tests(){
+ auto r=request();r.mode=WallCaptureRequest::Mode::FOLLOW_RECOIL;r.follow_recoil_mouse_invariance_confirmed=true;
+ cv::Mat gray(240,260,CV_8UC1);cv::RNG rng(843);rng.fill(gray,cv::RNG::UNIFORM,40,220);
+ cv::GaussianBlur(gray,gray,{5,5},1.0);cv::Mat wall;cv::cvtColor(gray,wall,cv::COLOR_GRAY2BGR);
+ const auto frame=[&](cv::Point shift,cv::Point q){cv::Mat result;
+  const cv::Mat transform=(cv::Mat_<double>(2,3)<<1,0,shift.x,0,1,shift.y);
+  cv::warpAffine(wall,result,transform,wall.size(),cv::INTER_LINEAR,cv::BORDER_REFLECT_101);
+  cv::rectangle(result,cv::Rect(q.x-1,q.y-1,3,3),cv::Scalar(255,0,255),-1);return result;};
+ auto first=frame({0,0},{150,100});auto second=frame({2,-3},{160,85});
+ auto result=analyze_wall_capture({{0,first},{40,second}},r);
+ expect(result.valid&&result.candidate.has_value(),"Follow Recoil原图生成候选");
+ if(!result.valid)std::cerr<<result.message<<'\n';
+ if(result.candidate)expect(std::abs(result.candidate->points.back().x_counts-4)<0.1&&std::abs(result.candidate->points.back().y_counts-4)<0.1,"Follow Recoil使用(q-q0)-b及正确H符号");
+ const auto common=analyze_wall_capture({{0,first},{40,frame({2,-3},{152,97})}},r);
+ expect(common.valid&&std::abs(common.candidate->points.back().x_counts)<0.1&&std::abs(common.candidate->points.back().y_counts)<0.1,"准星背景共同位移不能重复计入");
+ const auto opposite=analyze_wall_capture({{0,first},{40,frame({-2,3},{140,115})}},r);
+ expect(opposite.valid&&std::abs(opposite.candidate->points.back().x_counts+4)<0.1&&std::abs(opposite.candidate->points.back().y_counts+4)<0.1,"准星两个方向均正确");
+ auto bad=r;bad.follow_recoil_mouse_invariance_confirmed=false;expect(!analyze_wall_capture({{0,first},{40,second}},bad).valid,"缺少Jq校核不能推导");
+ cv::Point2d point;std::string error;
+ auto duplicate=second.clone();cv::rectangle(duplicate,{200,180,3,3},{255,0,255},-1);
+ expect(!locate_follow_recoil_crosshair(duplicate,point,error),"多个洋红点拒绝质心");
+ expect(!locate_follow_recoil_crosshair(frame({0,0},{1,100}),point,error),"裁边准星拒绝");
+ auto cross=wall.clone();cv::line(cross,{145,100},{155,100},{255,0,255},1);cv::line(cross,{150,95},{150,105},{255,0,255},1);
+ expect(locate_follow_recoil_crosshair(cross,point,error)&&point==cv::Point2d(150,100),"完整短十字可定位");
+ cross.at<cv::Vec3b>(95,150)={50,50,50};expect(!locate_follow_recoil_crosshair(cross,point,error),"缺臂拒绝");
+ expect(!analyze_wall_capture({{0,first},{40,wall}},r).valid,"缺测帧不能沿用旧中心");
+ bad=r;bad.image.registration_roi={120,70,64,64};expect(!analyze_wall_capture({{0,first},{40,second}},bad).valid,"背景ROI排除准星");
+ auto path=std::filesystem::temp_directory_path()/("follow-recoil-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())+".json");
+ WallCaptureReport loaded;expect(save_wall_report(path,result,error)&&load_wall_report(path,loaded,error)&&loaded.mode==r.mode&&loaded.observations.size()==1&&loaded.observations[0].crosshair_center==cv::Point2d(160,85),"Follow Recoil模式与q/b报告可重载");
+ std::filesystem::remove(path);
+ if(result.candidate){
+  auto base=*result.candidate;for(auto& p:base.points){p.x_counts=0;p.y_counts=0;}
+  std::vector<WallCaptureReport> fit(3,result),holdout(2,result);
+  for(int i=0;i<5;++i)(i<3?fit[i]:holdout[i-3]).candidate->source.sha256=std::string(64,static_cast<char>('a'+i));
+  WallOptimizationRequest optimization;optimization.measurements_confirmed=true;
+  const auto optimized=optimize_wall_trials(base,fit,holdout,optimization);
+  expect(optimized.valid&&optimized.candidate&&std::abs(optimized.candidate->points.back().x_counts-4)<0.1&&std::abs(optimized.candidate->points.back().y_counts-4)<0.1,"Follow Recoil优化正向追加已转换counts，不能再次反号");
+  holdout[0].mode=WallCaptureRequest::Mode::CAMERA_MOTION;
+  expect(!optimize_wall_trials(base,fit,holdout,optimization).valid,"优化组拒绝混合camera和follow模式");
+  Trial metadata,trial;metadata.id="id";metadata.content_hash="hash";metadata.firing_id="fire";metadata.source_run="run";
+  metadata.executed_profile_revision="revision";metadata.environment_fingerprint=r.environment_fingerprint;
+  metadata.completed=metadata.independent_recoil=metadata.timing_valid=metadata.reference_confirmed=true;
+  metadata.measurement_ms=40;metadata.receipts.push_back({1,1,0,0,0,ReceiptState::ACKNOWLEDGED});
+  expect(wall_measurement_to_trial(result,0,true,metadata,trial,error)&&std::abs(trial.residual[0]-8)<0.2&&std::abs(trial.residual[1]+12)<0.2&&trial.measurement_source=="follow_recoil_display_geometry_confirmed_endpoint_v1","端点Trial保存e而非反号counts，单独标识观测来源");
+ }
+}
 void extension_replay(){
  const auto directory=std::filesystem::path(__FILE__).parent_path()/"fixtures/recoil_extension";
  std::ifstream input(directory/"base.json");nlohmann::json document;input>>document;
@@ -104,6 +150,7 @@ int main(int argc,char** argv){
   return 0;
  }
 
+ follow_recoil_tests();
  extension_replay();
  auto r=request();auto f=frames();auto result=analyze_wall_capture(f,r);
  expect(result.valid&&result.candidate.has_value(),"无既有曲线也能生成候选");

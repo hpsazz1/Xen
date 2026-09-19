@@ -96,6 +96,7 @@ bool TriggerController::configure(const TriggerConfig& config) noexcept {
     config_valid_ = true;
     candidate_valid_ = false;
     release_seen_ = false;
+    observation_failure_ = TriggerReason::NONE;
     state_.phase = config.enabled ? TriggerPhase::WAITING : TriggerPhase::DISABLED;
     state_.reason = config.enabled ? TriggerReason::WAIT_RELEASE : TriggerReason::DISABLED;
     return true;
@@ -232,18 +233,25 @@ TriggerDecision TriggerController::observe(const TriggerObservation& observation
     if (now < last_now_) return cancel(TriggerReason::INVALID_OBSERVATION, last_now_);
     last_now_ = now;
     if (const auto canceled = check_context(permit, now)) return *canceled;
+    // 新帧与定时轮询使用相同的前置许可优先级，持续阻断不会逐帧换成图像错误。
+    if (const auto canceled = check_permission(permit, now)) return *canceled;
+    const auto reject_observation = [&](TriggerReason reason) {
+        observation_failure_ = reason;
+        return release(reason, now);
+    };
     const bool same_epoch = observation.epoch == state_.observation_epoch;
     if (!observation.valid || observation.epoch == 0 || observation.sequence == 0 ||
         (same_epoch && observation.sequence <= state_.observation_sequence) ||
         observation.roi_width <= 0 || observation.roi_height <= 0 ||
         !std::isfinite(observation.center_x) || !std::isfinite(observation.center_y) ||
         observation.center_x < 0 || observation.center_y < 0 || observation.center_x >= observation.roi_width ||
-        observation.center_y >= observation.roi_height) return release(TriggerReason::INVALID_OBSERVATION, now);
+        observation.center_y >= observation.roi_height) return reject_observation(TriggerReason::INVALID_OBSERVATION);
     if (!observation.timing_valid || observation.observed_at == TriggerTime{} || observation.uncertainty.count() < 0 ||
-        observation.observed_at > now) return release(TriggerReason::TIMING_UNAVAILABLE, now);
+        observation.observed_at > now) return reject_observation(TriggerReason::TIMING_UNAVAILABLE);
     const auto max_age = std::chrono::duration_cast<std::chrono::nanoseconds>(Ms(config_.max_observation_age_ms));
     if (observation.uncertainty >= max_age || now - observation.observed_at >= max_age - observation.uncertainty)
-        return release(TriggerReason::STALE, now);
+        return reject_observation(TriggerReason::STALE);
+    observation_failure_ = TriggerReason::NONE;
     const bool geometry_changed = roi_width_ != observation.roi_width || roi_height_ != observation.roi_height ||
         center_x_ != observation.center_x || center_y_ != observation.center_y;
     if (!same_epoch && state_.observation_epoch != 0) release_seen_ = false;
@@ -261,21 +269,32 @@ TriggerDecision TriggerController::observe(const TriggerObservation& observation
     return tick(permit, now);
 }
 
+std::optional<TriggerDecision> TriggerController::check_permission(const TriggerPermit& permit, TriggerTime now) noexcept {
+    state_.permission_block = TriggerPermissionBlock::NONE;
+    if (!config_valid_) return cancel(TriggerReason::INVALID_CONFIG, now);
+    if (!config_.enabled || !permit.enabled) return cancel(TriggerReason::DISABLED, now);
+    if (!permit.healthy || !permit.focused || !permit.armed || permit.physical_left_down) {
+        state_.permission_block = !permit.healthy ? TriggerPermissionBlock::INPUT_UNHEALTHY :
+            !permit.focused ? TriggerPermissionBlock::NOT_FOCUSED :
+            !permit.armed ? TriggerPermissionBlock::NOT_ARMED : TriggerPermissionBlock::MANUAL_FIRE;
+        return cancel(TriggerReason::PERMISSION, now);
+    }
+    return std::nullopt;
+}
+
 TriggerDecision TriggerController::tick(const TriggerPermit& permit, TriggerTime now) noexcept {
     if (now < last_now_) return cancel(TriggerReason::INVALID_OBSERVATION, last_now_);
     last_now_ = now;
     if (const auto canceled = check_context(permit, now)) return *canceled;
-    if (!config_valid_) return cancel(TriggerReason::INVALID_CONFIG, now);
-    if (!config_.enabled || !permit.enabled) return cancel(TriggerReason::DISABLED, now);
-    if (!permit.healthy || !permit.focused || !permit.armed || permit.physical_left_down)
-        return cancel(TriggerReason::PERMISSION, now);
+    if (const auto canceled = check_permission(permit, now)) return *canceled;
     if (!permit.held) {
         release_seen_ = true;
         return release(TriggerReason::RELEASED, now);
     }
     if (state_.faulted) return result(now);
     if (!release_seen_) return release(TriggerReason::WAIT_RELEASE, now);
-    if (!candidate_valid_) return release(TriggerReason::NO_CANDIDATE, now);
+    if (!candidate_valid_) return release(observation_failure_ == TriggerReason::NONE ?
+        TriggerReason::NO_CANDIDATE : observation_failure_, now);
     if (now >= observation_expires_) return release(TriggerReason::STALE, now);
     if (config_.require_stop && config_.allow_estimated_stop && pending_ != TriggerButtonAction::UP) {
         const bool qualified = permit.stop_estimated_qualified && permit.estimated_stop_request_id != 0;

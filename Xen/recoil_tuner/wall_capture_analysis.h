@@ -15,8 +15,10 @@ struct WallCalibrationSample {
 bool fit_wall_calibration(const std::vector<WallCalibrationSample>& samples,
     double max_condition, std::array<double,4>& pixel_response, std::string& error) noexcept;
 struct WallCaptureRequest {
-    enum class Mode { BULLET_MARKS, CAMERA_MOTION };
+    enum class Mode { BULLET_MARKS, CAMERA_MOTION, FOLLOW_RECOIL };
     Mode mode = Mode::BULLET_MARKS;
+    // 独立鼠标标定已检查准星屏幕中心保持不变，才能使用 H^-1((q-q0)-b)。
+    bool follow_recoil_mouse_invariance_confirmed = false;
     ImageRequest image;
     std::vector<WallCalibrationSample> calibration;
     std::string environment_fingerprint, profile_id, weapon_id, source_hash;
@@ -24,9 +26,12 @@ struct WallCaptureRequest {
 };
 struct WallObservation {
     cv::Point2d center;
+    cv::Point2d crosshair_center{}, background_translation{};
     double earliest_ms = 0, first_visible_ms = 0;
     std::array<double, 2> cumulative_counts{};
 };
+// 固定洋红实心小点或无间隙对称短十字；多解、缺臂、裁边均拒绝。
+bool locate_follow_recoil_crosshair(const cv::Mat& image, cv::Point2d& center, std::string& error) noexcept;
 struct WallCaptureReport {
     bool valid = false, requires_manual_confirmation = true;
     // 这些是图像首次可见区间；不提供真实逐发时间资格。

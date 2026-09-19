@@ -20,6 +20,21 @@ void acknowledge(RecoilController& c,const RecoilDecision& d,double ms){
     if(d.has_intent)c.acknowledge({d.intent.command_id,RecoilReceiptStatus::ACKNOWLEDGED,time(ms)},time(ms));
 }
 void schema_and_compile(){
+    {
+        RecoilController controller; auto sample=input();
+        sample.focused=false;
+        expect(controller.advance(sample,time(0)).snapshot.context_block==RecoilContextBlock::NOT_FOCUSED,
+            "上下文阻断明确指示源端焦点");
+        sample.focused=true;sample.profile_conditions_match=false;
+        expect(controller.advance(sample,time(1)).snapshot.context_block==RecoilContextBlock::PROFILE_CONDITIONS,
+            "武器条件不足区别于焦点失效");
+        sample.profile_conditions_match=true;sample.healthy=false;
+        expect(controller.advance(sample,time(2)).snapshot.context_block==RecoilContextBlock::INPUT_UNHEALTHY,
+            "输入监听失效具有明确原因");
+        sample.healthy=true;
+        expect(controller.advance(sample,time(3)).snapshot.context_block==RecoilContextBlock::NONE,
+            "条件恢复后不遗留旧阻断原因");
+    }
     auto p=*profile();std::string error;expect(validate_recoil_profile(p,error),"合成profile合法");
     auto minimal=p;minimal.calibration.game_build.clear();minimal.calibration.conditions.clear();
     expect(validate_recoil_profile(minimal,error),"版本与条件可空的校准声明合法");

@@ -13,6 +13,7 @@ enum class WallRunMode { CALIBRATE, CAPTURE, TEST };
 struct WallRunRequest {
     WallRunMode mode = WallRunMode::CAPTURE;
     bool measurement_required = true;
+    bool follow_recoil = false;
     CaptureConfig capture;
     std::filesystem::path output_directory;
     std::string weapon_id, environment_fingerprint;

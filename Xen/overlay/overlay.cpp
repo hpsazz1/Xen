@@ -3099,7 +3099,18 @@ struct Overlay::Impl {
             case TriggerReason::FIRE_DISABLED: reason = "条件满足，开枪开关已关闭"; break;
             case TriggerReason::INVALID_CONFIG: reason = "配置无效"; break;
             case TriggerReason::WAIT_RELEASE: reason = "请先松开许可键再按下"; break;
-            case TriggerReason::PERMISSION: reason = "输入、焦点或武装许可未满足"; break;
+            case TriggerReason::PERMISSION:
+                switch (snapshot.trigger.permission_block) {
+                case TriggerPermissionBlock::INPUT_UNHEALTHY: reason = "KMBOX 输入监听未就绪或失联"; break;
+                case TriggerPermissionBlock::NOT_FOCUSED:
+                    reason = !snapshot.source_context.available ? "源端焦点桥接不可用，请启动源机焦点服务并检查连接" :
+                        !snapshot.source_context.focused ? "源端游戏不在前台，请切回游戏" : "源端焦点会话变化，请松开许可键再按下";
+                    break;
+                case TriggerPermissionBlock::NOT_ARMED: reason = "输出许可未满足，请检查允许输出与全局武装"; break;
+                case TriggerPermissionBlock::MANUAL_FIRE: reason = "正在手动射击，自动扳机待命"; break;
+                default: reason = "输入、焦点或武装许可未满足"; break;
+                }
+                break;
             case TriggerReason::INVALID_OBSERVATION: reason = "图像版本或坐标无效"; break;
             case TriggerReason::TIMING_UNAVAILABLE: reason = "缺少有效源图像时序"; break;
             case TriggerReason::STALE: reason = "图像已过期"; break;

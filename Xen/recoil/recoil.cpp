@@ -298,6 +298,7 @@ bool RecoilController::restart_for_manual(RecoilTime now) noexcept {
 RecoilDecision RecoilController::advance(const RecoilInput& input,RecoilTime now) noexcept {
     if(now==RecoilTime{}||now<last_now_)return cancel(RecoilReason::INVALID_TIME,last_now_);
     last_now_=now;
+    state_.context_block=RecoilContextBlock::NONE;
     if(!input.enabled){cancel(RecoilReason::DISABLED,now);state_.phase=RecoilPhase::DISABLED;return result();}
     const bool changed=input.profile!=profile_||input.weapon_generation!=weapon_generation_||input.device_epoch!=device_epoch_;
     if(changed) {
@@ -318,8 +319,13 @@ RecoilDecision RecoilController::advance(const RecoilInput& input,RecoilTime now
         if(profile_->state!=RecoilProfileState::SCHEMA_VALID || !profile_->calibration.evidence.empty() ||
             profile_->phase_tolerance_ms || profile_->recovery_ms)return cancel(RecoilReason::UNCALIBRATED,now);
     } else if(!execution_profile(*profile_))return cancel(RecoilReason::UNCALIBRATED,now);
-    if(!input.healthy||!input.focused||!input.permission||!input.profile_conditions_match||!weapon_generation_||!device_epoch_)
+    if(!input.healthy||!input.focused||!input.permission||!input.profile_conditions_match||!weapon_generation_||!device_epoch_) {
+        state_.context_block=!input.healthy ? RecoilContextBlock::INPUT_UNHEALTHY :
+            !input.focused ? RecoilContextBlock::NOT_FOCUSED :
+            !input.profile_conditions_match ? RecoilContextBlock::PROFILE_CONDITIONS :
+            !input.permission ? RecoilContextBlock::PERMISSION : RecoilContextBlock::GENERATION;
         return cancel(RecoilReason::CONTEXT,now);
+    }
     if(state_.faulted)return result();
     if(!input.held) {
         if(active_||(!released_since_firing_&&has_fired_)){released_at_=now;released_since_firing_=true;}

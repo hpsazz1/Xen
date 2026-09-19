@@ -1,6 +1,7 @@
 #include "recoil_tuner/wall_capture_run.h"
 #include <atomic>
 #include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 #include <filesystem>
 #include <iostream>
 #include <thread>
@@ -51,8 +52,9 @@ public:
     bool output_owner_exclusive() const noexcept override { return true; }
     bool supports_left_button() const noexcept override { return true; }
     bool left_button_cleanup_required() const noexcept override { return down; }
-    MouseMoveReceipt move(const MouseMoveCommand&) noexcept override {
+    MouseMoveReceipt move(const MouseMoveCommand& command) noexcept override {
         ++moves;
+        x.fetch_add(command.dx_counts);y.fetch_add(command.dy_counts);
         MouseMoveReceipt receipt;
         receipt.succeeded = acknowledge_moves; receipt.protocol_ack_received = acknowledge_moves;
         receipt.backend_completed_at = std::chrono::steady_clock::now();
@@ -75,8 +77,35 @@ public:
     std::string last_error() const override { return {}; }
     bool down = false, unknown_down = false, acknowledge_moves = false;
     std::atomic<bool> ever_down{false};
+    std::atomic<int> x{0},y{0};
     int downs = 0, ups = 0, moves = 0;
     std::uint64_t sequence = 0;
+};
+class DelayedCalibrationCapture final : public ICapture {
+public:
+    explicit DelayedCalibrationCapture(std::shared_ptr<FakeDevice> device):device_(std::move(device)){
+        cv::Mat gray(320,320,CV_8UC1);cv::RNG generator(4321);generator.fill(gray,cv::RNG::UNIFORM,20,220);
+        cv::cvtColor(gray,background_,cv::COLOR_GRAY2BGR);
+    }
+    bool open() noexcept override{return true;}
+    CaptureStatus grab(CapturedFrame& frame) noexcept override{
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        const cv::Point next(device_->x.load(),device_->y.load());
+        const auto now=std::chrono::steady_clock::now();
+        if(next!=pending_){pending_=next;changed_=now;}
+        if(now-changed_>=std::chrono::milliseconds(50))visible_=pending_;
+        cv::Mat transform=(cv::Mat_<double>(2,3)<<1,0,visible_.x,0,1,visible_.y);
+        cv::warpAffine(background_,frame.bgr,transform,background_.size(),cv::INTER_LINEAR,cv::BORDER_REFLECT);
+        frame.bgr(cv::Rect(159,159,3,3)).setTo(cv::Scalar(255,0,255));
+        frame.width=frame.height=320;frame.timing.sequence=++sequence_;frame.timing.captured_at=now;
+        return CaptureStatus::FRAME;
+    }
+    void close() noexcept override{}
+    CaptureStatus status() const noexcept override{return CaptureStatus::READY;}
+    std::string last_error() const override{return {};}
+private:
+    std::shared_ptr<FakeDevice> device_;cv::Mat background_;cv::Point pending_{},visible_{};
+    std::chrono::steady_clock::time_point changed_{};std::uint64_t sequence_=0;
 };
 }
 int main() {
@@ -309,6 +338,38 @@ int main() {
     check(result.report.value("recovery_action", std::string{}) == "recalibrate", "旧标定几何不匹配必须要求重标定");
     request.geometry_valid = {};
 
+    {
+        auto follow=request;follow.follow_recoil=true;follow.mode=recoil_tuner::WallRunMode::CALIBRATE;
+        follow.target_shots=0;follow.output_directory=root/"follow-delayed-calibration";
+        device=std::make_shared<FakeDevice>();device->acknowledge_moves=true;
+        follow.capture_factory=[device](const CaptureConfig&){return std::make_unique<DelayedCalibrationCapture>(device);};
+        const auto calibrated=recoil_tuner::run_wall_capture(follow,device,canceled);
+        if(!calibrated.completed)std::cerr<<calibrated.message<<'\n';
+        check(calibrated.completed&&device->moves==4&&device->downs==0&&
+            calibrated.report.value("follow_recoil_mouse_invariance_verified",false),
+            "跟随准星标定须用四向独立响应校核准星固定且不射击");
+        if(calibrated.completed){
+            const auto interval=calibrated.report.at("follow_recoil_receive_alignment").at("interval_ms");
+            check(interval[0].get<double>()<=60&&interval[1].get<double>()>=50,
+                "独立视频响应对齐区间应覆盖合成50ms延迟");
+        }
+    }
+    for(const auto mode:{recoil_tuner::WallRunMode::CAPTURE,recoil_tuner::WallRunMode::CALIBRATE}){
+        auto follow=request;follow.follow_recoil=true;follow.mode=mode;follow.target_shots=5;
+        follow.capture_factory=[](const CaptureConfig&){return std::make_unique<FakeCapture>();};
+        follow.output_directory=root/(mode==recoil_tuner::WallRunMode::CAPTURE?"follow-missing-capture":"follow-missing-calibration");
+        device=std::make_shared<FakeDevice>();
+        const auto rejected=recoil_tuner::run_wall_capture(follow,device,canceled);
+        check(!rejected.completed&&device->downs==0&&device->moves==0,
+            "跟随准星模式未识别专用准星必须在任何射击或标定移动前拒绝");
+    }
+    {
+        auto follow=request;follow.follow_recoil=true;follow.target_shots=6;
+        follow.output_directory=root/"follow-six-shots";device=std::make_shared<FakeDevice>();
+        const auto rejected=recoil_tuner::run_wall_capture(follow,device,canceled);
+        check(!rejected.completed&&device->downs==0&&device->moves==0,
+            "准星首次采集超过五发必须在输出前拒绝");
+    }
     device = std::make_shared<FakeDevice>(); canceled.store(true);
     request.output_directory = root / "canceled";
     result = recoil_tuner::run_wall_capture(request, device, canceled);
