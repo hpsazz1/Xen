@@ -65,6 +65,43 @@ int main() {
     request.context_valid = [] { return true; };
     std::atomic<bool> canceled{false};
     auto device = std::make_shared<FakeDevice>();
+    request.mode = recoil_tuner::WallRunMode::TEST;
+    request.measurement_required = false;
+    int capture_requests = 0;
+    request.capture_factory = [&](const CaptureConfig&) -> std::unique_ptr<ICapture> { ++capture_requests; return {}; };
+    request.geometry_valid = [](const auto&) { return false; };
+    request.output_directory = root / "direct-verification-without-video";
+    auto direct = recoil_tuner::run_wall_capture(request, device, canceled);
+    check(direct.completed && device->downs == 1 && device->ups == 1 && !device->down,
+        "无测量已有曲线验证不得因图像不可用阻止单次测试与UP");
+    check(capture_requests == 0 && direct.frames.empty() && !direct.report.value("training_eligible",true),
+        "无测量验证不得创建Capture或提供图像训练资格");
+    device=std::make_shared<FakeDevice>();device->unknown_down=true;
+    request.output_directory=root/"direct-unknown-down";
+    direct=recoil_tuner::run_wall_capture(request,device,canceled);
+    check(!direct.completed&&device->downs==1&&device->ups==1&&!device->down,
+        "无测量验证仍须UNKNOWN后的UP清理");
+    device=std::make_shared<FakeDevice>();request.context_valid=[device]{return !device->ever_down;};
+    request.context_block_reason=[]{return std::string("源焦点测试已丢失");};
+    request.output_directory=root/"direct-focus-loss";
+    direct=recoil_tuner::run_wall_capture(request,device,canceled);
+    check(!direct.completed&&device->ups==1&&direct.message=="源焦点测试已丢失",
+        "无测量仍保留源上下文撤销且输出具体原因");
+    device=std::make_shared<FakeDevice>();request.context_valid=[]{return false;};
+    request.context_block_reason=[]{return std::string("等待GSI测试状态");};
+    request.output_directory=root/"direct-block-reason";
+    bool specific_progress=false;
+    direct=recoil_tuner::run_wall_capture(request,device,canceled,[&](const std::string& message){
+        if(message=="等待GSI测试状态"){specific_progress=true;canceled=true;}
+    });
+    check(specific_progress&&!direct.completed&&device->downs==0&&
+        direct.report.value("readiness_blocker",std::string{})=="等待GSI测试状态",
+        "等待具体原因须进入progress与结果，取消不得输出");
+    canceled=false;request.context_valid=[]{return true;};request.context_block_reason={};
+    request.mode = recoil_tuner::WallRunMode::CAPTURE; request.measurement_required = true;
+    request.capture_factory = [](const CaptureConfig&) { return std::make_unique<FakeCapture>(); };
+    request.geometry_valid = {};
+    device = std::make_shared<FakeDevice>();
     request.output_directory = root / "complete";
     auto result = recoil_tuner::run_wall_capture(request, device, canceled);
     check(result.completed && !result.cleanup_unknown, "正常ACK的DOWN清理债务不得当作失败");

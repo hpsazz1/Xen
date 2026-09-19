@@ -63,8 +63,10 @@ bool pressed(const InputSnapshot& input, int key) { return key > 0 && key < 256 
 WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IMouseController> device,
         const std::atomic<bool>& canceled, const std::function<void(const std::string&)>& progress) noexcept {
     WallRunResult result;
+    const bool measurement_required=request.mode!=WallRunMode::TEST||request.measurement_required;
     result.report = {{"schema_version", 1}, {"completed", false}, {"cleanup_unknown", false},
-        {"physically_accepted", false}, {"frames", Json::array()}, {"calibration", Json::array()}};
+        {"physically_accepted", false}, {"measurement_required",measurement_required},
+        {"frames", Json::array()}, {"calibration", Json::array()}};
     std::unique_ptr<ICapture> capture;
     std::jthread capture_thread;
     CaptureBuffer buffer;
@@ -110,6 +112,7 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
         std::filesystem::create_directories(request.output_directory.parent_path());
         if (!std::filesystem::create_directory(request.output_directory)) throw std::runtime_error("无法独占创建采集目录");
         directory_owned = true;
+        if(measurement_required){
         std::filesystem::create_directory(request.output_directory / "frames");
         auto config = request.capture;
         config.enable_d3d11_cuda_interop = false; config.enable_d3d11_directml_interop = false;
@@ -188,6 +191,8 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
                 }
             } catch (...) { std::lock_guard lock(buffer.mutex); buffer.error = "图像线程异常"; }
         });
+        }
+        std::string readiness_reason="等待键鼠释放";
         auto input_valid = [&](bool armed) {
             if (canceled.load()) throw std::runtime_error("用户取消");
             InputSnapshot input;
@@ -198,8 +203,10 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
                 !pressed(input, 'S') && !pressed(input, 'D') && !pressed(input, request.trigger_virtual_key);
             if (armed && !released) throw std::runtime_error("检测到人工移动、左键或测试键，已停止本组");
             const bool context = request.context_valid();
-            if (armed && !context) throw std::runtime_error("源焦点或武器上下文失效");
-            {
+            const auto context_reason=!context&&request.context_block_reason?request.context_block_reason():"源焦点或武器上下文失效";
+            if (armed && !context) throw std::runtime_error(context_reason);
+            readiness_reason=!released?"等待松开测试键、左键和WASD":!context?context_reason:"等待连续就绪";
+            if(measurement_required){
                 std::lock_guard lock(buffer.mutex);
                 if (!buffer.error.empty()) throw std::runtime_error(buffer.error);
                 if (armed && (buffer.latest.frame.bgr.empty() || Clock::now() - buffer.latest.received > std::chrono::milliseconds(500)))
@@ -209,17 +216,25 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
         };
         notify("请松开测试键、左键和移动键，保持游戏前台；准备好后自动执行本组");
         Clock::time_point ready_since{};
+        std::string reported_reason;
         for (;;) {
             const auto now = Clock::now();
-            if (now - origin > std::chrono::seconds(15)) throw std::runtime_error("等待释放、焦点与图像超时");
+            if (now - origin > std::chrono::seconds(15)) throw std::runtime_error("准备超时："+readiness_reason);
             bool ready = input_valid(false);
-            { std::lock_guard lock(buffer.mutex); ready = ready && !buffer.latest.frame.bgr.empty() && now - buffer.latest.received < std::chrono::milliseconds(200); }
+            if(measurement_required){
+                std::lock_guard lock(buffer.mutex);
+                const bool image_ready=!buffer.latest.frame.bgr.empty()&&now-buffer.latest.received<std::chrono::milliseconds(200);
+                if(ready&&!image_ready)readiness_reason="等待有效图像（尚无画面或图像已过期）";
+                ready=ready&&image_ready;
+            }
+            result.report["readiness_blocker"]=readiness_reason;
+            if(reported_reason!=readiness_reason){reported_reason=readiness_reason;notify(readiness_reason);}
             if (!ready) ready_since = {};
             else if (ready_since == Clock::time_point{}) ready_since = now;
             else if (now - ready_since >= std::chrono::milliseconds(100)) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
-        {
+        if(measurement_required){
             std::lock_guard lock(buffer.mutex);
             result.report["geometry"] = geometry_json(buffer.latest);
             if (request.geometry_valid && !request.geometry_valid(result.report["geometry"]))
@@ -274,7 +289,7 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
         } else {
             if (request.on_ready) { worker_ready = true; if (!request.on_ready()) throw std::runtime_error("候选测试调度器准备失败"); }
             input_valid(true);
-            notify("正在执行一次有界扫射并采集图像，取消键可立即停止");
+            notify(measurement_required?"正在执行一次有界扫射并采集图像，取消键可立即停止":"正在验证已有曲线，不采集画面；取消键可立即停止");
             const auto started = Clock::now();
             left_may_be_down = true;
             const auto receipt = device->set_left_button(true);
@@ -302,16 +317,16 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
             result.report["overshoot"] = overshoot;
             result.report["target_reached"] = target_reached;
             result.report["exact_shot_count_verified"] = false;
-            result.report["training_eligible"] = request.target_shots == 0 || (target_reached && overshoot == 0);
+            result.report["training_eligible"] = measurement_required && (request.target_shots == 0 || (target_reached && overshoot == 0));
         }
         release(); stop_capture();
         if (!buffer.error.empty()) throw std::runtime_error(buffer.error);
         result.completed = !result.cleanup_unknown;
-        termination = "COMPLETED"; result.message = "本组采集完成，图像与执行记录已保存";
+        termination = "COMPLETED"; result.message = measurement_required?"本组采集完成，图像与执行记录已保存":"已有曲线验证完成，执行记录已保存；请人工观察效果";
     } catch (const std::exception& error) { result.message = error.what(); release(); stop_capture(); }
       catch (...) { result.message = "采集异常，已停止本组"; release(); stop_capture(); }
     try {
-        notify("射击已停止，正在保存本组图像和时间证据");
+        notify(measurement_required?"射击已停止，正在保存本组图像和时间证据":"射击已停止，正在保存本组执行记录");
         result.report["completed"] = result.completed;
         if (!result.completed) result.report["training_eligible"] = false;
         result.report["cleanup_unknown"] = result.cleanup_unknown;

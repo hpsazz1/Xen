@@ -11,6 +11,7 @@
 #include <misc/cpp/imgui_stdlib.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -25,8 +26,56 @@
 #endif
 #include <windows.h>
 #include <shellapi.h>
+#include <shobjidl.h>
+#include <wrl/client.h>
 
 namespace {
+struct PickerCancellation {
+    IFileDialog* dialog;
+    const std::atomic<bool>* canceled;
+    UINT_PTR timer = 0;
+};
+thread_local PickerCancellation* active_picker = nullptr;
+void CALLBACK cancel_picker_timer(HWND, UINT, UINT_PTR timer, DWORD) noexcept {
+    // 模态窗口消息循环在创建 COM 对象的同一 STA 调用此回调。
+    if (active_picker && active_picker->timer == timer && active_picker->canceled->load())
+        active_picker->dialog->Close(HRESULT_FROM_WIN32(ERROR_CANCELLED));
+}
+std::string choose_recoil_profile(HWND owner, const std::shared_ptr<std::atomic<bool>>& canceled) {
+    if(canceled->load())return {};
+    const auto initialized=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED|COINIT_DISABLE_OLE1DDE);
+    if(FAILED(initialized)) throw std::runtime_error("无法初始化文件选择窗口");
+    struct Uninitialize { ~Uninitialize(){CoUninitialize();} } uninitialize;
+    Microsoft::WRL::ComPtr<IFileOpenDialog> dialog;
+    if(FAILED(CoCreateInstance(__uuidof(FileOpenDialog),nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&dialog))))
+        throw std::runtime_error("无法打开文件选择窗口");
+    FILEOPENDIALOGOPTIONS options{};
+    const COMDLG_FILTERSPEC filters[]{{L"弹道曲线 JSON",L"*.json"},{L"所有文件",L"*.*"}};
+    if(FAILED(dialog->GetOptions(&options)) ||
+        FAILED(dialog->SetOptions(options|FOS_FORCEFILESYSTEM|FOS_FILEMUSTEXIST|FOS_PATHMUSTEXIST|FOS_NOCHANGEDIR)) ||
+        FAILED(dialog->SetFileTypes(2,filters)) || FAILED(dialog->SetTitle(L"选择弹道曲线 JSON")))
+        throw std::runtime_error("文件选择窗口配置失败");
+    PickerCancellation cancellation{dialog.Get(), canceled.get()};
+    struct TimerScope {
+        PickerCancellation* previous;
+        PickerCancellation& current;
+        ~TimerScope(){KillTimer(nullptr,current.timer);active_picker=previous;}
+    } timer_scope{active_picker,cancellation};
+    active_picker=&cancellation;
+    cancellation.timer=SetTimer(nullptr,0,20,cancel_picker_timer);
+    if(!cancellation.timer)throw std::runtime_error("无法建立文件选择取消响应");
+    if(canceled->load())return {};
+    const auto shown=dialog->Show(owner);
+    if(canceled->load() || shown==HRESULT_FROM_WIN32(ERROR_CANCELLED))return {};
+    if(FAILED(shown))throw std::runtime_error("文件选择失败");
+    Microsoft::WRL::ComPtr<IShellItem> item; PWSTR name=nullptr;
+    if(FAILED(dialog->GetResult(&item))||FAILED(item->GetDisplayName(SIGDN_FILESYSPATH,&name)))
+        throw std::runtime_error("无法取得选中文件路径");
+    struct FreePath { PWSTR value; ~FreePath(){CoTaskMemFree(value);} } free_path{name};
+    const auto utf8=std::filesystem::path(name).u8string();
+    if(canceled->load())return {};
+    return {reinterpret_cast<const char*>(utf8.data()),utf8.size()};
+}
 struct DisabledScope { explicit DisabledScope(bool disabled) { ImGui::BeginDisabled(disabled); } ~DisabledScope() { ImGui::EndDisabled(); } };
 const char* reason_text(RecoilReason reason) {
     switch (reason) {
@@ -140,6 +189,7 @@ struct RecoilPanel::Impl {
     std::shared_ptr<Job> job;
     bool working_copy = false;
     bool cancel_requested = false;
+    std::shared_ptr<std::atomic<bool>> job_cancellation;
 
     std::function<void(Impl&)> pending_action;
     void launch(std::function<void(Impl&)> action) {
@@ -149,9 +199,11 @@ struct RecoilPanel::Impl {
     void poll() {
         if (pending_action) {
             auto action = std::exchange(pending_action, {});
+            job_cancellation=std::make_shared<std::atomic<bool>>(false);
             // 在绘制调用之外转移整份编辑状态，不在 UI 线程复制大型数据集和撤销历史。
             auto copy = std::make_shared<Impl>(std::move(*this));
             copy->working_copy = true;
+            job_cancellation=copy->job_cancellation;
             cancel_requested = false;
             try { job = Job::start(copy, [action = std::move(action)](auto& state) {
                 try { action(*state); }
@@ -170,6 +222,7 @@ struct RecoilPanel::Impl {
         *this = std::move(*finished->value);
         working_copy = false;
         cancel_requested = false;
+        job_cancellation.reset();
         if (failed) status = "后台任务异常结束；编辑状态已保留。";
         if (canceled) {
             workflow_after_calibration.reset(); workflow_prepare_next.reset();
@@ -470,23 +523,25 @@ struct RecoilPanel::Impl {
         }
         help("测试使用已保存文件；新武器无需先加载曲线即可采集。");
         if (ImGui::TreeNode("导入已有曲线 JSON")) {
+            if(ImGui::Button("选择曲线文件")) {
+                workflow_after_calibration.reset(); workflow_prepare_next.reset();
+                const auto settings=config.recoil;
+                const auto owner=static_cast<HWND>(ImGui::GetMainViewport()->PlatformHandleRaw);
+                launch([settings,owner](Impl& s) {
+                    const auto path=choose_recoil_profile(owner,s.job_cancellation);
+                    if(path.empty() || s.job_cancellation->load()){s.status="已取消文件选择，当前曲线保持不变。";return;}
+                    s.workflow_profile_import=path;
+                    s.import_workflow_profile(settings);
+                });
+            }
+            help("打开Windows文件选择窗口，选择JSON后直接导入并准备验证；取消不会更改当前曲线。");
             ImGui::InputText("已有曲线文件", &workflow_profile_import);
             ImGui::BeginDisabled(workflow_profile_import.empty());
             if (ImGui::Button("导入并准备验证")) {
                 actions.debug_plan_edited = true;
                 workflow_after_calibration.reset(); workflow_prepare_next.reset();
                 const auto settings = config.recoil;
-                launch([settings](Impl& s) {
-                    RecoilProfile candidate;
-                    if (!load_recoil_profile(read_workflow_file(s.workflow_profile_import),candidate,s.status)) return;
-                    s.select_workflow_weapon(candidate.weapon_id);
-                    RecoilStore store(std::filesystem::u8path(settings.profile_directory));
-                    if (!store.save_new(candidate,s.selected_file,s.status)) return;
-                    s.load_file(settings,s.selected_file); s.refresh(settings);
-                    if (!s.loaded || s.base.weapon_id != s.workflow_weapon) return;
-                    s.workflow_record_measurement = false; s.workflow_prepare_next = debug_session::Mode::RECOIL_TEST;
-                    s.status = "已有曲线已导入并选中；仅准备验证，仍须重新按测试键。";
-                });
+                launch([settings](Impl& s) {s.import_workflow_profile(settings);});
             }
             ImGui::EndDisabled();
             help("导入结构有效的曲线另存为候选，保留原文件，不要求先采集或标定，不自动激活或射击。");
@@ -525,6 +580,9 @@ struct RecoilPanel::Impl {
         ImGui::TextWrapped("当前步骤：%s", workflow_after_calibration ? "画面标定；完成后只准备下一步" :
             workflow_prepare_next ? "正在准备下一步" : debug && debug->busy ? "本组处理中" :
             debug && debug->repeat_ready ? "已准备，等待你按测试键" : "选择采集或验证");
+        if(debug&&debug->busy&&debug->plan.is_object()&&
+            debug->plan.value("kind",std::string{}).starts_with("recoil_")&&!debug->message.empty())
+            ImGui::TextWrapped("本组状态：%s",debug->message.c_str());
         if (debug && debug->repeat_ready) ImGui::TextWrapped("已准备：回游戏对准靶点，按一下测试键后松开，等待本组完成。修改参数后请重新准备。");
         ImGui::TextWrapped("采集的是视角/靶点运动候选，不把准星动画当弹着点。固定位置和姿态；每组对准新的干净靶面。");
         workflow_results(config, actions, debug);
@@ -758,6 +816,25 @@ struct RecoilPanel::Impl {
         report.reset();
         if (undo.size() >= 20) undo.erase(undo.begin());
         undo.push_back(checkpoint); redo.clear(); checkpoint = {draft, tuning}; calibration_confirmed = false; compile();
+    }
+    void import_workflow_profile(const RecoilConfig& settings) {
+        if(job_cancellation && job_cancellation->load())return;
+        RecoilProfile candidate;
+        if(!load_recoil_profile(read_workflow_file(workflow_profile_import),candidate,status))return;
+        RecoilStore store(std::filesystem::u8path(settings.profile_directory));
+        std::string file;
+        // 用户常直接选择曲线目录内的现有文件；相同内容直接选中，避免重复另存同一曲线。
+        refresh(settings);
+        for(const auto& saved:files)
+            if(serialize_recoil_profile(*saved.profile)==serialize_recoil_profile(candidate)){file=saved.file;break;}
+        if(job_cancellation && job_cancellation->load())return;
+        if(file.empty()&&!store.save_new(candidate,file,status))return;
+        select_workflow_weapon(candidate.weapon_id);
+        workflow_after_calibration.reset(); workflow_prepare_next.reset();
+        load_file(settings,file); refresh(settings);
+        if(!loaded||base.weapon_id!=workflow_weapon)return;
+        workflow_record_measurement=false; workflow_prepare_next=debug_session::Mode::RECOIL_TEST;
+        status="曲线已选中并准备验证；回游戏按测试键即可开始本组。";
     }
     void refresh(const RecoilConfig& config) {
         if (!working_copy) { launch([config](Impl& state) { state.refresh(config); }); return; }
@@ -1092,6 +1169,7 @@ void RecoilPanel::poll() noexcept {
 }
 bool RecoilPanel::busy() const noexcept { return impl_->job || impl_->pending_action; }
 void RecoilPanel::request_cancel() noexcept {
+    if(impl_->job_cancellation)impl_->job_cancellation->store(true);
     impl_->workflow_after_calibration.reset(); impl_->workflow_prepare_next.reset();
     if (impl_->pending_action) {
         impl_->pending_action = {};

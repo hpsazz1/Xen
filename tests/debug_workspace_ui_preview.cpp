@@ -221,11 +221,19 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     debug_session::Snapshot debug; OverlayActions actions;
     std::vector<OverlayActions> emitted;
     std::string pending_focus;
+    ImGuiID pending_focus_id=0;
+    std::atomic<bool> cancel_picker_on_frame{false};
+    std::string pending_focus_window = "recoil-flow";
     auto frame = [&] {
+        if(cancel_picker_on_frame.exchange(false))panel->request_cancel();
         panel->poll(); actions = {};
-        ImGui::NewFrame(); ImGui::LogToBuffer(0); ImGui::SetNextWindowPos({0,0}); ImGui::SetNextWindowSize({1300,1600});
+        ImGui::NewFrame();
+        if (!pending_focus.empty()) {
+            if (auto* target=ImGui::FindWindowByName(pending_focus_window.c_str())) ImGui::SetFocusID(pending_focus_id,target);
+            pending_focus.clear();
+        }
+        ImGui::LogToBuffer(0); ImGui::SetNextWindowPos({0,0}); ImGui::SetNextWindowSize({1300,1600});
         ImGui::Begin("recoil-flow", nullptr, ImGuiWindowFlags_NoSavedSettings);
-        if (!pending_focus.empty()) { ImGui::SetFocusID(ImGui::GetID(pending_focus.c_str()),ImGui::GetCurrentWindow()); pending_focus.clear(); }
         panel->render_tools(runtime,config,true,actions,&debug);
         ImGui::End();
         { std::ofstream text(output/"flow-last-frame.txt"); text << ImGui::GetCurrentContext()->LogBuffer.c_str(); }
@@ -240,13 +248,14 @@ void recoil_flow_preview(const std::filesystem::path& output) {
         }
     };
     auto settle = [&] {
-        for (int i=0;i<200;++i) { frame(); if (!panel->busy() && i>5) return; std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
+        for (int i=0;i<5000;++i) { frame(); if (!panel->busy() && i>5) return; std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
         throw std::runtime_error("面板后台任务未在有界时间内完成");
     };
-    auto click = [&](const char* label) {
-        settle(); auto* window = ImGui::FindWindowByName("recoil-flow"); require(window != nullptr,"流程窗口缺失");
-        const auto target = window->GetID(label);
-        io.AddMousePosEvent(1290,1590); pending_focus=label; frame();
+    auto click = [&](const char* label, bool popup = false, const char* scope = nullptr) {
+        settle(); pending_focus_window=popup?"##Combo_00":"recoil-flow";
+        auto* window = ImGui::FindWindowByName(pending_focus_window.c_str()); require(window != nullptr,"流程窗口缺失");
+        const auto target = scope?ImHashStr(label,0,window->GetID(scope)):window->GetID(label);
+        io.AddMousePosEvent(1290,1590); pending_focus=label; pending_focus_id=target;frame();
         require(ImGui::GetCurrentContext()->NavId==target,"真实目标控件未获得导航焦点");
         const auto rectangle = ImGui::WindowRectRelToAbs(window,window->NavRectRel[ImGuiNavLayer_Main]);
         const ImVec2 point=rectangle.GetCenter();
@@ -313,6 +322,88 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     panel->poll(); // 启动实际结果导入；即使同步操作已完成，尚未回迁时取消也不得自动准备。
     panel->request_cancel(); settle(); settle();
     require(emitted.empty(),"后台结果处理取消后不得自动Prepare下一组");
+    // 多曲线不能沿用“唯一曲线自动选中”替代用户真正选择下拉项。
+    settle(); panel.reset(); debug={}; emitted.clear();
+    auto second=imported; second.id="ui-second"; second.revision=2;
+    { std::ofstream file("profiles/second.json"); file<<serialize_recoil_profile(second); }
+    { std::ofstream file("cache/recoil/workflow-settings.json"); file<<R"({"ak47":{}})"; }
+    panel=std::make_unique<RecoilPanel>(); settle();
+    click("测试曲线"); click("second.json",true); click("验证已有弹道");
+    require(emitted.size()==1 && std::filesystem::path(emitted.back().debug_request.recoil_profile_path).filename()=="second.json",
+        "多条已有曲线必须能实际下拉选择并验证所选文件");
+    emitted.clear(); settle(); panel.reset(); panel=std::make_unique<RecoilPanel>(); settle();
+    click("验证已有弹道");
+    require(emitted.size()==1 && std::filesystem::path(emitted.back().debug_request.recoil_profile_path).filename()=="second.json",
+        "重新打开面板必须恢复用户选择的曲线");
+    emitted.clear(); click("导入已有曲线 JSON");
+    std::ifstream screen(output/"flow-last-frame.txt"); const std::string screen_text{std::istreambuf_iterator<char>(screen),{}};
+    require(screen_text.find("选择曲线文件")!=std::string::npos,"导入已有曲线必须提供可操作的文件选择入口，不能只有手输路径");
+    auto native_selection = [&](const std::filesystem::path& path, bool cancel, bool panel_cancel = false) {
+        std::atomic<bool> seen{false}, chosen{false}, fallback_cancel{false};
+        std::jthread response([&](std::stop_token stop) {
+            const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(8);
+            while(!stop.stop_requested()&&std::chrono::steady_clock::now()<deadline) {
+                HWND dialog=nullptr;
+                EnumWindows([](HWND window,LPARAM context)->BOOL {
+                    DWORD process=0;GetWindowThreadProcessId(window,&process);
+                    if(process!=GetCurrentProcessId())return TRUE;
+                    wchar_t title[128]{};GetWindowTextW(window,title,128);
+                    if(std::wstring_view(title)==L"选择弹道曲线 JSON"){
+                        *reinterpret_cast<HWND*>(context)=window;return FALSE;
+                    }return TRUE;
+                },reinterpret_cast<LPARAM>(&dialog));
+                if(dialog) {
+                    seen=true;
+                    if(panel_cancel) {
+                        cancel_picker_on_frame=true;
+                        const auto closed_by=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+                        while(IsWindow(dialog)&&std::chrono::steady_clock::now()<closed_by)
+                            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                        if(IsWindow(dialog)){fallback_cancel=true;PostMessageW(dialog,WM_COMMAND,IDCANCEL,0);}
+                        chosen=true;return;
+                    }
+                    if(cancel){PostMessageW(dialog,WM_COMMAND,IDCANCEL,0);chosen=true;return;}
+                    HWND edit=nullptr;
+                    EnumChildWindows(dialog,[](HWND child,LPARAM context)->BOOL {
+                        wchar_t name[64]{};GetClassNameW(child,name,64);
+                        if(IsWindowVisible(child)&&std::wstring_view(name)==L"Edit"){
+                            *reinterpret_cast<HWND*>(context)=child;return FALSE;
+                        }return TRUE;
+                    },reinterpret_cast<LPARAM>(&edit));
+                    if(edit){
+                        SendMessageW(edit,WM_SETTEXT,0,reinterpret_cast<LPARAM>(path.c_str()));
+                        PostMessageW(dialog,WM_COMMAND,IDOK,0);chosen=true;return;
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+        });
+        click("选择曲线文件",false,"导入已有曲线 JSON");
+        response.request_stop();response.join();
+        require(seen&&chosen,"测试必须实际操作本进程创建的Windows文件选择窗口");
+        require(!fallback_cancel,"全局取消必须自行关闭运行中的文件选择器，不能依赖再次点击取消");
+        require(std::filesystem::current_path()==output,"系统文件选择不得改变工作目录");
+    };
+    emitted.clear();native_selection({},true);
+    require(emitted.empty(),"取消文件选择不得准备任务或改写当前曲线");
+    const auto profiles_before_cancel=std::distance(std::filesystem::directory_iterator("profiles"),std::filesystem::directory_iterator{});
+    emitted.clear();native_selection({},false,true);
+    require(emitted.empty()&&!panel->busy(),"全局取消文件选择后必须释放busy且不能Prepare");
+    require(std::distance(std::filesystem::directory_iterator("profiles"),std::filesystem::directory_iterator{})==profiles_before_cancel,
+        "全局取消运行中文件选择不得新建曲线文件");
+    emitted.clear();native_selection(std::filesystem::absolute("profiles/second.json"),false);
+    require(emitted.size()==1&&std::filesystem::path(emitted.back().debug_request.recoil_profile_path).filename()=="second.json",
+        "选择目录内已有曲线应直接载入验证，不能因重复版本拒绝");
+    emitted.clear();auto external=imported;external.id="external-ui";external.revision=3;
+    const auto external_path=output/std::filesystem::path(L"外部曲线.json");
+    {std::ofstream file(external_path);file<<serialize_recoil_profile(external);}
+    native_selection(external_path,false);
+    require(emitted.size()==1&&emitted.back().debug_request.mode==debug_session::Mode::RECOIL_TEST&&
+        emitted.back().debug_request.recoil_calibration_path.empty(),"系统文件选择后必须实际导入并准备所选曲线");
+    RecoilProfile imported_result;std::ifstream imported_file(emitted.back().debug_request.recoil_profile_path);
+    const std::string imported_text{std::istreambuf_iterator<char>(imported_file),{}};std::string imported_error;
+    require(load_recoil_profile(imported_text,imported_result,imported_error)&&imported_result.id=="external-ui",
+        "导入结果必须是所选外部曲线的真实内容");
     std::ofstream report(output/"recoil-flow.txt"); report << "真实RecoilPanel无设备交互回归通过；自动动作仅PREPARE，等待下一次人工按键。\n";
 }
 }
@@ -492,6 +583,17 @@ int wmain(int argc, wchar_t** argv) {
             // 最小窗口上半部是共享调试状态；截图应实际呈现新流程入口，而不是只在日志中存在。
             ImGui::SetScrollY(content,content->ScrollMax.y); frame(); frame();
             save_window(capture,output/"recoil-tools.png");
+            auto* import_tabs = ImGui::GetCurrentContext()->TabBars.GetByKey(content->GetID("debug_tabs"));
+            require(import_tabs != nullptr,"导入截图缺少弹道标签");
+            input.focus_window=content;
+            input.focus_id=ImHashStr("导入已有曲线 JSON",0,import_tabs->SelectedTabId); frame();
+            input.position=ImGui::WindowRectRelToAbs(content,content->NavRectRel[ImGuiNavLayer_Main]).GetCenter();
+            require(content->ClipRect.Contains(input.position),"导入折叠标题不可点击");
+            frame(); input.down=true; frame(); input.down=false; frame(); frame();
+            require(capture.text.find("选择曲线文件")!=std::string::npos,"导入展开后没有文件选择按钮");
+            ImGui::SetScrollY(content,content->ScrollMax.y); frame(); frame();
+            input.position={400,40}; frame();
+            save_window(capture,output/"recoil-import.png");
             ImGui::SetScrollY(content, 0); frame(); frame();
             auto* recoil_tabs = ImGui::GetCurrentContext()->TabBars.GetByKey(content->GetID("debug_tabs"));
             require(recoil_tabs != nullptr,"弹道标签状态丢失");

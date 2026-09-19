@@ -17,5 +17,6 @@ bool recoil_debug_geometry_matches(const nlohmann::json& plan, const nlohmann::j
 using RecoilDebugCaptureHook = std::function<void(const std::filesystem::path&, RecoilTime)>;
 nlohmann::json run_recoil_debug(const nlohmann::json&, const AppConfig&,
     const std::shared_ptr<IMouseController>&, const std::filesystem::path&,
-    const std::atomic<bool>& canceled, RecoilDebugCaptureHook capture = {});
+    const std::atomic<bool>& canceled, RecoilDebugCaptureHook capture = {},
+    const std::function<void(const std::string&)>& progress = {});
 #endif

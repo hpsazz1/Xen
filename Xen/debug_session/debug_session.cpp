@@ -217,7 +217,10 @@ struct Session::Impl {
         if (recoil_mode(work.request.mode)) {
             update([&](Snapshot& s) { s.state=State::RUNNING;s.report_directory=(work.directory/"run").string();
                 s.message="等待源端聚焦并松开键鼠，然后执行一组；紧急停止键可取消"; });
-            auto result=run_recoil_debug(work.plan,work.context.config,work.context.device,work.directory/"run",canceled);
+            auto result=run_recoil_debug(work.plan,work.context.config,work.context.device,work.directory/"run",canceled,{},
+                [this](const std::string& message){
+                    if(view.load()->message!=message)update([&](Snapshot& s){s.message=message;});
+                });
             write_document(work.directory/"result-index.json",result);
             auto completed=std::make_shared<const Json>(std::move(result));
             update([&](Snapshot& s) {s.result=completed;s.cleanup_unknown=!completed->value("cleanup_known",false);

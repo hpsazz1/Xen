@@ -12,6 +12,7 @@ namespace recoil_tuner {
 enum class WallRunMode { CALIBRATE, CAPTURE, TEST };
 struct WallRunRequest {
     WallRunMode mode = WallRunMode::CAPTURE;
+    bool measurement_required = true;
     CaptureConfig capture;
     std::filesystem::path output_directory;
     std::string weapon_id, environment_fingerprint;
@@ -21,6 +22,7 @@ struct WallRunRequest {
     cv::Rect registration_roi;
     // 外层持有唯一 Source/GSI 服务，返回焦点及武器上下文是否仍有效。
     std::function<bool()> context_valid;
+    std::function<std::string()> context_block_reason;
     // 使用当前实际帧几何复核标定绑定，在任何设备输出之前执行。
     std::function<bool(const nlohmann::json&)> geometry_valid;
     // Worker 在任何 DOWN 前预备；仅本模块拥有软件左键。

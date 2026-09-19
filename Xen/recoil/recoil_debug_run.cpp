@@ -97,7 +97,8 @@ bool recoil_debug_geometry_matches(const Json& plan,const Json& actual) noexcept
 }
 
 Json run_recoil_debug(const Json& plan,const AppConfig& config,const std::shared_ptr<IMouseController>& device,
-        const std::filesystem::path& output,const std::atomic<bool>& canceled,RecoilDebugCaptureHook capture) {
+        const std::filesystem::path& output,const std::atomic<bool>& canceled,RecoilDebugCaptureHook capture,
+        const std::function<void(const std::string&)>& progress) {
     if(!device||!device->output_owner_exclusive())throw std::runtime_error("弹道测试缺少独占设备");
     const auto directory=std::filesystem::absolute(output);
     std::filesystem::create_directories(directory);write(directory/"plan.json",plan);
@@ -121,8 +122,10 @@ Json run_recoil_debug(const Json& plan,const AppConfig& config,const std::shared
     auto source_config=config.source_context;
     char* token=nullptr;std::size_t token_size=0;
     if(_dupenv_s(&token,&token_size,"XEN_SOURCE_CONTEXT_TOKEN")==0&&token){source_config.token=token;std::free(token);}
-    if(!source.start(source_config)||!gsi.start(config.gsi))
-        return {{"success",false},{"cleanup_known",true},{"message","源焦点或GSI接收器未就绪，未开始输出"}};
+    if(!source.start(source_config))
+        return {{"success",false},{"cleanup_known",true},{"message","源焦点接收器启动失败，未开始输出"}};
+    if(!gsi.start(config.gsi))
+        return {{"success",false},{"cleanup_known",true},{"message","GSI接收器启动失败，未开始输出"}};
     std::atomic<std::uint64_t> source_session{0},weapon_epoch{0};
     const auto valid_context=[&]{
         const auto focus=source.snapshot();const auto weapon=gsi.snapshot();
@@ -136,6 +139,7 @@ Json run_recoil_debug(const Json& plan,const AppConfig& config,const std::shared
     };
     recoil_tuner::WallRunRequest request;
     request.mode=testing?recoil_tuner::WallRunMode::TEST:calibrating?recoil_tuner::WallRunMode::CALIBRATE:recoil_tuner::WallRunMode::CAPTURE;
+    request.measurement_required=!testing||plan.contains("calibration");
     request.capture=config.capture;request.output_directory=directory/"capture";request.weapon_id=weapon_id;
     request.environment_fingerprint=fingerprint;request.sensitivity=environment.sensitivity;
     request.duration_ms=plan.at("duration_ms").get<int>();
@@ -154,6 +158,25 @@ Json run_recoil_debug(const Json& plan,const AppConfig& config,const std::shared
         const auto state=worker->snapshot();const auto budget=worker->calibration_snapshot();
         return !state.faulted&&archive.snapshot().available&&
             (!budget.terminal||budget.end==RecoilCalibrationEnd::COMPLETED);
+    };
+    request.context_block_reason=[&]() -> std::string {
+        const auto focus=source.snapshot();const auto weapon=gsi.snapshot();
+        if(!focus.available)return "等待源焦点状态（尚未收到有效源端状态）";
+        if(!focus.focused)return "等待游戏切到源端前台";
+        if(!weapon.valid)return "等待有效GSI武器状态";
+        if(!weapon.identity_match)return "GSI玩家身份不匹配";
+        if(weapon.canonical_id!=weapon_id)return "等待GSI武器与所选曲线一致";
+        if(weapon.state!=weapon::WeaponState::ACTIVE)return "等待武器切换为持用状态";
+        if(!weapon.ammo_clip)return "等待GSI弹夹数据";
+        if(weapon.valid_until<=RecoilClock::now())return "GSI状态已过期，等待新状态";
+        if((source_session.load()&&source_session.load()!=focus.session_id)||
+            (weapon_epoch.load()&&weapon_epoch.load()!=weapon.source_epoch))return "源焦点或GSI会话已更换，请重新准备";
+        if(worker){
+            if(worker->snapshot().faulted)return "压枪命令执行故障，已停止本组";
+            if(!archive.snapshot().available)return "压枪执行归档不可用，已停止本组";
+            return "压枪测试许可已结束";
+        }
+        return "等待源端与武器上下文就绪";
     };
     request.geometry_valid=[&](const Json& actual){return recoil_debug_geometry_matches(plan,actual);};
     if(testing) {
@@ -200,7 +223,10 @@ Json run_recoil_debug(const Json& plan,const AppConfig& config,const std::shared
         };
     }
     if(!testing)request.on_ready=[&]{initial_ammo=gsi.snapshot().ammo_clip;return initial_ammo&&*initial_ammo>0;};
-    const auto run=recoil_tuner::run_wall_capture(request,device,canceled,[&](const std::string&){if(capture)capture(directory,RecoilClock::now());});
+    const auto run=recoil_tuner::run_wall_capture(request,device,canceled,[&](const std::string& message){
+        if(progress)progress(message);
+        if(capture)capture(directory,RecoilClock::now());
+    });
     cleanup.stop();
     Json result=run.report;result["success"]=run.completed;result["cleanup_known"]=!run.cleanup_unknown;
     result["message"]=run.message;result["physical_validation_passed"]=false;
