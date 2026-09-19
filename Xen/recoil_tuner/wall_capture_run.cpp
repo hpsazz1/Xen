@@ -40,6 +40,7 @@ struct CaptureBuffer {
     std::string error;
     std::string recovery_action;
     Json registration_failure;
+    cv::Rect search_region;
     StoredFrame registration_failure_frame;
     bool recording = false;
     cv::Mat reference;
@@ -169,6 +170,7 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
                                 buffer.error = "采集区域或图像几何发生变化，请重新标定"; break;
                             }
                             const auto registration=detail::register_wall(buffer.reference,frame.bgr,roi);
+                            buffer.search_region=registration.search_region;
                             const auto shift=registration.shift;
                             const auto response=registration.response;
                             const auto& reason=registration.failure;
@@ -186,6 +188,10 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
                                     {"texture_stddev",number(registration.texture_stddev)},{"response",number(response)},
                                     {"shift_pixels",{number(shift.x),number(shift.y)}},{"roi",{roi.x,roi.y,roi.width,roi.height}},
                                     {"method",detail::kWallRegistration},{"midpoint_residual",number(registration.residual)},
+                                    {"search_policy",detail::kWallSearchPolicy},
+                                    {"search_region",{registration.search_region.x,registration.search_region.y,
+                                        registration.search_region.width,registration.search_region.height}},
+                                    {"explicit_search_limit",{registration.explicit_search_limit.width,registration.explicit_search_limit.height}},
                                     {"raw_midpoint_residual",number(registration.raw_residual)},
                                     {"template_score",number(registration.template_score)},
                                     {"peak_separation",number(registration.peak_separation)}};
@@ -291,6 +297,7 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
                     before.frame.bgr.size() != after.frame.bgr.size() || after.received <= receipt.backend_completed_at)
                     throw std::runtime_error("标定图像区域、几何或时间无效");
                 const auto registration=detail::register_wall(before.frame.bgr,after.frame.bgr,roi,{64,64});
+                buffer.search_region=registration.search_region;
                 const auto delta=registration.shift;
                 const auto response=registration.response;
                 if(!registration.failure.empty() || cv::norm(delta)>64)
@@ -351,6 +358,12 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
     try {
         notify(measurement_required?"射击已停止，正在保存本组图像和时间证据":"射击已停止，正在保存本组执行记录");
         result.report["completed"] = result.completed;
+        if(measurement_required){
+            result.report["search_policy"]=detail::kWallSearchPolicy;
+            result.report["explicit_search_limit"]=request.mode==WallRunMode::CALIBRATE?Json{64,64}:Json{0,0};
+            const auto& region=buffer.search_region;
+            result.report["search_region"]=region.empty()?Json(nullptr):Json{region.x,region.y,region.width,region.height};
+        }
         if (!result.completed && request.mode == WallRunMode::CALIBRATE) buffer.recovery_action = "recalibrate";
         if (!buffer.recovery_action.empty()) result.report["recovery_action"] = buffer.recovery_action;
         if (!buffer.registration_failure.is_null()) result.report["registration_failure"] = buffer.registration_failure;

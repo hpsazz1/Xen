@@ -240,6 +240,66 @@ struct RecoilPanel::Impl {
     std::uint64_t workflow_result_generation = 0;
     std::uint64_t workflow_abort_generation = std::numeric_limits<std::uint64_t>::max();
     std::string workflow_preview_path, workflow_import_path, workflow_candidate_path;
+    struct WallHistory { std::string weapon, path, label; int shots = 0; };
+    std::vector<WallHistory> workflow_history;
+    std::string workflow_history_selected, workflow_history_status;
+    void refresh_workflow_history() {
+        workflow_history.clear();
+        std::size_t unreadable = 0;
+        const std::filesystem::path root("cache/recoil/workflow");
+        if (std::filesystem::exists(root)) for (const auto& entry : std::filesystem::directory_iterator(root)) {
+            if (!entry.is_directory()) continue;
+            const auto path = entry.path() / "result-index.json";
+            if (!std::filesystem::is_regular_file(path)) continue;
+            try {
+                const auto result = nlohmann::json::parse(read_workflow_file(path.string()));
+                const auto mode = result.value("mode",std::string{});
+                const int shots = result.value("requested_shots",0);
+                if (!result.value("success",false) || !result.value("completed",false) ||
+                    !result.value("cleanup_known",false) || (mode != "capture" && mode != "test") ||
+                    !result.value("training_eligible",false) || !result.value("archive_complete",true) ||
+                    !result.contains("observed_ammo_delta") || !result.at("observed_ammo_delta").is_number_integer() ||
+                    result.at("observed_ammo_delta").get<int>() != shots ||
+                    shots < 1 || shots > 50 || result.value("measurement_path",std::string{}).empty()) continue;
+                const auto weapon = result.value("weapon_id",std::string{});
+                workflow_history.push_back({weapon,path.string(),std::to_string(shots) + "发 | " +
+                    (mode == "capture" ? "初始采集 | " : "曲线测试 | ") + entry.path().filename().string(),shots});
+            } catch (...) { ++unreadable; }
+        }
+        std::sort(workflow_history.begin(),workflow_history.end(),[](const auto& a,const auto& b) {
+            return a.shots != b.shots ? a.shots < b.shots : a.path > b.path;
+        });
+        workflow_history_status = unreadable ? "部分历史结果无法读取，已略过；可用结果仍可选择。" : "历史记录已刷新。";
+    }
+    void import_history_result(const std::string& path) {
+        const auto result = nlohmann::json::parse(read_workflow_file(path));
+        if (result.value("weapon_id",std::string{}) != workflow_weapon) {
+            status = "历史结果武器与当前选择不一致，请先切换到对应武器。"; return;
+        }
+        const int shots = result.value("requested_shots",0);
+        if (!result.value("success",false) || !result.value("completed",false) ||
+            !result.value("cleanup_known",false) || !result.value("training_eligible",false) ||
+            !result.value("archive_complete",true) || !result.contains("observed_ammo_delta") ||
+            !result.at("observed_ammo_delta").is_number_integer() || result.at("observed_ammo_delta").get<int>() != shots ||
+            shots < 1 || shots > 50) {
+            status = "历史结果未成功完成或发数无效，未载入。"; return;
+        }
+        recoil_tuner::WallCaptureReport measurement;
+        std::string error;
+        const auto measurement_path=result.value("measurement_path",std::string{});
+        if (measurement_path.empty() || !recoil_tuner::load_wall_report(std::filesystem::u8path(measurement_path),measurement,error) || !measurement.valid) {
+            status = "历史测量载入失败，当前阶段未改变：" + (error.empty() ? "测量无效或路径缺失。" : error); return;
+        }
+        const auto executed=result.value("base_profile_path",std::string{});
+        if (!executed.empty()) read_workflow_file(executed);
+        workflow_after_calibration.reset(); workflow_prepare_next.reset();
+        workflow_samples.clear(); workflow_locked_prefix_ms = 0;
+        workflow_target_shots = shots; workflow_group_shots = std::max(workflow_group_shots,shots);
+        remember_workflow_weapon();
+        import_workflow_result(result);
+        if (workflow_measurement_ready)
+            status = "历史结果已载入，本次发数恢复为" + std::to_string(shots) + "发；请先核对画面，再保存候选或加入优化数据。";
+    }
     recoil_tuner::WallCaptureReport workflow_measurement;
     bool workflow_measurement_ready = false, workflow_confirmed = false, workflow_count_ok = false;
     int workflow_observed_shots = -1, workflow_requested_shots = 0;
@@ -308,8 +368,14 @@ struct RecoilPanel::Impl {
             }
         }
         const auto measurement_path = result.value("measurement_path", std::string{});
-        if (!measurement_path.empty())
+        if (!measurement_path.empty()) {
             workflow_measurement_ready = recoil_tuner::load_wall_report(std::filesystem::u8path(measurement_path), workflow_measurement, status);
+            if (!workflow_measurement_ready) {
+                workflow_count_ok=false; workflow_executed_profile.clear();
+                status="测量载入失败："+status;
+                return;
+            }
+        }
         const auto executed = result.value("base_profile_path", std::string{});
         workflow_executed_profile = executed.empty() ? "" : read_workflow_file(executed);
         workflow_requested_shots = result.value("requested_shots",0);
@@ -325,6 +391,9 @@ struct RecoilPanel::Impl {
         else if (!calibration_path.empty() && result.value("success",false) && result.value("completed",false) &&
             result.value("cleanup_known",false)) status = "画面标定已带入；下一步准备采集或测试。";
         else status = result.value("message",std::string{"本组已结束，请人工核对效果。"});
+        if (workflow_requested_shots > 0 && workflow_requested_shots != workflow_target_shots)
+            status = "结果为" + std::to_string(workflow_requested_shots) + "发，当前阶段为" +
+                std::to_string(workflow_target_shots) + "发；请选择历史记录直接载入以恢复对应发数。";
     }
 
     void workflow_results(AppConfig& config, OverlayActions& actions, const debug_session::Snapshot* debug) {
@@ -432,11 +501,36 @@ struct RecoilPanel::Impl {
         help("使用三组训练、两组独立验证画面，限定修正量并锁定已验收前段；只生成待复测候选，验证数据不会重复使用。");
         ImGui::EndDisabled();
         if (ImGui::TreeNode("载入以前的采集")) {
+            ImGui::TextWrapped("按当前武器选择已保存结果；标签显示发数、类型和独立Run。载入会恢复对应发数，不会自动确认或执行。");
+            if (ImGui::Button("刷新历史记录")) launch([](Impl& s) { s.refresh_workflow_history(); });
+            help("后台读取各Run的结果索引，不扫描图像；新结果出现后可手动刷新。");
+            const auto selected = std::find_if(workflow_history.begin(),workflow_history.end(),[&](const auto& item) {
+                return item.path == workflow_history_selected && item.weapon == workflow_weapon;
+            });
+            const bool has_history = std::any_of(workflow_history.begin(),workflow_history.end(),[&](const auto& item) { return item.weapon == workflow_weapon; });
+            if (ImGui::BeginCombo("历史采集记录",selected == workflow_history.end() ? "请选择发数和记录" : selected->label.c_str())) {
+                for (const auto& item : workflow_history) if (item.weapon == workflow_weapon &&
+                    ImGui::Selectable(item.label.c_str(),item.path == workflow_history_selected)) workflow_history_selected = item.path;
+                ImGui::EndCombo();
+            }
+            ImGui::BeginDisabled(selected == workflow_history.end());
+            if (ImGui::Button("载入所选记录")) {
+                actions.debug_plan_edited = true;
+                const auto path = workflow_history_selected;
+                launch([path](Impl& s) { s.import_history_result(path); });
+            }
+            ImGui::EndDisabled();
+            help("载入并恢复该记录的发数，清空当前未使用的优化选择；原始记录保留，不连接设备。");
+            if (!has_history) ImGui::TextWrapped("当前武器暂无成功的图像采集记录；失败或仅执行未测量的记录不列入。");
+            if (!workflow_history_status.empty()) ImGui::TextWrapped("%s",workflow_history_status.c_str());
+            if (ImGui::TreeNode("高级：按路径载入")) {
             ImGui::InputText("本组结果 JSON", &workflow_import_path);
             if (ImGui::Button("载入采集结果")) launch([](Impl& s) {
                 s.import_workflow_result(nlohmann::json::parse(read_workflow_file(s.workflow_import_path)));
             });
             help("载入已完成会话的结果，重新核对后加入本轮；不连接设备。");
+            ImGui::TreePop();
+            }
             ImGui::TreePop();
         }
         ImGui::BeginDisabled(!loaded || base.weapon_id != workflow_weapon || !workflow_samples.empty());
@@ -491,6 +585,7 @@ struct RecoilPanel::Impl {
                     s.selected_file=value.value("selected_file",std::string{});
                 }
                 s.refresh_workflow_selection(settings); s.workflow_profiles_directory = settings.profile_directory;
+                s.refresh_workflow_history();
             });
             return;
         }

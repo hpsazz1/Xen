@@ -528,6 +528,69 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     io.AddMouseButtonEvent(0,true); frame(); io.AddMouseButtonEvent(0,false); frame(); settle();
     require(emitted.empty() && screen_contains("阶段目标：6 / 6 发"),
         "整组阶段追加按钮必须禁用，不能再次准备或越过发数上限");
+    // 历史索引直接使用持久Run结果；加载2发记录必须修正原3发草稿，不能静默禁用保存。
+    auto history_result = [&](const char* name,const char* weapon,bool success,const char* mode) {
+        const auto directory=std::filesystem::path("cache/recoil/workflow")/name;
+        std::filesystem::create_directories(directory);
+        std::ofstream file(directory/"result-index.json");
+        file << nlohmann::json{{"weapon_id",weapon},{"success",success},{"completed",true},{"cleanup_known",true},
+            {"mode",mode},{"training_eligible",true},{"requested_shots",2},{"observed_ammo_delta",2},
+            {"capture_path",name},{"measurement_path","stage-measurement.json"},
+            {"candidate_path",std::string(mode)=="capture"?"stage-candidate.json":""},
+            {"base_profile_path",std::string(mode)=="test"?"stage-candidate.json":""}};
+    };
+    history_result("history-a","ak47",true,"capture");
+    history_result("history-b","ak47",true,"test");
+    history_result("history-failed","ak47",false,"capture");
+    history_result("history-other","m4a1_s",true,"capture");
+    history_result("history-ineligible","ak47",true,"capture");
+    history_result("history-overshot","ak47",true,"capture");
+    history_result("history-missing-measurement","ak47",true,"capture");
+    auto change_history = [&](const char* name,const char* key,const nlohmann::json& value) {
+        const auto path=std::filesystem::path("cache/recoil/workflow")/name/"result-index.json";
+        nlohmann::json result;
+        { std::ifstream file(path); file>>result; }
+        result[key]=value;
+        std::ofstream file(path); file<<result;
+    };
+    change_history("history-ineligible","training_eligible",false);
+    change_history("history-overshot","observed_ammo_delta",3);
+    change_history("history-missing-measurement","measurement_path","missing-measurement.json");
+    settle(); panel.reset(); debug={}; emitted.clear();
+    { std::ofstream file("cache/recoil/workflow-settings.json");
+      file << R"({"ak47":{"target_shots":3,"selected_file":"imported.json"}})"; }
+    panel=std::make_unique<RecoilPanel>(); settle();
+    click("载入以前的采集");
+    click("历史采集记录",false,"载入以前的采集");
+    require(screen_contains("2发 | 初始采集 | history-a") && screen_contains("2发 | 曲线测试 | history-b") &&
+        !screen_contains("history-failed") && !screen_contains("history-other") &&
+        !screen_contains("history-ineligible") && !screen_contains("history-overshot"),
+        "历史列表须按当前武器筛选、排除失败或不合格测量并区分同发数不同Run");
+    click("2发 | 初始采集 | history-missing-measurement",true);
+    click("载入所选记录",false,"载入以前的采集");
+    require(emitted.empty() && screen_contains("历史测量载入失败，当前阶段未改变") &&
+        screen_contains("测量报告读取失败") && screen_contains("阶段目标：3 / 30 发"),
+        "缺失历史测量必须保留明确读失败和原阶段，不得伪称载入成功或恢复发数");
+    click("历史采集记录",false,"载入以前的采集");
+    click("2发 | 初始采集 | history-a",true);
+    click("载入所选记录",false,"载入以前的采集");
+    require(emitted.empty() && screen_contains("本次发数恢复为2发") && screen_contains("候选已生成：先核对画面"),
+        "历史候选载入必须恢复匹配发数且不能自动确认或准备物理动作");
+    settle(); panel.reset(); panel=std::make_unique<RecoilPanel>(); settle();
+    // 面板重建不销毁ImGui上下文；树的展开状态仍由宿主保留。
+    if(!screen_contains("历史采集记录"))click("载入以前的采集");
+    click("历史采集记录",false,"载入以前的采集");
+    require(screen_contains("2发 | 初始采集 | history-a") && screen_contains("2发 | 曲线测试 | history-b"),
+        "重开面板必须从原持久结果恢复历史，无需复制路径");
+    click("2发 | 曲线测试 | history-b",true);
+    click("载入所选记录",false,"载入以前的采集");
+    require(emitted.empty() && screen_contains("画面已核对：加入优化数据") && screen_contains("训练 0/3，验证 0/2"),
+        "历史测试结果只载入预览，不得自动计入训练或发出设备动作");
+    click("武器"); click("M4A1-S",true);
+    click("历史采集记录",false,"载入以前的采集");
+    require(screen_contains("2发 | 初始采集 | history-other") && !screen_contains("history-a") &&
+        !screen_contains("history-b") && emitted.empty(),"切换武器后只列对应历史，不得沿用上个武器记录");
+    click("2发 | 初始采集 | history-other",true);
     std::ofstream report(output/"recoil-flow.txt"); report << "真实RecoilPanel无设备交互回归通过；自动动作仅PREPARE，等待下一次人工按键。\n";
 }
 }
@@ -539,6 +602,9 @@ int wmain(int argc, wchar_t** argv) {
         const auto output = std::filesystem::absolute(argv[1]);
         require(!std::filesystem::exists(output), "截图目录必须独立且尚不存在");
         require(std::filesystem::create_directories(output), "无法创建独立截图目录");
+        const auto preview_previous=std::filesystem::current_path();
+        struct RestorePreviewDirectory { std::filesystem::path path; ~RestorePreviewDirectory(){std::filesystem::current_path(path);} } restore_preview{preview_previous};
+        std::filesystem::current_path(output); // 历史浏览也只能读取本预览独立目录。
         LogConfig logs; logs.enable_file = false; logs.enable_debug_file = false; Log::init(logs);
         for (int i=2;i<argc;++i) if (std::wstring_view(argv[i])==L"--recoil-flow") {
             recoil_flow_preview(output); Log::shutdown(); std::cout << "PASS recoil-flow\n"; return 0;
@@ -718,6 +784,15 @@ int wmain(int argc, wchar_t** argv) {
             ImGui::SetScrollY(content,content->ScrollMax.y); frame(); frame();
             input.position={400,40}; frame();
             save_window(capture,output/"recoil-import.png");
+            input.focus_window=content;
+            input.focus_id=ImHashStr("载入以前的采集",0,import_tabs->SelectedTabId); frame();
+            input.position=ImGui::WindowRectRelToAbs(content,content->NavRectRel[ImGuiNavLayer_Main]).GetCenter();
+            require(content->ClipRect.Contains(input.position),"历史采集标题在最小窗口不可点击");
+            frame(); input.down=true; frame(); input.down=false; frame(); frame();
+            require(capture.text.find("历史采集记录")!=std::string::npos&&capture.text.find("载入所选记录")!=std::string::npos,
+                "历史入口展开后必须显示选择及载入控件");
+            ImGui::SetScrollY(content,content->ScrollMax.y); frame(); frame();
+            input.position={400,40}; frame();save_window(capture,output/"recoil-history.png");
             ImGui::SetScrollY(content, 0); frame(); frame();
             auto* recoil_tabs = ImGui::GetCurrentContext()->TabBars.GetByKey(content->GetID("debug_tabs"));
             require(recoil_tabs != nullptr,"弹道标签状态丢失");

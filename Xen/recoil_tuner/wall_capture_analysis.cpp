@@ -58,12 +58,19 @@ WallRegistration register_wall(const cv::Mat& before, const cv::Mat& after,
     cv::Scalar mean,deviation;cv::meanStdDev(a(roi),mean,deviation);
     result.texture_stddev=deviation[0];
     if(result.texture_stddev<5)return reject("insufficient_texture");
-    const double limit_x=search_limit.width>0?search_limit.width:roi.width*0.30;
-    const double limit_y=search_limit.height>0?search_limit.height:roi.height*0.30;
-    const int left=std::max(0,roi.x-static_cast<int>(std::ceil(limit_x)));
-    const int top=std::max(0,roi.y-static_cast<int>(std::ceil(limit_y)));
-    const int right=std::min(a.cols,roi.x+roi.width+static_cast<int>(std::ceil(limit_x)));
-    const int bottom=std::min(a.rows,roi.y+roi.height+static_cast<int>(std::ceil(limit_y)));
+    // 搜索域取完整模板和两侧中点采样真实支撑的交集；不是ROI尺寸的经验百分比。
+    // 每侧高斯核需1像素halo，中点各承担一半平移，故可用边距乘2。
+    const int support_x=2*std::min(roi.x-1,a.cols-roi.x-roi.width-1);
+    const int support_y=2*std::min(roi.y-1,a.rows-roi.y-roi.height-1);
+    if(support_x<0 || support_y<0)return reject("invalid_registration_geometry");
+    int min_x=std::max(-roi.x,-support_x),max_x=std::min(a.cols-roi.x-roi.width,support_x);
+    int min_y=std::max(-roi.y,-support_y),max_y=std::min(a.rows-roi.y-roi.height,support_y);
+    // 标定保留调用方的显式64像素界，已有有效v3映射不因默认搜索域变化失效。
+    if(search_limit.width>0){min_x=std::max(min_x,-search_limit.width);max_x=std::min(max_x,search_limit.width);}
+    if(search_limit.height>0){min_y=std::max(min_y,-search_limit.height);max_y=std::min(max_y,search_limit.height);}
+    const int left=roi.x+min_x,top=roi.y+min_y;
+    const int right=roi.x+roi.width+max_x,bottom=roi.y+roi.height+max_y;
+    result.search_region={left,top,right-left,bottom-top};result.explicit_search_limit=search_limit;
     cv::Mat scores;
     cv::matchTemplate(b(cv::Rect(left,top,right-left,bottom-top)),a(roi),scores,cv::TM_CCOEFF_NORMED);
     cv::Point peak;double best_score=0;cv::minMaxLoc(scores,nullptr,&best_score,nullptr,&peak);
@@ -81,6 +88,7 @@ WallRegistration register_wall(const cv::Mat& before, const cv::Mat& after,
     cv::createHanningWindow(window,roi.size(),CV_64F);
     const auto evaluate=[&](cv::Point location){
         WallRegistration candidate;candidate.texture_stddev=result.texture_stddev;
+        candidate.search_region=result.search_region;candidate.explicit_search_limit=search_limit;
         cv::Mat bf;b(cv::Rect(left+location.x,top+location.y,roi.width,roi.height)).convertTo(bf,CV_64F);
         // OpenCV加窗可能原地修改浮点输入；每个候选独立持有参考副本。
         auto reference=af.clone();
@@ -89,7 +97,7 @@ WallRegistration register_wall(const cv::Mat& before, const cv::Mat& after,
         if(!finite(candidate.shift.x)||!finite(candidate.shift.y)||!finite(candidate.response))
             candidate.failure="nonfinite_registration";
         else if(candidate.response<0.5)candidate.failure="unreliable_registration";
-        else if(std::abs(candidate.shift.x)>limit_x || std::abs(candidate.shift.y)>limit_y)
+        else if(candidate.shift.x<min_x || candidate.shift.x>max_x || candidate.shift.y<min_y || candidate.shift.y>max_y)
             candidate.failure="registration_range_exceeded";
         if(!candidate.failure.empty())return candidate;
         const cv::Point2f center(roi.x+(roi.width-1)*0.5f,roi.y+(roi.height-1)*0.5f);
@@ -99,7 +107,7 @@ WallRegistration register_wall(const cv::Mat& before, const cv::Mat& after,
         };
         const auto residual_at=[&](cv::Point2d shift,bool raw=false){
             const cv::Point2f half(static_cast<float>(shift.x*0.5),static_cast<float>(shift.y*0.5));
-            if(std::abs(shift.x)>limit_x || std::abs(shift.y)>limit_y ||
+            if(shift.x<min_x || shift.x>max_x || shift.y<min_y || shift.y>max_y ||
                 !inside(center-half)||!inside(center+half) ||
                 roi.x+shift.x<0 || roi.y+shift.y<0 ||
                 roi.x+roi.width+shift.x>a.cols || roi.y+roi.height+shift.y>a.rows)

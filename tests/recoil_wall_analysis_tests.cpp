@@ -33,7 +33,9 @@ int main(int argc,char** argv){
    const auto after=cv::imread((path.parent_path()/file).string());
    const auto r=detail::register_wall(before,after,{40,40,80,80});
    rows.push_back({{"file",file},{"failure",r.failure},{"shift",{r.shift.x,r.shift.y}},
-    {"response",r.response},{"residual",r.residual},{"raw_residual",r.raw_residual},{"method",detail::kWallRegistration},{"peak_separation",r.peak_separation}});
+    {"response",r.response},{"residual",r.residual},{"raw_residual",r.raw_residual},{"method",detail::kWallRegistration},
+    {"search_policy",detail::kWallSearchPolicy},{"search_region",{r.search_region.x,r.search_region.y,r.search_region.width,r.search_region.height}},
+    {"peak_separation",r.peak_separation}});
   };
   for(std::size_t i=1;i<report.at("frames").size();++i)inspect(report.at("frames").at(i).at("file"));
   if(report.contains("registration_failure")&&report.at("registration_failure").contains("image_file"))
@@ -95,13 +97,29 @@ int main(int argc,char** argv){
  cv::Mat wide_shift;const cv::Mat wide_transform=(cv::Mat_<double>(2,3)<<1,0,70,0,1,0);
  cv::warpAffine(wide,wide_shift,wide_transform,wide.size(),cv::INTER_LINEAR,cv::BORDER_REFLECT_101);
  auto large=analyze_wall_capture({{0,wide},{40,wide_shift}},wide_request);
- expect(large.valid&&large.candidate,"大于64像素但仍在背景ROI30%内可配准");
+ expect(large.valid&&large.candidate,"大于64像素且有真实图像支撑时可配准");
  if(large.candidate)expect(std::abs(large.candidate->points.back().x_counts+35)<0.2,"大范围camera补偿尺度正确");
  const cv::Mat boundary_transform=(cv::Mat_<double>(2,3)<<1,0,130,0,1,0);
  cv::warpAffine(wide,wide_shift,boundary_transform,wide.size(),cv::INTER_LINEAR,cv::BORDER_REFLECT_101);
- expect(!analyze_wall_capture({{0,wide},{40,wide_shift}},wide_request).valid,"超过ROI30%边缘拒绝外推");
+ expect(analyze_wall_capture({{0,wide},{40,wide_shift}},wide_request).valid,"真实支撑内130像素平移不得被ROI30%经验界误拒绝");
+ const cv::Mat unsupported_transform=(cv::Mat_<double>(2,3)<<1,0,330,0,1,0);
+ cv::warpAffine(wide,wide_shift,unsupported_transform,wide.size(),cv::INTER_LINEAR,cv::BORDER_REFLECT_101);
+ expect(!analyze_wall_capture({{0,wide},{40,wide_shift}},wide_request).valid,"超出中点真实支撑的平移仍须拒绝，不能补造图像");
  // 真实失败帧必须通过生产分析接口复现，不用无射击标定帧代替。
  const auto fixtures=std::filesystem::path(__FILE__).parent_path()/"fixtures/recoil_registration";
+ cv::Mat supported_base(320,320,CV_8UC1);cv::RNG support_random(817);
+ support_random.fill(supported_base,cv::RNG::UNIFORM,20,230);cv::GaussianBlur(supported_base,supported_base,{5,5},1.0);
+ for(const auto shift:std::vector<cv::Point2d>{{-39,0},{77,0},{0,-39},{0,77},{30,-30},{-30,30}}){
+  cv::Mat shifted;const cv::Mat warp=(cv::Mat_<double>(2,3)<<1,0,shift.x,0,1,shift.y);
+  cv::warpAffine(supported_base,shifted,warp,supported_base.size(),cv::INTER_LINEAR,cv::BORDER_CONSTANT);
+  const auto registration=detail::register_wall(supported_base,shifted,{40,40,80,80});
+  expect(registration.failure.empty()&&cv::norm(registration.shift-shift)<0.3,"真实搜索支撑内正负两轴及边缘平移必须恢复同一对应");
+ }
+ for(const auto shift:std::vector<cv::Point2d>{{-41,0},{79,0},{0,-41},{0,79}}){
+  cv::Mat shifted;const cv::Mat warp=(cv::Mat_<double>(2,3)<<1,0,shift.x,0,1,shift.y);
+  cv::warpAffine(supported_base,shifted,warp,supported_base.size(),cv::INTER_LINEAR,cv::BORDER_CONSTANT);
+  expect(!detail::register_wall(supported_base,shifted,{40,40,80,80}).failure.empty(),"真实模板或中点halo支撑外不得接收外推");
+ }
  const auto shot_reference=cv::imread((fixtures/"reference.png").string());
  auto shot_request=camera_request;shot_request.image.registration_roi={40,40,80,80};
  shot_request.image.reference={160,160};
@@ -122,6 +140,18 @@ int main(int argc,char** argv){
  const auto stage_shot=cv::imread((fixtures/"shot-stage.png").string());
  expect(analyze_wall_capture({{0,stage_reference},{120,stage_shot}},shot_request).valid,
   "分段实采失败帧必须在原残差门槛内完成亚像素求精");
+ for(int i=0;i<3;++i){
+  const auto range_reference=cv::imread((fixtures/("reference-range-"+std::to_string(i)+".png")).string());
+  const auto range_shot=cv::imread((fixtures/("shot-range-"+std::to_string(i)+".png")).string());
+  const auto range_result=analyze_wall_capture({{0,range_reference},{120,range_shot}},shot_request);
+  expect(range_result.valid,"三发/五发真实图像中仍有完整背景对应，不应因固定24像素搜索域中断");
+  if(range_result.valid)expect(range_result.observations.back().center.y>185&&range_result.observations.back().center.y<189,
+   "扩大到真实支撑后仍须匹配同一文字，不能换到重复峰");
+  const auto bounded=detail::register_wall(range_reference,range_shot,{40,40,80,80});
+  expect(bounded.search_region==cv::Rect(0,0,198,198),"默认搜索必须来自完整模板与中点halo真实支撑交集");
+  const auto calibration_search=detail::register_wall(range_reference,range_shot,{40,40,80,80},{64,64});
+  expect(calibration_search.search_region==cv::Rect(0,0,184,184),"标定显式64像素搜索域及已有v3映射须保持兼容");
+ }
  const auto text_reference=cv::imread((fixtures/"reference-text.png").string());
  const auto text_shot=cv::imread((fixtures/"shot-text.png").string());
  const auto text_result=analyze_wall_capture({{0,text_reference},{120,text_shot}},shot_request);

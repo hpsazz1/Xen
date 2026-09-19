@@ -131,6 +131,9 @@ int main() {
     check(result.completed && !result.cleanup_unknown, "正常ACK的DOWN清理债务不得当作失败");
     check(device->downs == 1 && device->ups == 1 && !device->down, "完成必须单次DOWN和UP");
     check(!result.frames.empty() && std::filesystem::is_regular_file(request.output_directory / "run.json"), "图像与报告必须落盘");
+    check(result.report.value("search_policy",std::string{})=="real_template_midpoint_support_v1" &&
+        result.report.at("search_region").is_array() && result.report.at("explicit_search_limit")==nlohmann::json({0,0}),
+        "成功测量也必须保留搜索策略与真实范围，不能只按算法族冒充新策略证据");
 
     const auto fixtures=std::filesystem::path(__FILE__).parent_path()/"fixtures/recoil_registration";
     for(const auto* name:{"shot-a.png","shot-b.png","shot-before-a.png"}){
@@ -143,6 +146,17 @@ int main() {
         const auto replay=recoil_tuner::run_wall_capture(request,device,canceled);
         check(replay.completed&&device->downs==1&&device->ups==1&&!device->down,
             "真实开枪失败图回放必须完成有界采集并释放假设备");
+    }
+    for(int i=0;i<3;++i){
+        device=std::make_shared<FakeDevice>();request.output_directory=root/("range-"+std::to_string(i));
+        const auto before=cv::imread((fixtures/("reference-range-"+std::to_string(i)+".png")).string());
+        const auto after=cv::imread((fixtures/("shot-range-"+std::to_string(i)+".png")).string());
+        request.capture_factory=[device,before,after](const CaptureConfig&){
+            return std::make_unique<RecordedCapture>(before,after,[device]{return device->ever_down.load();});
+        };
+        const auto replay=recoil_tuner::run_wall_capture(request,device,canceled);
+        check(replay.completed&&device->downs==1&&device->ups==1&&!device->down,
+            "三发及五发真实范围失败图在线回放必须通过真实支撑搜索并完成假设备释放");
     }
     request.capture_factory=[](const CaptureConfig&){return std::make_unique<FakeCapture>();};
 

@@ -6,8 +6,11 @@
 
 namespace recoil_tuner::detail {
 inline constexpr const char* kWallRegistration = "bounded_patch_midpoint_filtered_v3";
+inline constexpr const char* kWallSearchPolicy = "real_template_midpoint_support_v1";
 struct WallRegistration {
     cv::Point2d shift;
+    cv::Rect search_region;
+    cv::Size explicit_search_limit;
     double response = 0, texture_stddev = 0, residual = 0;
     double raw_residual = std::numeric_limits<double>::quiet_NaN();
     double template_score = 0, peak_separation = 0;
