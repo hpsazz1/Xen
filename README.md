@@ -14,6 +14,11 @@ Capture → Detector → Aim → Runtime SafetyGate → Mouse
 
 ## 能力概览
 
+弹道采集按 GSI 弹药减少量停止，并在松键后核对本次发数；少发、多发、计数缺失或回退均不能用于训练，失败不会自动补枪。
+源端 Xen GSI 配置可用 `scripts/set_xen_gsi_realtime.ps1 -CfgPath <gamestate_integration_xen.cfg完整路径>`
+取消主动缓冲和节流（buffer/throttle 均为 0.0）；脚本保留其他配置和原文件备份，支持 `-WhatIf`。
+修改后重启游戏再由用户前台采集，以排除旧配置缓存。GSI 仍有传输和调度延迟，接收计数不代表精确逐发时刻。
+
 | 层 | 当前能力 |
 |---|---|
 | Capture | DXGI Desktop Duplication、UDP MJPEG、XUDP JPEG、NDI |

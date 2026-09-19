@@ -216,7 +216,49 @@ int main() {
     request.output_directory = root / "overshoot";
     request.target_shots = 5; request.observed_ammo_delta = [] { return std::optional<int>{6}; };
     result = recoil_tuner::run_wall_capture(request, device, canceled);
-    check(result.completed && result.report.value("overshoot", 0) == 1 && !result.report.value("training_eligible", true), "超阶段弹数必须排除训练");
+    check(!result.completed && result.report.value("overshoot", 0) == 1 && !result.report.value("training_eligible", true), "超阶段弹数必须报告失败并排除训练");
+
+    // 真实Run出现3→4及3→0；不能只用曾到目标加最终overshoot==0判合格。
+    for (const int final_count : {0, 2, 3, 4}) {
+        device = std::make_shared<FakeDevice>();
+        request.output_directory = root / ("three-shot-final-" + std::to_string(final_count));
+        request.target_shots = 3;
+        request.observed_ammo_delta = [device, final_count] { return std::optional<int>{device->down ? 3 : final_count}; };
+        result = recoil_tuner::run_wall_capture(request, device, canceled);
+        check(result.completed == (final_count == 3) && result.report.value("training_eligible", false) == (final_count == 3),
+            "目标3发必须以停后GSI恰好3为准，0/2/4均失败且不可训练");
+        check(device->downs == 1 && device->ups == 1, "计数失配不得自动补发或重新开火");
+    }
+    device = std::make_shared<FakeDevice>();
+    request.output_directory = root / "three-shot-regressed-then-restored";
+    int settled_reads = 0;
+    request.observed_ammo_delta = [device, &settled_reads] { return std::optional<int>{device->down || ++settled_reads > 1 ? 3 : 0}; };
+    result = recoil_tuner::run_wall_capture(request, device, canceled);
+    check(!result.completed && !result.report.value("training_eligible", true), "停后GSI计数回退再恢复仍须拒绝，不能掩盖换弹或状态乱序");
+
+    device = std::make_shared<FakeDevice>();
+    request.output_directory = root / "three-shot-delayed-until-after-up";
+    request.observed_ammo_delta = [device] { return std::optional<int>{device->down ? 2 : 3}; };
+    result = recoil_tuner::run_wall_capture(request, device, canceled);
+    check(result.completed && result.report.value("gsi_count_matched",false) && result.report.value("training_eligible",false),
+        "最长时长先UP、停后GSI才确认3发时可按最终计数核对，不能要求按住时已到目标");
+    check(result.report.value("stop_reason",std::string{}) == "duration_limit", "记录最长时长停枪而非伪称按GSI目标停枪");
+
+    device = std::make_shared<FakeDevice>();
+    request.output_directory = root / "three-shot-gsi-unavailable";
+    request.observed_ammo_delta = [device]() -> std::optional<int> { return device->down ? std::optional<int>{3} : std::nullopt; };
+    result = recoil_tuner::run_wall_capture(request, device, canceled);
+    check(!result.completed && !result.report.value("training_eligible",true), "停后GSI缺失不能沿用按住时计数宣称合格");
+
+    device = std::make_shared<FakeDevice>();
+    request.output_directory = root / "slow-start-budget";
+    request.on_firing_started = [](auto, const auto&) { std::this_thread::sleep_for(std::chrono::milliseconds(120)); return true; };
+    int down_count_reads = 0;
+    request.observed_ammo_delta = [device, &down_count_reads] { if(device->down)++down_count_reads; return std::optional<int>{3}; };
+    result = recoil_tuner::run_wall_capture(request, device, canceled);
+    check(result.completed && down_count_reads == 0 && device->downs == 1 && device->ups == 1,
+        "DOWN启动回调已耗尽100ms最长时长时必须直接UP，不能重新计时");
+    request.on_firing_started = {};
 
     device = std::make_shared<FakeDevice>();
     request.output_directory = root / "geometry-mismatch";

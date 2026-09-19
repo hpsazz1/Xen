@@ -2017,6 +2017,10 @@ if(BUILD_TESTING)
         -PathSafetyScript "${PROJECT_SOURCE_DIR}/scripts/invoke_path_safety.ps1"
         -RepositoryRoot "${PROJECT_SOURCE_DIR}")
 
+    add_test(NAME gsi_realtime_config_tests
+        COMMAND "${XEN_POWERSHELL7_EXECUTABLE}" -NoProfile -ExecutionPolicy Bypass
+            -File "${PROJECT_SOURCE_DIR}/tests/gsi_realtime_config_tests.ps1")
+
     add_test(NAME test_root_owner_cli_tests
         COMMAND "${CMAKE_COMMAND}" -E env --unset=PSModulePath --
             "${XEN_POWERSHELL7_EXECUTABLE}"

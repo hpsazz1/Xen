@@ -328,26 +328,64 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
             // 已确认DOWN仍有待UP的清理债务，这是正常状态，不能误判失败。
             if (receipt.disposition != ButtonDisposition::ACKNOWLEDGED) throw std::runtime_error("射击命令未收到明确ACK");
             if (request.on_firing_started && !request.on_firing_started(started, receipt)) throw std::runtime_error("候选执行未接受射击信号");
-            const auto until = Clock::now() + std::chrono::milliseconds(request.duration_ms);
+            // 最长按住预算从DOWN提交开始，慢ACK或准备回调不得延长真实按住窗口。
+            const auto until = started + std::chrono::milliseconds(request.duration_ms);
             std::optional<int> observed;
-            bool target_reached = false;
+            int peak_observed = 0;
+            bool target_reached = false, count_regressed = false, count_unavailable = false;
+            std::string stop_reason = "duration_limit";
+            result.report["ammo_observations"] = Json::array();
+            auto observe_ammo = [&] {
+                if (!request.observed_ammo_delta) return;
+                const auto next = request.observed_ammo_delta();
+                if (result.report["ammo_observations"].empty() || next != observed)
+                    result.report["ammo_observations"].push_back({{"time_ms", milliseconds(Clock::now(), started)},
+                        {"ammo_delta", next ? Json(*next) : Json(nullptr)}, {"after_release", !left_may_be_down}});
+                observed = next;
+                if (!observed || *observed < 0) count_unavailable = true;
+                else {
+                    if (*observed < peak_observed) count_regressed = true;
+                    peak_observed = std::max(peak_observed, *observed);
+                }
+                result.report["observed_ammo_delta"] = observed ? Json(*observed) : Json(nullptr);
+                result.report["peak_observed_ammo_delta"] = peak_observed;
+                result.report["ammo_count_regressed"] = count_regressed;
+            };
             while (Clock::now() < until) {
                 input_valid(true);
-                if (request.observed_ammo_delta) observed = request.observed_ammo_delta();
-                if (request.target_shots > 0 && observed && *observed >= request.target_shots) { target_reached = true; break; }
+                observe_ammo();
+                if (request.target_shots > 0) {
+                    if (count_regressed || count_unavailable) { stop_reason = "gsi_count_invalid"; break; }
+                    if (observed && *observed >= request.target_shots) { target_reached = true; stop_reason = "gsi_target_reached"; break; }
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }
+            result.report["stop_reason"] = stop_reason;
             release();
             if (result.cleanup_unknown) throw std::runtime_error("左键清理结果未知");
-            wait_checked(std::chrono::milliseconds(300));
-            if (request.observed_ammo_delta) observed = request.observed_ammo_delta();
+            // UP后的有界核对也持续采样，不能漏掉换弹/乱序回退后又恢复的计数。
+            const auto settle_until = Clock::now() + std::chrono::milliseconds(300);
+            do {
+                observe_ammo();
+                input_valid(true);
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            } while (Clock::now() < settle_until);
+            observe_ammo();
             const int overshoot = observed && request.target_shots > 0 ? std::max(0, *observed - request.target_shots) : 0;
             result.report["requested_shots"] = request.target_shots;
             result.report["observed_ammo_delta"] = observed ? Json(*observed) : Json(nullptr);
             result.report["overshoot"] = overshoot;
             result.report["target_reached"] = target_reached;
             result.report["exact_shot_count_verified"] = false;
-            result.report["training_eligible"] = measurement_required && (request.target_shots == 0 || (target_reached && overshoot == 0));
+            const bool count_matched = observed && *observed == request.target_shots && !count_regressed && !count_unavailable;
+            result.report["gsi_count_matched"] = request.target_shots > 0 && count_matched;
+            result.report["training_eligible"] = measurement_required && (request.target_shots == 0 || count_matched);
+            if (request.target_shots > 0 && !count_matched) {
+                if (count_regressed) throw std::runtime_error("GSI弹药计数发生回退，可能换弹或状态乱序；本组无效，请稳定后重新采集");
+                if (count_unavailable || !observed) throw std::runtime_error("GSI弹药计数不可用，本组无效，请重新采集");
+                throw std::runtime_error("发数不符：目标" + std::to_string(request.target_shots) + "发，GSI核对" +
+                    std::to_string(*observed) + "发；本组不用于训练，请重新采集");
+            }
         }
         release(); stop_capture();
         if (!buffer.error.empty()) throw std::runtime_error(buffer.error);
