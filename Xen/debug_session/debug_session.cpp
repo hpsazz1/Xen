@@ -413,6 +413,9 @@ bool Session::repeat(const Context& context) noexcept {
         const auto source = impl_->repeat_plan.load();
         if (!source || source->repeat_revision != impl_->repeat_revision.load() || !physical_mode(source->request.mode)) {
             const auto current=snapshot();
+            // 无许可重按不能覆盖上组失败；保留原始原因供用户决定如何重新准备。
+            if(current->state==State::FAILED || current->state==State::CLEANUP_UNKNOWN ||
+                current->state==State::CANCELED) return false;
             if(current->state==State::COMPLETED && current->result &&
                 current->result->value("mode",std::string{})=="capture" &&
                 !current->result->value("candidate_path",std::string{}).empty())

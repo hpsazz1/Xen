@@ -573,6 +573,11 @@ void test_recoil_freeze_and_admission(const std::filesystem::path& root) {
     request.recoil_calibration_path=utf8(root/"missing.json");
     require(session.dispatch(Action::PREPARE,request,context),"缺标定请求接收");wait_idle(session);
     require(session.snapshot()->state==State::FAILED,"无画面标定不能准备counts采集");
+    const auto failed_message=session.snapshot()->message;
+    require(!session.repeat(context),"失败后按键不得执行无效模板");
+    require(session.snapshot()->message.find(failed_message)!=std::string::npos &&
+        session.snapshot()->message.find("没有有效测试模板")==std::string::npos,
+        "失败后再次按键必须保留具体失败原因，不能用无模板覆盖");
     // 冻结首组许可在启动时消费，不依赖后续UI渲染或执行成功才撤销。
     for(const auto mode:{Mode::RECOIL_CALIBRATE,Mode::RECOIL_CAPTURE}){
         Session one_shot;request.mode=mode;request.recoil_calibration_path=utf8(calibration_path);
