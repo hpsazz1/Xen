@@ -338,6 +338,13 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     emitted.clear(); click("导入已有曲线 JSON");
     std::ifstream screen(output/"flow-last-frame.txt"); const std::string screen_text{std::istreambuf_iterator<char>(screen),{}};
     require(screen_text.find("选择曲线文件")!=std::string::npos,"导入已有曲线必须提供可操作的文件选择入口，不能只有手输路径");
+    require(screen_text.find("已有曲线文件")==std::string::npos &&
+        screen_text.find("导入并准备验证")==std::string::npos,
+        "已有曲线必须只使用测试曲线的选中对象，不能再要求填写或导入同一文件");
+    click("验证已有弹道");
+    require(emitted.size()==1 && std::filesystem::path(emitted.back().debug_request.recoil_profile_path).filename()=="second.json",
+        "展开外部导入后直接验证必须仍使用测试曲线已选中的文件");
+    emitted.clear();
     auto native_selection = [&](const std::filesystem::path& path, bool cancel, bool panel_cancel = false) {
         std::atomic<bool> seen{false}, chosen{false}, fallback_cancel{false};
         std::jthread response([&](std::stop_token stop) {

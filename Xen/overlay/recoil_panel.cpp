@@ -253,7 +253,7 @@ struct RecoilPanel::Impl {
     bool workflow_settings_loaded = false, workflow_settings_dirty = false;
     bool workflow_record_measurement = false;
     std::optional<debug_session::Mode> workflow_after_calibration, workflow_prepare_next;
-    std::string workflow_profile_import, workflow_profiles_directory;
+    std::string workflow_profiles_directory;
     void remember_workflow_weapon() {
         workflow_weapon_settings[workflow_weapon] = {{"target_shots",workflow_target_shots},{"step_shots",workflow_step_shots},
             {"group_shots",workflow_group_shots},{"duration_ms",workflow_duration_ms},
@@ -521,7 +521,7 @@ struct RecoilPanel::Impl {
             }
             ImGui::EndCombo();
         }
-        help("测试使用已保存文件；新武器无需先加载曲线即可采集。");
+        help("已有曲线统一从此列表选择，验证直接使用所选文件，无需再次导入；新武器可直接采集。");
         if (ImGui::TreeNode("导入已有曲线 JSON")) {
             if(ImGui::Button("选择曲线文件")) {
                 workflow_after_calibration.reset(); workflow_prepare_next.reset();
@@ -530,21 +530,10 @@ struct RecoilPanel::Impl {
                 launch([settings,owner](Impl& s) {
                     const auto path=choose_recoil_profile(owner,s.job_cancellation);
                     if(path.empty() || s.job_cancellation->load()){s.status="已取消文件选择，当前曲线保持不变。";return;}
-                    s.workflow_profile_import=path;
-                    s.import_workflow_profile(settings);
+                    s.import_workflow_profile(settings,path);
                 });
             }
-            help("打开Windows文件选择窗口，选择JSON后直接导入并准备验证；取消不会更改当前曲线。");
-            ImGui::InputText("已有曲线文件", &workflow_profile_import);
-            ImGui::BeginDisabled(workflow_profile_import.empty());
-            if (ImGui::Button("导入并准备验证")) {
-                actions.debug_plan_edited = true;
-                workflow_after_calibration.reset(); workflow_prepare_next.reset();
-                const auto settings = config.recoil;
-                launch([settings](Impl& s) {s.import_workflow_profile(settings);});
-            }
-            ImGui::EndDisabled();
-            help("导入结构有效的曲线另存为候选，保留原文件，不要求先采集或标定，不自动激活或射击。");
+            help("仅在导入外部JSON时使用；选定后加入上方测试曲线列表并选中、准备验证，取消保留当前选择，不自动激活或射击。");
             ImGui::TreePop();
         }
         if (loaded && base.weapon_id == workflow_weapon && ImGui::TreeNode("曲线强度")) {
@@ -817,10 +806,10 @@ struct RecoilPanel::Impl {
         if (undo.size() >= 20) undo.erase(undo.begin());
         undo.push_back(checkpoint); redo.clear(); checkpoint = {draft, tuning}; calibration_confirmed = false; compile();
     }
-    void import_workflow_profile(const RecoilConfig& settings) {
+    void import_workflow_profile(const RecoilConfig& settings, const std::string& path) {
         if(job_cancellation && job_cancellation->load())return;
         RecoilProfile candidate;
-        if(!load_recoil_profile(read_workflow_file(workflow_profile_import),candidate,status))return;
+        if(!load_recoil_profile(read_workflow_file(path),candidate,status))return;
         RecoilStore store(std::filesystem::u8path(settings.profile_directory));
         std::string file;
         // 用户常直接选择曲线目录内的现有文件；相同内容直接选中，避免重复另存同一曲线。
