@@ -55,7 +55,12 @@ public:
         snapshot = {}; snapshot.status = InputMonitorStatus::READY; snapshot.state_valid = true;
         return true;
     }
-    bool output_owner_exclusive() const noexcept override { return true; }
+    std::atomic_bool hold_background_owner{false};
+    const std::thread::id owner_thread=std::this_thread::get_id();
+    bool output_owner_exclusive() const noexcept override {
+        while(hold_background_owner.load()&&std::this_thread::get_id()!=owner_thread)std::this_thread::yield();
+        return true;
+    }
     MouseStatus status() const noexcept override { return MouseStatus::READY; }
     std::string last_error() const override { return {}; }
     bool set_input_report_subscription(bool value) noexcept override {
@@ -568,6 +573,18 @@ void test_recoil_freeze_and_admission(const std::filesystem::path& root) {
     request.recoil_calibration_path=utf8(root/"missing.json");
     require(session.dispatch(Action::PREPARE,request,context),"缺标定请求接收");wait_idle(session);
     require(session.snapshot()->state==State::FAILED,"无画面标定不能准备counts采集");
+    // 冻结首组许可在启动时消费，不依赖后续UI渲染或执行成功才撤销。
+    for(const auto mode:{Mode::RECOIL_CALIBRATE,Mode::RECOIL_CAPTURE}){
+        Session one_shot;request.mode=mode;request.recoil_calibration_path=utf8(calibration_path);
+        context.config.source_context.host.clear();context.config.source_context.port=0;
+        require(one_shot.dispatch(Action::PREPARE,request,context),"单次采集准备接收");wait_idle(one_shot);
+        require(one_shot.snapshot()->repeat_ready,"单次采集也须先提供一次前台许可");
+        device->hold_background_owner=true;
+        require(one_shot.repeat(context),"首次标定或采集按键应被接收");
+        const bool consumed=!one_shot.snapshot()->repeat_ready;
+        one_shot.cancel();device->hold_background_owner=false;wait_idle(one_shot);
+        require(consumed,"初始标定和采集模板必须在首次启动时消费，不能重复采集同一前段");
+    }
     require(device->outputs==0&&device->closes==0,"拒绝和取消不得操作借用设备");
 }
 void test_recoil_existing_curve_without_measurement(const std::filesystem::path& root) {

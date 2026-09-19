@@ -118,6 +118,10 @@ int main(int argc,char** argv){
  const auto preceding_reference=cv::imread((fixtures/"reference-a.png").string());
  expect(analyze_wall_capture({{0,preceding_reference},{100,preceding}},shot_request).valid,
   "真实失败前段图也须通过，不能只修最后一帧的相关响应");
+ const auto stage_reference=cv::imread((fixtures/"reference-stage.png").string());
+ const auto stage_shot=cv::imread((fixtures/"shot-stage.png").string());
+ expect(analyze_wall_capture({{0,stage_reference},{120,stage_shot}},shot_request).valid,
+  "分段实采失败帧必须在原残差门槛内完成亚像素求精");
  // 对错误对应保持拒绝：高频多解、无关图像、局部遮挡和真实边界。
  cv::Mat periodic(320,320,CV_8UC1);
  for(int y=0;y<periodic.rows;++y)for(int x=0;x<periodic.cols;++x)

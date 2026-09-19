@@ -11,6 +11,7 @@
 #include "overlay/overlay.h"
 #include "overlay/recoil_panel.h"
 #include "recoil/recoil.h"
+#include "recoil_tuner/wall_capture_analysis.h"
 #include "log/log.h"
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -450,6 +451,76 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     const std::string imported_text{std::istreambuf_iterator<char>(imported_file),{}};std::string imported_error;
     require(load_recoil_profile(imported_text,imported_result,imported_error)&&imported_result.id=="external-ui",
         "导入结果必须是所选外部曲线的真实内容");
+    // 使用生产结果导入与真实控件，确认初始候选、五组优化和阶段推进在主流程可达。
+    settle(); panel.reset(); debug={}; emitted.clear();
+    { std::ofstream file("cache/recoil/workflow-settings.json");
+      file << R"({"ak47":{"target_shots":2,"step_shots":2,"group_shots":6,"calibration_path":"","selected_file":"imported.json"}})"; }
+    auto stage_candidate=imported; stage_candidate.id="ui-stage";
+    stage_candidate.state=RecoilProfileState::SCHEMA_VALID;
+    { std::ofstream file("stage-candidate.json"); file<<serialize_recoil_profile(stage_candidate); }
+    recoil_tuner::WallCaptureReport measurement;
+    measurement.valid=true; measurement.message="无设备阶段测量";
+    measurement.environment_fingerprint="ui-stage-environment"; measurement.candidate=stage_candidate;
+    std::string measurement_error;
+    require(recoil_tuner::save_wall_report("stage-measurement.json",measurement,measurement_error),
+        "阶段UI合成测量保存失败");
+    panel=std::make_unique<RecoilPanel>(); settle();
+    auto screen_contains = [&](const char* text) {
+        std::ifstream file(output/"flow-last-frame.txt");
+        const std::string content{std::istreambuf_iterator<char>(file),{}};
+        return content.find(text)!=std::string::npos;
+    };
+    auto stage_result = [&](int index, bool initial) {
+        debug.generation=100+index*2; debug.state=debug_session::State::COMPLETED;
+        debug.result=std::make_shared<const nlohmann::json>(nlohmann::json{
+            {"weapon_id","ak47"},{"success",true},{"completed",true},{"cleanup_known",true},
+            {"training_eligible",true},{"requested_shots",2},{"observed_ammo_delta",2},
+            {"capture_path","ui-stage-"+std::to_string(index)}, {"measurement_path","stage-measurement.json"},
+            {"candidate_path",initial?"stage-candidate.json":""},
+            {"base_profile_path",initial?"":"stage-candidate.json"}});
+        settle(); settle();
+    };
+    stage_result(0,true);
+    require(emitted.empty() && screen_contains("候选已生成：先核对画面") &&
+        screen_contains("画面已核对：保存候选并准备测试") && screen_contains("训练 0/3，验证 0/2"),
+        "初始候选必须明确提示人工保存，不能自动重复采集或计入五组优化");
+    click("画面已核对：保存候选并准备测试");
+    require(emitted.size()==1 && emitted.back().debug_request.mode==debug_session::Mode::RECOIL_CALIBRATE,
+        "恢复旧成功候选但标定已失效时，记录优化数据不得静默降为无测量测试");
+    debug.generation=101;debug.result=std::make_shared<const nlohmann::json>(nlohmann::json{
+        {"weapon_id","ak47"},{"success",true},{"completed",true},{"cleanup_known",true},
+        {"calibration_path","ui-calibration.json"}});
+    settle();settle();
+    require(emitted.size()==2 && emitted.back().debug_request.mode==debug_session::Mode::RECOIL_TEST,
+        "恢复候选完成标定后必须仅准备该候选测试，不得退回重新采集");
+    require(screen_contains("实测满意可直接追加") && screen_contains("若需要优化"),
+        "五组数据只能是优化要求，不能伪装为生成候选或追加阶段的前置条件");
+    emitted.clear();
+    for(int index=1;index<=5;++index) {
+        stage_result(index,false);
+        click("画面已核对：加入优化数据");
+        require(emitted.empty(),"人工加入测量不得自动启动下一组或推进阶段");
+    }
+    require(screen_contains("训练 3/3，验证 2/2") && screen_contains("下一步：5组已齐") &&
+        screen_contains("优化本阶段并载入候选") && screen_contains("阶段目标：2 / 6 发；复测通过后追加至 4 发"),
+        "五组完成后优化和追加目标必须直接呈现，不得隐藏在折叠菜单");
+    std::filesystem::copy_file(output/"flow-last-frame.txt",output/"stage-progress.txt",
+        std::filesystem::copy_options::overwrite_existing);
+    click("清空本轮待用数据");
+    click("已复测本阶段：锁定前段并追加");
+    require(emitted.size()==1 && emitted.back().debug_request.mode==debug_session::Mode::RECOIL_TEST &&
+        emitted.back().debug_request.recoil_target_shots==4 &&
+        emitted.back().debug_request.recoil_locked_prefix_ms==100 &&
+        emitted.back().debug_request.recoil_calibration_path=="ui-calibration.json",
+        "人工确认阶段后必须锁定前段、追加目标并仅准备一次测试，无需额外再点验证");
+    emitted.clear(); click("已复测本阶段：锁定前段并追加");
+    require(emitted.size()==1 && emitted.back().debug_request.recoil_target_shots==6 &&
+        screen_contains("已到整组发数"),"追加到整组后必须明确结束阶段扩展");
+    emitted.clear();
+    // 指针仍停在刚才的追加按钮；到达整组后的再次点击必须被真实禁用控件拒绝。
+    io.AddMouseButtonEvent(0,true); frame(); io.AddMouseButtonEvent(0,false); frame(); settle();
+    require(emitted.empty() && screen_contains("阶段目标：6 / 6 发"),
+        "整组阶段追加按钮必须禁用，不能再次准备或越过发数上限");
     std::ofstream report(output/"recoil-flow.txt"); report << "真实RecoilPanel无设备交互回归通过；自动动作仅PREPARE，等待下一次人工按键。\n";
 }
 }

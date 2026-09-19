@@ -110,7 +110,7 @@ WallRegistration register_wall(const cv::Mat& before, const cv::Mat& after,
             candidate.failure="invalid_registration_geometry";return candidate;
         }
         // 相位质心是初值；在每轴不到半像素邻域内最小化同一残差，不放宽8的验收阈值。
-        for(double step:{0.25,0.125,0.0625}){
+        for(double step:{0.25,0.125,0.0625,0.03125,0.015625}){
             const auto origin=candidate.shift;
             for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x){
                 const cv::Point2d refined=origin+cv::Point2d(x*step,y*step);

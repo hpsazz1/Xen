@@ -102,6 +102,7 @@ DebugRunMode run_mode(Mode mode) {
     }
 }
 bool recoil_mode(Mode mode) { return mode == Mode::RECOIL_TEST || mode == Mode::RECOIL_CALIBRATE || mode == Mode::RECOIL_CAPTURE; }
+bool single_use_recoil_mode(Mode mode) { return mode == Mode::RECOIL_CALIBRATE || mode == Mode::RECOIL_CAPTURE; }
 bool physical_mode(Mode mode) { return mode == Mode::COUNTERPULSE || mode == Mode::FIRE_TEST || recoil_mode(mode); }
 bool uses_device(Mode mode) { return physical_mode(mode) || mode == Mode::MANUAL_RECORDING; }
 void admit(const Context& context, Mode mode) {
@@ -410,8 +411,14 @@ bool Session::repeat(const Context& context) noexcept {
         if (busy()) return reject("已有调试任务正在执行，本次快捷键忽略，不排队");
         if (!context.config.keyboard.debug_test_enabled) return reject("调试测试快捷键开关未启用");
         const auto source = impl_->repeat_plan.load();
-        if (!source || source->repeat_revision != impl_->repeat_revision.load() || !physical_mode(source->request.mode))
+        if (!source || source->repeat_revision != impl_->repeat_revision.load() || !physical_mode(source->request.mode)) {
+            const auto current=snapshot();
+            if(current->state==State::COMPLETED && current->result &&
+                current->result->value("mode",std::string{})=="capture" &&
+                !current->result->value("candidate_path",std::string{}).empty())
+                return reject("初始候选已生成；请回压枪页核对并保存候选，再测试或推进阶段，无需重复采集");
             return reject("没有有效测试模板，请先在调试页重新准备");
+        }
         admit(context,source->request.mode);
         if (snapshot()->cleanup_unknown || context.device != source->context.device)
             return reject("设备或清理状态变化，请重新准备");
@@ -422,6 +429,7 @@ bool Session::repeat(const Context& context) noexcept {
              context.config.keyboard.emergency_virtual_keys != source->context.config.keyboard.emergency_virtual_keys))
             return reject("测试键或紧急停止键已改变，请重新准备");
         auto work = *source;
+        if(single_use_recoil_mode(work.request.mode))invalidate_repeat();
         impl_->prepared.reset();
         return impl_->launch(State::RUNNING,true,[this,work = std::move(work)]() mutable {
             work.directory = new_directory(work.request.output_root);
@@ -473,6 +481,7 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
             if (physical && (!allow_physical_output || confirmation != physical_confirmation())) return reject("请勾选允许本次真实物理输出后点击启动");
             if (physical && (!work.context.config.mouse.allow_send_input || !context.config.mouse.allow_send_input)) return reject("设置中的物理输出未允许，请保存后重新准备");
             if (!physical && (allow_physical_output || !confirmation.empty())) return reject("离线及录制任务不接受物理输出授权");
+            if(single_use_recoil_mode(work.request.mode))invalidate_repeat();
             impl_->prepared.reset();
             return impl_->launch(State::RUNNING,physical,[this,work,allow_physical_output,confirmation] {
                 impl_->run(work,allow_physical_output,confirmation);

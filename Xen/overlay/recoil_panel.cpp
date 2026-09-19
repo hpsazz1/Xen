@@ -275,6 +275,10 @@ struct RecoilPanel::Impl {
     }
 
     void prepare_workflow(debug_session::Mode mode, const AppConfig& config, OverlayActions& actions) {
+        if (mode == debug_session::Mode::RECOIL_TEST && workflow_record_measurement && workflow_calibration_path.empty()) {
+            workflow_after_calibration = mode;
+            mode = debug_session::Mode::RECOIL_CALIBRATE;
+        }
         actions.debug_plan_edited = true;
         actions.debug_action = debug_session::Action::PREPARE;
         auto& r = actions.debug_request;
@@ -383,10 +387,14 @@ struct RecoilPanel::Impl {
             ImGui::EndDisabled();
             help("点击即人工确认固定靶点、画面可用且没有人物或手动视角移动，并执行对应保存/加入操作；程序不会代替确认，不代表物理验收通过。");
         }
-        if (workflow_record_measurement || !workflow_samples.empty())
-            ImGui::Text("本轮优化数据：训练 %d/3，验证 %d/2", static_cast<int>(std::min<std::size_t>(3,workflow_samples.size())),
-                static_cast<int>(workflow_samples.size() > 3 ? workflow_samples.size() - 3 : 0));
-        if (ImGui::TreeNode("优化与阶段推进")) {
+        ImGui::SeparatorText("优化与阶段推进");
+        ImGui::Text("本轮优化数据：训练 %d/3，验证 %d/2", static_cast<int>(std::min<std::size_t>(3,workflow_samples.size())),
+            static_cast<int>(workflow_samples.size() > 3 ? workflow_samples.size() - 3 : 0));
+        ImGui::TextWrapped("一次有效初始采集即可生成候选。保存后先实测；效果满意可直接锁定前段并追加发数。需要优化时，再用同一曲线收集5组：3组训练、2组独立验证，失败组不计入。");
+        if (workflow_samples.size() == 5)
+            ImGui::TextWrapped("下一步：5组已齐，点击优化；优化后仍需你实测确认，再锁定前段并追加发数。");
+        else if (loaded && workflow_record_measurement && workflow_candidate_path.empty())
+            ImGui::TextWrapped("下一步：验证已有弹道；实测满意可直接追加。若需要优化，核对画面并加入数据，本轮还需 %d 组。", 5 - static_cast<int>(workflow_samples.size()));
         if (ImGui::SmallButton("清空本轮待用数据")) workflow_samples.clear();
         help("只清除本轮选择，不删除原始采集，也不撤销已使用验证数据的记录。");
         ImGui::BeginDisabled(workflow_samples.size() != 5);
@@ -432,14 +440,22 @@ struct RecoilPanel::Impl {
             ImGui::TreePop();
         }
         ImGui::BeginDisabled(!loaded || base.weapon_id != workflow_weapon || !workflow_samples.empty());
+        const int next_shots = std::min(workflow_group_shots, workflow_target_shots + workflow_step_shots);
+        ImGui::Text("阶段目标：%d / %d 发；复测通过后追加至 %d 发", workflow_target_shots, workflow_group_shots, next_shots);
+        if (workflow_target_shots >= workflow_group_shots)
+            ImGui::TextWrapped("已到整组发数：继续验证效果，或使用整组微调，不再追加。");
+        ImGui::BeginDisabled(workflow_target_shots >= workflow_group_shots);
         if (ImGui::Button("已复测本阶段：锁定前段并追加")) {
             workflow_locked_prefix_ms = base.points.empty() ? 0 : base.points.back().time_ms;
             tuning = {};
             workflow_target_shots = std::min(workflow_group_shots, workflow_target_shots + workflow_step_shots);
             remember_workflow_weapon();
             actions.debug_plan_edited = true; workflow_measurement_ready = false;
+            workflow_record_measurement = true;
+            workflow_prepare_next = debug_session::Mode::RECOIL_TEST;
         }
-        help("由你完成实际复测后推进。锁定当前曲线已有时间段，仅优化后续新增段；不把图像时间当精确第N发时刻。");
+        help("由你完成实际复测后推进；有待用数据时先完成优化或清空选择。锁定已有时间段，准备追加后的测试，仍须回游戏重新按键；不把图像时间当精确第N发时刻。");
+        ImGui::EndDisabled();
         if (ImGui::Button("整组微调：解除前段锁定")) {
             workflow_locked_prefix_ms = 0; workflow_target_shots = workflow_group_shots;
             remember_workflow_weapon();
@@ -447,8 +463,6 @@ struct RecoilPanel::Impl {
         }
         help("整组分段完成并复测后使用；下一轮允许优化全曲线，旧版本保留。");
         ImGui::EndDisabled();
-        ImGui::TreePop();
-        }
     }
 
     void workflow(const RuntimeSnapshot& snapshot, AppConfig& config, OverlayActions& actions,
@@ -486,7 +500,8 @@ struct RecoilPanel::Impl {
             workflow_after_calibration.reset(); workflow_prepare_next.reset();
             refresh_workflow_selection(config.recoil); return;
         }
-        ImGui::TextWrapped("对准固定靶点，准备后回游戏按顶部测试键。每次只执行一组；标定只移动，采集和测试会自动射击。");
+        ImGui::TextWrapped("流程：标定一次 → 采集1组生成候选 → 保存并实测 → 满意后追加发数。需要优化时收集3组训练+2组验证。每次按键只执行一组，不会一直采集。");
+        ImGui::TextWrapped("对准固定靶点，准备后回游戏按顶部测试键。标定只移动，采集和测试会自动射击。");
         bool changed = false;
         if (ImGui::BeginCombo("武器", weapon::display_name(workflow_weapon).data())) {
             for (const auto& item : weapon::kWeaponNames) if (ImGui::Selectable(item.display_name.data(), workflow_weapon == item.canonical_id)) {
@@ -583,13 +598,18 @@ struct RecoilPanel::Impl {
         }
         help("清除当前武器旧标定，先准备X/Y标定；标定成功后仅准备采集，每一步仍须回游戏重新按测试键。");
         ImGui::EndDisabled();
-        ImGui::TextWrapped("当前步骤：%s", workflow_after_calibration ? "画面标定；完成后只准备下一步" :
+        const bool candidate_pending = workflow_measurement_ready && workflow_measurement.valid &&
+            workflow_count_ok && !workflow_candidate_path.empty();
+        ImGui::TextWrapped("当前步骤：%s", candidate_pending ? "候选已生成：先核对画面，保存候选并准备测试；无需重复初始采集" :
+            workflow_samples.size() == 5 ? "本轮5组已齐：先优化本阶段，无需继续重复测试" :
+            workflow_after_calibration ? "画面标定；完成后只准备下一步" :
             workflow_prepare_next ? "正在准备下一步" : debug && debug->busy ? "本组处理中" :
             debug && debug->repeat_ready ? "已准备，等待你按测试键" : "选择采集或验证");
         if(debug&&debug->busy&&debug->plan.is_object()&&
             debug->plan.value("kind",std::string{}).starts_with("recoil_")&&!debug->message.empty())
             ImGui::TextWrapped("本组状态：%s",debug->message.c_str());
-        if (debug && debug->repeat_ready) ImGui::TextWrapped("已准备：回游戏对准靶点，按一下测试键后松开，等待本组完成。修改参数后请重新准备。");
+        if (debug && debug->repeat_ready && !candidate_pending && workflow_samples.size() < 5)
+            ImGui::TextWrapped("已准备：回游戏对准靶点，按一下测试键后松开，等待本组完成。修改参数后请重新准备。");
         ImGui::TextWrapped("采集的是视角/靶点运动候选，不把准星动画当弹着点。固定位置和姿态；每组对准新的干净靶面。");
         workflow_results(config, actions, debug);
         if (workflow_settings_dirty && !ImGui::IsAnyItemActive() && actions.debug_action == debug_session::Action::NONE && !pending_action) {
