@@ -301,6 +301,20 @@ WallCaptureReport optimize_wall_trials(const RecoilProfile& base, const std::vec
             end_ms = (std::min)(end_ms, r.candidate->points.back().time_ms);
         if (end_ms <= request.locked_prefix_ms) return reject("共同观测区间未超过已锁定前段，请延长本阶段采集。");
         const bool preserve_tail = end_ms < base.points.back().time_ms;
+        const double established_end_ms = base.points.back().time_ms;
+        const auto mean_residual = [&](double time) {
+            std::array<double, 2> mean{};
+            for (const auto& report : fit) {
+                const auto residual = sample_recoil_profile(*report.candidate, time);
+                mean[0] += residual.x_counts / fit.size(); mean[1] += residual.y_counts / fit.size();
+            }
+            return mean;
+        };
+        const auto boundary_residual = mean_residual(established_end_ms);
+        auto boundary_correction = boundary_residual;
+        for (auto& axis : boundary_correction)
+            axis = established_end_ms <= request.locked_prefix_ms ? 0 :
+                std::clamp(axis, -request.max_axis_correction_counts, request.max_axis_correction_counts);
         std::set<double> grid;
         for (const auto& point : base.points) grid.insert(point.time_ms);
         grid.insert(request.locked_prefix_ms); grid.insert(end_ms);
@@ -308,33 +322,52 @@ WallCaptureReport optimize_wall_trials(const RecoilProfile& base, const std::vec
             if (point.time_ms > request.locked_prefix_ms && point.time_ms <= end_ms) grid.insert(point.time_ms);
         candidate.points.clear();
         for (const auto time : grid) { auto point = sample_recoil_profile(base,time); point.time_ms = time; candidate.points.push_back(point); }
-        std::vector<std::array<double, 2>> corrections;
         for (auto& point : candidate.points) {
-            std::array<double, 2> correction{};
-            for (const auto& report : fit) {
-                const auto residual = sample_recoil_profile(*report.candidate, point.time_ms);
-                correction[0] += residual.x_counts / fit.size(); correction[1] += residual.y_counts / fit.size();
+            auto correction = mean_residual(point.time_ms);
+            if (point.time_ms > established_end_ms) {
+                // 新域从候选旧末端连续建立，只拟合边界之后的测量变化；不把锁前残差变成阶跃。
+                for (std::size_t axis = 0; axis < correction.size(); ++axis)
+                    correction[axis] = boundary_correction[axis] + correction[axis] - boundary_residual[axis];
+            } else {
+                for (auto& axis : correction)
+                    axis = std::clamp(axis, -request.max_axis_correction_counts, request.max_axis_correction_counts);
+                if (point.time_ms <= request.locked_prefix_ms || (preserve_tail && point.time_ms >= end_ms)) correction = {};
             }
-            if (point.time_ms <= request.locked_prefix_ms || (preserve_tail && point.time_ms >= end_ms)) correction = {};
-            for (auto& axis : correction) axis = std::clamp(axis, -request.max_axis_correction_counts, request.max_axis_correction_counts);
-            point.x_counts += correction[0]; point.y_counts += correction[1]; corrections.push_back(correction);
+            point.x_counts += correction[0]; point.y_counts += correction[1];
         }
+        // 候选冻结之后独立评分；留出组独有的内部变化不能漏评，也不能反向参与拟合节点选择。
+        auto evaluation_grid = grid;
+        for (const auto& r : holdout) for (const auto& point : r.candidate->points)
+            if (point.time_ms > request.locked_prefix_ms && point.time_ms <= end_ms) evaluation_grid.insert(point.time_ms);
         double before = 0, after = 0;
-        for (const auto& r : holdout) for (std::size_t i = 1; i < candidate.points.size(); ++i) {
-            if (candidate.points[i].time_ms <= request.locked_prefix_ms || candidate.points[i].time_ms > end_ms) continue;
-            const auto residual = sample_recoil_profile(*r.candidate, candidate.points[i].time_ms);
+        double extension_before = 0, extension_after = 0, endpoint_before = 0, endpoint_after = 0;
+        for (const auto& r : holdout) for (const auto time : evaluation_grid) {
+            if (time <= request.locked_prefix_ms || time > end_ms) continue;
+            const auto residual = sample_recoil_profile(*r.candidate, time);
+            const auto current = sample_recoil_profile(candidate, time), original = sample_recoil_profile(base, time);
             const auto& h = r.pixel_response;
             const auto cost = [&](double x, double y) { return std::hypot(h[0] * x + h[1] * y, h[2] * x + h[3] * y); };
-            before += cost(residual.x_counts, residual.y_counts);
-            after += cost(residual.x_counts - corrections[i][0], residual.y_counts - corrections[i][1]);
+            const double old_cost = cost(residual.x_counts, residual.y_counts);
+            const double new_cost = cost(residual.x_counts - (current.x_counts - original.x_counts),
+                residual.y_counts - (current.y_counts - original.y_counts));
+            before += old_cost; after += new_cost;
+            if (time > established_end_ms) {
+                extension_before += old_cost; extension_after += new_cost;
+                if (time == end_ms) { endpoint_before += old_cost; endpoint_after += new_cost; }
+            }
         }
         if (before <= 1e-9 || after > before * (1 - request.min_relative_improvement))
             return reject("独立验证组的预测残差未改善，保留原曲线。");
+        if (end_ms > established_end_ms &&
+            (extension_before <= 1e-9 || extension_after > extension_before * (1 - request.min_relative_improvement) ||
+             endpoint_before <= 1e-9 || endpoint_after > endpoint_before * (1 - request.min_relative_improvement)))
+            return reject("独立验证组的新增段或末端预测残差未改善，保留原曲线。");
         if (!validate_recoil_profile(candidate, error)) return reject(error.c_str());
         candidate.source.sha256 = recoil_calibration_sha256(nlohmann::json{{"base",serialize_recoil_profile(base)},
             {"measurement_hashes",hashes},{"locked_prefix_ms",request.locked_prefix_ms},{"common_end_ms",end_ms},
-            {"max_axis_correction_counts",request.max_axis_correction_counts}}.dump());
-        candidate.source.conversion_revision = "wall_time_series_optimization_v1";
+            {"max_axis_correction_counts",request.max_axis_correction_counts},
+            {"algorithm","wall_time_series_optimization_v2"}}.dump());
+        candidate.source.conversion_revision = "wall_time_series_optimization_v2";
         output.valid = true; output.candidate = std::move(candidate);
         output.message = "已用重复采集生成时域优化候选，独立组仅通过预测比较，仍需重新实测。";
         for (const auto& hash : hashes) output.calibration_evidence.push_back(hash);

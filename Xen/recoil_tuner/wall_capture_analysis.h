@@ -45,6 +45,7 @@ bool wall_measurement_to_trial(const WallCaptureReport& report, std::size_t obse
     bool point_confirmed, const Trial& metadata, Trial& output, std::string& error) noexcept;
 // fit和holdout由调用者明确划分并持久登记；每个报告必须人工核对，不能重用同一原始采集。
 struct WallOptimizationRequest {
+    // 仅约束基线已有时域的微调；新增时域按拟合组的边界相对残差建立，仍需独立验证。
     double max_axis_correction_counts = 5;
     double min_relative_improvement = 0.05;
     bool measurements_confirmed = false;

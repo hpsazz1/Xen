@@ -23,8 +23,44 @@ std::vector<WallFrame> frames(){
  auto a=base.clone();cv::circle(a,{160,85},2,cv::Scalar(0),-1);auto b=a.clone();cv::circle(b,{170,70},2,cv::Scalar(0),-1);
  return {{0,base},{20,base.clone()},{40,a},{60,a.clone()},{80,b}};
 }
+void extension_replay(){
+ const auto directory=std::filesystem::path(__FILE__).parent_path()/"fixtures/recoil_extension";
+ std::ifstream input(directory/"base.json");nlohmann::json document;input>>document;
+ RecoilProfile base;std::string error;
+ expect(load_recoil_profile(document.dump(),base,error),"真实执行基线必须有效");
+ std::vector<WallCaptureReport> fit(3),holdout(2);
+ for(int i=0;i<5;++i){auto& report=i<3?fit[i]:holdout[i-3];
+  const auto name=i<3?"fit-"+std::to_string(i+1):"holdout-"+std::to_string(i-2);
+  expect(load_wall_report(directory/(name+".json"),report,error),"真实五组测量必须可重载");
+ }
+ WallOptimizationRequest request;request.measurements_confirmed=true;request.locked_prefix_ms=base.points.back().time_ms;
+ const auto result=optimize_wall_trials(base,fit,holdout,request);
+ expect(result.valid&&result.candidate,"真实三拟合两验证必须生成候选");
+ if(!result.candidate){std::cerr<<result.message<<'\n';return;}
+ const auto& candidate=*result.candidate;
+ const auto boundary=base.points.back();const auto end=candidate.points.back();
+ for(const auto& point:base.points){const auto actual=sample_recoil_profile(candidate,point.time_ms);
+  expect(actual.x_counts==point.x_counts&&actual.y_counts==point.y_counts,"真实锁前段全部节点保持");}
+ for(double time=0;time<boundary.time_ms;time+=0.5){
+  const auto old=sample_recoil_profile(base,time),current=sample_recoil_profile(candidate,time);
+  expect(old.x_counts==current.x_counts&&old.y_counts==current.y_counts,"真实锁前段插值保持");}
+ const auto tail=sample_recoil_profile(candidate,550);
+ expect(end.y_counts-boundary.y_counts>40,"真实新增段不能被微调预算截成净5counts");
+ expect(end.y_counts-tail.y_counts>10,"真实后半段仍须建立纵向补偿，不能延长平台");
+ double before=0,after=0;
+ for(const auto& report:holdout)for(double time=boundary.time_ms+1;time<=end.time_ms;time+=1){
+  const auto residual=sample_recoil_profile(*report.candidate,time);
+  const auto current=sample_recoil_profile(candidate,time);
+  before+=std::abs(residual.y_counts);
+  after+=std::abs(residual.y_counts-(current.y_counts-boundary.y_counts));
+ }
+ expect(after<before*0.5,"真实验证组新增段预测Y残差至少减半");
+ std::cout<<"extension_replay end_ms="<<end.time_ms<<" added_y="<<end.y_counts-boundary.y_counts
+  <<" tail_y="<<end.y_counts-tail.y_counts<<" holdout_y_ratio="<<after/before<<'\n';
+}
 }
 int main(int argc,char** argv){
+ if(argc==2&&std::string(argv[1])=="--extension-replay"){extension_replay();return failures?1:0;}
  if(argc==3&&std::string(argv[1])=="--registration-replay"){
   const std::filesystem::path path=argv[2];std::ifstream input(path);nlohmann::json report;input>>report;
   const auto before=cv::imread((path.parent_path()/report.at("frames").at(0).at("file").get<std::string>()).string());
@@ -68,6 +104,7 @@ int main(int argc,char** argv){
   return 0;
  }
 
+ extension_replay();
  auto r=request();auto f=frames();auto result=analyze_wall_capture(f,r);
  expect(result.valid&&result.candidate.has_value(),"无既有曲线也能生成候选");
  if(result.candidate){auto& p=*result.candidate;expect(p.state==RecoilProfileState::SCHEMA_VALID&&!p.phase_tolerance_ms&&!p.recovery_ms&&p.calibration.evidence.empty(),"不伪造校准声明");
@@ -207,6 +244,30 @@ int main(int argc,char** argv){
   expect(overlap.valid&&overlap.candidate,"稍短采集仍可优化共同观测区间");
   if(overlap.candidate){for(double time:{80.,85.,90.,100.}){const auto old=sample_recoil_profile(longer_base,time),current=sample_recoil_profile(*overlap.candidate,time);expect(std::abs(old.x_counts-current.x_counts)<1e-12&&std::abs(old.y_counts-current.y_counts)<1e-12,"未覆盖旧尾保持原值与插值，不外推测量");}}
   tune.locked_prefix_ms=80;expect(!optimize_wall_trials(longer_base,fit,holdout,tune).valid,"共同观测没超过前段时要求更长采集");tune.locked_prefix_ms=0;
+  // 边界残差不为零，且锁定点早于旧末端：旧域仍有限微调，新域仅建立相对增量。
+  auto staged_base=base;staged_base.points={{0,0,0},{20,1,2},{40,2,3}};
+  auto staged_fit=fit,staged_holdout=holdout;
+  for(auto* reports:{&staged_fit,&staged_holdout})for(auto& report:*reports)
+   report.candidate->points={{0,0,0},{20,-15,30},{40,-20,40},{60,-40,70},{80,-60,100}};
+  tune.locked_prefix_ms=20;
+  const auto staged=optimize_wall_trials(staged_base,staged_fit,staged_holdout,tune);
+  expect(staged.valid&&staged.candidate,"旧段微调与新增段建立可同时存在");
+  if(staged.candidate){
+   const auto joint=sample_recoil_profile(*staged.candidate,40),end=staged.candidate->points.back();
+   expect(joint.x_counts==-3&&joint.y_counts==8,"未锁定旧末端两轴仍严格服从5counts预算");
+   expect(end.x_counts-joint.x_counts==-40&&end.y_counts-joint.y_counts==60,"新段以旧末端残差为锚建立相对增量");
+   const auto near=sample_recoil_profile(*staged.candidate,40+1e-7);
+   expect(std::abs(near.x_counts-joint.x_counts)<1e-5&&std::abs(near.y_counts-joint.y_counts)<1e-5,"连接处连续且无边界残差阶跃");
+  }
+  auto opposed=staged_holdout;
+  for(auto& report:opposed)report.candidate->points={{0,0,0},{20,15,-30},{40,20,-40},{80,60,-100}};
+  expect(!optimize_wall_trials(staged_base,staged_fit,opposed,tune).valid,"独立组方向相反必须拒绝新增段");
+  // 早段改善不能掩盖新增域尾端反向。
+  for(auto& report:opposed)report.candidate->points={{0,0,0},{20,-15,30},{40,-20,40},{60,-40,70},{80,60,-100}};
+  expect(!optimize_wall_trials(staged_base,staged_fit,opposed,tune).valid,"新增末端恶化必须拒绝，不能由早段平均掩盖");
+  for(auto& report:opposed)report.candidate->points={{0,0,0},{20,-15,30},{40,-20,40},{60,-40,70},{70,-50,-10000},{80,-60,100}};
+  expect(!optimize_wall_trials(staged_base,staged_fit,opposed,tune).valid,"留出独有内部节点的反向残差不能漏评");
+  tune.locked_prefix_ms=0;
   holdout[0].candidate->source.sha256=fit[0].candidate->source.sha256;expect(!optimize_wall_trials(base,fit,holdout,tune).valid,"留出不允许重复拟合来源");
  }
  std::filesystem::remove_all(directory);

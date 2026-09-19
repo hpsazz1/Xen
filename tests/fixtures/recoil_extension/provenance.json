@@ -1,0 +1,94 @@
+{
+  "task_id": "RECOIL-WORKFLOW-001",
+  "purpose": "offline_diagnostic_regression_only",
+  "holdout_previously_consumed": true,
+  "physical_acceptance": false,
+  "locked_prefix_ms": 242.4281,
+  "common_end_ms": 684.7013,
+  "base": {
+    "file": "base.json",
+    "sha256": "79e36c900ccad9d6b6f59e9f4510b685c599910fdc6fe03fafeac148a0344c3e",
+    "extracted_json_pointer": "/profile",
+    "source": "E:\\Xen\\docs\\evidence\\RECOIL-WORKFLOW-001\\stage-extension-20260920\\debug-17898341699818747-15\\run\\plan.json",
+    "source_file_sha256": "347ab6ab9bd7dd56c3bca0df39a06bc42e229ea3bece9725c9dac43b5c6b90a5",
+    "plan_profile_sha256": "4c3dc6fee2dc1939a80752bba50e546cc2a1a0a7fb162d8f23f2dff4693a3776",
+    "all_five_plans_and_execution_batches_match": true
+  },
+  "optimization_analysis": {
+    "source": "E:\\Xen\\docs\\evidence\\RECOIL-WORKFLOW-001\\extension-output-20260920\\optimization-analysis.json",
+    "file_sha256": "1b2eb548af2d1f76ea417a531e93dc8c06e94eda22503bdd6f7efd3bde5d1c59",
+    "all_five_content_hashes_match": true
+  },
+  "trials": [
+    {
+      "file": "fit-1.json",
+      "use": "fit",
+      "source_run": "debug-17898341699818747-15",
+      "measurement_source": "E:\\Xen\\docs\\evidence\\RECOIL-WORKFLOW-001\\stage-extension-20260920\\debug-17898341699818747-15\\run\\measurement.json",
+      "measurement_file_sha256": "027488d5071dc3a15e2daf617c9da7fd0b0c6bcf25fdcd021ab641ffb472b82e",
+      "measurement_content_sha256": "cb986634c5ec18477b15ca5cbe0ccd0f3ecd9c3a188c439ee5ddf62d910084c0",
+      "plan_source": "E:\\Xen\\docs\\evidence\\RECOIL-WORKFLOW-001\\stage-extension-20260920\\debug-17898341699818747-15\\run\\plan.json",
+      "plan_file_sha256": "347ab6ab9bd7dd56c3bca0df39a06bc42e229ea3bece9725c9dac43b5c6b90a5",
+      "plan_profile_sha256": "4c3dc6fee2dc1939a80752bba50e546cc2a1a0a7fb162d8f23f2dff4693a3776",
+      "execution_batch_source": "E:\\Xen\\docs\\evidence\\RECOIL-WORKFLOW-001\\stage-extension-20260920\\debug-17898341699818747-15\\run\\batches\\batch-1-1.json",
+      "execution_batch_file_sha256": "fda69e07895953f55d8ebc3d0652c5c2505137ce8962858ef996acebd1c6655f",
+      "execution_profile_matches_plan": true
+    },
+    {
+      "file": "fit-2.json",
+      "use": "fit",
+      "source_run": "debug-17898342599427201-16",
+      "measurement_source": "E:\\Xen\\docs\\evidence\\RECOIL-WORKFLOW-001\\stage-extension-20260920\\debug-17898342599427201-16\\run\\measurement.json",
+      "measurement_file_sha256": "9c4ed107e8725b972c09900bf85cc383d712b8b60b32cdc34f687582e9787977",
+      "measurement_content_sha256": "cd56107bc336f48ff6a932302631e2e96f9bfc08e488d90014aae035efe26b8f",
+      "plan_source": "E:\\Xen\\docs\\evidence\\RECOIL-WORKFLOW-001\\stage-extension-20260920\\debug-17898342599427201-16\\run\\plan.json",
+      "plan_file_sha256": "347ab6ab9bd7dd56c3bca0df39a06bc42e229ea3bece9725c9dac43b5c6b90a5",
+      "plan_profile_sha256": "4c3dc6fee2dc1939a80752bba50e546cc2a1a0a7fb162d8f23f2dff4693a3776",
+      "execution_batch_source": "E:\\Xen\\docs\\evidence\\RECOIL-WORKFLOW-001\\stage-extension-20260920\\debug-17898342599427201-16\\run\\batches\\batch-1-1.json",
+      "execution_batch_file_sha256": "35f3ea39fe0f944c1beab26d10f348a5aaefc6b6f229731b9a4165a90ee65b48",
+      "execution_profile_matches_plan": true
+    },
+    {
+      "file": "fit-3.json",
+      "use": "fit",
+      "source_run": "debug-17898343581934046-18",
+      "measurement_source": "E:\\Xen\\docs\\evidence\\RECOIL-WORKFLOW-001\\stage-extension-20260920\\debug-17898343581934046-18\\run\\measurement.json",
+      "measurement_file_sha256": "27a96f4f607400673d22e663c99183b42a9dc6aa86e4ab399ec50c325fd8f379",
+      "measurement_content_sha256": "051ce0928452201c8903152efa42c0bfd66f37df9d0473833231d9ffe8e8232d",
+      "plan_source": "E:\\Xen\\docs\\evidence\\RECOIL-WORKFLOW-001\\stage-extension-20260920\\debug-17898343581934046-18\\run\\plan.json",
+      "plan_file_sha256": "459f6f49b5a559e19d8bca3d652f63f4a8061da65eaa45d0c00acfdb6e3f2475",
+      "plan_profile_sha256": "4c3dc6fee2dc1939a80752bba50e546cc2a1a0a7fb162d8f23f2dff4693a3776",
+      "execution_batch_source": "E:\\Xen\\docs\\evidence\\RECOIL-WORKFLOW-001\\stage-extension-20260920\\debug-17898343581934046-18\\run\\batches\\batch-1-1.json",
+      "execution_batch_file_sha256": "eafe93c56b265b99cf58af0aa76fc618f97ffc8b2a0440bcfd41a15c9af76679",
+      "execution_profile_matches_plan": true
+    },
+    {
+      "file": "holdout-1.json",
+      "use": "holdout",
+      "source_run": "debug-17898360570615792-2",
+      "measurement_source": "\\\\192.168.3.20\\XenLab$\\releases\\Xen-unified-autostop-20260913-r1\\cache\\recoil\\workflow\\debug-17898360570615792-2\\run\\measurement.json",
+      "measurement_file_sha256": "187ad57a1434925a664fa4ce44d6692e649f9ab0e64b037915ed4bd1c3e2e9cd",
+      "measurement_content_sha256": "a6b63973be3d3945a19b29322ae049db3d1a5c0a37b75b78ac03c5a122e76bee",
+      "plan_source": "\\\\192.168.3.20\\XenLab$\\releases\\Xen-unified-autostop-20260913-r1\\cache\\recoil\\workflow\\debug-17898360570615792-2\\run\\plan.json",
+      "plan_file_sha256": "347ab6ab9bd7dd56c3bca0df39a06bc42e229ea3bece9725c9dac43b5c6b90a5",
+      "plan_profile_sha256": "4c3dc6fee2dc1939a80752bba50e546cc2a1a0a7fb162d8f23f2dff4693a3776",
+      "execution_batch_source": "\\\\192.168.3.20\\XenLab$\\releases\\Xen-unified-autostop-20260913-r1\\cache\\recoil\\workflow\\debug-17898360570615792-2\\run\\batches\\batch-1-1.json",
+      "execution_batch_file_sha256": "11095270981873fa68a7dcfa62089b16e38dc9e0a7e164790324012d6cae88da",
+      "execution_profile_matches_plan": true
+    },
+    {
+      "file": "holdout-2.json",
+      "use": "holdout",
+      "source_run": "debug-17898360799733384-3",
+      "measurement_source": "\\\\192.168.3.20\\XenLab$\\releases\\Xen-unified-autostop-20260913-r1\\cache\\recoil\\workflow\\debug-17898360799733384-3\\run\\measurement.json",
+      "measurement_file_sha256": "111adb54bd1845f3344214e0e1fe3583f5310ea27e439e5fd7930c19a36745a0",
+      "measurement_content_sha256": "f06332b4ae4d48c58ecea1fd515e98c7d52943162d613513f55c46b16026f44d",
+      "plan_source": "\\\\192.168.3.20\\XenLab$\\releases\\Xen-unified-autostop-20260913-r1\\cache\\recoil\\workflow\\debug-17898360799733384-3\\run\\plan.json",
+      "plan_file_sha256": "347ab6ab9bd7dd56c3bca0df39a06bc42e229ea3bece9725c9dac43b5c6b90a5",
+      "plan_profile_sha256": "4c3dc6fee2dc1939a80752bba50e546cc2a1a0a7fb162d8f23f2dff4693a3776",
+      "execution_batch_source": "\\\\192.168.3.20\\XenLab$\\releases\\Xen-unified-autostop-20260913-r1\\cache\\recoil\\workflow\\debug-17898360799733384-3\\run\\batches\\batch-1-1.json",
+      "execution_batch_file_sha256": "8898e99b579345e5cf1becc5363b9a564b86d284a842c4080586a1f28bb364b3",
+      "execution_profile_matches_plan": true
+    }
+  ]
+}
