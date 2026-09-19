@@ -309,6 +309,13 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     require(emitted.size()==1 && emitted.back().debug_request.mode==debug_session::Mode::RECOIL_CAPTURE &&
         emitted.back().debug_request.recoil_calibration_path=="recalibrated.json",
         "重标定成功后只能准备一次使用新标定的采集");
+    emitted.clear(); debug.generation=112; debug.state=debug_session::State::FAILED;
+    debug.result=std::make_shared<const nlohmann::json>(nlohmann::json{{"weapon_id","ak47"},{"success",false},
+        {"recovery_action","retarget"}});
+    settle(); click("采集新弹道");
+    require(emitted.size()==1 && emitted.back().debug_request.mode==debug_session::Mode::RECOIL_CAPTURE &&
+        emitted.back().debug_request.recoil_calibration_path=="recalibrated.json",
+        "单组背景失配重新对准应保留有效几何标定，不得强制重复X/Y");
     emitted.clear(); debug.generation=12; debug.state=debug_session::State::FAILED;
     debug.result=std::make_shared<const nlohmann::json>(nlohmann::json{{"weapon_id","ak47"},{"success",false},
         {"recovery_action","reduce_shots"}});

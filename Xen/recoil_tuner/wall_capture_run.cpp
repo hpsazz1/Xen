@@ -173,18 +173,20 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
                             const auto response=registration.response;
                             const auto& reason=registration.failure;
                             if(reason=="insufficient_texture")
-                                buffer.error="背景纹理不足，已停止本组；请换有清晰细节的固定靶面，重新标定后采集";
+                                buffer.error="背景纹理不足，已停止本组；请重新对准有清晰细节的固定靶面后再采集";
                             else if(reason=="registration_range_exceeded")
                                 buffer.error="背景位移接近观测范围边缘，已停止本组；请重新对准并减少本阶段发数";
                             else if(!reason.empty())
-                                buffer.error="背景匹配不可靠，已停止本组；请重新对准固定靶面并标定";
+                                buffer.error="背景匹配不可靠，已停止本组；请重新对准固定靶面后再采集";
                             if (!reason.empty()) {
-                                buffer.recovery_action = reason == "registration_range_exceeded" ? "reduce_shots" : "recalibrate";
+                                // 背景可观测性失败不等于几何或设备counts映射改变；保留有效标定。
+                                buffer.recovery_action = reason == "registration_range_exceeded" ? "reduce_shots" : "retarget";
                                 const auto number = [](double value) { return std::isfinite(value) ? Json(value) : Json(nullptr); };
                                 buffer.registration_failure = {{"reason",reason},{"sequence",frame.timing.sequence},
                                     {"texture_stddev",number(registration.texture_stddev)},{"response",number(response)},
                                     {"shift_pixels",{number(shift.x),number(shift.y)}},{"roi",{roi.x,roi.y,roi.width,roi.height}},
                                     {"method",detail::kWallRegistration},{"midpoint_residual",number(registration.residual)},
+                                    {"raw_midpoint_residual",number(registration.raw_residual)},
                                     {"template_score",number(registration.template_score)},
                                     {"peak_separation",number(registration.peak_separation)}};
                                 // 首枪可能早于30Hz归档间隔失败；保留已拥有的本帧，释放后独立落盘，不进入训练序列。
@@ -300,6 +302,12 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
                     {"acknowledged", true}, {"evidence_id", result.calibration.back().evidence_id}, {"call_started_ns", nanoseconds(started)},
                     {"completed_ns", nanoseconds(receipt.backend_completed_at)}, {"response", response},
                     {"before_sequence", before.frame.timing.sequence}, {"after_sequence", after.frame.timing.sequence}});
+                if (cv::norm(before.frame.bgr, after.frame.bgr, cv::NORM_INF) == 0) {
+                    const char* direction = command.dx_counts > 0 ? "X正向" : command.dx_counts < 0 ? "X反向" :
+                        command.dy_counts > 0 ? "Y正向" : "Y反向";
+                    throw std::runtime_error(std::string(direction) +
+                        "命令已收到ACK，但前后画面完全相同，标定未通过；已停止本组，请核对游戏焦点与画面响应后重新标定");
+                }
             }
         } else {
             if (request.on_ready) { worker_ready = true; if (!request.on_ready()) throw std::runtime_error("候选测试调度器准备失败"); }

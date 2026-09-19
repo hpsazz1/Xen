@@ -51,7 +51,13 @@ public:
     bool output_owner_exclusive() const noexcept override { return true; }
     bool supports_left_button() const noexcept override { return true; }
     bool left_button_cleanup_required() const noexcept override { return down; }
-    MouseMoveReceipt move(const MouseMoveCommand&) noexcept override { ++moves; return {}; }
+    MouseMoveReceipt move(const MouseMoveCommand&) noexcept override {
+        ++moves;
+        MouseMoveReceipt receipt;
+        receipt.succeeded = acknowledge_moves; receipt.protocol_ack_received = acknowledge_moves;
+        receipt.backend_completed_at = std::chrono::steady_clock::now();
+        return receipt;
+    }
     bool poll_input(InputSnapshot& input) noexcept override {
         input.state_valid = true; input.status = InputMonitorStatus::READY; input.sequence = ++sequence;
         return true;
@@ -67,7 +73,7 @@ public:
     void close() noexcept override {}
     MouseStatus status() const noexcept override { return MouseStatus::READY; }
     std::string last_error() const override { return {}; }
-    bool down = false, unknown_down = false;
+    bool down = false, unknown_down = false, acknowledge_moves = false;
     std::atomic<bool> ever_down{false};
     int downs = 0, ups = 0, moves = 0;
     std::uint64_t sequence = 0;
@@ -158,9 +164,9 @@ int main() {
     request.capture_factory = [device](const CaptureConfig&) { return std::make_unique<FakeCapture>([device] { return device->ever_down.load(); }); };
     result = recoil_tuner::run_wall_capture(request, device, canceled);
     check(!result.completed && device->ups == 1 && !result.report.value("training_eligible", true), "在线观测失配必须停止并排除训练");
-    check(result.report.value("recovery_action", std::string{}) == "recalibrate" &&
-        result.message.find("减少") == std::string::npos,
-        "匹配失效必须要求重新标定，不能无依据归因于弹数过多");
+    check(result.report.value("recovery_action", std::string{}) == "retarget" &&
+        result.message.find("减少") == std::string::npos && result.message.find("重新标定") == std::string::npos,
+        "几何未变的匹配失效只要求重新对准，不得丢弃仍有效的counts映射或归因于弹数过多");
     check(result.report.contains("registration_failure"), "失配报告必须保存实际判据以区分纹理、相关性和范围");
     check(std::filesystem::is_regular_file(request.output_directory / "registration-failure.png") &&
         result.report.at("registration_failure").value("image_file",std::string{}) == "registration-failure.png" &&
@@ -170,10 +176,27 @@ int main() {
     request.output_directory = root / "texture-insufficient";
     request.capture_factory = [](const CaptureConfig&) { return std::make_unique<FakeCapture>([] { return true; }); };
     result = recoil_tuner::run_wall_capture(request, device, canceled);
-    check(!result.completed && result.report.value("recovery_action", std::string{}) == "recalibrate" &&
-        result.message.find("纹理不足") != std::string::npos && result.message.find("减少") == std::string::npos,
-        "静止无纹理背景也会失败，必须提示换靶面重新标定而不是减少弹数");
+    check(!result.completed && result.report.value("recovery_action", std::string{}) == "retarget" &&
+        result.message.find("纹理不足") != std::string::npos && result.message.find("减少") == std::string::npos &&
+        result.message.find("重新标定") == std::string::npos,
+        "静止无纹理背景要求重新对准，不代表设备counts映射失效");
+    check(result.report.at("registration_failure").at("raw_midpoint_residual").is_null(),
+        "尚未计算的原始残差必须是null，不能伪装成零差");
     request.capture_factory = [](const CaptureConfig&) { return std::make_unique<FakeCapture>(); };
+
+    device = std::make_shared<FakeDevice>(); device->acknowledge_moves = true;
+    request.mode = recoil_tuner::WallRunMode::CALIBRATE;
+    request.output_directory = root / "calibration-ack-without-image-response";
+    result = recoil_tuner::run_wall_capture(request, device, canceled);
+    check(!result.completed && device->moves == 1 && device->downs == 0 &&
+        result.calibration.size() == 1 && result.report.at("calibration").size() == 1,
+        "ACK后首步整图未变必须保留本步证据并立即停止，不得继续反向或自动补发");
+    check(result.message.find("X正向") != std::string::npos &&
+        result.message.find("ACK") != std::string::npos && result.message.find("前后画面完全相同") != std::string::npos &&
+        result.report.value("recovery_action",std::string{}) == "recalibrate" &&
+        !result.report.value("training_eligible",true),
+        "标定首步未观测必须明确方向及ACK证据边界，不能宣称标定完成或有效训练");
+    request.mode = recoil_tuner::WallRunMode::CAPTURE;
 
     device = std::make_shared<FakeDevice>();
     request.output_directory = root / "overshoot";

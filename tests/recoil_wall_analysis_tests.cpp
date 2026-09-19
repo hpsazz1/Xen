@@ -33,7 +33,7 @@ int main(int argc,char** argv){
    const auto after=cv::imread((path.parent_path()/file).string());
    const auto r=detail::register_wall(before,after,{40,40,80,80});
    rows.push_back({{"file",file},{"failure",r.failure},{"shift",{r.shift.x,r.shift.y}},
-    {"response",r.response},{"residual",r.residual},{"peak_separation",r.peak_separation}});
+    {"response",r.response},{"residual",r.residual},{"raw_residual",r.raw_residual},{"method",detail::kWallRegistration},{"peak_separation",r.peak_separation}});
   };
   for(std::size_t i=1;i<report.at("frames").size();++i)inspect(report.at("frames").at(i).at("file"));
   if(report.contains("registration_failure")&&report.at("registration_failure").contains("image_file"))
@@ -122,6 +122,18 @@ int main(int argc,char** argv){
  const auto stage_shot=cv::imread((fixtures/"shot-stage.png").string());
  expect(analyze_wall_capture({{0,stage_reference},{120,stage_shot}},shot_request).valid,
   "分段实采失败帧必须在原残差门槛内完成亚像素求精");
+ const auto text_reference=cv::imread((fixtures/"reference-text.png").string());
+ const auto text_shot=cv::imread((fixtures/"shot-text.png").string());
+ const auto text_result=analyze_wall_capture({{0,text_reference},{120,text_shot}},shot_request);
+ expect(text_result.valid,"真实高对比文字的亚像素采样差异不得误判为背景失配");
+ if(text_result.valid)expect(std::abs(text_result.observations.back().center.x-161.4)<0.6&&
+  std::abs(text_result.observations.back().center.y-157.4)<0.6,"文字采样残差修复必须保留几何对应位置");
+ auto text_occluded=text_shot.clone();text_occluded(cv::Rect(60,60,20,20)).setTo(cv::Scalar::all(128));
+ const auto text_blocked=detail::register_wall(text_reference,text_occluded,{40,40,80,80});
+ expect(text_blocked.response>=0.5&&text_blocked.peak_separation>=0.1&&
+  text_blocked.failure=="inconsistent_registration","滤波残差仍必须拒绝相关性正常的局部遮挡");
+ const auto halo=detail::register_wall(text_reference,text_reference,{0,40,80,80});
+ expect(halo.failure=="invalid_registration_geometry","残差滤波不得借图像边界补造真实halo");
  // 对错误对应保持拒绝：高频多解、无关图像、局部遮挡和真实边界。
  cv::Mat periodic(320,320,CV_8UC1);
  for(int y=0;y<periodic.rows;++y)for(int x=0;x<periodic.cols;++x)

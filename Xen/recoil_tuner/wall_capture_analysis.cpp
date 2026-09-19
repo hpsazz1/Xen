@@ -50,6 +50,11 @@ WallRegistration register_wall(const cv::Mat& before, const cv::Mat& after,
         return value;
     };
     const auto a=gray(before),b=gray(after);
+    // 固定对称预滤波只用于残差域，降低高梯度文字对亚像素采样相位的敏感性。
+    // 原图NCC、phase及位移范围保持独立；下方支撑检查包含核的1像素真实halo。
+    cv::Mat smooth_a,smooth_b;
+    cv::GaussianBlur(a,smooth_a,{3,3},0.5,0.5);
+    cv::GaussianBlur(b,smooth_b,{3,3},0.5,0.5);
     cv::Scalar mean,deviation;cv::meanStdDev(a(roi),mean,deviation);
     result.texture_stddev=deviation[0];
     if(result.texture_stddev<5)return reject("insufficient_texture");
@@ -89,10 +94,10 @@ WallRegistration register_wall(const cv::Mat& before, const cv::Mat& after,
         if(!candidate.failure.empty())return candidate;
         const cv::Point2f center(roi.x+(roi.width-1)*0.5f,roi.y+(roi.height-1)*0.5f);
         const auto inside=[&](cv::Point2f c){
-            return c.x-(roi.width-1)*0.5>=0 && c.y-(roi.height-1)*0.5>=0 &&
-                c.x+(roi.width-1)*0.5<=a.cols-1 && c.y+(roi.height-1)*0.5<=a.rows-1;
+            return c.x-(roi.width-1)*0.5>=1 && c.y-(roi.height-1)*0.5>=1 &&
+                c.x+(roi.width-1)*0.5<=a.cols-2 && c.y+(roi.height-1)*0.5<=a.rows-2;
         };
-        const auto residual_at=[&](cv::Point2d shift){
+        const auto residual_at=[&](cv::Point2d shift,bool raw=false){
             const cv::Point2f half(static_cast<float>(shift.x*0.5),static_cast<float>(shift.y*0.5));
             if(std::abs(shift.x)>limit_x || std::abs(shift.y)>limit_y ||
                 !inside(center-half)||!inside(center+half) ||
@@ -101,15 +106,15 @@ WallRegistration register_wall(const cv::Mat& before, const cv::Mat& after,
                 return std::numeric_limits<double>::infinity();
             // 两图都在中点空间插值，避免仅模糊当前图再与锐利参考图比较。
             cv::Mat first,second,difference;
-            cv::getRectSubPix(a,roi.size(),center-half,first);
-            cv::getRectSubPix(b,roi.size(),center+half,second);
+            cv::getRectSubPix(raw?a:smooth_a,roi.size(),center-half,first);
+            cv::getRectSubPix(raw?b:smooth_b,roi.size(),center+half,second);
             cv::absdiff(first,second,difference);return cv::mean(difference)[0];
         };
         candidate.residual=residual_at(candidate.shift);
         if(!finite(candidate.residual)){
             candidate.failure="invalid_registration_geometry";return candidate;
         }
-        // 相位质心是初值；在每轴不到半像素邻域内最小化同一残差，不放宽8的验收阈值。
+        // 相位质心是初值；在每轴不到半像素邻域内最小化滤波残差。原始残差另存诊断。
         for(double step:{0.25,0.125,0.0625,0.03125,0.015625}){
             const auto origin=candidate.shift;
             for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x){
@@ -118,6 +123,7 @@ WallRegistration register_wall(const cv::Mat& before, const cv::Mat& after,
                 if(residual<candidate.residual){candidate.shift=refined;candidate.residual=residual;}
             }
         }
+        candidate.raw_residual=residual_at(candidate.shift,true);
         if(candidate.residual>8)candidate.failure="inconsistent_registration";
         return candidate;
     };

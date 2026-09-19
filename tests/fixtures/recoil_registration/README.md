@@ -10,3 +10,5 @@
 shot-before-a.png：第一组Run的frames/frame-3.png，用于亚像素残差回归。
 
 reference-stage.png / shot-stage.png：debug-17898257553581723-7 的基线与失败帧，原亚像素网格残差8.0073，验证保持阈值8的细化精度。
+
+reference-text.png / shot-text.png：debug-17898280289641842-17 的基线与真实失败帧；原始文字边缘残差8.046875。用于采样稳健残差回归，并从同图生成局部遮挡负例；不把配准通过当作真实压枪验收。
