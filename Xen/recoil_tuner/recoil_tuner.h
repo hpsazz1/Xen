@@ -107,6 +107,8 @@ struct ImageRequest {
 };
 struct ImageMeasurement {
     bool valid = false;
+    bool registration_valid = false;
+    bool empty_detection = false;
     bool requires_manual_confirmation = true;
     bool temporal_assignment_available = false;
     cv::Point2d translation;

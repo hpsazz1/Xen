@@ -927,7 +927,8 @@ target_include_directories(recoil PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(recoil PUBLIC nlohmann_json::nlohmann_json PRIVATE bcrypt)
 add_library(recoil_worker STATIC Xen/recoil/recoil_worker.cpp)
 target_link_libraries(recoil_worker PUBLIC recoil trigger_worker mouse PRIVATE Threads::Threads)
-add_library(recoil_tuner STATIC Xen/recoil_tuner/recoil_tuner.cpp Xen/recoil_tuner/recoil_tuner_io.cpp Xen/recoil_tuner/image_measurement.cpp)
+add_library(recoil_tuner STATIC Xen/recoil_tuner/recoil_tuner.cpp Xen/recoil_tuner/recoil_tuner_io.cpp Xen/recoil_tuner/image_measurement.cpp
+    Xen/recoil_tuner/wall_capture_analysis.cpp)
 target_include_directories(recoil_tuner PUBLIC ${PROJECT_SOURCE_DIR}/Xen ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(recoil_tuner PUBLIC recoil nlohmann_json::nlohmann_json ${OpenCV_LIBS})
 add_executable(xen_recoil_tuner Xen/recoil_tuner_cli/main.cpp)
@@ -1046,10 +1047,11 @@ add_library(debug_runner STATIC Xen/auto_stop_probe/debug_runner.cpp
 target_include_directories(debug_runner PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(debug_runner PUBLIC config mouse capture source_context input_training nlohmann_json::nlohmann_json
     PRIVATE user32 gdi32)
-add_library(debug_session STATIC Xen/debug_session/debug_session.cpp)
+add_library(debug_session STATIC Xen/debug_session/debug_session.cpp Xen/recoil/recoil_debug_run.cpp
+    Xen/recoil_tuner/wall_capture_run.cpp)
 target_include_directories(debug_session PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(debug_session PUBLIC runtime weapon nlohmann_json::nlohmann_json
-    PRIVATE debug_runner log Threads::Threads)
+    PRIVATE debug_runner recoil_archive recoil_calibration_io recoil_tuner capture log Threads::Threads)
 target_compile_definitions(debug_session PRIVATE
     XEN_DEBUG_BUILD_COMMIT="${XEN_BUILD_GIT_COMMIT}"
     XEN_DEBUG_BUILD_DIRTY=${XEN_BUILD_GIT_DIRTY}
@@ -1060,7 +1062,7 @@ add_library(overlay STATIC
 target_include_directories(overlay PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(overlay
     PUBLIC runtime config model_workspace debug_session
-    PRIVATE imgui recoil_tuner recoil recoil_calibration_io d3d11 dxgi dwmapi)
+    PRIVATE imgui recoil_tuner recoil recoil_calibration_io d3d11 dxgi dwmapi shell32)
 
 add_executable(xen_app WIN32
     Xen/app/main.cpp
@@ -1238,6 +1240,10 @@ if(BUILD_TESTING)
     target_link_libraries(recoil_tuner_tests PRIVATE recoil_tuner recoil)
     xen_deploy_runtime_dlls(recoil_tuner_tests OPENCV)
     add_test(NAME recoil_tuner_tests COMMAND recoil_tuner_tests)
+    add_executable(recoil_wall_analysis_tests tests/recoil_wall_analysis_tests.cpp)
+    target_link_libraries(recoil_wall_analysis_tests PRIVATE recoil_tuner)
+    xen_deploy_runtime_dlls(recoil_wall_analysis_tests OPENCV)
+    add_test(NAME recoil_wall_analysis_tests COMMAND recoil_wall_analysis_tests)
     add_executable(recoil_config_tests tests/recoil_config_tests.cpp)
     target_link_libraries(recoil_config_tests PRIVATE config)
     xen_deploy_runtime_dlls(recoil_config_tests OPENCV)
@@ -1744,6 +1750,10 @@ if(BUILD_TESTING)
     add_executable(debug_session_tests tests/debug_session_tests.cpp)
     target_link_libraries(debug_session_tests PRIVATE debug_session)
     add_test(NAME debug_session_tests COMMAND debug_session_tests)
+    add_executable(wall_capture_run_tests tests/wall_capture_run_tests.cpp)
+    target_link_libraries(wall_capture_run_tests PRIVATE debug_session)
+    xen_deploy_runtime_dlls(wall_capture_run_tests OPENCV ORT NDI)
+    add_test(NAME wall_capture_run_tests COMMAND wall_capture_run_tests)
     xen_deploy_runtime_dlls(debug_session_tests OPENCV ORT NDI)
     set_tests_properties(debug_session_tests PROPERTIES TIMEOUT 30)
     add_executable(debug_panel_tests tests/debug_panel_tests.cpp Xen/overlay/debug_panel.cpp)

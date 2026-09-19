@@ -58,6 +58,7 @@ ImageMeasurement measure_image_pair(const cv::Mat& before, const cv::Mat& after,
         cv::Mat background_error;
         cv::absdiff(a(request.registration_roi), aligned(request.registration_roi), background_error);
         if (cv::mean(background_error)[0] > 8.0) { result.message = "平移后背景仍不一致，可能有透视、亮度或场景变化。"; return result; }
+        result.registration_valid = true;
         cv::Mat difference, binary;
         // 只提取新增暗斑；特效/弹孔身份仍需人工确认，不自动写为真实弹点。
         cv::subtract(a(roi), aligned(roi), difference);
@@ -75,6 +76,7 @@ ImageMeasurement measure_image_pair(const cv::Mat& before, const cv::Mat& after,
             result.candidate_centers.emplace_back(roi.x + centers.at<double>(i, 0), roi.y + centers.at<double>(i, 1));
         }
         if (result.candidate_centers.empty() || result.candidate_centers.size() > 32) {
+            result.empty_detection = result.candidate_centers.empty();
             result.candidate_centers.clear(); result.message = "没有可用暗斑或候选过多；请人工核对图像。"; return result;
         }
         result.valid = true;

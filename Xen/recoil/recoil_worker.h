@@ -69,7 +69,8 @@ public:
         std::function<RecoilInput()> context, std::function<TriggerFiringSignal()> firing);
     ~RecoilWorker();
     bool start(const RecoilConfig& config) noexcept;
-    bool start_calibration(const RecoilConfig& config, std::shared_ptr<const RecoilCalibrationPermit> permit) noexcept;
+    bool start_calibration(const RecoilConfig& config, std::shared_ptr<const RecoilCalibrationPermit> permit,
+        bool automated_debug_firing = false) noexcept;
     void cancel() noexcept;
     void stop() noexcept;
     RecoilSnapshot snapshot() const noexcept;

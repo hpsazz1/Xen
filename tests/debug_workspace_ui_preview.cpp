@@ -362,7 +362,7 @@ int wmain(int argc, wchar_t** argv) {
                 capture.text.find("使用估计完成联动") != std::string::npos,
                 "扳机调试缺少有效性与联动控制");
             save_window(capture, output / "trigger-debug-bottom.png");
-            select_debug_tab("弹道工具", "武器点射资料", "recoil-tools.png");
+            select_debug_tab("弹道工具", "准备画面标定", "recoil-tools.png");
             ImGui::SetScrollY(content, content->ScrollMax.y); frame(); frame();
             require(capture.text.find("压枪校准配置") != std::string::npos &&
                 capture.text.find("曲线目录") != std::string::npos &&

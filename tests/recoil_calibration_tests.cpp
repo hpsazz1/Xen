@@ -47,6 +47,10 @@ void contracts() {
     check(!validate_recoil_calibration_manifest(m,*p,error),"NaN拒绝");
     m=manifest(*p);m.hold_virtual_key=1;
     check(!validate_recoil_calibration_manifest(m,*p,error),"保持键不能是左键");
+    for (int key : {5,6}) {m=manifest(*p);m.hold_virtual_key=key;
+        check(validate_recoil_calibration_manifest(m,*p,error),"校准保持键允许鼠标侧键");}
+    for (int key : {1,2,3,4,0x57,0x41,0x53,0x44,0x23}) {m=manifest(*p);m.hold_virtual_key=key;
+        check(!validate_recoil_calibration_manifest(m,*p,error),"拒绝左键主鼠标键WASD或相同取消键");}
     m=manifest(*p);check(!authorize_recoil_calibration(m,p,RecoilTime{},error),"空授权时间拒绝");
     check(!authorize_recoil_calibration(m,p,RecoilTime::max(),error),"到期溢出拒绝");
 }

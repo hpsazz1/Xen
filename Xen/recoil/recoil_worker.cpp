@@ -19,6 +19,8 @@ public:
     RecoilController controller;
     std::shared_ptr<const RecoilCalibrationPermit> calibration_permit;
     std::unique_ptr<RecoilCalibrationBudget> calibration_budget;
+    bool automated_debug_firing = false;
+    std::uint64_t automated_firing_id = 0;
     RecoilCalibrationBudgetSnapshot calibration_state;
     mutable std::mutex mutex;
     std::condition_variable wake;
@@ -47,7 +49,7 @@ public:
             !mouse->left_button_faulted();
         const bool physical = result.healthy && raw.virtual_keys[1];
         const auto synthetic = firing();
-        if ((mouse->left_button_cleanup_required() && !synthetic.confirmed_down) ||
+        if ((mouse->left_button_cleanup_required() && !synthetic.confirmed_down && !automated_debug_firing) ||
             (synthetic.confirmed_down && (!synthetic.id || synthetic.started_at==RecoilTime{}))) result.healthy=false;
         if (!result.permission || !result.focused || !result.profile_conditions_match) source_blocked = true;
         if (result.healthy && synthetic.confirmed_down && !physical) automatic_firing_seen = true;
@@ -85,11 +87,22 @@ public:
         result.permission = result.permission && !source_blocked && !stopping.load() && !canceled.load();
         if(calibration_budget) {
             // 独立校准保留人工许可；普通压枪不再读取额外保持键。
-            result.permission = result.permission && raw.virtual_keys[calibration_permit->manifest().hold_virtual_key];
+            if (automated_debug_firing) {
+                const bool valid_command = synthetic.id && synthetic.call_started_at != RecoilTime{} &&
+                    synthetic.backend_completed_at >= synthetic.call_started_at &&
+                    synthetic.started_at == synthetic.backend_completed_at &&
+                    synthetic.uncertainty == synthetic.backend_completed_at - synthetic.call_started_at;
+                if (physical || (synthetic.confirmed_down && (!valid_command ||
+                        (automated_firing_id && automated_firing_id != synthetic.id))))
+                    calibration_budget->finish(RecoilCalibrationEnd::CONTEXT);
+                if (synthetic.confirmed_down && valid_command && !automated_firing_id)
+                    automated_firing_id = synthetic.id;
+                result.permission = result.permission && !physical && (!synthetic.confirmed_down || valid_command);
+            } else result.permission = result.permission && raw.virtual_keys[calibration_permit->manifest().hold_virtual_key];
             if(result.healthy&&raw.virtual_keys[calibration_permit->manifest().cancel_virtual_key])
                 calibration_budget->finish(RecoilCalibrationEnd::CANCELED);
             const bool within_budget=calibration_budget->check_time(RecoilClock::now());
-            result.permission=result.permission&&!synthetic.confirmed_down&&calibration_permit->matches(result.profile)&&
+            result.permission=result.permission&&(automated_debug_firing||!synthetic.confirmed_down)&&calibration_permit->matches(result.profile)&&
                 within_budget;
         }
         return result;
@@ -305,7 +318,8 @@ bool RecoilWorker::start_impl(const RecoilConfig& config) noexcept {
         impl_->thread = std::thread([this] { impl_->run(); }); return true;
     } catch (...) { return false; }
 }
-bool RecoilWorker::start_calibration(const RecoilConfig& config,std::shared_ptr<const RecoilCalibrationPermit> permit) noexcept {
+bool RecoilWorker::start_calibration(const RecoilConfig& config,std::shared_ptr<const RecoilCalibrationPermit> permit,
+        bool automated_debug_firing) noexcept {
     try {
         if(impl_->thread.joinable()||impl_->calibration_permit||!permit||!config.enabled||config.mixed_aim||
             config.hold_virtual_key!=permit->manifest().hold_virtual_key||!impl_->ledger)return false;
@@ -313,6 +327,7 @@ bool RecoilWorker::start_calibration(const RecoilConfig& config,std::shared_ptr<
         if(config.game_build!=environment.game_build||config.conditions!=environment.conditions||
             config.input_path!=environment.input_path||config.sensitivity!=environment.sensitivity)return false;
         impl_->calibration_permit=std::move(permit);
+        impl_->automated_debug_firing=automated_debug_firing;
         impl_->calibration_budget=std::make_unique<RecoilCalibrationBudget>(impl_->calibration_permit);
         if(!impl_->calibration_budget->check_time(RecoilClock::now()))return false;
         impl_->controller=RecoilController(impl_->calibration_permit);

@@ -3197,7 +3197,7 @@ struct Overlay::Impl {
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("弹道工具")) {
-            recoil_panel.render_tools(snapshot, app_config, can_edit);
+            recoil_panel.render_tools(snapshot, app_config, can_edit, actions, debug_snapshot);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("运行诊断")) {

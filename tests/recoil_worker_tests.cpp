@@ -66,7 +66,7 @@ struct Fixture {
     std::atomic<std::shared_ptr<TriggerWorker>> live_trigger;
     std::unique_ptr<RecoilWorker> worker;
     Fixture(bool rapid=false, bool change_generation=true, bool zero_curve=false, bool calibration=false,
-            int legacy_permission_key=0, double recovery_ms=20) {
+            int legacy_permission_key=0, double recovery_ms=20, bool automated_debug_firing=false) {
         profile->id = "synthetic"; profile->weapon_id = "synthetic_weapon";
         profile->state = RecoilProfileState::CALIBRATED; profile->phase_tolerance_ms = 100; profile->recovery_ms = recovery_ms;
         profile->source.sha256 = std::string(64, 'a'); profile->source.source_unit = "synthetic";
@@ -111,7 +111,7 @@ struct Fixture {
             check(permit!=nullptr,"fake校准permit有效");
             config.hold_virtual_key=18;config.game_build="synthetic";config.input_path="kmbox_net";
             config.conditions="synthetic";config.sensitivity=1.0;
-            check(worker->start_calibration(config,permit),"独立校准worker启动");
+            check(worker->start_calibration(config,permit,automated_debug_firing),"独立校准worker启动");
         } else check(worker->start(config), "worker启动");
     }
     void ready() { check(until([&]{return worker->snapshot().phase == RecoilPhase::READY;}), "等待新按下资格"); }
@@ -119,6 +119,25 @@ struct Fixture {
 }
 int main() {
     try {
+        {
+            Fixture f(false,false,false,true,0,20,true);f.mouse->calibration_key=false;f.ready();
+            f.synthetic_uncertainty_ns=1000;f.synthetic_start=RecoilClock::now();f.synthetic_down=true;
+            check(until([&]{return f.mouse->moves>0;}),"显式自动调试permit允许已确认命令源且不伪造保持键");
+            ++f.synthetic_id;
+            check(until([&]{return f.worker->calibration_snapshot().terminal;}),"同permit命令id变化必须终止");
+            f.worker->stop();check(f.mouse->downs==0&&f.mouse->ups==0,"压枪Worker不占有左键");
+        }
+        {
+            Fixture f(false,false,false,true,0,20,true);f.ready();
+            f.synthetic_start=RecoilClock::now();f.synthetic_down=true;
+            check(until([&]{return f.worker->calibration_snapshot().terminal;}),"缺少ACK完成区间拒绝自动调试");
+            check(f.mouse->moves==0,"无有效回执区间不得移动");
+        }
+        {
+            Fixture f(false,false,false,true,0,20,true);f.ready();f.mouse->held=true;
+            check(until([&]{return f.worker->calibration_snapshot().terminal;}),"自动调试拒绝混入人工左键");
+            check(f.mouse->moves==0,"人工左键不能启动自动调试permit");
+        }
         {
             Fixture f(false,true,false,false,0,1000);f.ready();
             f.synthetic_start=RecoilClock::now();f.synthetic_down=true;

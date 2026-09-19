@@ -68,9 +68,9 @@ bool validate_recoil_calibration_manifest(const RecoilCalibrationManifest& m, co
             l.rolling_window_counts <= 0 || l.rolling_window_counts > 65534 || !std::isfinite(l.command_phase_budget_ms) ||
             l.command_phase_budget_ms <= 0 || l.command_phase_budget_ms > 1000)
             throw std::runtime_error("校准次数、时间或counts预算无效");
-        const auto valid_key=[](int key){return key > 6 && key <= 255 && key != 0x57 && key != 0x41 && key != 0x53 && key != 0x44;};
+        const auto valid_key=[](int key){return (key == 5 || key == 6 || key > 6) && key <= 255 && key != 0x57 && key != 0x41 && key != 0x53 && key != 0x44;};
         if(!valid_key(m.hold_virtual_key) || !valid_key(m.cancel_virtual_key) || m.hold_virtual_key==m.cancel_virtual_key)
-            throw std::runtime_error("校准保持键与取消键必须独立且不能使用鼠标或WASD");
+            throw std::runtime_error("校准保持键与取消键必须独立，仅支持侧键或非WASD键盘键");
         error.clear();return true;
     } catch(const std::exception& e) {error=e.what();return false;} catch(...) {error="校准契约校验异常";return false;}
 }

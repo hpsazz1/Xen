@@ -1,7 +1,9 @@
 #include "overlay/recoil_panel.h"
+#include "overlay/overlay.h"
 #include "recoil/recoil_store.h"
 #include "recoil/recoil_calibration_io.h"
 #include "recoil_tuner/recoil_tuner.h"
+#include "recoil_tuner/wall_capture_analysis.h"
 #include "weapon/weapon_timing.h"
 #include "weapon/weapon_catalog.h"
 
@@ -12,14 +14,17 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include "recoil/recoil_editor_job_internal.h"
 #include <functional>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <shellapi.h>
 
 namespace {
 struct DisabledScope { explicit DisabledScope(bool disabled) { ImGui::BeginDisabled(disabled); } ~DisabledScope() { ImGui::EndDisabled(); } };
@@ -64,6 +69,15 @@ std::string new_output_directory(const char* category) {
 void prepare_output_parent(const std::string& directory) {
     const auto parent = std::filesystem::u8path(directory).parent_path();
     if (!parent.empty()) std::filesystem::create_directories(parent);
+}
+std::string read_workflow_file(const std::string& path) {
+    const auto file = std::filesystem::u8path(path);
+    if (!std::filesystem::is_regular_file(file) || std::filesystem::file_size(file) > 16 * 1024 * 1024)
+        throw std::runtime_error("采集文件不存在或过大");
+    std::ifstream stream(file, std::ios::binary);
+    std::string bytes((std::istreambuf_iterator<char>(stream)), {});
+    if (stream.bad()) throw std::runtime_error("采集文件读取失败");
+    return bytes;
 }
 void row(const char* label, const char* description) {
     ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(label); help(description);
@@ -164,6 +178,273 @@ struct RecoilPanel::Impl {
     std::string calibration_output = new_output_directory("calibration");
     std::string calibration_request_file, calibration_command;
     std::string calibration_prepared_identity;
+    std::string workflow_weapon = "ak47", workflow_calibration_path, workflow_run;
+    int workflow_duration_ms = 3000, workflow_target_shots = 5, workflow_group_shots = 30, workflow_step_shots = 5;
+    double workflow_locked_prefix_ms = 0;
+    std::uint64_t workflow_result_generation = 0;
+    std::string workflow_preview_path, workflow_import_path, workflow_candidate_path;
+    recoil_tuner::WallCaptureReport workflow_measurement;
+    bool workflow_measurement_ready = false, workflow_confirmed = false, workflow_count_ok = false;
+    int workflow_observed_shots = -1, workflow_requested_shots = 0;
+    std::string workflow_executed_profile;
+    struct WallSample {
+        recoil_tuner::WallCaptureReport measurement;
+        std::string source_run, executed_profile;
+    };
+    std::vector<WallSample> workflow_samples;
+    nlohmann::json workflow_weapon_settings = nlohmann::json::object();
+    bool workflow_settings_loaded = false, workflow_settings_dirty = false;
+    void remember_workflow_weapon() {
+        workflow_weapon_settings[workflow_weapon] = {{"target_shots",workflow_target_shots},{"step_shots",workflow_step_shots},
+            {"group_shots",workflow_group_shots},{"duration_ms",workflow_duration_ms}};
+        workflow_settings_dirty = true;
+    }
+    void select_workflow_weapon(const std::string& weapon) {
+        remember_workflow_weapon(); workflow_weapon = weapon;
+        const auto value = workflow_weapon_settings.value(weapon, nlohmann::json::object());
+        workflow_group_shots = std::clamp(value.value("group_shots",30),1,50);
+        workflow_target_shots = std::clamp(value.value("target_shots",5),1,workflow_group_shots);
+        workflow_step_shots = std::clamp(value.value("step_shots",5),1,50);
+        workflow_duration_ms = std::clamp(value.value("duration_ms",3000),500,10000);
+        workflow_locked_prefix_ms = 0; workflow_samples.clear(); workflow_measurement_ready = false;
+    }
+
+    void import_workflow_result(const nlohmann::json& result) {
+        workflow_confirmed = false; workflow_measurement_ready = false;
+        workflow_candidate_path = result.value("candidate_path", std::string{});
+        workflow_preview_path = result.value("preview_path", std::string{});
+        workflow_run = result.value("capture_path", std::string{});
+        const auto calibration_path = result.value("calibration_path", std::string{});
+        if (!calibration_path.empty()) workflow_calibration_path = calibration_path;
+        const auto measurement_path = result.value("measurement_path", std::string{});
+        if (!measurement_path.empty())
+            workflow_measurement_ready = recoil_tuner::load_wall_report(std::filesystem::u8path(measurement_path), workflow_measurement, status);
+        const auto executed = result.value("base_profile_path", std::string{});
+        workflow_executed_profile = executed.empty() ? "" : read_workflow_file(executed);
+        workflow_requested_shots = result.value("requested_shots",0);
+        workflow_observed_shots = result.contains("observed_ammo_delta") && result.at("observed_ammo_delta").is_number_integer()
+            ? result.at("observed_ammo_delta").get<int>() : -1;
+        workflow_count_ok = result.value("completed", false) && result.value("success", false) &&
+            result.value("cleanup_known", false) && result.value("archive_complete", true) &&
+            result.value("training_eligible", false) && result.contains("observed_ammo_delta") &&
+            result.at("observed_ammo_delta").is_number_integer() &&
+            result.at("observed_ammo_delta").get<int>() == result.value("requested_shots", -2) &&
+            result.value("requested_shots", 0) == workflow_target_shots;
+        if (workflow_measurement_ready) status = workflow_measurement.message;
+        else if (!calibration_path.empty()) status = "画面标定已带入；下一步准备采集或测试。";
+    }
+
+    void workflow_results(AppConfig& config, OverlayActions& actions, const debug_session::Snapshot* debug) {
+        if (debug && !debug->busy && debug->result && debug->generation != workflow_result_generation &&
+            (debug->result->contains("capture_path") || debug->result->contains("calibration_path"))) {
+            workflow_result_generation = debug->generation;
+            const auto result = *debug->result;
+            launch([result](Impl& s) { s.import_workflow_result(result); });
+            return;
+        }
+        if (!workflow_preview_path.empty() && ImGui::Button("查看本组画面")) {
+            const auto path = std::filesystem::u8path(workflow_preview_path);
+            ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        help("打开本组保存的画面对照，核对固定靶点、遮挡与是否有人工移动；不会执行设备动作。");
+        if (workflow_measurement_ready) {
+            ImGui::TextWrapped("本组：%s", workflow_measurement.message.c_str());
+            if (workflow_observed_shots >= 0) ImGui::Text("目标 %d 发；GSI观测 %d 发（非逐发精确计数）",workflow_requested_shots,workflow_observed_shots);
+            if (!workflow_count_ok) ImGui::TextWrapped("实际发数未与本阶段目标一致；保留原始数据，不自动纳入阶段训练。");
+            ImGui::Checkbox("已核对本组固定靶点和画面可用", &workflow_confirmed);
+            help("确认没有移动人物或手动修正视角，图像中靶面稳定。此确认不代表真实弹着或压枪验收通过。");
+            ImGui::BeginDisabled(!workflow_confirmed || !workflow_measurement.valid || !workflow_count_ok);
+            if (!workflow_candidate_path.empty() && ImGui::Button("保存采集候选并载入")) {
+                const auto settings = config.recoil;
+                launch([settings](Impl& s) {
+                    RecoilProfile candidate;
+                    if (!load_recoil_profile(read_workflow_file(s.workflow_candidate_path), candidate, s.status)) return;
+                    RecoilStore store(std::filesystem::u8path(settings.profile_directory));
+                    if (store.save_new(candidate, s.selected_file, s.status)) {
+                        s.load_file(settings, s.selected_file); s.refresh(settings);
+                        s.workflow_samples.clear(); s.workflow_locked_prefix_ms = 0;
+                        s.status = "采集候选已载入；下一步准备测试曲线，尚未发布。";
+                    }
+                });
+            }
+            if (!workflow_executed_profile.empty() && ImGui::Button("加入本阶段优化数据")) {
+                const auto duplicate = std::any_of(workflow_samples.begin(), workflow_samples.end(), [&](const auto& item) { return item.source_run == workflow_run; });
+                if (duplicate) status = "本组已加入，不能重复计数。";
+                else if (workflow_samples.size() >= 5) status = "本轮已有5组，先优化或清空后重新采集。";
+                else if (!workflow_samples.empty() && workflow_samples.front().executed_profile != workflow_executed_profile)
+                    status = "本组执行曲线不同；请先清空旧阶段数据，不能混合优化。";
+                else { workflow_samples.push_back({workflow_measurement, workflow_run, workflow_executed_profile}); status = "已加入独立测试数据。"; }
+            }
+            ImGui::EndDisabled();
+        }
+        ImGui::Text("本轮优化数据：训练 %d/3，验证 %d/2", static_cast<int>(std::min<std::size_t>(3,workflow_samples.size())),
+            static_cast<int>(workflow_samples.size() > 3 ? workflow_samples.size() - 3 : 0));
+        if (ImGui::SmallButton("清空本轮待用数据")) workflow_samples.clear();
+        help("只清除本轮选择，不删除原始采集，也不撤销已使用验证数据的记录。");
+        ImGui::BeginDisabled(workflow_samples.size() != 5);
+        if (ImGui::Button("优化本阶段并载入候选")) {
+            actions.debug_plan_edited = true;
+            const auto settings = config.recoil;
+            launch([settings](Impl& s) {
+                RecoilProfile executed;
+                if (!load_recoil_profile(s.workflow_samples.front().executed_profile, executed, s.status)) return;
+                std::vector<recoil_tuner::WallTrial> trials;
+                for (std::size_t i=0; i<s.workflow_samples.size(); ++i) {
+                    const auto& sample=s.workflow_samples[i];
+                    trials.push_back({sample.measurement,sample.source_run,sample.executed_profile,true,
+                        i<3 ? recoil_tuner::TrialUse::FIT : recoil_tuner::TrialUse::HOLDOUT});
+                }
+                recoil_tuner::WallOptimizationRequest request;
+                request.measurements_confirmed = true; request.locked_prefix_ms = s.workflow_locked_prefix_ms;
+                auto result = recoil_tuner::optimize_wall_trials_recorded(executed,trials,request,
+                    std::filesystem::u8path("cache/recoil/wall-usage"));
+                s.status = result.message;
+                if (!result.valid || !result.candidate) return;
+                RecoilCandidateReplayReport replay;
+                if (!validate_recoil_candidate_execution(*result.candidate,{},replay,s.status)) return;
+                RecoilStore store(std::filesystem::u8path(settings.profile_directory));
+                if (!store.save_new(*result.candidate,s.selected_file,s.status)) return;
+                const auto directory = new_output_directory("tuning");
+                std::filesystem::create_directories(std::filesystem::u8path(directory));
+                if (!recoil_tuner::save_wall_report(std::filesystem::u8path(directory)/"analysis.json",result,s.status)) return;
+                s.load_file(settings,s.selected_file); s.refresh(settings); s.workflow_samples.clear();
+                s.workflow_measurement_ready = false;
+                s.status = "优化候选已另存并载入；请重新准备测试，实测变好后再推进阶段。";
+            });
+        }
+        help("使用三组训练、两组独立验证画面，限定修正量并锁定已验收前段；只生成待复测候选，验证数据不会重复使用。");
+        ImGui::EndDisabled();
+        if (ImGui::TreeNode("载入以前的采集")) {
+            ImGui::InputText("本组结果 JSON", &workflow_import_path);
+            if (ImGui::Button("载入采集结果")) launch([](Impl& s) {
+                s.import_workflow_result(nlohmann::json::parse(read_workflow_file(s.workflow_import_path)));
+            });
+            help("载入已完成会话的结果，重新核对后加入本轮；不连接设备。");
+            ImGui::TreePop();
+        }
+        ImGui::BeginDisabled(!loaded || base.weapon_id != workflow_weapon || !workflow_samples.empty());
+        if (ImGui::Button("已复测本阶段：锁定前段并追加")) {
+            workflow_locked_prefix_ms = base.points.empty() ? 0 : base.points.back().time_ms;
+            tuning = {};
+            workflow_target_shots = std::min(workflow_group_shots, workflow_target_shots + workflow_step_shots);
+            remember_workflow_weapon();
+            actions.debug_plan_edited = true; workflow_measurement_ready = false;
+        }
+        help("由你完成实际复测后推进。锁定当前曲线已有时间段，仅优化后续新增段；不把图像时间当精确第N发时刻。");
+        if (ImGui::Button("整组微调：解除前段锁定")) {
+            workflow_locked_prefix_ms = 0; workflow_target_shots = workflow_group_shots;
+            remember_workflow_weapon();
+            actions.debug_plan_edited = true; workflow_measurement_ready = false;
+        }
+        help("整组分段完成并复测后使用；下一轮允许优化全曲线，旧版本保留。");
+        ImGui::EndDisabled();
+    }
+
+    void workflow(const RuntimeSnapshot& snapshot, AppConfig& config, OverlayActions& actions,
+                  const debug_session::Snapshot* debug) {
+        if (!workflow_settings_loaded) {
+            workflow_settings_loaded = true;
+            launch([](Impl& s) {
+                const auto path = std::filesystem::path("cache/recoil/workflow-settings.json");
+                if (std::filesystem::exists(path)) {
+                    s.workflow_weapon_settings = nlohmann::json::parse(read_workflow_file(path.string()));
+                    if (!s.workflow_weapon_settings.is_object()) throw std::runtime_error("阶段设置无效");
+                    const auto value=s.workflow_weapon_settings.value(s.workflow_weapon,nlohmann::json::object());
+                    s.workflow_group_shots=std::clamp(value.value("group_shots",30),1,50);
+                    s.workflow_target_shots=std::clamp(value.value("target_shots",5),1,s.workflow_group_shots);
+                    s.workflow_step_shots=std::clamp(value.value("step_shots",5),1,50);
+                    s.workflow_duration_ms=std::clamp(value.value("duration_ms",3000),500,10000);
+                }
+            });
+        }
+        ImGui::TextWrapped("对准固定靶点，准备后回游戏按顶部测试键。每次只执行一组；标定只移动，采集和测试会自动射击。");
+        bool changed = false;
+        if (ImGui::BeginCombo("武器", weapon::display_name(workflow_weapon).data())) {
+            for (const auto& item : weapon::kWeaponNames) if (ImGui::Selectable(item.display_name.data(), workflow_weapon == item.canonical_id)) {
+                select_workflow_weapon(std::string(item.canonical_id)); changed = true;
+            }
+            ImGui::EndCombo();
+        }
+        help("选择本组实际持有的武器；运行时由GSI核对。没有已知曲线也可以采集。");
+        if (!snapshot.weapon_snapshot.canonical_id.empty()) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("使用当前武器")) { select_workflow_weapon(snapshot.weapon_snapshot.canonical_id); changed = true; }
+            help("带入GSI最后识别的武器；不生成任何弹道数据。");
+        }
+        changed |= ImGui::SliderInt("本阶段目标发数", &workflow_target_shots, 1, workflow_group_shots);
+        help("按武器和后坐力调整，可从1至2发开始。GSI有延迟，超发或未知数据不能自动用于本阶段优化。");
+        changed |= ImGui::SliderInt("每阶段追加发数", &workflow_step_shots, 1, workflow_group_shots);
+        help("前段实测满意后按此数量扩展；后坐力大或容易出观测范围时调小。按武器分别保存。");
+        ImGui::Text("阶段：前%d发；已锁定前段 %.0f ms（图像观测时间）", workflow_target_shots, workflow_locked_prefix_ms);
+        if (ImGui::TreeNode("阶段与采集设置")) {
+            changed |= ImGui::SliderInt("整组发数", &workflow_group_shots, 1, 50);
+            workflow_target_shots = std::min(workflow_target_shots, workflow_group_shots);
+            changed |= ImGui::SliderInt("最长扫射 / ms", &workflow_duration_ms, 500, 10000);
+            help("无论弹药更新是否及时，到达此时长都停止。它是兜底上限，不代替实际发数。");
+            changed |= ImGui::InputText("画面标定文件", &workflow_calibration_path);
+            help("标定完成自动带入；也可载入此前相同灵敏度和画面配置的标定文件。");
+            ImGui::TreePop();
+        }
+        if (ImGui::Button("刷新曲线")) refresh(config.recoil);
+        help("读取已保存候选；不会激活或执行曲线。");
+        ImGui::SameLine();
+        if (ImGui::BeginCombo("测试曲线", selected_file.empty() ? "无曲线：先采集" : selected_file.c_str())) {
+            for (const auto& file : files) if (file.profile->weapon_id == workflow_weapon &&
+                ImGui::Selectable(file.file.c_str(), selected_file == file.file)) {
+                load_file(config.recoil, file.file); changed = true;
+            }
+            ImGui::EndCombo();
+        }
+        help("测试使用已保存文件；新武器无需先加载曲线即可采集。");
+        if (loaded && base.weapon_id == workflow_weapon) {
+            ImGui::BeginDisabled(workflow_locked_prefix_ms > 0);
+            changed |= strength_controls();
+            ImGui::EndDisabled();
+            if (workflow_locked_prefix_ms > 0) ImGui::TextWrapped("前段已锁定：保留现有力度，优化器只调整新增段；整组微调时可解除锁定。");
+        }
+        const auto prepare = [&](debug_session::Mode mode) {
+            actions.debug_plan_edited = true;
+            actions.debug_action = debug_session::Action::PREPARE;
+            auto& r = actions.debug_request;
+            r.mode = mode; r.weapon_id = workflow_weapon;
+            r.output_root = "cache/recoil/workflow";
+            r.recoil_duration_ms = workflow_duration_ms;
+            r.recoil_target_shots = workflow_target_shots;
+            r.recoil_locked_prefix_ms = workflow_locked_prefix_ms;
+            r.recoil_calibration_path = workflow_calibration_path;
+            r.recoil_profile_path = selected_file.empty() ? "" : (std::filesystem::u8path(config.recoil.profile_directory) /
+                std::filesystem::u8path(selected_file)).string();
+            r.recoil_x_strength = tuning.x_strength; r.recoil_y_strength = tuning.y_strength;
+            r.show_hud = false;
+        };
+        if (ImGui::Button("1. 准备画面标定")) prepare(debug_session::Mode::RECOIL_CALIBRATE);
+        help("首次或画面/灵敏度变化后使用。按测试键执行有限的两轴位移，测量像素与设备位移关系，不开枪。");
+        ImGui::SameLine();
+        if (ImGui::Button("2. 准备采集新曲线")) prepare(debug_session::Mode::RECOIL_CAPTURE);
+        help("不加载压枪曲线，按测试键执行一组扫射并记录画面；需先完成画面标定。");
+        ImGui::BeginDisabled(selected_file.empty() || !loaded || base.weapon_id != workflow_weapon);
+        if (ImGui::Button("3. 准备测试曲线")) prepare(debug_session::Mode::RECOIL_TEST);
+        help("冻结所选曲线与力度，按测试键执行一组压枪并采集残差。未校准候选仅在本次有界测试中执行。");
+        ImGui::EndDisabled();
+        if (changed) {
+            actions.debug_plan_edited = true; remember_workflow_weapon();
+            workflow_samples.clear(); workflow_confirmed = false; workflow_count_ok = false;
+        }
+        if (debug && debug->repeat_ready) ImGui::TextWrapped("已准备：回游戏对准靶点，按一下测试键后松开，等待本组完成。修改参数后请重新准备。");
+        ImGui::TextWrapped("采集的是视角/靶点运动候选，不把准星动画当弹着点。固定位置和姿态；每组对准新的干净靶面。");
+        workflow_results(config, actions, debug);
+        if (workflow_settings_dirty && !ImGui::IsAnyItemActive() && actions.debug_action == debug_session::Action::NONE && !pending_action) {
+            workflow_settings_dirty = false;
+            launch([](Impl& s) {
+                std::filesystem::create_directories("cache/recoil");
+                const auto temp=std::filesystem::path("cache/recoil/workflow-settings.json.partial-"+std::to_string(GetCurrentProcessId()));
+                { std::ofstream out(temp,std::ios::binary); out << s.workflow_weapon_settings.dump(2); out.close();
+                    if(!out) throw std::runtime_error("阶段设置保存失败"); }
+                if(!MoveFileExW(temp.c_str(),L"cache/recoil/workflow-settings.json",MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
+                    throw std::runtime_error("阶段设置替换失败");
+            });
+        }
+    }
 
     weapon::TimingCatalog timing_catalog = weapon::default_timing_catalog();
     std::string timing_loaded_path, timing_path_draft, timing_status;
@@ -726,7 +1007,8 @@ void RecoilPanel::render_diagnostics(const RuntimeSnapshot& snapshot) noexcept {
         if (!a.error.empty()) ImGui::TextWrapped("归档错误：%s", a.error.c_str());
     } catch (...) { impl_->status = "射击归档状态显示失败。"; }
 }
-void RecoilPanel::render_tools(const RuntimeSnapshot& snapshot, AppConfig& config, bool can_edit) noexcept {
+void RecoilPanel::render_tools(const RuntimeSnapshot& snapshot, AppConfig& config, bool can_edit,
+    OverlayActions& actions, const debug_session::Snapshot* debug_snapshot) noexcept {
     try {
         poll();
         ImGui::TextUnformatted("弹道工具与射击归档");
@@ -736,12 +1018,23 @@ void RecoilPanel::render_tools(const RuntimeSnapshot& snapshot, AppConfig& confi
             help("取消尚未开始的任务；已经开始的同步存储和分析等待完成。不会连接设备。");
             return;
         }
-        impl_->timing_settings(snapshot, config, can_edit);
         { DisabledScope disabled(!can_edit || busy());
+            const auto prior_sensitivity = config.recoil.sensitivity;
+            const auto prior_directory = config.recoil.profile_directory;
             impl_->calibration_settings(config);
-            ImGui::Checkbox("打开弹道编辑与优化", &impl_->show_editor);
+            if (prior_sensitivity != config.recoil.sensitivity || prior_directory != config.recoil.profile_directory) {
+                actions.debug_plan_edited = true; impl_->workflow_samples.clear();
+                impl_->workflow_count_ok = false; impl_->workflow_confirmed = false;
+                impl_->workflow_locked_prefix_ms = 0;
+            }
+            impl_->workflow(snapshot, config, actions, debug_snapshot);
+            ImGui::Checkbox("高级：曲线编辑与数据集优化", &impl_->show_editor);
             help("展开曲线草稿、人工校准与离线优化工具；不会自动加载、激活或执行曲线。");
             if (impl_->show_editor) impl_->editor(snapshot, config);
+            if (ImGui::TreeNode("高级：射击节奏")) {
+                impl_->timing_settings(snapshot, config, can_edit);
+                ImGui::TreePop();
+            }
         }
         if (!impl_->status.empty()) ImGui::TextWrapped("%s", impl_->status.c_str());
     } catch (...) { impl_->status = "弹道工具操作失败；请检查文件与数据。"; }

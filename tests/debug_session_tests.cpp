@@ -6,6 +6,7 @@
 #endif
 #include "debug_session/debug_session.h"
 #include "runtime/runtime.h"
+#include "recoil/recoil_debug_run.h"
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -505,6 +506,62 @@ void test_recording_and_replay_failure_status(const std::filesystem::path& root)
     session.request_shutdown(); wait_idle(session);
 }
 
+void test_recoil_freeze_and_admission(const std::filesystem::path& root) {
+    auto device=std::make_shared<FakeDevice>();auto context=context_for(device);
+    context.config.keyboard.debug_test_enabled=true;
+    context.config.keyboard.debug_test_virtual_keys={5};context.config.recoil.sensitivity=1;
+    RecoilProfile profile;profile.id="debug-candidate";profile.weapon_id="ak47";
+    profile.state=RecoilProfileState::SCHEMA_VALID;profile.points={{0,0,0},{100,2,4}};
+    const auto path=root/"recoil-candidate.json";
+    {std::ofstream file(path);file<<serialize_recoil_profile(profile);}
+    auto calibration=prepare_wall_debug_plan(true,"ak47",1500,{},context.config);
+    calibration["geometry"]={{"input_size",{320,320}},{"processed_size",{320,320}}};
+    calibration["samples"]={{{"counts",{4,0}},{"pixel_delta",{2,0}},{"acknowledged",true},{"evidence_id","x"}},
+        {{"counts",{0,4}},{"pixel_delta",{0,2}},{"acknowledged",true},{"evidence_id","y"}}};
+    const auto calibration_path=root/"recoil-calibration.json";
+    {std::ofstream file(calibration_path);file<<calibration.dump();}
+    for(int failure=0;failure<4;++failure){
+        auto bad=calibration;
+        if(failure==0)bad["samples"][1]["counts"]={8,0};
+        if(failure==1)bad["samples"][1]["acknowledged"]=false;
+        if(failure==2)bad["samples"][1]["evidence_id"]="x";
+        if(failure==3){
+            bad["samples"].push_back({{"counts",{-4,0}},{"pixel_delta",{-0.2,0}},{"acknowledged",true},{"evidence_id","reverse-x"}});
+            bad["samples"].push_back({{"counts",{0,-4}},{"pixel_delta",{0,-2}},{"acknowledged",true},{"evidence_id","reverse-y"}});
+        }
+        {std::ofstream file(calibration_path);file<<bad.dump();}
+        bool rejected=false;try{prepare_wall_debug_plan(false,"ak47",1500,calibration_path,context.config);}catch(...){rejected=true;}
+        require(rejected,"坏标定必须在准备阶段拒绝，不能先射击再分析失败");
+    }
+    {std::ofstream file(calibration_path);file<<calibration.dump();}
+    Request request;request.mode=Mode::RECOIL_TEST;request.recoil_profile_path=utf8(path);
+    request.recoil_calibration_path=utf8(calibration_path);request.output_root=utf8(root/"recoil-debug");
+    Session session;require(session.dispatch(Action::PREPARE,request,context),"弹道准备接收");wait_idle(session);
+    require(session.snapshot()->repeat_ready,"弹道测试完成准备但未生成快捷键模板");
+    const auto frozen=session.snapshot()->plan;
+    require(frozen.at("limits").at("firing_ms").get<int>()>=request.recoil_duration_ms,
+        "前段短曲线测试更长阶段必须延長会话时间预算");
+    require(frozen.at("limits").at("total_counts").get<int>()==10,
+        "延长阶段不得扩展counts预算或外推旧曲线尾部");
+    require(recoil_debug_geometry_matches(frozen,calibration.at("geometry")),"相同标定画面应通过几何绑定");
+    auto changed_geometry=calibration.at("geometry");changed_geometry["input_size"]={640,640};
+    require(!recoil_debug_geometry_matches(frozen,changed_geometry),"同配置但实际画面尺寸变化必须拒绝");
+    require(!recoil_debug_geometry_matches(Json::object(),calibration.at("geometry")),"缺标定不得通过几何绑定");
+    {std::ofstream file(path);file<<"changed after prepare";}
+    require(session.snapshot()->plan==frozen&&frozen.at("profile").at("points").size()==2,"准备曲线未被冻结");
+    require(device->opens==0&&device->outputs==0&&device->closes==0,"准备不得输出或重建设备");
+    context.runtime_idle=false;require(!session.repeat(context),"Runtime运行时不得弹道测试");context.runtime_idle=true;
+    context.config.keyboard.debug_test_virtual_keys={6};require(!session.repeat(context),"变更键绑定须重新准备");
+    session.cancel();require(!session.snapshot()->repeat_ready,"取消必须撤销弹道模板");
+    request.mode=Mode::RECOIL_CALIBRATE;request.weapon_id="ak47";request.recoil_target_shots=0;
+    require(session.dispatch(Action::PREPARE,request,context),"无效分段准备应返回后台错误");wait_idle(session);
+    require(session.snapshot()->state==State::FAILED&&!session.snapshot()->repeat_ready,"阶段0发不得生成测试模板");
+    request.recoil_target_shots=5;request.mode=Mode::RECOIL_CAPTURE;
+    request.recoil_calibration_path=utf8(root/"missing.json");
+    require(session.dispatch(Action::PREPARE,request,context),"缺标定请求接收");wait_idle(session);
+    require(session.snapshot()->state==State::FAILED,"无画面标定不能准备counts采集");
+    require(device->outputs==0&&device->closes==0,"拒绝和取消不得操作借用设备");
+}
 }
 int main() {
     const auto root = std::filesystem::temp_directory_path() /
@@ -534,6 +591,7 @@ int main() {
             require(device->outputs == 0 && device->opens == 0 && device->closes == 0,
                 "无源配置且取消的测试不得真实输出或重建设备");
         }
+        test_recoil_freeze_and_admission(root);
         test_idle_hud_show();
         test_save_weapon_timing(root);
         test_documents_and_frozen_prepare(root);

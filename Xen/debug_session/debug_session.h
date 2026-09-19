@@ -12,7 +12,7 @@ class Runtime;
 
 namespace debug_session {
 using Json = nlohmann::json;
-enum class Mode { COUNTERPULSE, FIRE_TEST, MANUAL_RECORDING, EVALUATE_MANUAL,
+enum class Mode { COUNTERPULSE, FIRE_TEST, RECOIL_TEST, RECOIL_CALIBRATE, RECOIL_CAPTURE, MANUAL_RECORDING, EVALUATE_MANUAL,
     EVALUATE_COMMANDS, DERIVE_DEFAULTS, DERIVE_PLAN };
 enum class Action { NONE, VALIDATE, SAVE_PLAN, PREPARE, START, CANCEL, REEVALUATE,
     HIDE_HUD, SHOW_HUD, LOAD_PLAN, LOAD_SAMPLING, LOAD_FIRE_SETTINGS,
@@ -25,6 +25,11 @@ struct Request {
     Mode mode = Mode::COUNTERPULSE;
     std::string plan_text, sampling_text, input_path, load_path;
     std::string weapon_id;
+    std::string recoil_profile_path, recoil_calibration_path;
+    double recoil_x_strength = 1, recoil_y_strength = 1;
+    int recoil_duration_ms = 1500;
+    int recoil_target_shots = 5;
+    double recoil_locked_prefix_ms = 0;
     std::string output_root = "cache/debug";
     int recording_duration_ms = 120000;
     int candidate_index = 0;

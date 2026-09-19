@@ -363,7 +363,7 @@ int wmain(int argc, wchar_t** argv) {
         };
         auto activate_view_item = [&](const char* label) {
             const std::string_view name(label);
-            require(name == "打开弹道编辑与优化" || name == "加载文件" || name == "独立弹道自动优化器",
+            require(name == "高级：曲线编辑与数据集优化" || name == "加载文件" || name == "独立弹道自动优化器",
                 "预览只允许展开界面和读取临时曲线");
             focus_item(label, content);
             input.down = true; frame(); input.down = false; frame(); frame();
@@ -408,10 +408,10 @@ int wmain(int argc, wchar_t** argv) {
         ImGui::SetScrollY(content, 0); frame(); frame();
         focus_item("弹道工具", content, "debug_tabs");
         input.down = true; frame(); input.down = false; frame(); frame();
-        focus_item("打开弹道编辑与优化", content);
+        focus_item("高级：曲线编辑与数据集优化", content);
         require_tooltip(capture, "不会自动加载、激活或执行曲线");
         save_window(capture, output / "recoil-editor-help.png");
-        activate_view_item("打开弹道编辑与优化");
+        activate_view_item("高级：曲线编辑与数据集优化");
         require(capture.text.find("先加载已有曲线") != std::string::npos, "编辑器没有按要求展开");
         focus_item("文件名", content);
         input.down = true; frame(); input.down = false; frame();

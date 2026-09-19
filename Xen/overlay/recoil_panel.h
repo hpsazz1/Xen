@@ -3,6 +3,8 @@
 #include <memory>
 #include "config/config.h"
 #include "runtime/runtime.h"
+struct OverlayActions;
+namespace debug_session { struct Snapshot; }
 
 class RecoilPanel {
 public:
@@ -11,7 +13,8 @@ public:
     RecoilPanel(const RecoilPanel&) = delete;
     RecoilPanel& operator=(const RecoilPanel&) = delete;
     void render(const RuntimeSnapshot& snapshot, AppConfig& config, bool can_edit) noexcept;
-    void render_tools(const RuntimeSnapshot& snapshot, AppConfig& config, bool can_edit) noexcept;
+    void render_tools(const RuntimeSnapshot& snapshot, AppConfig& config, bool can_edit,
+        OverlayActions& actions, const debug_session::Snapshot* debug_snapshot) noexcept;
     void render_connections(AppConfig& config, bool can_edit) noexcept;
     void render_diagnostics(const RuntimeSnapshot& snapshot) noexcept;
     // 每帧由宿主调用；关闭时请求取消并保持消息循环，直到 busy 返回 false。
