@@ -296,6 +296,7 @@ WallCaptureReport optimize_wall_trials(const RecoilProfile& base, const std::vec
         }
         auto candidate = base; candidate.revision += 1; candidate.state = RecoilProfileState::SCHEMA_VALID;
         candidate.calibration.evidence.clear(); candidate.phase_tolerance_ms.reset(); candidate.recovery_ms.reset();
+        candidate.execution_phase_budget_ms.reset();
         double end_ms = 60000;
         for (const auto* collection : {&fit, &holdout}) for (const auto& r : *collection)
             end_ms = (std::min)(end_ms, r.candidate->points.back().time_ms);

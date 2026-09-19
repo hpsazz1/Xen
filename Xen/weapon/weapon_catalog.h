@@ -34,6 +34,12 @@ inline constexpr std::string_view normalize_weapon_id(std::string_view name) noe
             return row.canonical_id;
     return {};
 }
+// 对外持久化使用目录中的真实 GSI 名称，不按内部短名拼接 weapon_。
+inline constexpr std::string_view gsi_name(std::string_view name) noexcept {
+    const auto canonical = normalize_weapon_id(name);
+    for (const auto& row : kWeaponNames) if (row.canonical_id == canonical) return row.gsi_name;
+    return {};
+}
 inline constexpr std::string_view display_name(std::string_view id) noexcept {
     const auto canonical = normalize_weapon_id(id);
     for (const auto& row : kWeaponNames) if (row.canonical_id == canonical) return row.display_name;

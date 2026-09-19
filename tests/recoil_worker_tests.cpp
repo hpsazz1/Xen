@@ -66,7 +66,7 @@ struct Fixture {
     std::atomic<std::shared_ptr<TriggerWorker>> live_trigger;
     std::unique_ptr<RecoilWorker> worker;
     Fixture(bool rapid=false, bool change_generation=true, bool zero_curve=false, bool calibration=false,
-            int legacy_permission_key=0, double recovery_ms=20, bool automated_debug_firing=false) {
+            int legacy_permission_key=0, double recovery_ms=20, bool automated_debug_firing=false, bool user_confirmed=false) {
         profile->id = "synthetic"; profile->weapon_id = "synthetic_weapon";
         profile->state = RecoilProfileState::CALIBRATED; profile->phase_tolerance_ms = 100; profile->recovery_ms = recovery_ms;
         profile->source.sha256 = std::string(64, 'a'); profile->source.source_unit = "synthetic";
@@ -76,6 +76,9 @@ struct Fixture {
         if(calibration) {
             profile->state=RecoilProfileState::SCHEMA_VALID;profile->calibration={};
             profile->phase_tolerance_ms.reset();profile->recovery_ms.reset();
+        }
+        if(user_confirmed) {
+            std::string error;check(confirm_recoil_profile(*profile,error),"人工确认测试曲线有效");
         }
         ledger->reset(14, 16, RecoilClock::now());
         worker = std::make_unique<RecoilWorker>(mouse, arbiter, ledger, [this] {
@@ -119,6 +122,42 @@ struct Fixture {
 }
 int main() {
     try {
+        {
+            Fixture f(true,false,false,false,0,20,false,true);f.ready();
+            for(int run=1;run<=2;++run) {
+                f.mouse->held=true;
+                check(until([&]{return f.worker->snapshot().session_id==run&&f.worker->snapshot().phase==RecoilPhase::EXHAUSTED;}),
+                    "人工确认曲线普通手动两次独立按下均完成首发重放");
+                const auto moves=f.mouse->moves.load();std::this_thread::sleep_for(10ms);
+                check(f.mouse->moves==moves&&f.worker->snapshot().session_id==run,"持续手动按下不循环尾部");
+                f.mouse->held=false;f.ready();
+            }
+        }
+        {
+            Fixture f(true,false,false,false,0,20,false,true);f.ready();
+            auto trigger=std::make_shared<TriggerWorker>(f.mouse,f.arbiter,[]{return true;},[]{return true;},
+                []{return std::uint64_t{1};},[](std::uint64_t){return true;},[](std::uint64_t){});
+            TriggerConfig cfg;cfg.enabled=true;cfg.require_stop=false;cfg.hold_virtual_key=5;
+            cfg.fire_delay_ms=0;cfg.press_duration_ms=40;cfg.shot_interval_ms=80;cfg.max_observation_age_ms=1000;
+            check(trigger->start(cfg),"人工确认双worker重放启动扳机");f.live_trigger.store(trigger);
+            check(until([&]{return trigger->snapshot().reason==TriggerReason::RELEASED;}),"扳机先观察释放");
+            for(int run=1;run<=2;++run) {
+                auto observation=std::make_shared<TriggerObservation>();
+                observation->detections.push_back({30,30,70,70,0.9f,0});observation->center_x=observation->center_y=50;
+                observation->roi_width=observation->roi_height=100;observation->epoch=1;observation->sequence=run;
+                observation->valid=observation->timing_valid=true;observation->observed_at=TriggerClock::now();
+                f.mouse->trigger_key=true;trigger->publish(observation);
+                check(until([&]{return f.worker->snapshot().session_id==run&&f.worker->snapshot().phase==RecoilPhase::EXHAUSTED;}),
+                    "两次独立真实TriggerWorker命令均重放人工确认曲线");
+                f.mouse->trigger_key=false;
+                check(until([&]{return !trigger->firing_signal().confirmed_down&&trigger->snapshot().reason==TriggerReason::RELEASED;}),
+                    "每次命令确认UP并释放扳机保持键");
+                f.ready();
+            }
+            check(f.mouse->downs==2&&f.mouse->ups==2&&f.worker->snapshot().session_id==2,
+                "两个独立扳机弹序各执行一次，不伪造恢复毫秒");
+            trigger->stop();f.worker->stop();
+        }
         {
             Fixture f(false,false,false,true,0,20,true);f.mouse->calibration_key=false;f.ready();
             f.synthetic_uncertainty_ns=1000;f.synthetic_start=RecoilClock::now();f.synthetic_down=true;

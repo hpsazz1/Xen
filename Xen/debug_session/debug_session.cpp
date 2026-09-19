@@ -205,6 +205,7 @@ struct Session::Impl {
                     }
                     if (canceled || s.state == State::FAILED || s.cleanup_unknown) {
                         repeat_plan.store(nullptr); s.repeat_ready = false;
+                        s.repeat_unavailable_reason = s.message;
                     }
                 } });
             });
@@ -388,7 +389,7 @@ void Session::set_theme(UiTheme theme) noexcept {
 void Session::request_shutdown() noexcept { impl_->shutting_down = true; cancel("应用关闭，正在清理"); poll(); }
 void Session::cancel(const std::string& reason) noexcept {
     impl_->canceled = true;
-    invalidate_repeat();
+    invalidate_repeat("测试模板已取消：" + reason);
     try {
         impl_->update([&](Snapshot& s) {
             if (s.busy) { s.state = State::STOPPING; s.message = reason; }
@@ -397,10 +398,13 @@ void Session::cancel(const std::string& reason) noexcept {
     } catch (...) {}
 }
 
-void Session::invalidate_repeat() noexcept {
+void Session::invalidate_repeat(const std::string& reason) noexcept {
     ++impl_->repeat_revision;
     impl_->repeat_plan.store(nullptr);
-    try { impl_->update([](Snapshot& s) { s.repeat_ready = false; }); } catch (...) {}
+    try { impl_->update([&](Snapshot& s) {
+        s.repeat_ready = false;
+        s.repeat_unavailable_reason = reason.empty() ? "测试模板已失效，请重新准备" : reason;
+    }); } catch (...) {}
 }
 bool Session::repeat(const Context& context) noexcept {
     try {
@@ -420,6 +424,8 @@ bool Session::repeat(const Context& context) noexcept {
                 current->result->value("mode",std::string{})=="capture" &&
                 !current->result->value("candidate_path",std::string{}).empty())
                 return reject("初始候选已生成；请回压枪页核对并保存候选，再测试或推进阶段，无需重复采集");
+            if (!current->repeat_unavailable_reason.empty())
+                return reject(current->repeat_unavailable_reason.c_str());
             return reject("没有有效测试模板，请先在调试页重新准备");
         }
         admit(context,source->request.mode);
@@ -432,7 +438,7 @@ bool Session::repeat(const Context& context) noexcept {
              context.config.keyboard.emergency_virtual_keys != source->context.config.keyboard.emergency_virtual_keys))
             return reject("测试键或紧急停止键已改变，请重新准备");
         auto work = *source;
-        if(single_use_recoil_mode(work.request.mode))invalidate_repeat();
+        if(single_use_recoil_mode(work.request.mode))invalidate_repeat("本次标定或采集许可已使用，请完成本组后重新准备");
         impl_->prepared.reset();
         return impl_->launch(State::RUNNING,true,[this,work = std::move(work)]() mutable {
             work.directory = new_directory(work.request.output_root);
@@ -484,7 +490,7 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
             if (physical && (!allow_physical_output || confirmation != physical_confirmation())) return reject("请勾选允许本次真实物理输出后点击启动");
             if (physical && (!work.context.config.mouse.allow_send_input || !context.config.mouse.allow_send_input)) return reject("设置中的物理输出未允许，请保存后重新准备");
             if (!physical && (allow_physical_output || !confirmation.empty())) return reject("离线及录制任务不接受物理输出授权");
-            if(single_use_recoil_mode(work.request.mode))invalidate_repeat();
+            if(single_use_recoil_mode(work.request.mode))invalidate_repeat("本次标定或采集许可已使用，请完成本组后重新准备");
             impl_->prepared.reset();
             return impl_->launch(State::RUNNING,physical,[this,work,allow_physical_output,confirmation] {
                 impl_->run(work,allow_physical_output,confirmation);
@@ -492,7 +498,7 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
         }
         if (snapshot()->cleanup_unknown && uses_device(request.mode)) return false;
         impl_->prepared.reset();
-        invalidate_repeat();
+        invalidate_repeat("新任务正在准备；旧测试模板已失效");
         const auto repeat_revision = impl_->repeat_revision.load();
         impl_->update([](Snapshot& s) { s.prepared_id.clear(); });
         return impl_->launch(State::WORKING,false,[this,action,request,context,repeat_revision] {
@@ -610,8 +616,19 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
                     impl_->repeat_plan.store(std::make_shared<const Impl::Prepared>(work));
                 impl_->update([&](Snapshot& s) { s.state = State::PREPARED; s.prepared_id = work.id;
                     s.repeat_ready = repeat_revision == impl_->repeat_revision.load() && static_cast<bool>(impl_->repeat_plan.load());
-                    s.physical = physical_mode(effective.mode); s.message = admission.empty() ?
-                        "已准备，等待本次前台启动；参数已冻结" : "计划已保存，但不能启动：" + admission; });
+                    if (s.repeat_ready) s.repeat_unavailable_reason.clear();
+                    else if (repeat_revision == impl_->repeat_revision.load() && !impl_->canceled)
+                        s.repeat_unavailable_reason = admission.empty() ? "当前为离线计划，不提供物理测试快捷键模板" : admission;
+                    // revision变化时保留实际编辑/取消原因，后台完成不能用“已准备”掩盖它。
+                    s.physical = physical_mode(effective.mode);
+                    s.message = !s.repeat_ready && physical_mode(effective.mode) ?
+                        "计划已保存，但不能启动：" + s.repeat_unavailable_reason : "已准备，等待本次前台启动；参数已冻结";
+                });
+                const auto readiness = snapshot();
+                // 仅记录准备阶段事实，后续编辑不覆写原始准备证据，也不保存配置或设备参数。
+                write_document(directory / "readiness.json",{{"schema_version",1},{"prepared_id",work.id},
+                    {"scope","prepare_snapshot_not_live_permission"},{"ready",readiness->repeat_ready},
+                    {"reason",readiness->repeat_unavailable_reason}});
             } else impl_->run(work,false,{});
         });
     } catch (const std::exception& error) {

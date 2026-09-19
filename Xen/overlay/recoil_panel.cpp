@@ -40,7 +40,7 @@ std::string workflow_execution_text(const RecoilProfile& source,const RecoilTuni
     if (!compile_recoil_profile(source,{tuning.x_strength,tuning.y_strength,0,1},profile,error))
         throw std::runtime_error("执行基线无效："+error);
     profile.state=RecoilProfileState::SCHEMA_VALID; profile.calibration.evidence.clear();
-    profile.phase_tolerance_ms.reset(); profile.recovery_ms.reset();
+    profile.phase_tolerance_ms.reset(); profile.recovery_ms.reset(); profile.execution_phase_budget_ms.reset();
     return serialize_recoil_profile(profile);
 }
 int workflow_named_shots(const RecoilProfile& profile) {
@@ -228,7 +228,6 @@ struct RecoilPanel::Impl {
     bool loaded = false, preview_valid = false, show_editor = false, calibration_confirmed = false;
     std::uint64_t save_revision = 1;
     RecoilCalibration calibration;
-    double phase_ms = 0, recovery_ms = 0;
     recoil_tuner::Dataset dataset;
     bool dataset_loaded = false;
     recoil_tuner::Request request;
@@ -880,7 +879,8 @@ struct RecoilPanel::Impl {
             workflow_after_calibration ? "画面标定；完成后只准备下一步" :
             workflow_prepare_next ? "正在准备下一步" : debug && debug->busy ? "本组处理中" :
             debug && debug->repeat_ready ? "已准备，等待你按测试键" : "选择采集或验证");
-        if(debug&&debug->busy&&debug->plan.is_object()&&
+        // 准备完成但未取得测试许可时仍展示具体原因，不能只留下“选择采集”。
+        if(debug&&(debug->busy||(debug->state==debug_session::State::PREPARED&&!debug->repeat_ready))&&debug->plan.is_object()&&
             debug->plan.value("kind",std::string{}).starts_with("recoil_")&&!debug->message.empty())
             ImGui::TextWrapped("本组状态：%s",debug->message.c_str());
         if (debug && debug->repeat_ready && !candidate_pending && workflow_samples.size() < 5)
@@ -1101,7 +1101,6 @@ struct RecoilPanel::Impl {
         report.reset();
         base = draft = profile; tuning = {}; checkpoint = {draft, tuning}; undo.clear(); redo.clear();
         loaded = true; calibration_confirmed = false; calibration = profile.calibration;
-        phase_ms = profile.phase_tolerance_ms.value_or(0); recovery_ms = profile.recovery_ms.value_or(0);
         save_revision = profile.revision == std::numeric_limits<std::uint64_t>::max() ? profile.revision : profile.revision + 1;
         compile();
     }
@@ -1186,7 +1185,7 @@ struct RecoilPanel::Impl {
     void settings(const RuntimeSnapshot& snapshot, AppConfig& config) {
         auto& c = config.recoil;
         if (form("recoil_settings")) {
-            row("启用压枪", "只在真实射击事实、源端焦点、GSI武器与匹配校准配置有效时补偿；启用本身不移动。");
+            row("启用压枪", "在射击、源端焦点、GSI武器和已验证弹道匹配时补偿；启用本身不移动。");
             ImGui::Checkbox("##recoil_enabled", &c.enabled);
             row("Aim混合模式", "关闭时选择独立压枪阶段能力；混合需外部运动账本和对应物理验收，不改变Aim参数。");
             ImGui::Checkbox("##recoil_mixed", &c.mixed_aim);
@@ -1203,8 +1202,8 @@ struct RecoilPanel::Impl {
         require(config.source_context.enabled, "启用源端焦点（设置）");
         require(std::isfinite(c.sensitivity) && c.sensitivity > 0, "游戏灵敏度");
         require(!c.profile_directory.empty(), "曲线目录");
-        if (!missing.empty()) ImGui::TextWrapped("配置缺项：%s。校准配置见调试 / 弹道工具；连接设置见括号位置。", missing.c_str());
-        ImGui::TextWrapped("校准配置、曲线编辑和活动版本选择见调试 / 弹道工具。GSI 自动识别武器，执行仍需已校准曲线。");
+        if (!missing.empty()) ImGui::TextWrapped("配置缺项：%s。弹道参数见调试 / 弹道工具；连接设置见括号位置。", missing.c_str());
+        ImGui::TextWrapped("曲线编辑和启用版本见调试 / 弹道工具。GSI 自动识别武器，使用已验证且灵敏度匹配的弹道。");
         ImGui::TextWrapped("武器：%s（%s）", weapon::display_name(snapshot.weapon_snapshot.canonical_id).data(),
             weapon::status_name(snapshot.weapon_snapshot.status));
         if (!snapshot.recoil_profile_status.empty()) ImGui::TextWrapped("曲线匹配：%s", snapshot.recoil_profile_status.c_str());
@@ -1327,32 +1326,28 @@ struct RecoilPanel::Impl {
         help("将当前通过编译的草稿另存为未校准候选；此操作不授予物理输出资格，也不更新活动索引。");
         ImGui::EndDisabled();
         prepare_panel(config);
-        if (ImGui::TreeNode("人工校准证据与版本发布")) {
-            ImGui::TextWrapped("只填写已完成实机的真实证据；输入字段不会产生实测，修改草稿后需重新确认。");
-            if (calibration.input_path.empty()) calibration.input_path = "kmbox_net";
-            ImGui::InputText("真实Run证据路径", &calibration.evidence); help("指向当前草稿对应的真实Run记录；必须由你核对曲线、配置、环境及结果，路径存在本身不证明校准通过。");
+        if (ImGui::TreeNode("确认与启用弹道")) {
+            ImGui::TextWrapped("确认当前弹道可用后另存并选择启用；修改曲线后需要重新确认。");
             double sensitivity = calibration.sensitivity.value_or(0);
-            if (ImGui::InputDouble("校准灵敏度", &sensitivity, 0, 0, "%.4f")) calibration.sensitivity = sensitivity;
-            help("填写真实校准时的正值游戏灵敏度；不能从曲线强度或模拟回放推断。");
-            ImGui::InputDouble("已验证相位容差 / ms", &phase_ms); help("填写真实测量支持的命令相位容差，单位毫秒；准备时的软件预算不能替代此值。");
-            ImGui::InputDouble("已验证恢复时间 / ms", &recovery_ms); help("填写已实测支持的松键后恢复时间，单位毫秒；它决定后续弹序何时可重新开始。");
-            ImGui::Checkbox("我已人工完成当前曲线的校准与证据核对", &calibration_confirmed);
-            help("由你确认当前草稿与真实Run证据、配置和环境一致；更改草稿后确认会失效，程序不会代替人工判定效果。");
+            if (ImGui::InputDouble("游戏灵敏度", &sensitivity, 0, 0, "%.4f")) {
+                calibration.sensitivity = sensitivity; calibration_confirmed = false;
+            }
+            help("填写使用这条弹道时的游戏灵敏度；启用时与当前设置匹配。");
+            ImGui::Checkbox("我确认当前弹道可用", &calibration_confirmed);
             ImGui::BeginDisabled(!preview_valid || !calibration_confirmed || save_revision <= base.revision);
-            if (ImGui::Button("另存人工校准版本")) {
+            if (ImGui::Button("保存已验证弹道")) {
                 const auto settings = config.recoil;
                 launch([settings](Impl& state) {
                     RecoilStore store(std::filesystem::u8path(settings.profile_directory));
-                    std::error_code ec;
-                    if (!std::filesystem::exists(std::filesystem::u8path(state.calibration.evidence), ec) || ec) state.status = "校准证据路径不存在，不能保存已校准声明。";
-                    else {
-                        auto candidate = state.preview; candidate.revision = state.save_revision; candidate.state = RecoilProfileState::CALIBRATED;
-                        candidate.calibration = state.calibration; candidate.phase_tolerance_ms = state.phase_ms; candidate.recovery_ms = state.recovery_ms;
-                        if (store.save_new(candidate, state.selected_file, state.status, true)) { state.refresh(settings); state.status = "已保存人工声明的校准版本；仍未自动激活。"; }
+                    auto candidate = state.preview; candidate.revision = state.save_revision;
+                    candidate.calibration.sensitivity = state.calibration.sensitivity;
+                    if (!confirm_recoil_profile(candidate,state.status)) return;
+                    if (store.save_new(candidate, state.selected_file, state.status, true)) {
+                        state.refresh(settings); state.status = "已保存用户确认的弹道，可选择启用。";
                     }
                 });
             }
-            help("另存包含人工校准声明的新版本；须有有效草稿、人工确认、新版本号和存在的证据路径，保存后仍不自动激活。");
+            help("保存灵敏度、验证标记和弹道点；不要求额外校准文件。保存后选择启用版本。");
             ImGui::EndDisabled();
             ImGui::TextWrapped("发布对象：%s", selected_file.empty() ? "尚未选择已保存文件" : selected_file.c_str());
             ImGui::BeginDisabled(selected_file.empty());
@@ -1412,6 +1407,7 @@ struct RecoilPanel::Impl {
                 auto result = recoil_tuner::optimize_profile_recorded(dataset_copy, request_copy, base_copy, [&](const auto& points, std::string& error) {
                     auto candidate = base_copy; candidate.state = RecoilProfileState::SCHEMA_VALID; candidate.points.clear();
                     candidate.phase_tolerance_ms.reset(); candidate.recovery_ms.reset(); candidate.calibration.evidence.clear();
+                    candidate.execution_phase_budget_ms.reset();
                     for (const auto& p : points) candidate.points.push_back({p.time_ms, p.x_counts, p.y_counts});
                     replay_attempted = true;
                     return validate_recoil_candidate_execution(candidate, {}, replay, error);

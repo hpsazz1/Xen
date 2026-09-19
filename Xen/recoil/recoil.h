@@ -11,7 +11,7 @@
 
 using RecoilClock = std::chrono::steady_clock;
 using RecoilTime = RecoilClock::time_point;
-enum class RecoilProfileState { IMPORTED, SCHEMA_VALID, CALIBRATED, ACCEPTED };
+enum class RecoilProfileState { IMPORTED, SCHEMA_VALID, CALIBRATED, ACCEPTED, USER_CONFIRMED };
 struct RecoilPoint {
     double time_ms = 0, x_counts = 0, y_counts = 0;
 };
@@ -33,6 +33,8 @@ struct RecoilProfile {
     RecoilCalibration calibration;
     // 缺失表示未经验证，不能自行补常量获得执行资格。
     std::optional<double> phase_tolerance_ms, recovery_ms;
+    // 仅人工确认版本使用的软件调度预算，不是实测相位或恢复能力。
+    std::optional<double> execution_phase_budget_ms;
     std::vector<RecoilPoint> points;
 };
 struct RecoilTuning {
@@ -43,6 +45,9 @@ struct RecoilTuning {
 bool validate_recoil_profile(const RecoilProfile& profile, std::string& error) noexcept;
 bool load_recoil_profile(std::string_view json, RecoilProfile& profile, std::string& error) noexcept;
 std::string serialize_recoil_profile(const RecoilProfile& profile);
+// 用户曲线库使用精简格式；历史实测校准状态保留旧格式证据。
+std::string serialize_recoil_profile_storage(const RecoilProfile& profile);
+bool confirm_recoil_profile(RecoilProfile& profile, std::string& error) noexcept;
 bool compile_recoil_profile(const RecoilProfile& base, const RecoilTuning& tuning,
     RecoilProfile& output, std::string& error) noexcept;
 // 生产与预览共用分段线性累计求值器；时域外钳制，不循环或外推尾斜率。

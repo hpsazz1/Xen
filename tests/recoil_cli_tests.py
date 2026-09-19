@@ -78,14 +78,15 @@ def main():
         report = json.loads((output / "analysis/report.json").read_text(encoding="utf-8"))
         check(report["status"] == "CANDIDATE_VALIDATED", "CLI did not validate candidate")
         profiles = list(output.glob("*.json"))
-        check(len(profiles) == 1 and profiles[0].name == "synthetic-r2.json", "root must contain one editor-loadable profile")
+        check(len(profiles) == 1 and profiles[0].name == "weapon_ak47-r2.json", "root must contain one GSI-named editor-loadable profile")
         candidate = json.loads(profiles[0].read_text(encoding="utf-8"))
-        check(candidate["id"] == base["id"] and candidate["weapon_id"] == base["weapon_id"] and candidate["revision"] == 2,
+        check(candidate["id"] == base["id"] and candidate["weapon_id"] == "weapon_ak47" and candidate["revision"] == 2,
               "candidate lost base identity or requested revision")
-        check(candidate["schema_version"] == 1 and candidate["unit"] == "device_counts" and
-              candidate["sample_semantics"] == "cumulative" and candidate["state"] == "SCHEMA_VALID", "invalid production profile schema")
-        check(candidate["phase_tolerance_ms"] is None and candidate["recovery_ms"] is None and
-              candidate["calibration"]["evidence"] == "", "candidate inherited physical calibration")
+        check(candidate["schema_version"] == 2 and candidate["verified"] is False,
+              "invalid compact production profile or inherited confirmation")
+        check(set(candidate) == {"schema_version", "id", "revision", "weapon_id", "sensitivity", "verified", "points"}
+              and candidate["sensitivity"] == base["calibration"]["sensitivity"],
+              "compact candidate retained calibration metadata or changed sensitivity")
         check(candidate["points"][0] == [0, 0, 0] and all(isinstance(p, list) and len(p) == 3 for p in candidate["points"]),
               "profile must use production [time,x,y] points")
         generic = json.loads((output / "analysis/candidate.json").read_text(encoding="utf-8"))

@@ -10,6 +10,8 @@
 namespace {
 using Json = nlohmann::json;
 constexpr int kCommandAxisLimitCounts = 32767;
+// 与现有调试执行/候选回放一致的软件资源时限，不声明游戏实测相位。
+constexpr double kUserConfirmedPhaseBudgetMs = 20;
 constexpr std::uint64_t kReplayAdvanceLimit = 500000;
 bool finite(double x) { return std::isfinite(x); }
 bool optional_metadata(const std::string& value) {
@@ -26,6 +28,7 @@ const char* stage(RecoilProfileState state) {
     case RecoilProfileState::SCHEMA_VALID:return "SCHEMA_VALID";
     case RecoilProfileState::CALIBRATED:return "CALIBRATED";
     case RecoilProfileState::ACCEPTED:return "ACCEPTED";
+    case RecoilProfileState::USER_CONFIRMED:return "USER_CONFIRMED";
     } return "INVALID";
 }
 std::optional<double> number(const Json& json,const char* key) {
@@ -34,6 +37,7 @@ std::optional<double> number(const Json& json,const char* key) {
 }
 Json optional(std::optional<double> value) { return value ? Json(*value) : Json(nullptr); }
 bool execution_profile(const RecoilProfile& profile) {
+    if(profile.state==RecoilProfileState::USER_CONFIRMED)return profile.execution_phase_budget_ms.has_value();
     return (profile.state==RecoilProfileState::CALIBRATED || profile.state==RecoilProfileState::ACCEPTED) &&
         profile.phase_tolerance_ms.has_value();
 }
@@ -72,6 +76,16 @@ bool validate_recoil_profile(const RecoilProfile& p,std::string& error) noexcept
         if(!p.source.sha256.empty() && !hash(p.source.sha256))return reject("来源SHA256无效");
         if(!optional_metadata(p.calibration.game_build)||!optional_metadata(p.calibration.conditions))
             return reject("校准版本或条件元数据无效");
+        if(p.execution_phase_budget_ms && (p.state!=RecoilProfileState::USER_CONFIRMED ||
+            !finite(*p.execution_phase_budget_ms)||*p.execution_phase_budget_ms<=0||*p.execution_phase_budget_ms>1000))
+            return reject("人工确认软件预算无效或用于其它状态");
+        if(p.state==RecoilProfileState::USER_CONFIRMED) {
+            const auto canonical=weapon::normalize_weapon_id(p.weapon_id);
+            if(!canonical.empty()&&canonical!=p.weapon_id)return reject("人工确认曲线必须使用规范武器身份");
+            if(p.execution_phase_budget_ms!=kUserConfirmedPhaseBudgetMs||p.phase_tolerance_ms||p.recovery_ms||!p.calibration.sensitivity||
+                p.calibration.input_path!="kmbox_net")
+                return reject("人工确认需有效灵敏度和既定软件预算，不得补造实测相位或恢复时间");
+        }
         if(p.state==RecoilProfileState::CALIBRATED || p.state==RecoilProfileState::ACCEPTED) {
             const auto canonical = weapon::normalize_weapon_id(p.weapon_id);
             if (!canonical.empty() && canonical != p.weapon_id)
@@ -90,6 +104,27 @@ bool load_recoil_profile(std::string_view input,RecoilProfile& output,std::strin
             if(depth>16)throw std::runtime_error("曲线JSON嵌套过深");return true;
         });
         RecoilProfile p;
+        if(json.at("schema_version")==2) {
+            if(!json.at("revision").is_number_unsigned()||!json.at("verified").is_boolean())
+                throw std::runtime_error("精简曲线版本或确认状态类型无效");
+            p.id=json.at("id").get<std::string>();p.weapon_id=json.at("weapon_id").get<std::string>();
+            p.revision=json.at("revision").get<std::uint64_t>();
+            p.calibration.sensitivity=number(json,"sensitivity");p.calibration.input_path="kmbox_net";
+            p.state=RecoilProfileState::SCHEMA_VALID;
+            const auto& points=json.at("points");
+            if(!points.is_array()||points.size()>100000)throw std::runtime_error("曲线节点数量无效");
+            for(const auto& point:points) {
+                if(!point.is_array()||point.size()!=3)throw std::runtime_error("节点必须为[time_ms,x_counts,y_counts]");
+                p.points.push_back({point[0].get<double>(),point[1].get<double>(),point[2].get<double>()});
+            }
+            const auto canonical=weapon::normalize_weapon_id(p.weapon_id);
+            if(!canonical.empty())p.weapon_id=canonical;
+            if(json.at("verified").get<bool>()) {
+                if(!confirm_recoil_profile(p,error))return false;
+            } else if(!validate_recoil_profile(p,error))return false;
+            p.source.sha256=recoil_calibration_sha256(serialize_recoil_profile_storage(p));
+            output=std::move(p);return true;
+        }
         if(json.at("schema_version")!=1||!json.at("revision").is_number_unsigned())
             throw std::runtime_error("曲线schema或revision类型无效");
         p.schema_version=json.at("schema_version").get<std::uint32_t>();
@@ -102,12 +137,14 @@ bool load_recoil_profile(std::string_view input,RecoilProfile& output,std::strin
         else if(state=="SCHEMA_VALID")p.state=RecoilProfileState::SCHEMA_VALID;
         else if(state=="CALIBRATED")p.state=RecoilProfileState::CALIBRATED;
         else if(state=="ACCEPTED")p.state=RecoilProfileState::ACCEPTED;
+        else if(state=="USER_CONFIRMED")p.state=RecoilProfileState::USER_CONFIRMED;
         else throw std::runtime_error("未知曲线状态");
         const auto& s=json.at("source");
         p.source={s.value("repository",""),s.value("commit",""),s.value("sha256",""),s.value("license",""),
             s.value("source_unit",""),s.value("conversion_revision",""),s.value("redistribution_verified",false)};
         const auto& c=json.at("calibration");
         p.calibration={c.value("game_build",""),c.value("input_path",""),c.value("conditions",""),c.value("evidence",""),number(c,"sensitivity")};
+        p.execution_phase_budget_ms=number(json,"execution_phase_budget_ms");
         p.phase_tolerance_ms=number(json,"phase_tolerance_ms");p.recovery_ms=number(json,"recovery_ms");
         const auto& points=json.at("points");
         if(!points.is_array()||points.size()>100000)throw std::runtime_error("曲线节点数量无效");
@@ -136,7 +173,36 @@ std::string serialize_recoil_profile(const RecoilProfile& p) {
         {"calibration",{{"game_build",p.calibration.game_build},{"input_path",p.calibration.input_path},
             {"conditions",p.calibration.conditions},{"evidence",p.calibration.evidence},{"sensitivity",optional(p.calibration.sensitivity)}}},
         {"phase_tolerance_ms",optional(p.phase_tolerance_ms)},{"recovery_ms",optional(p.recovery_ms)},{"points",points}};
+    // 无此属性的历史曲线保持原序列化和语义哈希。
+    if(p.execution_phase_budget_ms)json["execution_phase_budget_ms"]=*p.execution_phase_budget_ms;
     return json.dump(2);
+}
+bool confirm_recoil_profile(RecoilProfile& profile,std::string& error) noexcept {
+    try {
+        auto confirmed=profile;
+        const auto canonical=weapon::normalize_weapon_id(confirmed.weapon_id);
+        if(!canonical.empty())confirmed.weapon_id=canonical;
+        confirmed.state=RecoilProfileState::USER_CONFIRMED;
+        confirmed.source={};confirmed.calibration.game_build.clear();confirmed.calibration.conditions.clear();
+        confirmed.calibration.evidence.clear();confirmed.calibration.input_path="kmbox_net";
+        confirmed.phase_tolerance_ms.reset();confirmed.recovery_ms.reset();
+        confirmed.execution_phase_budget_ms=kUserConfirmedPhaseBudgetMs;
+        if(!validate_recoil_profile(confirmed,error))return false;
+        confirmed.source.sha256=recoil_calibration_sha256(serialize_recoil_profile_storage(confirmed));
+        profile=std::move(confirmed);return true;
+    } catch(...) {return false;}
+}
+std::string serialize_recoil_profile_storage(const RecoilProfile& p) {
+    std::string error;if(!validate_recoil_profile(p,error))throw std::invalid_argument(error);
+    // 老实测曲线不能在存储层悄悄丢失校准证据；新人工确认路径使用精简格式。
+    if(p.state==RecoilProfileState::CALIBRATED||p.state==RecoilProfileState::ACCEPTED)
+        return serialize_recoil_profile(p);
+    Json points=Json::array();for(const auto& point:p.points)points.push_back({point.time_ms,point.x_counts,point.y_counts});
+    const auto gsi=weapon::gsi_name(p.weapon_id);
+    return Json{{"schema_version",2},{"id",p.id},{"revision",p.revision},
+        {"weapon_id",gsi.empty()?p.weapon_id:std::string(gsi)},
+        {"sensitivity",optional(p.calibration.sensitivity)},
+        {"verified",p.state==RecoilProfileState::USER_CONFIRMED},{"points",points}}.dump(2);
 }
 RecoilPoint sample_recoil_profile(const RecoilProfile& p,double time) noexcept {
     if(p.points.empty()||!finite(time)||time<=0)return {};
@@ -175,7 +241,7 @@ bool compile_recoil_profile(const RecoilProfile& base,const RecoilTuning& tuning
             }),compiled.points.end());
         }
         ++compiled.revision;compiled.state=RecoilProfileState::SCHEMA_VALID;
-        compiled.calibration.evidence.clear();compiled.phase_tolerance_ms.reset();compiled.recovery_ms.reset();
+        compiled.calibration.evidence.clear();compiled.phase_tolerance_ms.reset();compiled.recovery_ms.reset();compiled.execution_phase_budget_ms.reset();
         if(!validate_recoil_profile(compiled,error))return false;
         output=std::move(compiled);return true;
     }catch(...){return false;}
@@ -200,6 +266,7 @@ RecoilController::RecoilController(OfflineReplayTag,double phase_budget_ms) noex
 double RecoilController::phase_budget_ms() const noexcept {
     if(offline_phase_budget_ms_>0)return offline_phase_budget_ms_;
     if(calibration_permit_)return calibration_permit_->limits().command_phase_budget_ms;
+    if(profile_&&profile_->state==RecoilProfileState::USER_CONFIRMED)return profile_->execution_phase_budget_ms.value_or(0);
     return profile_ ? profile_->phase_tolerance_ms.value_or(0) : 0;
 }
 RecoilDecision RecoilController::result() const noexcept {
@@ -265,7 +332,10 @@ RecoilDecision RecoilController::advance(const RecoilInput& input,RecoilTime now
     }
     if(!active_) {
         if(!release_seen_){state_.reason=RecoilReason::WAIT_RELEASE;return result();}
-        const bool recovered=manual_restart_allowed_||!has_fired_||input.recovery_qualified || (released_since_firing_&&profile_->recovery_ms &&
+        // 人工确认采用明确的软件重放策略：观察到健康释放后，新按下从首发开始。
+        // 不声称游戏后坐力已恢复；同一持续按下及校准permit仍不能循环。
+        const bool confirmed_repress=profile_->state==RecoilProfileState::USER_CONFIRMED&&released_since_firing_;
+        const bool recovered=confirmed_repress||manual_restart_allowed_||!has_fired_||input.recovery_qualified || (released_since_firing_&&profile_->recovery_ms &&
             elapsed(now,released_at_)>=*profile_->recovery_ms);
         if(!recovered)return cancel(RecoilReason::RESET_UNVERIFIED,now);
         const auto start=input.firing_started_at==RecoilTime{}?now:input.firing_started_at;

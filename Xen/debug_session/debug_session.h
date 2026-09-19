@@ -41,6 +41,8 @@ struct Snapshot {
     State state = State::IDLE;
     bool busy = false, physical = false, hud_visible = false, cleanup_unknown = false;
     bool repeat_ready = false;
+    // 与普通进度消息分离，热键拒绝不能覆盖准备失败或失效原因。
+    std::string repeat_unavailable_reason;
     bool hud_requested = false;
     std::string hud_message;
     std::uint64_t generation = 0;
@@ -76,7 +78,7 @@ public:
     bool busy() const noexcept;
     // 仅显式启用的前台按下沿调用；繁忙不排队，每次从冻结模板创建独立Run。
     bool repeat(const Context& context) noexcept;
-    void invalidate_repeat() noexcept;
+    void invalidate_repeat(const std::string& reason = "测试模板已失效（参数或运行上下文变化），请重新准备") noexcept;
     // 原始输入面板沿用Runtime的记录/回看接口；开始、停止与归档等待均不占UI线程。
     bool record_inputs(Runtime& runtime, const std::string& root,
         const Context& context) noexcept;

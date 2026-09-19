@@ -932,7 +932,7 @@ add_library(recoil_tuner STATIC Xen/recoil_tuner/recoil_tuner.cpp Xen/recoil_tun
 target_include_directories(recoil_tuner PUBLIC ${PROJECT_SOURCE_DIR}/Xen ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(recoil_tuner PUBLIC recoil nlohmann_json::nlohmann_json ${OpenCV_LIBS})
 add_executable(xen_recoil_tuner Xen/recoil_tuner_cli/main.cpp)
-target_link_libraries(xen_recoil_tuner PRIVATE recoil_tuner recoil)
+target_link_libraries(xen_recoil_tuner PRIVATE recoil_tuner recoil weapon)
 xen_deploy_runtime_dlls(xen_recoil_tuner OPENCV)
 add_library(recoil_archive STATIC Xen/recoil/recoil_archive.cpp)
 target_link_libraries(recoil_archive PUBLIC recoil_worker PRIVATE recoil_tuner Threads::Threads)

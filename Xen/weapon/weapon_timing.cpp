@@ -71,24 +71,34 @@ bool load_timing_catalog(const std::filesystem::path& path, TimingCatalog& outpu
             if (event == Json::parse_event_t::object_end) keys.pop_back();
             return true;
         });
-        if (!json.is_object() || json.size() != 4 || !json.contains("schema_version") ||
-            !bounded_integer(json.at("schema_version"), 1) || !json.contains("revision") || !json.at("revision").is_number_unsigned() || json.at("revision").get<std::uint64_t>() == 0 ||
-            !json.contains("source") || !json.at("source").is_string() ||
-            json.at("source").get_ref<const std::string&>() != timing_catalog_source() || !json.contains("profiles") ||
+        if (!json.is_object() || !json.contains("schema_version") ||
+            !bounded_integer(json.at("schema_version"), 2) || !json.contains("revision") || !json.at("revision").is_number_unsigned() || json.at("revision").get<std::uint64_t>() == 0 ||
+            !json.contains("profiles") ||
             !json.at("profiles").is_array() || json.at("profiles").size() != kDefaults.profiles.size()) {
             error = "武器点射资料版本或完整条目数量无效"; return false;
         }
+        const bool gsi_schema = json.at("schema_version").get<int>() == 2;
+        // 旧版仍验证原来源契约；新版仅保存版本和条目，不混入已移除的元数据。
+        if (gsi_schema ? json.size() != 3 :
+            (json.size() != 4 || !json.contains("source") || !json.at("source").is_string() ||
+             json.at("source").get_ref<const std::string&>() != timing_catalog_source())) {
+            error = "武器点射资料字段或旧版来源无效"; return false;
+        }
         auto candidate = kDefaults;
         candidate.revision = json.at("revision").get<std::uint64_t>();
+        const char* identity_field = gsi_schema ? "weapon_id" : "canonical_id";
         std::array<bool, 33> seen{};
         for (const auto& row : json.at("profiles")) {
-            if (!row.is_object() || row.size() != 4 || !row.contains("canonical_id") ||
-                !row.at("canonical_id").is_string() || !row.contains("enabled") || !row.at("enabled").is_boolean() ||
+            if (!row.is_object() || row.size() != 4 || !row.contains(identity_field) ||
+                !row.at(identity_field).is_string() || !row.contains("enabled") || !row.at("enabled").is_boolean() ||
                 !row.contains("shot_hold_ms") || !bounded_integer(row.at("shot_hold_ms"),500) ||
                 !row.contains("fire_interval_ms") || !bounded_integer(row.at("fire_interval_ms"),2000)) {
                 error = "武器点射条目字段或整数范围无效"; return false;
             }
-            const auto* known = find_timing(kDefaults, row.at("canonical_id").get_ref<const std::string&>());
+            const auto& identity = row.at(identity_field).get_ref<const std::string&>();
+            // 新版只接受明确的协议原名；旧版保留历史别名兼容，随后按内部身份去重。
+            if (gsi_schema && !find_gsi_name(identity)) { error = "武器点射资料需使用目录中的GSI原名"; return false; }
+            const auto* known = find_timing(kDefaults, identity);
             if (!known) { error = "武器点射资料包含未知武器"; return false; }
             const auto index = static_cast<std::size_t>(known - kDefaults.profiles.data());
             if (seen[index]) { error = "武器点射资料包含重复武器"; return false; }
@@ -108,9 +118,9 @@ bool save_timing_catalog(const std::filesystem::path& path, const TimingCatalog&
         error.clear();
         if (!valid_timing_catalog(catalog)) { error = "武器点射资料无效，未保存"; return false; }
         Json rows = Json::array();
-        for (const auto& profile : catalog.profiles) rows.push_back({{"canonical_id", profile.canonical_id},
+        for (const auto& profile : catalog.profiles) rows.push_back({{"weapon_id", gsi_name(profile.canonical_id)},
             {"shot_hold_ms", profile.shot_hold_ms}, {"fire_interval_ms", profile.fire_interval_ms}, {"enabled", profile.enabled}});
-        const std::string content = Json{{"schema_version",1},{"revision",catalog.revision},{"source",timing_catalog_source()},{"profiles",rows}}.dump(2) + "\n";
+        const std::string content = Json{{"schema_version",2},{"revision",catalog.revision},{"profiles",rows}}.dump(2) + "\n";
         const auto absolute = std::filesystem::absolute(path);
         std::filesystem::create_directories(absolute.parent_path());
         wchar_t name[MAX_PATH]{};

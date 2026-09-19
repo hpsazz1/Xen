@@ -162,7 +162,7 @@ void test_save_weapon_timing(const std::filesystem::path& root) {
     require(session.snapshot()->state == State::COMPLETED,"有效武器参数保存失败");
     const auto after = read_json(path);
     auto expected = before; expected["revision"] = 18;
-    for (auto& row : expected["profiles"]) if (row["canonical_id"] == "ak47") {
+    for (auto& row : expected["profiles"]) if (row["weapon_id"] == "weapon_ak47") {
         row["shot_hold_ms"] = 85; row["fire_interval_ms"] = 420;
     }
     require(after == expected,"保存覆盖了最新其他武器或没有仅更新所选两字段和版本");
@@ -398,6 +398,40 @@ void test_repeat_admission_and_invalidation(const std::filesystem::path& root) {
         "重复准入拒绝或模板操作触碰设备");
     session.request_shutdown(); wait_idle(session);
 }
+void test_repeat_unavailable_reason(const std::filesystem::path& root) {
+    Session session;
+    auto device=std::make_shared<FakeDevice>();
+    auto context=context_for(device); context.config.keyboard.debug_test_enabled=true;
+    Request request; request.mode=Mode::FIRE_TEST; request.show_hud=false;
+    request.output_root=utf8(root/"repeat-reason");
+    context.runtime_idle=false;
+    require(session.dispatch(Action::PREPARE,request,context),"受阻准备应保留诊断产物");
+    wait_idle(session);
+    require(!session.snapshot()->repeat_ready,"Runtime占用不应生成模板");
+    require(!session.repeat(context),"受阻模板不得执行");
+    require(session.snapshot()->message.find("Runtime")!=std::string::npos,
+        "热键覆盖了准备阶段Runtime准入失败原因");
+    require(session.snapshot()->repeat_unavailable_reason.find("Runtime")!=std::string::npos,
+        "快照应独立保存模板准入原因供UI显示");
+    auto readiness=read_json(std::filesystem::u8path(session.snapshot()->report_directory)/"readiness.json");
+    require(!readiness.at("ready").get<bool>() && readiness.at("reason").get<std::string>().find("Runtime")!=std::string::npos,
+        "准备产物旁应保存具体准入失败原因");
+    context.runtime_idle=true;
+    require(session.dispatch(Action::PREPARE,request,context),"解除占用后可重新准备");
+    wait_idle(session);
+    for(int i=0;i<8;++i)session.poll();
+    require(session.snapshot()->repeat_ready,"无编辑轮询不得撤销成功模板");
+    require(session.snapshot()->repeat_unavailable_reason.empty(),"新准备成功必须清除旧准入失败原因");
+    readiness=read_json(std::filesystem::u8path(session.snapshot()->report_directory)/"readiness.json");
+    require(readiness.at("ready").get<bool>() && readiness.at("reason").get<std::string>().empty(),"成功准备应保存就绪快照");
+    session.invalidate_repeat();
+    require(!session.repeat(context)&&session.snapshot()->message.find("失效")!=std::string::npos,
+        "准备后失效必须说明原因，不能使用通用无模板提示");
+    require(read_json(std::filesystem::u8path(session.snapshot()->report_directory)/"readiness.json")==readiness,
+        "后续编辑不能覆写只读准备快照");
+    require(device->outputs==0&&device->opens==0&&device->closes==0,"准入与失效回归不得操作设备");
+    session.request_shutdown();wait_idle(session);
+}
 void test_repeat_creates_independent_run(const std::filesystem::path& root) {
     std::filesystem::path previous_run;
     // 原生缺少源焦点会早失败并锁定清理状态；用独立会话覆盖两次目录分配，不能伪造成功再重用会话。
@@ -527,6 +561,19 @@ void test_recoil_freeze_and_admission(const std::filesystem::path& root) {
     profile.state=RecoilProfileState::SCHEMA_VALID;profile.points={{0,0,0},{100,2,4}};
     const auto path=root/"recoil-candidate.json";
     {std::ofstream file(path);file<<serialize_recoil_profile(profile);}
+    {
+        auto confirmed=profile; confirmed.calibration.sensitivity=1;
+        std::string error;
+        require(confirm_recoil_profile(confirmed,error),"测试人工确认弹道构造失败");
+        const auto compact_path=root/"compact-confirmed.json";
+        {std::ofstream file(compact_path);file<<serialize_recoil_profile_storage(confirmed);}
+        const auto prepared=prepare_recoil_debug_plan(compact_path,context.config,1,1);
+        require(prepared.at("source_profile_state")=="USER_CONFIRMED"&&
+            prepared.at("profile").at("state")=="SCHEMA_VALID"&&
+            !prepared.at("profile").contains("execution_phase_budget_ms"),
+            "简版弹道准备须读取真实状态并清除运行许可，不依赖旧JSON字段");
+        require(device->outputs==0,"简版弹道准备不得发送设备输出");
+    }
     auto calibration=prepare_wall_debug_plan(true,"ak47",1500,{},context.config);
     calibration["geometry"]={{"input_size",{320,320}},{"processed_size",{320,320}}};
     calibration["samples"]={{{"counts",{4,0}},{"pixel_delta",{2,0}},{"acknowledged",true},{"evidence_id","x"}},
@@ -664,6 +711,7 @@ int main() {
         test_edit_during_prepare_cannot_restore_repeat(root);
         test_offline_start_uses_frozen_mode(root);
         test_repeat_admission_and_invalidation(root);
+        test_repeat_unavailable_reason(root);
         test_repeat_creates_independent_run(root);
         test_recording_ownership_and_async(root);
         test_recording_and_replay_failure_status(root);

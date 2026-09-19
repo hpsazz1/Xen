@@ -1,4 +1,5 @@
 #include "recoil/recoil_store.h"
+#include "weapon/weapon_catalog.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <atomic>
@@ -85,8 +86,20 @@ struct IndexLock {
     explicit IndexLock(const std::filesystem::path&){}
 #endif
 };
-bool calibrated(const RecoilProfile& profile) {
-    return profile.state==RecoilProfileState::CALIBRATED||profile.state==RecoilProfileState::ACCEPTED;
+bool executable(const RecoilProfile& profile) {
+    return profile.state==RecoilProfileState::CALIBRATED||profile.state==RecoilProfileState::ACCEPTED||profile.state==RecoilProfileState::USER_CONFIRMED;
+}
+std::string canonical_weapon(const std::string& value) {
+    const auto canonical=weapon::normalize_weapon_id(value);
+    return canonical.empty()?value:std::string(canonical);
+}
+std::string stored_weapon(const std::string& canonical) {
+    const auto gsi=weapon::gsi_name(canonical);
+    return gsi.empty()?canonical:std::string(gsi);
+}
+std::string active_key(const Json& value,const std::string& canonical) {
+    const auto gsi=stored_weapon(canonical);
+    return value["active"].contains(gsi)?gsi:canonical;
 }
 void report(std::string& error,const std::exception& e)noexcept{try{error=e.what();}catch(...){}}
 }
@@ -119,17 +132,19 @@ bool RecoilStore::list(std::vector<RecoilStoredProfile>& output,std::string& err
 bool RecoilStore::save_new(const RecoilProfile& input,std::string& file,std::string& error,bool preserve) const noexcept {
     try {
         if(reparse(directory_)||!id(input.id))throw std::runtime_error("目录或profile id无效");
+        if(preserve&&!validate_recoil_profile(input,error))return false;
         RecoilProfile profile=input;
+        profile.weapon_id=canonical_weapon(profile.weapon_id);
         std::vector<RecoilStoredProfile> known;if(!list(known,error))return false;
         std::uint64_t maximum=0;
-        for(const auto& item:known)if(item.profile->id==profile.id)maximum=std::max(maximum,item.profile->revision);
+        for(const auto& item:known)if(item.profile->id==profile.id||item.profile->weapon_id==profile.weapon_id)maximum=std::max(maximum,item.profile->revision);
         if(maximum==std::numeric_limits<std::uint64_t>::max())throw std::runtime_error("曲线revision已耗尽");
         profile.revision=std::max(profile.revision,maximum+1);
-        if(!preserve){profile.state=RecoilProfileState::SCHEMA_VALID;profile.calibration.evidence.clear();profile.phase_tolerance_ms.reset();profile.recovery_ms.reset();}
-        else if(!calibrated(profile))throw std::runtime_error("明确校准保存必须带CALIBRATED或ACCEPTED及完整证据");
-        const auto text=serialize_recoil_profile(profile);
+        if(!preserve){profile.state=RecoilProfileState::SCHEMA_VALID;profile.calibration.evidence.clear();profile.phase_tolerance_ms.reset();profile.recovery_ms.reset();profile.execution_phase_budget_ms.reset();}
+        else if(!executable(profile))throw std::runtime_error("明确保存需已校准或用户确认状态及完整证据");
+        const auto text=serialize_recoil_profile_storage(profile);
         if(text.size()>16*1024*1024)throw std::runtime_error("保存曲线超过16MiB");
-        const auto name=profile.id+"-r"+std::to_string(profile.revision)+".json";
+        const auto name=stored_weapon(profile.weapon_id)+"-r"+std::to_string(profile.revision)+".json";
         if(!file_name(name))throw std::runtime_error("保存版本文件名过长");
         std::filesystem::create_directories(directory_);
         write(directory_/name,text,false);file=name;error.clear();return true;
@@ -138,11 +153,18 @@ bool RecoilStore::save_new(const RecoilProfile& input,std::string& file,std::str
 bool RecoilStore::set_active(const std::string& weapon,const std::string& file,std::string& error) const noexcept {
     try {
         RecoilProfile profile;if(!load(file,profile,error))return false;
-        if(!id(weapon)||profile.weapon_id!=weapon||!calibrated(profile))throw std::runtime_error("活动引用必须对应本武器的已校准曲线");
+        const auto canonical=canonical_weapon(weapon);
+        const auto gsi=stored_weapon(canonical);
+        if(!id(weapon)||profile.weapon_id!=canonical||!executable(profile))throw std::runtime_error("活动引用必须对应本武器的已校准或用户确认曲线");
         IndexLock lock(directory_);auto value=index(directory_);
-        auto previous=value["active"].contains(weapon)?value["active"][weapon]["file"].get<std::string>():std::string{};
-        if(previous==file){error.clear();return true;}
-        value["active"][weapon]={{"file",file},{"previous",previous}};
+        const auto key=active_key(value,canonical);
+        auto previous=value["active"].contains(key)?value["active"][key]["file"].get<std::string>():std::string{};
+        if(previous==file) {
+            if(key==gsi&&(canonical==gsi||!value["active"].contains(canonical))){error.clear();return true;}
+            previous=value["active"][key].value("previous",std::string{});
+        }
+        if(gsi!=canonical)value["active"].erase(canonical);
+        value["active"][gsi]={{"file",file},{"previous",previous}};
         if(value.dump(2).size()>65536)throw std::runtime_error("活动索引大小超过限制");
         write(directory_/"active.json",value.dump(2),true);error.clear();return true;
     }catch(const std::exception& e){report(error,e);return false;}catch(...){return false;}
@@ -150,12 +172,15 @@ bool RecoilStore::set_active(const std::string& weapon,const std::string& file,s
 bool RecoilStore::rollback(const std::string& weapon,std::string& error) const noexcept {
     try {
         IndexLock lock(directory_);auto value=index(directory_);
-        if(!value["active"].contains(weapon))throw std::runtime_error("没有可回退的活动版本");
-        const auto current=value["active"][weapon]["file"].get<std::string>();
-        const auto previous=value["active"][weapon].value("previous",std::string{});
+        const auto canonical=canonical_weapon(weapon);const auto key=active_key(value,canonical);
+        const auto gsi=stored_weapon(canonical);
+        if(!value["active"].contains(key))throw std::runtime_error("没有可回退的活动版本");
+        const auto current=value["active"][key]["file"].get<std::string>();
+        const auto previous=value["active"][key].value("previous",std::string{});
         RecoilProfile profile;if(!load(previous,profile,error))return false;
-        if(profile.weapon_id!=weapon||!calibrated(profile))throw std::runtime_error("回退版本不满足校准身份");
-        value["active"][weapon]={{"file",previous},{"previous",current}};
+        if(profile.weapon_id!=canonical||!executable(profile))throw std::runtime_error("回退版本不满足执行身份");
+        if(gsi!=canonical)value["active"].erase(canonical);
+        value["active"][gsi]={{"file",previous},{"previous",current}};
         write(directory_/"active.json",value.dump(2),true);error.clear();return true;
     }catch(const std::exception& e){report(error,e);return false;}catch(...){return false;}
 }
@@ -164,13 +189,14 @@ std::shared_ptr<const RecoilProfile> RecoilStore::resolve(const RecoilConfig& co
         if(reparse(directory_)||!id(weapon)||config.input_path!="kmbox_net"||
             !std::isfinite(config.sensitivity)||config.sensitivity<=0)throw std::runtime_error("曲线匹配条件未知");
         const auto value=index(directory_);
-        if(!value["active"].contains(weapon))throw std::runtime_error("武器未明确选择活动曲线");
-        const auto file=value["active"][weapon]["file"].get<std::string>();
+        const auto canonical=canonical_weapon(weapon);const auto key=active_key(value,canonical);
+        if(!value["active"].contains(key))throw std::runtime_error("武器未明确选择活动曲线");
+        const auto file=value["active"][key]["file"].get<std::string>();
         RecoilProfile p;if(!load(file,p,error))return {};
-        if(!calibrated(p)||p.weapon_id!=weapon||p.fire_mode!=config.fire_mode||
+        if(!executable(p)||p.weapon_id!=canonical||p.fire_mode!=config.fire_mode||
             p.calibration.input_path!=config.input_path||
             !p.calibration.sensitivity||*p.calibration.sensitivity!=config.sensitivity)
-            throw std::runtime_error("曲线校准状态、模式或输入条件不精确匹配");
+            throw std::runtime_error("曲线执行状态、模式或输入条件不精确匹配");
         error.clear();return std::make_shared<const RecoilProfile>(std::move(p));
     }catch(const std::exception& e){report(error,e);return {};}catch(...){return {};}
 }

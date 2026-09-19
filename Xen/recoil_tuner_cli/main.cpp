@@ -1,6 +1,8 @@
 #include "recoil_tuner/recoil_tuner.h"
 #include "recoil/recoil.h"
 #include "recoil/recoil_store.h"
+#include "weapon/weapon_timing.h"
+#include "weapon/weapon_catalog.h"
 
 #include <nlohmann/json.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -9,6 +11,7 @@
 #include <iostream>
 #include <iterator>
 #include <sstream>
+#include <set>
 
 namespace {
 std::string read_text(const std::filesystem::path& path) {
@@ -27,6 +30,66 @@ std::uint64_t number(const char* text) {
 }
 int main(int argc, char** argv) {
     try {
+        // 明确的人工确认迁移入口：只写全新目录，不改原件、不启用设备。
+        if (argc == 5 && std::string(argv[1]) == "compact-confirmed") {
+            const auto destination = std::filesystem::absolute(argv[4]);
+            if (std::filesystem::exists(destination)) throw std::runtime_error("迁移目标必须是新目录");
+            std::string error;
+            std::vector<RecoilStoredProfile> originals;
+            RecoilStore source(argv[2]);
+            if (!source.list(originals,error) || originals.empty()) throw std::runtime_error(error);
+            auto timing=weapon::default_timing_catalog();
+            if (std::string(argv[3])!="-" && !weapon::load_timing_catalog(argv[3],timing,error))
+                throw std::runtime_error(error);
+            std::set<std::string> weapons;
+            for (const auto& item : originals) {
+                if (!weapons.insert(item.profile->weapon_id).second)
+                    throw std::runtime_error("同武器有多个版本，请先明确迁移对象");
+                auto checked = *item.profile;
+                if (!confirm_recoil_profile(checked,error)) throw std::runtime_error(error);
+            }
+            std::filesystem::create_directories(destination);
+            RecoilStore output(destination/"profiles");
+            nlohmann::json entries = nlohmann::json::array();
+            for (const auto& item : originals) {
+                auto confirmed = *item.profile;
+                const auto gsi_name=weapon::gsi_name(confirmed.weapon_id);
+                if(gsi_name.empty())throw std::runtime_error("迁移武器没有明确GSI名称");
+                confirmed.id=gsi_name;
+                if (!confirm_recoil_profile(confirmed,error)) throw std::runtime_error(error);
+                std::string file;
+                if (!output.save_new(confirmed,file,error,true) || !output.set_active(confirmed.weapon_id,file,error))
+                    throw std::runtime_error(error);
+                RecoilConfig config;
+                config.sensitivity = *confirmed.calibration.sensitivity;
+                const auto resolved = output.resolve(config,confirmed.weapon_id,error);
+                if (!resolved || resolved->points.size()!=item.profile->points.size() ||
+                    resolved->calibration.sensitivity!=item.profile->calibration.sensitivity)
+                    throw std::runtime_error("迁移后活动弹道或灵敏度不一致");
+                for (std::size_t i=0;i<resolved->points.size();++i) {
+                    const auto& a=resolved->points[i]; const auto& b=item.profile->points[i];
+                    if(a.time_ms!=b.time_ms||a.x_counts!=b.x_counts||a.y_counts!=b.y_counts)
+                        throw std::runtime_error("迁移改变了弹道点");
+                }
+                entries.push_back({{"original_file",item.file},{"file",file},{"points",resolved->points.size()},
+                    {"sensitivity",config.sensitivity},{"verified",true},{"active_resolved",true}});
+            }
+            if (!weapon::save_timing_catalog(destination/"weapon-timing.json",timing,error))
+                throw std::runtime_error(error);
+            weapon::TimingCatalog reread;
+            if (!weapon::load_timing_catalog(destination/"weapon-timing.json",reread,error)) throw std::runtime_error(error);
+            for (const auto& row:timing.profiles) {
+                const auto* other=weapon::find_timing(reread,row.canonical_id);
+                if(!other||other->shot_hold_ms!=row.shot_hold_ms||other->fire_interval_ms!=row.fire_interval_ms||other->enabled!=row.enabled)
+                    throw std::runtime_error("迁移改变了武器时序");
+            }
+            const nlohmann::json report={{"kind","user_confirmed_profile_migration"},{"physical_test_performed",false},
+                {"entries",entries},{"timing_values_unchanged",true}};
+            std::ofstream manifest(destination/"migration-report.json",std::ios::binary);
+            manifest << report.dump(2); manifest.close();
+            if(!manifest) throw std::runtime_error("迁移报告保存失败");
+            std::cout << report.dump(2) << '\n'; return 0;
+        }
         if (argc == 7 && std::string(argv[1]) == "optimize") {
             recoil_tuner::Dataset dataset;
             std::string error;
@@ -56,7 +119,7 @@ int main(int argc, char** argv) {
                 auto candidate = base;
                 candidate.revision = revision;
                 candidate.state = RecoilProfileState::SCHEMA_VALID;
-                candidate.phase_tolerance_ms.reset(); candidate.recovery_ms.reset();
+                candidate.phase_tolerance_ms.reset(); candidate.recovery_ms.reset(); candidate.execution_phase_budget_ms.reset();
                 candidate.calibration.evidence.clear();
                 candidate.points.clear();
                 for (const auto& p : points) candidate.points.push_back({p.time_ms, p.x_counts, p.y_counts});
@@ -85,7 +148,7 @@ int main(int argc, char** argv) {
                 auto candidate = base;
                 candidate.revision = revision;
                 candidate.state = RecoilProfileState::SCHEMA_VALID;
-                candidate.phase_tolerance_ms.reset(); candidate.recovery_ms.reset();
+                candidate.phase_tolerance_ms.reset(); candidate.recovery_ms.reset(); candidate.execution_phase_budget_ms.reset();
                 candidate.calibration.evidence.clear(); candidate.points.clear();
                 for (const auto& point : report.candidate->points)
                     candidate.points.push_back({point.time_ms, point.x_counts, point.y_counts});
@@ -119,9 +182,11 @@ int main(int argc, char** argv) {
             return result.valid ? 0 : 2;
         }
         std::cout << "离线弹道优化器（不连接设备、不改变活动曲线）\n"
+            "  compact-confirmed <旧profiles目录> <weapon-timing.json或-使用内置值> <全新迁移目录>\n"
             "  optimize <数据集.json> <基线profile.json> <新结果目录> <优化代际> <候选版本>\n"
             "  measure <之前图像> <之后图像> <人工锚点与区域.json> <新测量结果.json>\n"
             "测量仅输出待人工确认的暗斑候选；优化结果需用户前台试验和人工验收。\n";
         return 1;
-    } catch (...) { std::cerr << "输入参数、文件或数据格式无效；未执行设备操作。\n"; return 1; }
+    } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
+      catch (...) { std::cerr << "输入参数、文件或数据格式无效；未执行设备操作。\n"; return 1; }
 }

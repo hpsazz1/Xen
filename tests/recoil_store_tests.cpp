@@ -59,6 +59,38 @@ int main(int argc, char** argv){
     expect(store.resolve(cfg,p.weapon_id,error)->revision==2,"拒绝未校准发布后保留原活动版本");
     expect(!store.load("../escape.json",loaded,error),"拒绝目录穿越");
     std::vector<RecoilStoredProfile> profiles;expect(store.list(profiles,error)&&profiles.size()==3,"限量列举保存版本");
+    auto manual=p;manual.id="manual";
+    expect(confirm_recoil_profile(manual,error),"人工确认不需要用户填来源或校准声明");
+    std::string manual_file;
+    expect(store.save_new(manual,manual_file,error,true),"人工确认保存新版本");
+    expect(store.load(manual_file,loaded,error)&&loaded.state==RecoilProfileState::USER_CONFIRMED&&
+        loaded.source.sha256.size()==64&&!loaded.phase_tolerance_ms&&!loaded.recovery_ms,"精简存储恢复身份及内容摘要，不伪造实测");
+    {std::ifstream stream(directory/manual_file);std::string content((std::istreambuf_iterator<char>(stream)),{});
+        expect(content.find("source")==std::string::npos&&content.find("calibration")==std::string::npos&&
+            content.find("phase")==std::string::npos,"用户JSON移除来源校准及软件预算节点");}
+    expect(store.set_active(p.weapon_id,manual_file,error)&&store.resolve(cfg,p.weapon_id,error)->state==RecoilProfileState::USER_CONFIRMED,
+        "用户确认曲线可作为本武器活动版本");
+    cfg.sensitivity=2;expect(!store.resolve(cfg,p.weapon_id,error),"人工确认灵敏度失配仍拒绝");cfg.sensitivity=1;
+    cfg.input_path="other";expect(!store.resolve(cfg,p.weapon_id,error),"人工确认输入路径失配仍拒绝");cfg.input_path="kmbox_net";
+    std::string draft_file;
+    expect(store.save_new(manual,draft_file,error)&&store.load(draft_file,loaded,error)&&
+        loaded.state==RecoilProfileState::SCHEMA_VALID&&!loaded.execution_phase_budget_ms,
+        "普通保存清除用户确认与软件预算");
+    expect(!store.set_active(p.weapon_id,draft_file,error),"未确认精简候选不能启用");
+    expect(store.rollback(p.weapon_id,error)&&store.resolve(cfg,p.weapon_id,error)->state==RecoilProfileState::CALIBRATED,
+        "人工确认版本可回退既有实测版本");
+    auto named=p;named.weapon_id="ak47";named.id="different_curve";named.revision=1;
+    expect(confirm_recoil_profile(named,error),"目录武器人工确认");
+    std::string named_file,named_next;
+    expect(store.save_new(named,named_file,error,true)&&named_file=="weapon_ak47-r1.json","文件名使用GSI规范名");
+    expect(store.set_active("weapon_ak47",named_file,error)&&bool(store.resolve(cfg,"ak47",error)),"GSI活动键与内部短名兼容");
+    named.id="another_curve";
+    expect(store.save_new(named,named_next,error,true)&&named_next=="weapon_ak47-r2.json","同武器不同曲线ID共享递增文件版本避免冲突");
+    {std::ofstream index(directory/"active.json");index<<"{\"schema_version\":1,\"active\":{\"ak47\":{\"file\":\""<<named_file<<"\",\"previous\":\"\"}}}";}
+    expect(bool(store.resolve(cfg,"weapon_ak47",error)),"旧短名活动索引兼容读取");
+    expect(store.set_active("ak47",named_next,error)&&store.rollback("weapon_ak47",error),"旧索引切换后使用GSI键且可回退");
+    {std::ifstream index(directory/"active.json");std::string content((std::istreambuf_iterator<char>(index)),{});
+        expect(content.find("weapon_ak47")!=std::string::npos&&content.find("\"ak47\"")==std::string::npos,"写活动索引只保留GSI名称");}
     {std::ofstream broken(directory/"broken.json");broken<<"{}";}
     expect(!store.list(profiles,error),"损坏候选显式失败不假成功");
     std::filesystem::remove_all(directory);

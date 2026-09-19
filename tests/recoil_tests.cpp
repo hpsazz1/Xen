@@ -78,6 +78,82 @@ void schema_and_compile(){
     expect(std::abs(sample_recoil_profile(p,15).x_counts-0.6)<1e-12,"分段线性求值");
     expect(sample_recoil_profile(p,999).x_counts==1.6,"尾部不外推");
 }
+void user_confirmed_execution_keeps_boundaries(){
+    auto base=*profile();base.phase_tolerance_ms.reset();base.recovery_ms.reset();
+    base.state=RecoilProfileState::IMPORTED;base.calibration.input_path="kmbox_net";
+    auto text=serialize_recoil_profile(base);
+    text.replace(text.find("IMPORTED"),8,"USER_CONFIRMED");
+    text.insert(1,"\"execution_phase_budget_ms\":20,");
+    RecoilProfile confirmed;std::string error;
+    const bool valid=load_recoil_profile(text,confirmed,error);
+    expect(valid,"用户确认曲线使用独立软件预算准入");
+    if(!valid)return;
+    expect(!confirmed.phase_tolerance_ms&&!confirmed.recovery_ms,"用户确认不补造实测相位和恢复数据");
+    RecoilProfile restored;
+    expect(load_recoil_profile(serialize_recoil_profile(confirmed),restored,error),"人工确认状态与预算往返");
+    auto missing=confirmed;missing.calibration.sensitivity.reset();
+    expect(!validate_recoil_profile(missing,error),"人工确认仍需灵敏度");
+    missing=confirmed;missing.phase_tolerance_ms=20;
+    expect(!validate_recoil_profile(missing,error),"人工确认不得混入实测相位声明");
+    auto no_budget=text;no_budget.erase(1,std::string("\"execution_phase_budget_ms\":20,").size());
+    expect(!load_recoil_profile(no_budget,restored,error),"人工确认缺软件预算不得执行");
+    const auto compact=serialize_recoil_profile_storage(confirmed);
+    expect(compact.find("source")==std::string::npos&&compact.find("calibration")==std::string::npos&&
+        compact.find("phase")==std::string::npos,"用户存储只留弹道与灵敏度及确认状态");
+    expect(load_recoil_profile(compact,restored,error)&&restored.state==RecoilProfileState::USER_CONFIRMED&&
+        restored.calibration.input_path=="kmbox_net"&&!restored.phase_tolerance_ms,"精简曲线重建人工确认执行身份");
+    const auto original=serialize_recoil_profile(restored);
+    RecoilProfile unchanged;
+    expect(compile_recoil_profile(restored,{},unchanged,error)&&serialize_recoil_profile(restored)==original&&
+        serialize_recoil_profile(unchanged)==original,"精简载入后无调参编译保持输入快照和人工身份");
+    expect(restored.source.sha256.size()==64&&serialize_recoil_profile_storage(restored)==compact,
+        "内容派生摘要不污染精简存储");
+    RecoilProfile tuned;
+    expect(compile_recoil_profile(confirmed,{2,1,0,1},tuned,error)&&tuned.state==RecoilProfileState::SCHEMA_VALID,
+        "修改人工确认曲线后重新成为候选");
+    RecoilController c;auto i=input();i.profile=std::make_shared<const RecoilProfile>(confirmed);
+    c.advance(i,time(0));i.held=true;i.firing_started_at=time(1);c.advance(i,time(1));
+    auto d=c.advance(i,time(21));expect(d.has_intent,"人工确认可产生普通运行意图");
+    if(d.has_intent){
+        auto late=c.acknowledge({d.intent.command_id,RecoilReceiptStatus::ACKNOWLEDGED,time(42)},time(42));
+        expect(late.snapshot.reason==RecoilReason::LATE,"人工确认迟到ACK仍终止会话");
+    }
+    RecoilController blocked;i.held=false;i.permission=false;
+    expect(blocked.advance(i,time(0)).snapshot.reason==RecoilReason::CONTEXT,"人工确认不能绕过环境许可");
+    i.permission=true;i.profile_conditions_match=false;
+    expect(blocked.advance(i,time(1)).snapshot.reason==RecoilReason::CONTEXT,"人工确认不能绕过条件匹配");
+}
+void user_confirmed_repress_replays_without_claiming_recovery(){
+    auto confirmed=*profile();std::string error;
+    expect(confirm_recoil_profile(confirmed,error),"用户确认重放测试profile有效");
+    RecoilController c;auto i=input();i.profile=std::make_shared<const RecoilProfile>(confirmed);
+    c.advance(i,time(0));
+    for(int run=0;run<2;++run) {
+        const double start=1+run*50;
+        i.held=true;i.firing_started_at=time(start);c.advance(i,time(start));
+        auto first=c.advance(i,time(start+10));
+        expect(first.snapshot.session_id==static_cast<std::uint64_t>(run+1)&&!first.has_intent&&
+            std::abs(first.snapshot.remainder_y-0.6)<1e-12,"每次独立按下从首10ms重新采样");
+        auto d=c.advance(i,time(start+20));acknowledge(c,d,start+20);
+        d=c.advance(i,time(start+40));acknowledge(c,d,start+40);
+        const auto end=c.snapshot();
+        expect(end.phase==RecoilPhase::EXHAUSTED,"已确认曲线末尾结束本次弹序");
+        const auto held=c.advance(i,time(start+41));
+        expect(!held.has_intent&&held.snapshot.session_id==end.session_id,"不释放的持续按下不能循环曲线");
+        i.held=false;c.advance(i,time(start+42));
+    }
+    expect(!i.recovery_qualified&&!confirmed.recovery_ms&&c.snapshot().session_id==2,
+        "两次普通手动重放不补造物理恢复时间或恢复资格");
+    i.held=true;i.firing_started_at=time(102);i.focused=false;
+    expect(c.advance(i,time(102)).snapshot.reason==RecoilReason::CONTEXT,"重按不能绕过焦点");
+    i.focused=true;
+    expect(!c.advance(i,time(103)).has_intent&&c.snapshot().session_id==2,"上下文拒绝后必须再次观察释放");
+    i.held=false;c.advance(i,time(104));i.held=true;i.firing_started_at=time(105);
+    expect(c.advance(i,time(126)).snapshot.reason==RecoilReason::LATE,"重按射击起点迟到仍拒绝");
+    RecoilController legacy;auto old=input();legacy.advance(old,time(0));old.held=true;old.firing_started_at=time(1);
+    legacy.advance(old,time(1));old.held=false;legacy.advance(old,time(2));old.held=true;old.firing_started_at=time(3);
+    expect(legacy.advance(old,time(3)).snapshot.reason==RecoilReason::RESET_UNVERIFIED,"原实测状态保留恢复等待规则");
+}
 void manual_restart_keeps_accounting_and_boundaries(){
     auto i=input();RecoilController c;c.advance(i,time(0));i.held=true;i.firing_started_at=time(1);c.advance(i,time(1));
     auto d=c.advance(i,time(21));expect(d.has_intent,"接管前软件弹序产生意图");
@@ -228,5 +304,5 @@ void candidate_large_zero_curve_is_bounded(){
     }
 }
 }
-int main(){schema_and_compile();manual_restart_keeps_accounting_and_boundaries();counts_and_phase();receipts_and_context();candidate_validation_keeps_production_closed();
+int main(){schema_and_compile();user_confirmed_execution_keeps_boundaries();user_confirmed_repress_replays_without_claiming_recovery();manual_restart_keeps_accounting_and_boundaries();counts_and_phase();receipts_and_context();candidate_validation_keeps_production_closed();
     candidate_execution_rejects_compiler_only_limits();candidate_replay_checks_faults_and_bounds();candidate_large_zero_curve_is_bounded();return failures?1:0;}

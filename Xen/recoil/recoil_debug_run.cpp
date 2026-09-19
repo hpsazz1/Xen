@@ -355,7 +355,7 @@ Json prepare_recoil_debug_plan(const std::filesystem::path& path, const AppConfi
         throw std::runtime_error(error);
     // load与compile已完成真实结构校验；只更新本次测试副本，IMPORTED源文件及生产准入不变。
     profile.state=RecoilProfileState::SCHEMA_VALID; profile.calibration.evidence.clear();
-    profile.phase_tolerance_ms.reset(); profile.recovery_ms.reset();
+    profile.phase_tolerance_ms.reset(); profile.recovery_ms.reset(); profile.execution_phase_budget_ms.reset();
     double variation = 0;
     for (std::size_t i=1;i<profile.points.size();++i)
         variation += std::abs(profile.points[i].x_counts-profile.points[i-1].x_counts)+
@@ -367,7 +367,7 @@ Json prepare_recoil_debug_plan(const std::filesystem::path& path, const AppConfi
     const auto total = static_cast<std::uint64_t>(count_limit);
     const int firing_ms=std::min(60000,static_cast<int>(std::ceil(profile.points.back().time_ms))+100);
     Json plan{{"schema_version",1},{"kind","recoil_test"},{"profile",Json::parse(serialize_recoil_profile(profile))},
-        {"source_profile_state",Json::parse(text).at("state")},{"measurement_enabled",false},
+        {"source_profile_state",Json::parse(serialize_recoil_profile(base)).at("state")},{"measurement_enabled",false},
         {"source_sha256",recoil_calibration_sha256(text)},{"sensitivity",config.recoil.sensitivity},
         {"hold_key",config.keyboard.debug_test_virtual_keys.front()},{"cancel_key",config.keyboard.emergency_virtual_keys.front()},
         {"limits",{{"session_ms",std::min(600000,firing_ms+30000)},{"firing_ms",firing_ms},
