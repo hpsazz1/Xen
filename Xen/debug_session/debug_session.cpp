@@ -175,7 +175,8 @@ struct Session::Impl {
         canceled = false;
         const auto current = ++generation;
         update([&](Snapshot& s) { s.state = state; s.busy = true; s.physical = physical;
-            s.generation = current; s.message = "后台处理中"; s.live.reset(); });
+            // generation与结果同次发布，不能让新准备代次携带上一次完成结果。
+            s.generation = current; s.message = "后台处理中"; s.live.reset(); s.result.reset(); });
         try {
             worker = std::async(std::launch::async, [this, current, physical, fn = std::forward<F>(fn)]() mutable {
                 try { fn(); }
@@ -543,14 +544,19 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
                 plan["target_shots"]=effective.recoil_target_shots;
                 plan["locked_prefix_ms"]=effective.recoil_locked_prefix_ms;
                 if(effective.mode==Mode::RECOIL_TEST) {
+                    if(effective.recoil_duration_ms<100||effective.recoil_duration_ms>10000)
+                        throw std::runtime_error("测试最长时长须100–10000ms");
                     plan["duration_ms"]=effective.recoil_duration_ms;
                     // 阶段延长只扩等待时间，旧曲线尾部不外推，counts额度仍由冻结曲线决定。
                     const int firing_limit=std::min(60000,effective.recoil_duration_ms+100);
                     plan["limits"]["firing_ms"]=std::max(plan["limits"]["firing_ms"].get<int>(),firing_limit);
                     plan["limits"]["session_ms"]=std::min(600000,plan["limits"]["firing_ms"].get<int>()+30000);
-                    auto calibrated=prepare_wall_debug_plan(false,plan.at("profile").at("weapon_id"),
-                        effective.recoil_duration_ms,std::filesystem::u8path(effective.recoil_calibration_path),context.config);
-                    plan["calibration"]=calibrated.at("calibration");
+                    plan["measurement_enabled"]=!effective.recoil_calibration_path.empty();
+                    if(!effective.recoil_calibration_path.empty()){
+                        auto calibrated=prepare_wall_debug_plan(false,plan.at("profile").at("weapon_id"),
+                            effective.recoil_duration_ms,std::filesystem::u8path(effective.recoil_calibration_path),context.config);
+                        plan["calibration"]=calibrated.at("calibration");
+                    }
                 }
             }
             const auto sampling = recoil_mode(effective.mode)?Json::object():request_sampling(effective);

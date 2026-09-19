@@ -9,6 +9,8 @@
 #endif
 
 #include "overlay/overlay.h"
+#include "overlay/recoil_panel.h"
+#include "recoil/recoil.h"
 #include "log/log.h"
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -27,6 +29,7 @@
 #include <iterator>
 #include <exception>
 #include <sstream>
+#include <thread>
 
 namespace {
 void require(bool value, const char* message) {
@@ -196,6 +199,122 @@ void require_page_table(const char* table_name) {
     }
     throw std::runtime_error("导航未到达预期生产页面，拒绝保存误导截图");
 }
+
+// 真实面板+ImGui交互，只截获动作，不构造Session/Runtime/设备。
+void recoil_flow_preview(const std::filesystem::path& output) {
+    const auto previous = std::filesystem::current_path();
+    struct RestoreDirectory { std::filesystem::path path; ~RestoreDirectory() { std::filesystem::current_path(path); } } restore{previous};
+    std::filesystem::current_path(output);
+    std::filesystem::create_directories("profiles");
+    std::filesystem::create_directories("cache/recoil");
+    RecoilProfile imported; imported.id = "ui-imported"; imported.weapon_id = "ak47";
+    imported.state = RecoilProfileState::IMPORTED; imported.points = {{0,0,0},{100,2,4}};
+    { std::ofstream file("profiles/imported.json"); file << serialize_recoil_profile(imported); }
+    { std::ofstream file("cache/recoil/workflow-settings.json"); file << R"({"ak47":{}})"; }
+    ImGui::CreateContext();
+    struct DestroyContext { ~DestroyContext() { ImGui::DestroyContext(); } } context;
+    auto& io = ImGui::GetIO(); io.DisplaySize = {1300,1600}; io.DeltaTime = 1.f/60.f; io.IniFilename = nullptr;
+    io.ConfigInputTrickleEventQueue = false;
+    io.Fonts->AddFontDefault(); unsigned char* pixels; int width, height; io.Fonts->GetTexDataAsRGBA32(&pixels,&width,&height);
+    auto panel = std::make_unique<RecoilPanel>(); AppConfig config; config.recoil.profile_directory = "profiles"; config.recoil.sensitivity = 1;
+    RuntimeSnapshot runtime; runtime.state = RuntimeState::STOPPED;
+    debug_session::Snapshot debug; OverlayActions actions;
+    std::vector<OverlayActions> emitted;
+    std::string pending_focus;
+    auto frame = [&] {
+        panel->poll(); actions = {};
+        ImGui::NewFrame(); ImGui::LogToBuffer(0); ImGui::SetNextWindowPos({0,0}); ImGui::SetNextWindowSize({1300,1600});
+        ImGui::Begin("recoil-flow", nullptr, ImGuiWindowFlags_NoSavedSettings);
+        if (!pending_focus.empty()) { ImGui::SetFocusID(ImGui::GetID(pending_focus.c_str()),ImGui::GetCurrentWindow()); pending_focus.clear(); }
+        panel->render_tools(runtime,config,true,actions,&debug);
+        ImGui::End();
+        { std::ofstream text(output/"flow-last-frame.txt"); text << ImGui::GetCurrentContext()->LogBuffer.c_str(); }
+        ImGui::LogFinish(); ImGui::Render();
+        require(actions.debug_action != debug_session::Action::START && !actions.debug_allow_physical_output &&
+            actions.debug_confirmation.empty(), "自动流程不得启动或产生物理授权");
+        if (actions.debug_action != debug_session::Action::NONE) {
+            emitted.push_back(actions);
+            std::ofstream trace(output/"flow-actions.txt",std::ios::app);
+            trace << static_cast<int>(actions.debug_action) << " mode=" << static_cast<int>(actions.debug_request.mode)
+                << " profile=" << actions.debug_request.recoil_profile_path << " calibration=" << actions.debug_request.recoil_calibration_path << '\n';
+        }
+    };
+    auto settle = [&] {
+        for (int i=0;i<200;++i) { frame(); if (!panel->busy() && i>5) return; std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
+        throw std::runtime_error("面板后台任务未在有界时间内完成");
+    };
+    auto click = [&](const char* label) {
+        settle(); auto* window = ImGui::FindWindowByName("recoil-flow"); require(window != nullptr,"流程窗口缺失");
+        const auto target = window->GetID(label);
+        io.AddMousePosEvent(1290,1590); pending_focus=label; frame();
+        require(ImGui::GetCurrentContext()->NavId==target,"真实目标控件未获得导航焦点");
+        const auto rectangle = ImGui::WindowRectRelToAbs(window,window->NavRectRel[ImGuiNavLayer_Main]);
+        const ImVec2 point=rectangle.GetCenter();
+        require(window->ClipRect.Contains(point)&&rectangle.GetWidth()>0&&rectangle.GetHeight()>0,"真实目标控件没有可点击矩形");
+        { std::ofstream trace(output/"flow-clicks.txt",std::ios::app); trace << label << " at " << point.x << ',' << point.y << '\n'; }
+        io.AddMousePosEvent(point.x,point.y); frame();
+        io.AddMouseButtonEvent(0,true); frame(); io.AddMouseButtonEvent(0,false); frame(); settle();
+    };
+    settle();
+    // 最终入口标签由生产面板提供；本测试不调用内部状态修改接口。
+    click("验证已有弹道");
+    require(!emitted.empty() && emitted.back().debug_action == debug_session::Action::PREPARE &&
+        emitted.back().debug_request.mode == debug_session::Mode::RECOIL_TEST &&
+        emitted.back().debug_request.recoil_calibration_path.empty() &&
+        std::filesystem::path(emitted.back().debug_request.recoil_profile_path).filename() == "imported.json",
+        "已有曲线应直接准备测试且不要求标定");
+    emitted.clear(); click("采集新弹道");
+    require(!emitted.empty() && emitted.back().debug_request.mode == debug_session::Mode::RECOIL_CALIBRATE,
+        "无标定的新曲线入口应先准备标定");
+    emitted.clear();
+    debug.generation=1; debug.state=debug_session::State::COMPLETED;
+    debug.result=std::make_shared<const nlohmann::json>(nlohmann::json{{"weapon_id","ak47"},{"success",true},
+        {"completed",true},{"cleanup_known",true},{"calibration_path","calibration-fixture.json"}});
+    settle(); settle();
+    require(emitted.size()==1 && emitted.front().debug_action==debug_session::Action::PREPARE &&
+        emitted.front().debug_request.mode==debug_session::Mode::RECOIL_CAPTURE,
+        "标定成功应仅准备一次采集并等待下一次人工按键");
+    emitted.clear(); for(int i=0;i<8;++i) frame();
+    require(emitted.empty(),"相同结果重复渲染不得再次自动准备");
+    auto reset_waiting_calibration = [&] {
+        settle(); panel.reset();
+        { std::ofstream file("cache/recoil/workflow-settings.json"); file << R"({"ak47":{"selected_file":"imported.json"}})"; }
+        debug={}; emitted.clear(); panel=std::make_unique<RecoilPanel>(); settle();
+        click("采集新弹道");
+        require(emitted.size()==1 && emitted.back().debug_request.mode==debug_session::Mode::RECOIL_CALIBRATE,
+            "新场景必须等待画面标定"); emitted.clear();
+    };
+    reset_waiting_calibration();
+    debug.generation=2; debug.state=debug_session::State::FAILED;
+    debug.result=std::make_shared<const nlohmann::json>(nlohmann::json{{"weapon_id","ak47"},{"success",false},
+        {"completed",false},{"cleanup_known",true},{"calibration_path","failed.json"}});
+    settle(); require(emitted.empty(),"失败结果不得自动推进");
+    reset_waiting_calibration();
+    debug.generation=3; debug.state=debug_session::State::CANCELED;
+    debug.result=std::make_shared<const nlohmann::json>(nlohmann::json{{"weapon_id","ak47"},{"success",true},
+        {"completed",true},{"cleanup_known",true},{"calibration_path","old-success.json"}});
+    settle();
+    require(emitted.empty(),"取消结果不得自动推进");
+    reset_waiting_calibration();
+    debug.generation=4; debug.state=debug_session::State::COMPLETED;
+    debug.result=std::make_shared<const nlohmann::json>(nlohmann::json{{"weapon_id","m4a1"},{"success",true},
+        {"completed",true},{"cleanup_known",true},{"calibration_path","other-weapon.json"}});
+    settle(); require(emitted.empty(),"另一武器的成功结果不得推进当前武器");
+    click("采集新弹道");
+    require(emitted.size()==1 && emitted.back().debug_request.mode==debug_session::Mode::RECOIL_CALIBRATE,
+        "另一武器结果不得污染当前武器的标定路径");
+    emitted.clear(); panel->request_cancel(); settle();
+    require(emitted.empty(),"取消自动推进意图后不得产生准备动作");
+    reset_waiting_calibration();
+    debug.generation=5; debug.state=debug_session::State::COMPLETED;
+    debug.result=std::make_shared<const nlohmann::json>(nlohmann::json{{"weapon_id","ak47"},{"success",true},
+        {"completed",true},{"cleanup_known",true},{"calibration_path","canceled-import.json"}});
+    frame(); require(panel->busy(),"结果导入应先进入后台任务");
+    panel->poll(); // 启动实际结果导入；即使同步操作已完成，尚未回迁时取消也不得自动准备。
+    panel->request_cancel(); settle(); settle();
+    require(emitted.empty(),"后台结果处理取消后不得自动Prepare下一组");
+    std::ofstream report(output/"recoil-flow.txt"); report << "真实RecoilPanel无设备交互回归通过；自动动作仅PREPARE，等待下一次人工按键。\n";
+}
 }
 
 // 只构造显示层与合成快照。无 Runtime 实例、Session、设备、用户配置读取或业务动作执行。
@@ -206,6 +325,9 @@ int wmain(int argc, wchar_t** argv) {
         require(!std::filesystem::exists(output), "截图目录必须独立且尚不存在");
         require(std::filesystem::create_directories(output), "无法创建独立截图目录");
         LogConfig logs; logs.enable_file = false; logs.enable_debug_file = false; Log::init(logs);
+        for (int i=2;i<argc;++i) if (std::wstring_view(argv[i])==L"--recoil-flow") {
+            recoil_flow_preview(output); Log::shutdown(); std::cout << "PASS recoil-flow\n"; return 0;
+        }
         Overlay overlay; AppConfig config;
         config.ui.width = kMinimumUiWidth; config.ui.height = kMinimumUiHeight;
         config.ui.open_detached_preview_on_start = false;
@@ -362,8 +484,24 @@ int wmain(int argc, wchar_t** argv) {
                 capture.text.find("使用估计完成联动") != std::string::npos,
                 "扳机调试缺少有效性与联动控制");
             save_window(capture, output / "trigger-debug-bottom.png");
-            select_debug_tab("弹道工具", "准备画面标定", "recoil-tools.png");
-            ImGui::SetScrollY(content, content->ScrollMax.y); frame(); frame();
+            select_debug_tab("弹道工具", "采集新弹道", "recoil-tools.png");
+            require(capture.text.find("验证已有弹道") != std::string::npos &&
+                capture.text.find("曲线目录") == std::string::npos &&
+                capture.text.find("游戏灵敏度") == std::string::npos,
+                "弹道首页应保留两入口并默认折叠高级校准配置");
+            // 最小窗口上半部是共享调试状态；截图应实际呈现新流程入口，而不是只在日志中存在。
+            ImGui::SetScrollY(content,content->ScrollMax.y); frame(); frame();
+            save_window(capture,output/"recoil-tools.png");
+            ImGui::SetScrollY(content, 0); frame(); frame();
+            auto* recoil_tabs = ImGui::GetCurrentContext()->TabBars.GetByKey(content->GetID("debug_tabs"));
+            require(recoil_tabs != nullptr,"弹道标签状态丢失");
+            input.focus_window = content;
+            input.focus_id = ImHashStr("压枪校准配置",0,recoil_tabs->SelectedTabId);
+            frame();
+            const auto header_rect = ImGui::WindowRectRelToAbs(content,content->NavRectRel[ImGuiNavLayer_Main]);
+            input.position = header_rect.GetCenter();
+            require(content->ClipRect.Contains(input.position),"校准配置折叠标题不可点击");
+            frame(); input.down=true; frame(); input.down=false; frame(); frame();
             require(capture.text.find("压枪校准配置") != std::string::npos &&
                 capture.text.find("曲线目录") != std::string::npos &&
                 capture.text.find("游戏灵敏度") != std::string::npos,

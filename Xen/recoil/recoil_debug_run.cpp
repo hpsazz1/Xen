@@ -89,6 +89,8 @@ bool recoil_debug_geometry_matches(const Json& plan,const Json& actual) noexcept
     try {
         if(!actual.is_object()||actual.empty())return false;
         if(plan.value("kind",std::string{})=="recoil_calibrate")return true;
+        if(plan.value("kind",std::string{})=="recoil_test"&&!plan.value("measurement_enabled",true)&&
+            !plan.contains("calibration"))return true;
         return plan.contains("calibration")&&plan.at("calibration").contains("geometry")&&
             plan.at("calibration").at("geometry")==actual;
     }catch(...){return false;}
@@ -303,7 +305,10 @@ Json run_recoil_debug(const Json& plan,const AppConfig& config,const std::shared
     }
     result["success"]=result.value("success",false)&&result.value("cleanup_known",false)&&
         (!testing||result.value("archive_complete",false));
-    if(!result["success"].get<bool>())result["training_eligible"]=false;
+    result["measurement_enabled"]=plan.contains("calibration");
+    if(!result["success"].get<bool>()||!plan.contains("calibration"))result["training_eligible"]=false;
+    if(testing&&!plan.contains("calibration")&&result["success"].get<bool>())
+        result["message"]="已有曲线验证完成，请人工观察效果；未提供画面标定，本组不参与优化训练";
     write(directory/"result.json",result);return result;
 }
 Json prepare_recoil_debug_plan(const std::filesystem::path& path, const AppConfig& config,
@@ -318,8 +323,7 @@ Json prepare_recoil_debug_plan(const std::filesystem::path& path, const AppConfi
     RecoilProfile base, profile; std::string error;
     if (!load_recoil_profile(text,base,error) || !compile_recoil_profile(base,{x_strength,y_strength,0,1},profile,error))
         throw std::runtime_error(error);
-    if (profile.state == RecoilProfileState::IMPORTED) throw std::runtime_error("请先完成曲线结构校验");
-    // 仅本次测试快照移除历史验收声明；原文件保持不变。
+    // load与compile已完成真实结构校验；只更新本次测试副本，IMPORTED源文件及生产准入不变。
     profile.state=RecoilProfileState::SCHEMA_VALID; profile.calibration.evidence.clear();
     profile.phase_tolerance_ms.reset(); profile.recovery_ms.reset();
     double variation = 0;
@@ -333,6 +337,7 @@ Json prepare_recoil_debug_plan(const std::filesystem::path& path, const AppConfi
     const auto total = static_cast<std::uint64_t>(count_limit);
     const int firing_ms=std::min(60000,static_cast<int>(std::ceil(profile.points.back().time_ms))+100);
     Json plan{{"schema_version",1},{"kind","recoil_test"},{"profile",Json::parse(serialize_recoil_profile(profile))},
+        {"source_profile_state",Json::parse(text).at("state")},{"measurement_enabled",false},
         {"source_sha256",recoil_calibration_sha256(text)},{"sensitivity",config.recoil.sensitivity},
         {"hold_key",config.keyboard.debug_test_virtual_keys.front()},{"cancel_key",config.keyboard.emergency_virtual_keys.front()},
         {"limits",{{"session_ms",std::min(600000,firing_ms+30000)},{"firing_ms",firing_ms},

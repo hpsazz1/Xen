@@ -455,7 +455,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                 !snapshot.trigger.faulted && !snapshot.output_armed && !debug_workspace.snapshot()->cleanup_unknown;
             return context;
         };
-        if (emergency_pressed || actions.training_stop_requested || actions.stop_requested) debug_workspace.cancel();
+        if (emergency_pressed || actions.training_stop_requested || actions.stop_requested) {
+            debug_workspace.cancel();
+            // 停止同时撤销文件处理后的准备意图，后台结果回迁不能恢复下一步。
+            overlay.cancel_background();
+        }
         if (keyboard_routing.debug_test_pressed && !emergency_pressed && !actions.stop_requested &&
             !runtime_toggle_pressed && !actions.start_requested && !overlay.close_requested()) {
             if (runtime_stop_job.valid() || overlay.background_busy()) {

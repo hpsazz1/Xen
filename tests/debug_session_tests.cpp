@@ -337,6 +337,14 @@ void test_offline_start_uses_frozen_mode(const std::filesystem::path& root) {
     const auto directory = std::filesystem::u8path(session.snapshot()->report_directory);
     require(std::filesystem::is_regular_file(directory / "default-baseline.json"), "冻结的离线模式未实际执行");
     require(!session.dispatch(Action::START, request, context, id), "已消费的准备身份重复执行");
+    const auto completed_generation=session.snapshot()->generation;
+    request.load_path=utf8(root/"missing-timing-after-result.json");
+    require(session.dispatch(Action::LOAD_WEAPON_TIMING,request,context),"完成后读取新文档请求未接收");
+    require(session.snapshot()->generation>completed_generation&&!session.snapshot()->result,
+        "新代次启动时不得携带旧结果让UI重复消费");
+    wait_idle(session);
+    require(session.snapshot()->state==State::FAILED&&!session.snapshot()->result,
+        "新请求失败也不能复活上一组已完成结果");
     session.request_shutdown(); wait_idle(session);
 }
 void test_repeat_admission_and_invalidation(const std::filesystem::path& root) {
@@ -562,6 +570,39 @@ void test_recoil_freeze_and_admission(const std::filesystem::path& root) {
     require(session.snapshot()->state==State::FAILED,"无画面标定不能准备counts采集");
     require(device->outputs==0&&device->closes==0,"拒绝和取消不得操作借用设备");
 }
+void test_recoil_existing_curve_without_measurement(const std::filesystem::path& root) {
+    auto device=std::make_shared<FakeDevice>();auto context=context_for(device);
+    context.config.keyboard.debug_test_enabled=true;context.config.keyboard.debug_test_virtual_keys={5};
+    context.config.recoil.sensitivity=1;
+    RecoilProfile imported;imported.id="imported-existing";imported.weapon_id="ak47";
+    imported.state=RecoilProfileState::IMPORTED;imported.points={{0,0,0},{100,2,4}};
+    const auto path=root/"existing-imported.json";const auto original=serialize_recoil_profile(imported);
+    {std::ofstream file(path);file<<original;}
+    Session session;Request request;request.mode=Mode::RECOIL_TEST;
+    request.recoil_profile_path=utf8(path);request.output_root=utf8(root/"existing-no-measurement");
+    require(session.dispatch(Action::PREPARE,request,context),"已有导入曲线验证准备请求接收");wait_idle(session);
+    const auto plan=session.snapshot()->plan;
+    require(session.snapshot()->repeat_ready,"结构有效IMPORTED曲线应可不经画面标定准备验证");
+    require(!plan.value("measurement_enabled",true)&&!plan.contains("calibration"),"无标定验证不得宣称启用画面测量");
+    require(plan.at("source_profile_state")=="IMPORTED"&&plan.at("profile").at("state")=="SCHEMA_VALID",
+        "仅本次冻结副本获得结构验证状态，原始来源身份须保留");
+    require(read_json(path).at("state")=="IMPORTED"&&read_json(path)==Json::parse(original),"验证准备不得改写源文件校准状态");
+    require(recoil_debug_geometry_matches(plan,{{"input_size",{320,320}}}),"仅人工观察无需先有画面标定");
+    context.runtime_idle=false;require(!session.repeat(context),"直接验证仍须Runtime停止独占设备");
+    context.runtime_idle=true;session.cancel();require(!session.snapshot()->repeat_ready,"取消仍撤销直接验证许可");
+    request.recoil_calibration_path=utf8(root/"not-found.json");
+    require(session.dispatch(Action::PREPARE,request,context),"显式坏标定请求接收");wait_idle(session);
+    require(session.snapshot()->state==State::FAILED&&!session.snapshot()->repeat_ready,"显式坏标定不得静默降级为人工观察");
+    request.recoil_calibration_path.clear();request.recoil_duration_ms=0;
+    require(session.dispatch(Action::PREPARE,request,context),"无标定零时长请求接收");wait_idle(session);
+    require(session.snapshot()->state==State::FAILED,"无标定仍须验证有界时长");
+    request.recoil_duration_ms=1500;
+    auto invalid=Json::parse(original);invalid["points"][1][0]=0;
+    {std::ofstream file(path);file<<invalid.dump();}
+    require(session.dispatch(Action::PREPARE,request,context),"无效导入曲线请求接收");wait_idle(session);
+    require(session.snapshot()->state==State::FAILED&&!session.snapshot()->repeat_ready,"IMPORTED仍须真实节点结构校验");
+    require(device->outputs==0&&device->opens==0&&device->closes==0,"纯准备与拒绝不得设备输出或重建设备");
+}
 }
 int main() {
     const auto root = std::filesystem::temp_directory_path() /
@@ -592,6 +633,7 @@ int main() {
                 "无源配置且取消的测试不得真实输出或重建设备");
         }
         test_recoil_freeze_and_admission(root);
+        test_recoil_existing_curve_without_measurement(root);
         test_idle_hud_show();
         test_save_weapon_timing(root);
         test_documents_and_frozen_prepare(root);
