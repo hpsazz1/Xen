@@ -248,7 +248,7 @@ Json run_recoil_debug(const Json& plan,const AppConfig& config,const std::shared
             write(directory/"calibration.json",{{"schema_version",1},{"environment_fingerprint",fingerprint},
                 {"weapon_id",weapon_id},{"sensitivity",environment.sensitivity},{"samples",samples},{"geometry",run.report.at("geometry")}});
             result["calibration_path"]=utf8(directory/"calibration.json");
-        }else{result["success"]=false;result["message"]=fit_error;}
+        }else{result["success"]=false;result["message"]=fit_error;result["recovery_action"]="recalibrate";}
     }
     if(!run.frames.empty()){
         auto preview=run.frames.back().image.clone();

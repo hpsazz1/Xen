@@ -126,6 +126,17 @@ int main() {
     request.capture_factory = [device](const CaptureConfig&) { return std::make_unique<FakeCapture>([device] { return device->ever_down.load(); }); };
     result = recoil_tuner::run_wall_capture(request, device, canceled);
     check(!result.completed && device->ups == 1 && !result.report.value("training_eligible", true), "在线观测失配必须停止并排除训练");
+    check(result.report.value("recovery_action", std::string{}) == "recalibrate" &&
+        result.message.find("减少") == std::string::npos,
+        "匹配失效必须要求重新标定，不能无依据归因于弹数过多");
+    check(result.report.contains("registration_failure"), "失配报告必须保存实际判据以区分纹理、相关性和范围");
+    device = std::make_shared<FakeDevice>();
+    request.output_directory = root / "texture-insufficient";
+    request.capture_factory = [](const CaptureConfig&) { return std::make_unique<FakeCapture>([] { return true; }); };
+    result = recoil_tuner::run_wall_capture(request, device, canceled);
+    check(!result.completed && result.report.value("recovery_action", std::string{}) == "recalibrate" &&
+        result.message.find("纹理不足") != std::string::npos && result.message.find("减少") == std::string::npos,
+        "静止无纹理背景也会失败，必须提示换靶面重新标定而不是减少弹数");
     request.capture_factory = [](const CaptureConfig&) { return std::make_unique<FakeCapture>(); };
 
     device = std::make_shared<FakeDevice>();
@@ -139,6 +150,7 @@ int main() {
     request.geometry_valid = [](const auto&) { return false; };
     result = recoil_tuner::run_wall_capture(request, device, canceled);
     check(!result.completed && device->downs == 0 && device->moves == 0, "实际几何不匹配必须在任何输出前拒绝");
+    check(result.report.value("recovery_action", std::string{}) == "recalibrate", "旧标定几何不匹配必须要求重标定");
     request.geometry_valid = {};
 
     device = std::make_shared<FakeDevice>(); canceled.store(true);

@@ -325,9 +325,16 @@ struct RecoilPanel::Impl {
 
     void workflow_results(AppConfig& config, OverlayActions& actions, const debug_session::Snapshot* debug) {
         if (!pending_action && !job && debug && !debug->busy && debug->result && debug->generation != workflow_result_generation &&
-            (debug->result->contains("capture_path") || debug->result->contains("calibration_path"))) {
+            (debug->result->contains("capture_path") || debug->result->contains("calibration_path") ||
+                debug->result->contains("recovery_action"))) {
             workflow_result_generation = debug->generation;
             if (debug->state != debug_session::State::COMPLETED) {
+                if (debug->result->value("weapon_id",std::string{}) == workflow_weapon &&
+                    !debug->result->value("success",false) &&
+                    debug->result->value("recovery_action",std::string{}) == "recalibrate") {
+                    workflow_calibration_path.clear(); remember_workflow_weapon();
+                    workflow_samples.clear(); workflow_locked_prefix_ms = 0;
+                }
                 workflow_measurement_ready = false; workflow_count_ok = false; workflow_confirmed = false;
                 workflow_candidate_path.clear(); workflow_executed_profile.clear();
                 workflow_preview_path = debug->result->value("preview_path",std::string{});
@@ -565,7 +572,17 @@ struct RecoilPanel::Impl {
             workflow_prepare_next = workflow_after_calibration ? debug_session::Mode::RECOIL_CALIBRATE : debug_session::Mode::RECOIL_TEST;
         }
         help("冻结当前曲线并准备有界测试，不要求先采集；仍须回游戏按测试键执行，不代表已校准发布。");
-        ImGui::EndDisabled(); ImGui::EndDisabled();
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("重新标定并采集")) {
+            workflow_calibration_path.clear(); remember_workflow_weapon();
+            workflow_samples.clear(); workflow_measurement_ready = false; workflow_locked_prefix_ms = 0;
+            workflow_record_measurement = true;
+            workflow_after_calibration = debug_session::Mode::RECOIL_CAPTURE;
+            workflow_prepare_next = debug_session::Mode::RECOIL_CALIBRATE;
+        }
+        help("清除当前武器旧标定，先准备X/Y标定；标定成功后仅准备采集，每一步仍须回游戏重新按测试键。");
+        ImGui::EndDisabled();
         ImGui::TextWrapped("当前步骤：%s", workflow_after_calibration ? "画面标定；完成后只准备下一步" :
             workflow_prepare_next ? "正在准备下一步" : debug && debug->busy ? "本组处理中" :
             debug && debug->repeat_ready ? "已准备，等待你按测试键" : "选择采集或验证");

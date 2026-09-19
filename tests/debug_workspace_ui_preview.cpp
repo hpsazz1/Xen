@@ -285,6 +285,45 @@ void recoil_flow_preview(const std::filesystem::path& output) {
         "标定成功应仅准备一次采集并等待下一次人工按键");
     emitted.clear(); for(int i=0;i<8;++i) frame();
     require(emitted.empty(),"相同结果重复渲染不得再次自动准备");
+    debug.generation=10; debug.state=debug_session::State::FAILED;
+    debug.message="背景观测不足，请重新标定";
+    debug.result=std::make_shared<const nlohmann::json>(nlohmann::json{{"weapon_id","ak47"},{"success",false},
+        {"recovery_action","recalibrate"}});
+    settle();
+    require(emitted.empty(),"需要重标定的失败不得自动执行或准备设备动作");
+    { std::ifstream file("cache/recoil/workflow-settings.json"); nlohmann::json settings; file>>settings;
+      require(settings.at("ak47").value("calibration_path",std::string{}).empty(),
+          "需要重标定的失败必须持久化清除已失效标定，即使结果没有capture_path"); }
+    click("采集新弹道");
+    require(emitted.size()==1 && emitted.back().debug_request.mode==debug_session::Mode::RECOIL_CALIBRATE,
+        "采集失败要求重标定时，重试必须先准备X/Y标定");
+    settle(); panel.reset(); debug={}; emitted.clear(); panel=std::make_unique<RecoilPanel>(); settle();
+    click("采集新弹道");
+    require(emitted.size()==1 && emitted.back().debug_request.mode==debug_session::Mode::RECOIL_CALIBRATE,
+        "重新打开面板不能恢复失效的标定路径");
+    emitted.clear(); debug.generation=11; debug.state=debug_session::State::COMPLETED;
+    debug.result=std::make_shared<const nlohmann::json>(nlohmann::json{{"weapon_id","ak47"},{"success",true},
+        {"completed",true},{"cleanup_known",true},{"calibration_path","recalibrated.json"}});
+    settle(); settle();
+    require(emitted.size()==1 && emitted.back().debug_request.mode==debug_session::Mode::RECOIL_CAPTURE &&
+        emitted.back().debug_request.recoil_calibration_path=="recalibrated.json",
+        "重标定成功后只能准备一次使用新标定的采集");
+    emitted.clear(); debug.generation=12; debug.state=debug_session::State::FAILED;
+    debug.result=std::make_shared<const nlohmann::json>(nlohmann::json{{"weapon_id","ak47"},{"success",false},
+        {"recovery_action","reduce_shots"}});
+    settle(); click("采集新弹道");
+    require(emitted.size()==1 && emitted.back().debug_request.mode==debug_session::Mode::RECOIL_CAPTURE &&
+        emitted.back().debug_request.recoil_calibration_path=="recalibrated.json",
+        "仅需减少发数的失败必须保留有效标定");
+    emitted.clear(); click("重新标定并采集");
+    require(emitted.size()==1 && emitted.back().debug_request.mode==debug_session::Mode::RECOIL_CALIBRATE,
+        "常用区重标定并采集必须先准备标定");
+    emitted.clear(); debug.generation=13; debug.state=debug_session::State::COMPLETED;
+    debug.result=std::make_shared<const nlohmann::json>(nlohmann::json{{"weapon_id","ak47"},{"success",true},
+        {"completed",true},{"cleanup_known",true},{"calibration_path","manual-recalibrated.json"}});
+    settle(); settle();
+    require(emitted.size()==1 && emitted.back().debug_request.mode==debug_session::Mode::RECOIL_CAPTURE,
+        "常用区重标定成功后必须仅准备后续采集");
     auto reset_waiting_calibration = [&] {
         settle(); panel.reset();
         { std::ofstream file("cache/recoil/workflow-settings.json"); file << R"({"ak47":{"selected_file":"imported.json"}})"; }

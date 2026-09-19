@@ -36,6 +36,8 @@ struct CaptureBuffer {
     StoredFrame latest;
     std::uint64_t bytes = 0;
     std::string error;
+    std::string recovery_action;
+    Json registration_failure;
     bool recording = false;
     cv::Mat reference;
     cv::Size reference_input_size;
@@ -157,7 +159,8 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
                             frame.source_pixels_per_pixel_x != buffer.reference_source_scale_x ||
                             frame.source_pixels_per_pixel_y != buffer.reference_source_scale_y ||
                             geometry_json(buffer.latest) != buffer.reference_geometry) {
-                            buffer.error = "采集源几何或缩放发生变化"; break;
+                                buffer.recovery_action = "recalibrate";
+                                buffer.error = "采集源几何或缩放发生变化，请重新标定"; break;
                         }
                         if (request.mode != WallRunMode::CALIBRATE && !buffer.reference.empty()) {
                             auto roi = request.registration_roi;
@@ -165,7 +168,8 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
                                 frame.bgr.cols / 4, frame.bgr.rows / 4};
                             if (frame.bgr.size() != buffer.reference.size() || roi.width < 32 || roi.height < 32 ||
                                 (roi & cv::Rect(0, 0, frame.bgr.cols, frame.bgr.rows)) != roi) {
-                                buffer.error = "采集区域或图像几何发生变化"; break;
+                                buffer.recovery_action = "recalibrate";
+                                buffer.error = "采集区域或图像几何发生变化，请重新标定"; break;
                             }
                             const auto a = gray_float(buffer.reference(roi)), b = gray_float(frame.bgr(roi));
                             cv::Mat window; cv::createHanningWindow(window, a.size(), CV_64F);
@@ -173,9 +177,27 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
                             double response = 0;
                             const auto shift = cv::phaseCorrelate(a, b, window, &response);
                             // 只以观测ROI比例判断是否仍能注册，不用固定速度档。
-                            if (deviation[0] < 5 || !std::isfinite(shift.x) || !std::isfinite(shift.y) || response < 0.5 ||
-                                std::abs(shift.x) / roi.width > 0.30 || std::abs(shift.y) / roi.height > 0.30) {
-                                buffer.error = "背景观测失配或接近范围边缘，已停止本组；请减少本阶段弹数"; break;
+                            std::string reason;
+                            if (deviation[0] < 5) {
+                                reason = "insufficient_texture";
+                                buffer.error = "背景纹理不足，已停止本组；请换有清晰细节的固定靶面，重新标定后采集";
+                            } else if (!std::isfinite(shift.x) || !std::isfinite(shift.y) || !std::isfinite(response)) {
+                                reason = "nonfinite_registration";
+                                buffer.error = "背景匹配结果无效，已停止本组；请重新对准固定靶面并标定";
+                            } else if (response < 0.5) {
+                                reason = "unreliable_registration";
+                                buffer.error = "背景匹配不可靠，已停止本组；请换清晰且非重复的固定靶面，重新标定后采集";
+                            } else if (std::abs(shift.x) / roi.width > 0.30 || std::abs(shift.y) / roi.height > 0.30) {
+                                reason = "registration_range_exceeded";
+                                buffer.error = "背景位移接近观测范围边缘，已停止本组；请重新对准并减少本阶段发数";
+                            }
+                            if (!reason.empty()) {
+                                buffer.recovery_action = reason == "registration_range_exceeded" ? "reduce_shots" : "recalibrate";
+                                const auto number = [](double value) { return std::isfinite(value) ? Json(value) : Json(nullptr); };
+                                buffer.registration_failure = {{"reason",reason},{"sequence",frame.timing.sequence},
+                                    {"texture_stddev",number(deviation[0])},{"response",number(response)},
+                                    {"shift_pixels",{number(shift.x),number(shift.y)}},{"roi",{roi.x,roi.y,roi.width,roi.height}}};
+                                break;
                             }
                         }
                         // 原始源帧仍逐帧做在线范围检查；落盘最多30 Hz，保存实际时间而非合成等间隔。
@@ -237,8 +259,10 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
         if(measurement_required){
             std::lock_guard lock(buffer.mutex);
             result.report["geometry"] = geometry_json(buffer.latest);
-            if (request.geometry_valid && !request.geometry_valid(result.report["geometry"]))
+            if (request.geometry_valid && !request.geometry_valid(result.report["geometry"])) {
+                buffer.recovery_action = "recalibrate";
                 throw std::runtime_error("当前实际画面几何与标定不一致，请重新标定");
+            }
             buffer.frames.push_back(buffer.latest);
             buffer.reference = buffer.latest.frame.bgr;
             buffer.reference_input_size = buffer.latest.input_size;
@@ -276,7 +300,7 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
                 cv::Scalar mean, deviation; cv::meanStdDev(a, mean, deviation);
                 cv::Mat window; cv::createHanningWindow(window, a.size(), CV_64F);
                 double response = 0; const auto delta = cv::phaseCorrelate(a, b, window, &response);
-                if (deviation[0] < 5 || !std::isfinite(delta.x) || !std::isfinite(delta.y) || response < 0.5 || cv::norm(delta) > 64)
+                if (deviation[0] < 5 || !std::isfinite(delta.x) || !std::isfinite(delta.y) || !std::isfinite(response) || response < 0.5 || cv::norm(delta) > 64)
                     throw std::runtime_error("墙面纹理或标定配准不足，请选择有纹理的固定墙面");
                 const auto id = std::to_string(result.calibration.size() + 1);
                 result.calibration.push_back({{static_cast<double>(command.dx_counts), static_cast<double>(command.dy_counts)},
@@ -328,6 +352,9 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
     try {
         notify(measurement_required?"射击已停止，正在保存本组图像和时间证据":"射击已停止，正在保存本组执行记录");
         result.report["completed"] = result.completed;
+        if (!result.completed && request.mode == WallRunMode::CALIBRATE) buffer.recovery_action = "recalibrate";
+        if (!buffer.recovery_action.empty()) result.report["recovery_action"] = buffer.recovery_action;
+        if (!buffer.registration_failure.is_null()) result.report["registration_failure"] = buffer.registration_failure;
         if (!result.completed) result.report["training_eligible"] = false;
         result.report["cleanup_unknown"] = result.cleanup_unknown;
         result.report["termination"] = termination;
