@@ -38,6 +38,7 @@ struct CaptureBuffer {
     std::string error;
     std::string recovery_action;
     Json registration_failure;
+    StoredFrame registration_failure_frame;
     bool recording = false;
     cv::Mat reference;
     cv::Size reference_input_size;
@@ -197,6 +198,8 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
                                 buffer.registration_failure = {{"reason",reason},{"sequence",frame.timing.sequence},
                                     {"texture_stddev",number(deviation[0])},{"response",number(response)},
                                     {"shift_pixels",{number(shift.x),number(shift.y)}},{"roi",{roi.x,roi.y,roi.width,roi.height}}};
+                                // 首枪可能早于30Hz归档间隔失败；保留已拥有的本帧，释放后独立落盘，不进入训练序列。
+                                buffer.registration_failure_frame = buffer.latest;
                                 break;
                             }
                         }
@@ -392,6 +395,20 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
             }
         }
         if (directory_owned) {
+            if (!buffer.registration_failure_frame.frame.bgr.empty()) {
+                const auto& failed = buffer.registration_failure_frame;
+                std::vector<unsigned char> bytes;
+                if (!cv::imencode(".png", failed.frame.bgr, bytes, {cv::IMWRITE_PNG_COMPRESSION, 1}))
+                    throw std::runtime_error("失配诊断图像编码失败");
+                const std::string name = "registration-failure.png";
+                std::ofstream file(request.output_directory / name, std::ios::binary);
+                file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size())); file.close();
+                if (!file) throw std::runtime_error("失配诊断图像写入失败");
+                auto& failure = result.report["registration_failure"];
+                failure["image_file"] = name; failure["reference_file"] = "frames/frame-0.png";
+                failure["received_ns"] = nanoseconds(failed.received);
+                failure["sha256"] = recoil_calibration_sha256(std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+            }
             result.report["source_hash"] = recoil_calibration_sha256(result.report.dump());
             if (request.mode == WallRunMode::CALIBRATE && result.completed) {
                 result.report["raw_calibration_path"] = (request.output_directory / "raw-calibration.json").string();

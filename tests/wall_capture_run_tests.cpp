@@ -130,6 +130,10 @@ int main() {
         result.message.find("减少") == std::string::npos,
         "匹配失效必须要求重新标定，不能无依据归因于弹数过多");
     check(result.report.contains("registration_failure"), "失配报告必须保存实际判据以区分纹理、相关性和范围");
+    check(std::filesystem::is_regular_file(request.output_directory / "registration-failure.png") &&
+        result.report.at("registration_failure").value("image_file",std::string{}) == "registration-failure.png" &&
+        result.report.at("registration_failure").value("reference_file",std::string{}) == "frames/frame-0.png",
+        "首枪失配即使早于保存间隔，也必须保存真正失败帧及参考帧引用");
     device = std::make_shared<FakeDevice>();
     request.output_directory = root / "texture-insufficient";
     request.capture_factory = [](const CaptureConfig&) { return std::make_unique<FakeCapture>([] { return true; }); };
