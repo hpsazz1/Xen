@@ -148,7 +148,8 @@ Json run_recoil_debug(const Json& plan,const AppConfig& config,const std::shared
     request.observed_ammo_delta=[&]() -> std::optional<int> {
         const auto weapon=gsi.snapshot();
         if(!initial_ammo||!weapon.valid||!weapon.ammo_clip||weapon.canonical_id!=weapon_id||
-            weapon.valid_until<=RecoilClock::now()||*weapon.ammo_clip>*initial_ammo)return {};
+            weapon.valid_until<=RecoilClock::now())return {};
+        // 保留有符号原始差值；UP后自动补满可能超过本次起始弹量，由采集生命周期判断。
         return *initial_ammo-*weapon.ammo_clip;
     };
     request.trigger_virtual_key=plan.at("hold_key");request.cancel_virtual_key=plan.at("cancel_key");

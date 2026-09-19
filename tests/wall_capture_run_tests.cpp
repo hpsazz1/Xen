@@ -218,15 +218,19 @@ int main() {
     result = recoil_tuner::run_wall_capture(request, device, canceled);
     check(!result.completed && result.report.value("overshoot", 0) == 1 && !result.report.value("training_eligible", true), "超阶段弹数必须报告失败并排除训练");
 
-    // 真实Run出现3→4及3→0；不能只用曾到目标加最终overshoot==0判合格。
-    for (const int final_count : {0, 2, 3, 4}) {
+    // 用户确认地图会自动补满：UP后3→0仍是已完成3发，原始最终差值必须另存。
+    for (const int final_count : {-2, 0, 2, 3, 4}) {
         device = std::make_shared<FakeDevice>();
         request.output_directory = root / ("three-shot-final-" + std::to_string(final_count));
         request.target_shots = 3;
         request.observed_ammo_delta = [device, final_count] { return std::optional<int>{device->down ? 3 : final_count}; };
         result = recoil_tuner::run_wall_capture(request, device, canceled);
-        check(result.completed == (final_count == 3) && result.report.value("training_eligible", false) == (final_count == 3),
-            "目标3发必须以停后GSI恰好3为准，0/2/4均失败且不可训练");
+        const bool expected = final_count <= 0 || final_count == 3;
+        check(result.completed == expected && result.report.value("training_eligible", false) == expected,
+            "目标3发已UP后自动补满不否定射击段，少发或多发仍拒绝");
+        if (final_count <= 0)
+            check(result.report.value("firing_ammo_delta",-1) == 3 && result.report.value("observed_ammo_delta",99) == final_count &&
+                result.report.value("post_release_ammo_restored",false), "补弹后保持原始差值并独立记录已完成的射击段计数");
         check(device->downs == 1 && device->ups == 1, "计数失配不得自动补发或重新开火");
     }
     device = std::make_shared<FakeDevice>();
@@ -235,6 +239,43 @@ int main() {
     request.observed_ammo_delta = [device, &settled_reads] { return std::optional<int>{device->down || ++settled_reads > 1 ? 3 : 0}; };
     result = recoil_tuner::run_wall_capture(request, device, canceled);
     check(!result.completed && !result.report.value("training_eligible", true), "停后GSI计数回退再恢复仍须拒绝，不能掩盖换弹或状态乱序");
+
+    for (const int after_reset : {1, 4}) {
+        device = std::make_shared<FakeDevice>(); settled_reads = 0;
+        request.output_directory = root / ("refill-followed-by-consumption-" + std::to_string(after_reset));
+        request.observed_ammo_delta = [device, &settled_reads, after_reset] {
+            return std::optional<int>{device->down ? 3 : ++settled_reads == 1 ? 0 : after_reset};
+        };
+        result = recoil_tuner::run_wall_capture(request,device,canceled);
+        check(!result.completed && !result.report.value("training_eligible",true), "补弹后新的减弹不能算作原射击段有效");
+    }
+    device = std::make_shared<FakeDevice>();
+    request.output_directory = root / "two-shots-then-refill";
+    request.observed_ammo_delta = [device] { return std::optional<int>{device->down ? 2 : 0}; };
+    result = recoil_tuner::run_wall_capture(request,device,canceled);
+    check(!result.completed && !result.report.value("training_eligible",true), "未达到目标时补弹不能补足发数");
+    device = std::make_shared<FakeDevice>();
+    request.output_directory = root / "four-shots-then-refill";
+    request.observed_ammo_delta = [device] { return std::optional<int>{device->down ? 4 : 0}; };
+    result = recoil_tuner::run_wall_capture(request,device,canceled);
+    check(!result.completed && !result.report.value("training_eligible",true) && result.report.value("overshoot",0) == 1,
+        "超发后补弹不能清除超发事实");
+    device = std::make_shared<FakeDevice>();
+    request.output_directory = root / "refill-while-firing";
+    int firing_reads = 0;
+    request.observed_ammo_delta = [&firing_reads] { return std::optional<int>{++firing_reads == 1 ? 2 : 0}; };
+    result = recoil_tuner::run_wall_capture(request,device,canceled);
+    check(!result.completed && device->downs == 1 && device->ups == 1, "射击中补弹或计数回退仍立即UP并拒绝");
+
+    device = std::make_shared<FakeDevice>(); firing_reads = 0;
+    request.output_directory = root / "test-real-refill-sequence";
+    request.mode = recoil_tuner::WallRunMode::TEST; request.measurement_required = false;
+    request.observed_ammo_delta = [device, &firing_reads] { return std::optional<int>{device->down ? std::min(3,firing_reads++) : 0}; };
+    result = recoil_tuner::run_wall_capture(request,device,canceled);
+    check(result.completed && result.report.value("firing_ammo_delta",-1) == 3 &&
+        result.report.value("observed_ammo_delta",-1) == 0 && !result.report.value("training_eligible",true) &&
+        device->downs == 1 && device->ups == 1, "真实验证0→1→2→3→UP→0顺序可完成，但无测量仍不可训练");
+    request.mode = recoil_tuner::WallRunMode::CAPTURE; request.measurement_required = true;
 
     device = std::make_shared<FakeDevice>();
     request.output_directory = root / "three-shot-delayed-until-after-up";

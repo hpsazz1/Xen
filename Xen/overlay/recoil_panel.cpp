@@ -30,6 +30,13 @@
 #include <wrl/client.h>
 
 namespace {
+int workflow_firing_shots(const nlohmann::json& result) {
+    // 新报告区分本次射击段与停枪后的补弹；新字段无效时不能退回旧字段掩盖错误。
+    const auto field = result.find(result.contains("firing_ammo_delta") ? "firing_ammo_delta" : "observed_ammo_delta");
+    if (field == result.end() || !field->is_number_integer() || *field < 0 ||
+        *field > std::numeric_limits<int>::max()) return -1;
+    return field->get<int>();
+}
 struct PickerCancellation {
     IFileDialog* dialog;
     const std::atomic<bool>* canceled;
@@ -258,8 +265,7 @@ struct RecoilPanel::Impl {
                 if (!result.value("success",false) || !result.value("completed",false) ||
                     !result.value("cleanup_known",false) || (mode != "capture" && mode != "test") ||
                     !result.value("training_eligible",false) || !result.value("archive_complete",true) ||
-                    !result.contains("observed_ammo_delta") || !result.at("observed_ammo_delta").is_number_integer() ||
-                    result.at("observed_ammo_delta").get<int>() != shots ||
+                    workflow_firing_shots(result) != shots ||
                     shots < 1 || shots > 50 || result.value("measurement_path",std::string{}).empty()) continue;
                 const auto weapon = result.value("weapon_id",std::string{});
                 workflow_history.push_back({weapon,path.string(),std::to_string(shots) + "发 | " +
@@ -279,8 +285,7 @@ struct RecoilPanel::Impl {
         const int shots = result.value("requested_shots",0);
         if (!result.value("success",false) || !result.value("completed",false) ||
             !result.value("cleanup_known",false) || !result.value("training_eligible",false) ||
-            !result.value("archive_complete",true) || !result.contains("observed_ammo_delta") ||
-            !result.at("observed_ammo_delta").is_number_integer() || result.at("observed_ammo_delta").get<int>() != shots ||
+            !result.value("archive_complete",true) || workflow_firing_shots(result) != shots ||
             shots < 1 || shots > 50) {
             status = "历史结果未成功完成或发数无效，未载入。"; return;
         }
@@ -379,13 +384,11 @@ struct RecoilPanel::Impl {
         const auto executed = result.value("base_profile_path", std::string{});
         workflow_executed_profile = executed.empty() ? "" : read_workflow_file(executed);
         workflow_requested_shots = result.value("requested_shots",0);
-        workflow_observed_shots = result.contains("observed_ammo_delta") && result.at("observed_ammo_delta").is_number_integer()
-            ? result.at("observed_ammo_delta").get<int>() : -1;
+        workflow_observed_shots = workflow_firing_shots(result);
         workflow_count_ok = result.value("completed", false) && result.value("success", false) &&
             result.value("cleanup_known", false) && result.value("archive_complete", true) &&
-            result.value("training_eligible", false) && result.contains("observed_ammo_delta") &&
-            result.at("observed_ammo_delta").is_number_integer() &&
-            result.at("observed_ammo_delta").get<int>() == result.value("requested_shots", -2) &&
+            result.value("training_eligible", false) &&
+            workflow_observed_shots == result.value("requested_shots", -2) &&
             result.value("requested_shots", 0) == workflow_target_shots;
         if (workflow_measurement_ready) status = workflow_measurement.message;
         else if (!calibration_path.empty() && result.value("success",false) && result.value("completed",false) &&

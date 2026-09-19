@@ -333,6 +333,7 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
             std::optional<int> observed;
             int peak_observed = 0;
             bool target_reached = false, count_regressed = false, count_unavailable = false;
+            bool ammo_restored = false, consumed_after_restore = false;
             std::string stop_reason = "duration_limit";
             result.report["ammo_observations"] = Json::array();
             auto observe_ammo = [&] {
@@ -341,15 +342,29 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
                 if (result.report["ammo_observations"].empty() || next != observed)
                     result.report["ammo_observations"].push_back({{"time_ms", milliseconds(Clock::now(), started)},
                         {"ammo_delta", next ? Json(*next) : Json(nullptr)}, {"after_release", !left_may_be_down}});
+                const auto previous = observed;
                 observed = next;
-                if (!observed || *observed < 0) count_unavailable = true;
+                if (!observed) count_unavailable = true;
+                else if (ammo_restored) {
+                    // 已闭合射击段后再次减弹，无法归属同一组；不能用峰值掩盖新一轮或乱序。
+                    if (previous && *observed > *previous) consumed_after_restore = true;
+                }
+                else if (!left_may_be_down && request.target_shots > 0 && peak_observed == request.target_shots &&
+                    !count_regressed && !count_unavailable && *observed <= 0) {
+                    // 已明确UP且目标已达到后，地图恢复至起始弹量或更多，不追溯撤销已完成发数。
+                    ammo_restored = true;
+                    result.report["ammo_restored_time_ms"] = milliseconds(Clock::now(), started);
+                }
                 else {
+                    if (*observed < 0) count_unavailable = true;
                     if (*observed < peak_observed) count_regressed = true;
                     peak_observed = std::max(peak_observed, *observed);
                 }
                 result.report["observed_ammo_delta"] = observed ? Json(*observed) : Json(nullptr);
                 result.report["peak_observed_ammo_delta"] = peak_observed;
                 result.report["ammo_count_regressed"] = count_regressed;
+                result.report["post_release_ammo_restored"] = ammo_restored;
+                result.report["ammo_consumed_after_restore"] = consumed_after_restore;
             };
             while (Clock::now() < until) {
                 input_valid(true);
@@ -363,7 +378,7 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
             result.report["stop_reason"] = stop_reason;
             release();
             if (result.cleanup_unknown) throw std::runtime_error("左键清理结果未知");
-            // UP后的有界核对也持续采样，不能漏掉换弹/乱序回退后又恢复的计数。
+            // UP后仍观察整个窗口，区分已完成段后的补满与补满后再次减弹。
             const auto settle_until = Clock::now() + std::chrono::milliseconds(300);
             do {
                 observe_ammo();
@@ -371,16 +386,21 @@ WallRunResult run_wall_capture(const WallRunRequest& request, std::shared_ptr<IM
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
             } while (Clock::now() < settle_until);
             observe_ammo();
-            const int overshoot = observed && request.target_shots > 0 ? std::max(0, *observed - request.target_shots) : 0;
+            const int overshoot = request.target_shots > 0 ?
+                std::max(0, std::max(peak_observed, observed.value_or(0)) - request.target_shots) : 0;
             result.report["requested_shots"] = request.target_shots;
             result.report["observed_ammo_delta"] = observed ? Json(*observed) : Json(nullptr);
             result.report["overshoot"] = overshoot;
             result.report["target_reached"] = target_reached;
             result.report["exact_shot_count_verified"] = false;
-            const bool count_matched = observed && *observed == request.target_shots && !count_regressed && !count_unavailable;
+            const auto firing_count = ammo_restored ? std::optional<int>{peak_observed} : observed;
+            result.report["firing_ammo_delta"] = firing_count ? Json(*firing_count) : Json(nullptr);
+            const bool count_matched = firing_count && *firing_count == request.target_shots &&
+                !count_regressed && !count_unavailable && !consumed_after_restore;
             result.report["gsi_count_matched"] = request.target_shots > 0 && count_matched;
             result.report["training_eligible"] = measurement_required && (request.target_shots == 0 || count_matched);
             if (request.target_shots > 0 && !count_matched) {
+                if (consumed_after_restore) throw std::runtime_error("停枪后弹药恢复，但随后又出现减弹；本组跨越弹药周期，不能用于训练");
                 if (count_regressed) throw std::runtime_error("GSI弹药计数发生回退，可能换弹或状态乱序；本组无效，请稳定后重新采集");
                 if (count_unavailable || !observed) throw std::runtime_error("GSI弹药计数不可用，本组无效，请重新采集");
                 throw std::runtime_error("发数不符：目标" + std::to_string(request.target_shots) + "发，GSI核对" +

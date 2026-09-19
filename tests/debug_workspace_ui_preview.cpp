@@ -477,20 +477,27 @@ void recoil_flow_preview(const std::filesystem::path& output) {
         const std::string content{std::istreambuf_iterator<char>(file),{}};
         return content.find(text)!=std::string::npos;
     };
-    auto stage_result = [&](int index, bool initial) {
+    auto stage_result = [&](int index, bool initial, bool invalid_count = false) {
         debug.generation=100+index*2; debug.state=debug_session::State::COMPLETED;
-        debug.result=std::make_shared<const nlohmann::json>(nlohmann::json{
+        nlohmann::json result{
             {"weapon_id","ak47"},{"success",true},{"completed",true},{"cleanup_known",true},
             {"training_eligible",true},{"requested_shots",2},{"observed_ammo_delta",2},
             {"capture_path","ui-stage-"+std::to_string(index)}, {"measurement_path","stage-measurement.json"},
             {"candidate_path",initial?"stage-candidate.json":""},
-            {"base_profile_path",initial?"":"stage-candidate.json"}});
+            {"base_profile_path",initial?"":"stage-candidate.json"}};
+        if (initial) { result["observed_ammo_delta"]=0; result["firing_ammo_delta"]=2; }
+        if (invalid_count) { result["observed_ammo_delta"]=2; result["firing_ammo_delta"]="2"; }
+        debug.result=std::make_shared<const nlohmann::json>(std::move(result));
         settle(); settle();
     };
+    stage_result(-1,true,true);
+    require(emitted.empty() && screen_contains("实际发数未与本阶段目标一致"),
+        "当前结果的新计数字段无效时不得退回旧字段2发而接受");
     stage_result(0,true);
     require(emitted.empty() && screen_contains("候选已生成：先核对画面") &&
-        screen_contains("画面已核对：保存候选并准备测试") && screen_contains("训练 0/3，验证 0/2"),
-        "初始候选必须明确提示人工保存，不能自动重复采集或计入五组优化");
+        screen_contains("画面已核对：保存候选并准备测试") && screen_contains("训练 0/3，验证 0/2") &&
+        screen_contains("目标 2 发；GSI观测 2 发"),
+        "补弹后当前结果须显示本次射击段2发并允许人工保存，不能把原始最终0发当失配");
     click("画面已核对：保存候选并准备测试");
     require(emitted.size()==1 && emitted.back().debug_request.mode==debug_session::Mode::RECOIL_CALIBRATE,
         "恢复旧成功候选但标定已失效时，记录优化数据不得静默降为无测量测试");
@@ -546,6 +553,7 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     history_result("history-ineligible","ak47",true,"capture");
     history_result("history-overshot","ak47",true,"capture");
     history_result("history-missing-measurement","ak47",true,"capture");
+    history_result("history-invalid-firing","ak47",true,"capture");
     auto change_history = [&](const char* name,const char* key,const nlohmann::json& value) {
         const auto path=std::filesystem::path("cache/recoil/workflow")/name/"result-index.json";
         nlohmann::json result;
@@ -556,6 +564,9 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     change_history("history-ineligible","training_eligible",false);
     change_history("history-overshot","observed_ammo_delta",3);
     change_history("history-missing-measurement","measurement_path","missing-measurement.json");
+    change_history("history-a","observed_ammo_delta",0);
+    change_history("history-a","firing_ammo_delta",2);
+    change_history("history-invalid-firing","firing_ammo_delta","2");
     settle(); panel.reset(); debug={}; emitted.clear();
     { std::ofstream file("cache/recoil/workflow-settings.json");
       file << R"({"ak47":{"target_shots":3,"selected_file":"imported.json"}})"; }
@@ -564,8 +575,9 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     click("历史采集记录",false,"载入以前的采集");
     require(screen_contains("2发 | 初始采集 | history-a") && screen_contains("2发 | 曲线测试 | history-b") &&
         !screen_contains("history-failed") && !screen_contains("history-other") &&
-        !screen_contains("history-ineligible") && !screen_contains("history-overshot"),
-        "历史列表须按当前武器筛选、排除失败或不合格测量并区分同发数不同Run");
+        !screen_contains("history-ineligible") && !screen_contains("history-overshot") &&
+        !screen_contains("history-invalid-firing"),
+        "历史列表须接受已闭合射击段、排除无效新字段且不得退回旧字段，保留旧超发排除");
     click("2发 | 初始采集 | history-missing-measurement",true);
     click("载入所选记录",false,"载入以前的采集");
     require(emitted.empty() && screen_contains("历史测量载入失败，当前阶段未改变") &&
@@ -574,8 +586,9 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     click("历史采集记录",false,"载入以前的采集");
     click("2发 | 初始采集 | history-a",true);
     click("载入所选记录",false,"载入以前的采集");
-    require(emitted.empty() && screen_contains("本次发数恢复为2发") && screen_contains("候选已生成：先核对画面"),
-        "历史候选载入必须恢复匹配发数且不能自动确认或准备物理动作");
+    require(emitted.empty() && screen_contains("本次发数恢复为2发") && screen_contains("候选已生成：先核对画面") &&
+        screen_contains("目标 2 发；GSI观测 2 发"),
+        "补弹后历史候选必须按射击段恢复2发，不能自动确认或准备物理动作");
     settle(); panel.reset(); panel=std::make_unique<RecoilPanel>(); settle();
     // 面板重建不销毁ImGui上下文；树的展开状态仍由宿主保留。
     if(!screen_contains("历史采集记录"))click("载入以前的采集");

@@ -30,6 +30,7 @@ struct WallRunRequest {
     std::function<bool(std::chrono::steady_clock::time_point, const ButtonReceipt&)> on_firing_started;
     std::function<void()> on_firing_stopped;
     // 按GSI弹药减少量停止并在UP后核对；接收计数不代表实际逐发时刻或物理恰好发数。
+    // 返回起始弹量减当前弹量（有符号），补满超过起始弹量为负，缺失必须返回nullopt。
     std::function<std::optional<int>()> observed_ammo_delta;
     // 无输出专项测试可注入Capture；生产省略时使用正式工厂。
     std::function<std::unique_ptr<ICapture>(const CaptureConfig&)> capture_factory;
