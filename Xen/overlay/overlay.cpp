@@ -3129,7 +3129,14 @@ struct Overlay::Impl {
             case TriggerReason::CONTEXT_CHANGED: reason = "武器上下文已改变，请松开许可键再按下"; break;
             case TriggerReason::CONTEXT_UNAVAILABLE: reason = "武器上下文无效，等待恢复后松键再按下"; break;
         }
-        ImGui::TextWrapped("扳机会话：%s", reason);
+        ImGui::TextWrapped("扳机会话：%s",
+            overlay::detail::trigger_session_status(snapshot.trigger, reason));
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::BeginTooltip();
+            ImGui::Text("实时原因：%s", reason);
+            ImGui::TextUnformatted("待命摘要合并等待许可与等待目标；不表示已经满足开火条件。");
+            ImGui::EndTooltip();
+        }
         if (snapshot.trigger.button_may_be_down) ImGui::TextWrapped("软件左键可能仍按下；以释放回执与设备实际状态为准。");
         if (snapshot.trigger.faulted) ImGui::TextWrapped("故障已锁存；完成设备清理并停止会话后再启动。");
         end_config_panel();

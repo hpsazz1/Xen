@@ -56,6 +56,65 @@ overlay::detail::PresentAdapter adapter_for(
     return {&capture, present_from_capture};
 }
 
+void test_trigger_session_status_is_stable_without_masking_safety() {
+    TriggerController controller;
+    TriggerConfig config;
+    config.enabled = true;
+    config.hold_virtual_key = 5;
+    expect(controller.configure(config), "扳机显示回归配置应有效");
+    TriggerPermit permit;
+    permit.enabled = permit.healthy = permit.focused = permit.armed = true;
+    const auto at = [](int milliseconds) {
+        return TriggerTime(std::chrono::milliseconds(1000 + milliseconds));
+    };
+    controller.tick(permit, at(0));
+    TriggerObservation observation;
+    observation.valid = observation.timing_valid = true;
+    observation.epoch = 1;
+    observation.roi_width = observation.roi_height = 300;
+    observation.center_x = observation.center_y = 150;
+    for (int i = 1; i <= 10; ++i) {
+        observation.sequence = i;
+        observation.observed_at = at(i * 2);
+        const auto observed = controller.observe(observation, permit, at(i * 2));
+        const auto ticked = controller.tick(permit, at(i * 2 + 1));
+        expect(observed.snapshot.reason == TriggerReason::NO_CANDIDATE &&
+            ticked.snapshot.reason == TriggerReason::RELEASED &&
+            observed.button_action == TriggerButtonAction::NONE &&
+            ticked.button_action == TriggerButtonAction::NONE,
+            "真实新帧和轮询保持原有无候选/释放状态且不产生输出");
+        expect(std::string_view(overlay::detail::trigger_session_status(
+            observed.snapshot, "准星未进入有效内域")) ==
+            overlay::detail::trigger_session_status(ticked.snapshot, "已发起释放或等待按下"),
+            "未按许可键时新帧与轮询不得令扳机会话文字跳变");
+    }
+    TriggerSnapshot snapshot;
+    snapshot.reason = TriggerReason::NO_CANDIDATE;
+    const char* normal = overlay::detail::trigger_session_status(snapshot, "无候选");
+    for (const auto reason : {TriggerReason::NONE, TriggerReason::TARGET_CHANGED,
+            TriggerReason::DELAY, TriggerReason::COOLDOWN, TriggerReason::WAIT_NEW_FRAME,
+            TriggerReason::COMMAND_PENDING, TriggerReason::DISABLED, TriggerReason::INVALID_CONFIG,
+            TriggerReason::WAIT_RELEASE, TriggerReason::PERMISSION,
+            TriggerReason::INVALID_OBSERVATION, TriggerReason::TIMING_UNAVAILABLE,
+            TriggerReason::STALE, TriggerReason::STOP_UNVERIFIED, TriggerReason::STOP_EXPIRED,
+            TriggerReason::UNKNOWN_RECEIPT, TriggerReason::CANCELED,
+            TriggerReason::COUNTER_EXHAUSTED, TriggerReason::CONTEXT_CHANGED,
+            TriggerReason::CONTEXT_UNAVAILABLE, TriggerReason::FIRE_DISABLED}) {
+        snapshot.reason = reason;
+        expect(std::string_view(overlay::detail::trigger_session_status(snapshot, "即时详细原因")) == "即时详细原因",
+            "其他执行、安全、配置、上下文和图像状态必须即时保留详细原因");
+    }
+    snapshot.reason = TriggerReason::RELEASED;
+    snapshot.button_may_be_down = true;
+    expect(std::string_view(overlay::detail::trigger_session_status(snapshot, "等待释放回执")) == "等待释放回执",
+        "按钮仍可能按下时保留即时清理状态，不能显示普通待命");
+    snapshot.button_may_be_down = false;
+    snapshot.reason = TriggerReason::NO_CANDIDATE;
+    snapshot.faulted = true;
+    expect(std::string_view(overlay::detail::trigger_session_status(snapshot, "故障详情")) != normal,
+        "故障快照不得被正常状态摘要覆盖");
+}
+
 void test_present_success_statuses_preserve_submission() {
     PresentCapture capture;
     capture.results[0] = S_OK;
@@ -500,6 +559,7 @@ void test_delay_compensation_tooltip_states_new_app_default() {
 } // namespace
 
 int main() {
+    test_trigger_session_status_is_stable_without_masking_safety();
     test_present_success_statuses_preserve_submission();
     test_present_device_removed_failure_is_owned_and_latched();
     test_present_device_reset_and_generic_failures_are_rejected();

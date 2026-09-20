@@ -9,6 +9,7 @@
 // 所有运行、武装和输出意图均丢弃，保存只更新本进程中的展示参数。
 int main(int argc, char** argv) {
     bool input_training_preview = false;
+    bool trigger_status_preview = false;
     AppConfig config;
     config.mouse.allow_send_input = false;
     config.mouse.backend = MouseBackend::KMBOX_NET;
@@ -26,8 +27,10 @@ int main(int argc, char** argv) {
             config.ui.theme = UiTheme::DARK;
         } else if (argument == "--input-training") {
             input_training_preview = true;
+        } else if (argument == "--trigger-status") {
+            trigger_status_preview = true;
         } else {
-            std::cerr << "用法：auxiliary_ui_preview [--minimum] [--dark] [--input-training]\n";
+            std::cerr << "用法：auxiliary_ui_preview [--minimum] [--dark] [--input-training] [--trigger-status]\n";
             return 2;
         }
     }
@@ -87,7 +90,14 @@ int main(int argc, char** argv) {
     const model_workspace::Snapshot workspace_snapshot;
     std::string message = "界面预览：无设备连接；运行和输出操作均不执行，保存不写配置文件。";
     int result = 0;
+    unsigned int preview_frame = 0;
     while (overlay.pump_messages()) {
+        if (trigger_status_preview) {
+            // 重放现场两个待命原因逐帧交替；仅驱动展示快照，不创建控制器或设备。
+            snapshot.trigger.phase = TriggerPhase::WAITING;
+            snapshot.trigger.reason = (++preview_frame % 2) ?
+                TriggerReason::NO_CANDIDATE : TriggerReason::RELEASED;
+        }
         OverlayActions actions;
         if (!overlay.render(snapshot, {}, models, backends, config,
                 workspace_settings, workspace_snapshot, message, actions)) {

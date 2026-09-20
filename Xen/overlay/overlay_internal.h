@@ -11,8 +11,21 @@
 #include <string>
 
 #include <winerror.h>
+#include "trigger/trigger.h"
 
 namespace overlay::detail {
+
+inline const char* trigger_session_status(
+        const TriggerSnapshot& snapshot, const char* detail) noexcept {
+    // 新图像与定时轮询会在这两个待命原因间切换；只稳定摘要，不改变控制状态。
+    if (snapshot.faulted) return "故障已锁存，请检查详细状态";
+    if (!snapshot.button_may_be_down &&
+        (snapshot.reason == TriggerReason::NO_CANDIDATE ||
+         snapshot.reason == TriggerReason::RELEASED))
+        return "待命，等待许可与目标";
+    return detail;
+}
+
 
 enum class HotkeyConflictTarget { RUNTIME_TOGGLE, AIM_HOLD, EMERGENCY, AUTO_STOP, DEBUG_TEST };
 
