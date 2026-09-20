@@ -928,7 +928,7 @@ target_link_libraries(recoil PUBLIC nlohmann_json::nlohmann_json PRIVATE bcrypt)
 add_library(recoil_worker STATIC Xen/recoil/recoil_worker.cpp)
 target_link_libraries(recoil_worker PUBLIC recoil trigger_worker mouse PRIVATE Threads::Threads)
 add_library(recoil_tuner STATIC Xen/recoil_tuner/recoil_tuner.cpp Xen/recoil_tuner/recoil_tuner_io.cpp Xen/recoil_tuner/image_measurement.cpp
-    Xen/recoil_tuner/wall_capture_analysis.cpp)
+    Xen/recoil_tuner/wall_capture_analysis.cpp Xen/recoil_tuner/target_anchor.cpp)
 target_include_directories(recoil_tuner PUBLIC ${PROJECT_SOURCE_DIR}/Xen ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(recoil_tuner PUBLIC recoil nlohmann_json::nlohmann_json ${OpenCV_LIBS})
 add_executable(xen_recoil_tuner Xen/recoil_tuner_cli/main.cpp)
@@ -1048,7 +1048,7 @@ target_include_directories(debug_runner PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(debug_runner PUBLIC config mouse capture source_context input_training nlohmann_json::nlohmann_json
     PRIVATE user32 gdi32)
 add_library(debug_session STATIC Xen/debug_session/debug_session.cpp Xen/recoil/recoil_debug_run.cpp
-    Xen/recoil_tuner/wall_capture_run.cpp)
+    Xen/recoil_tuner/wall_capture_run.cpp Xen/recoil_tuner/target_capture_run.cpp)
 target_include_directories(debug_session PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(debug_session PUBLIC runtime weapon nlohmann_json::nlohmann_json
     PRIVATE debug_runner recoil_archive recoil_calibration_io recoil_tuner capture log Threads::Threads)
@@ -1058,7 +1058,8 @@ target_compile_definitions(debug_session PRIVATE
     XEN_DEBUG_RUNTIME_ID="${XEN_BUILD_RUNTIME_ID}")
 
 add_library(overlay STATIC
-    Xen/overlay/overlay.cpp Xen/overlay/recoil_panel.cpp Xen/overlay/input_training_panel.cpp Xen/overlay/debug_panel.cpp)
+    Xen/overlay/overlay.cpp Xen/overlay/recoil_panel.cpp Xen/overlay/input_training_panel.cpp Xen/overlay/debug_panel.cpp
+    Xen/overlay/recoil_target_panel.cpp Xen/overlay/recoil_target_analysis_panel.cpp)
 target_include_directories(overlay PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(overlay
     PUBLIC runtime config model_workspace debug_session
@@ -1237,6 +1238,10 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(recoil_archive_tests OPENCV)
     add_test(NAME recoil_archive_tests COMMAND recoil_archive_tests)
     add_executable(recoil_tuner_tests tests/recoil_tuner_tests.cpp)
+    add_executable(recoil_target_anchor_tests tests/recoil_target_anchor_tests.cpp)
+    target_link_libraries(recoil_target_anchor_tests PRIVATE recoil_tuner)
+    xen_deploy_runtime_dlls(recoil_target_anchor_tests OPENCV)
+    add_test(NAME recoil_target_anchor_tests COMMAND recoil_target_anchor_tests)
     target_link_libraries(recoil_tuner_tests PRIVATE recoil_tuner recoil)
     xen_deploy_runtime_dlls(recoil_tuner_tests OPENCV)
     add_test(NAME recoil_tuner_tests COMMAND recoil_tuner_tests)
@@ -1751,6 +1756,19 @@ if(BUILD_TESTING)
     target_link_libraries(debug_session_tests PRIVATE debug_session)
     add_test(NAME debug_session_tests COMMAND debug_session_tests)
     add_executable(wall_capture_run_tests tests/wall_capture_run_tests.cpp)
+    add_executable(recoil_target_capture_tests tests/recoil_target_capture_tests.cpp)
+    target_link_libraries(recoil_target_capture_tests PRIVATE debug_session)
+    xen_deploy_runtime_dlls(recoil_target_capture_tests OPENCV ORT NDI)
+    add_test(NAME recoil_target_capture_tests COMMAND recoil_target_capture_tests)
+    add_executable(recoil_target_panel_tests tests/recoil_target_panel_tests.cpp)
+    target_link_libraries(recoil_target_panel_tests PRIVATE overlay imgui)
+    xen_deploy_runtime_dlls(recoil_target_panel_tests OPENCV ORT NDI)
+    add_test(NAME recoil_target_panel_tests COMMAND recoil_target_panel_tests)
+    add_test(NAME recoil_target_iteration_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8 "${PROJECT_SOURCE_DIR}/tests/recoil_target_iteration_tests.py")
+    add_test(NAME recoil_target_capture_contract_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8 "${PROJECT_SOURCE_DIR}/tests/recoil_target_capture_contract_tests.py"
+            --capture-exe "$<TARGET_FILE:recoil_target_capture_tests>")
     target_link_libraries(wall_capture_run_tests PRIVATE debug_session)
     xen_deploy_runtime_dlls(wall_capture_run_tests OPENCV ORT NDI)
     add_test(NAME wall_capture_run_tests COMMAND wall_capture_run_tests)

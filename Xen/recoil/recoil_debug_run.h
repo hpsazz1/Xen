@@ -11,6 +11,7 @@ nlohmann::json prepare_recoil_debug_plan(const std::filesystem::path&, const App
     double x_strength = 1, double y_strength = 1);
 nlohmann::json prepare_wall_debug_plan(bool calibrate, const std::string& weapon_id,
     int duration_ms, const std::filesystem::path& calibration_path, const AppConfig&, bool follow_recoil = false);
+nlohmann::json prepare_target_debug_plan(const nlohmann::json& options, const AppConfig&);
 bool recoil_debug_geometry_matches(const nlohmann::json& plan, const nlohmann::json& actual) noexcept;
 // 借用App独占设备；一次用户热键许可的有界扫射，左键仅归采集runner，不close设备。
 // hook在后台周期调用；采集方可通过目录与时间关联原始批次，不能把ACK当成命中观测。

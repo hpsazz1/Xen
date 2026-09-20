@@ -13,7 +13,7 @@ class Runtime;
 namespace debug_session {
 using Json = nlohmann::json;
 enum class Mode { COUNTERPULSE, FIRE_TEST, RECOIL_TEST, RECOIL_CALIBRATE, RECOIL_CAPTURE, MANUAL_RECORDING, EVALUATE_MANUAL,
-    EVALUATE_COMMANDS, DERIVE_DEFAULTS, DERIVE_PLAN };
+    EVALUATE_COMMANDS, DERIVE_DEFAULTS, DERIVE_PLAN, RECOIL_TARGET };
 enum class Action { NONE, VALIDATE, SAVE_PLAN, PREPARE, START, CANCEL, REEVALUATE,
     HIDE_HUD, SHOW_HUD, LOAD_PLAN, LOAD_SAMPLING, LOAD_FIRE_SETTINGS,
     LOAD_WEAPON_TIMING, SAVE_WEAPON_TIMING, DERIVE_PLAN, DERIVE_DEFAULTS };
@@ -30,6 +30,8 @@ struct Request {
     int recoil_duration_ms = 1500;
     int recoil_target_shots = 5;
     bool recoil_follow_crosshair = false;
+    // 固定锚点实验草稿；准备时验证并冻结，普通Runtime不读取。
+    Json recoil_target_options = Json::object();
     double recoil_locked_prefix_ms = 0;
     std::string output_root = "cache/debug";
     int recording_duration_ms = 120000;

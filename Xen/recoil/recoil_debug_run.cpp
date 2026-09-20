@@ -3,6 +3,8 @@
 #include "recoil/recoil_worker.h"
 #include "recoil/recoil_archive.h"
 #include "recoil_tuner/wall_capture_run.h"
+#include "recoil_tuner/target_capture_run.h"
+#include "weapon/weapon_catalog.h"
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <algorithm>
@@ -109,6 +111,36 @@ Json run_recoil_debug(const Json& plan,const AppConfig& config,const std::shared
         const std::function<void(const std::string&)>& progress) {
     if(!device||!device->output_owner_exclusive())throw std::runtime_error("弹道测试缺少独占设备");
     const auto directory=std::filesystem::absolute(output);
+    if(plan.value("kind",std::string{})=="recoil_target"){
+        source_context::SourceContextClient source;weapon::GsiReceiver gsi;
+        struct StopTarget {source_context::SourceContextClient& s;weapon::GsiReceiver& g;~StopTarget(){g.stop();s.stop();}} stop{source,gsi};
+        auto source_config=config.source_context;char* token=nullptr;std::size_t token_size=0;
+        if(_dupenv_s(&token,&token_size,"XEN_SOURCE_CONTEXT_TOKEN")==0&&token){source_config.token=token;std::free(token);}
+        if(!source.start(source_config)||!gsi.start(config.gsi))return {{"success",false},{"cleanup_known",true},{"message","源焦点或GSI接收器启动失败，未输出"}};
+        std::uint64_t source_session=0,weapon_epoch=0;std::string player_id;const auto weapon_id=plan.at("weapon_id").get<std::string>();
+        recoil_tuner::TargetRunRequest request;request.plan=plan;request.capture=config.capture;request.output_directory=directory;
+        request.context_valid=[&]{const auto s=source.snapshot();const auto w=gsi.snapshot();
+            const bool valid=s.available&&s.focused&&(w.valid||w.status==weapon::Status::EMPTY)&&w.identity_match&&w.canonical_id==weapon_id&&
+                w.state==weapon::WeaponState::ACTIVE&&w.valid_until>RecoilClock::now();
+            if(!valid)return false;if(!source_session)source_session=s.session_id;if(!weapon_epoch){weapon_epoch=w.source_epoch;player_id=w.player_id;}
+            // GSI ACTIVE→EMPTY会令valid变false并递增代际；只允许同玩家自然打空这一终止事实。
+            const bool empty_end=w.status==weapon::Status::EMPTY&&w.ammo_clip&&*w.ammo_clip==0&&w.source_epoch==weapon_epoch+1&&w.player_id==player_id;
+            return source_session==s.session_id&&w.player_id==player_id&&(weapon_epoch==w.source_epoch||empty_end);};
+        request.context_facts=[&]{const auto s=source.snapshot();const auto w=gsi.snapshot();return Json{{"focused",s.focused},{"source_session",s.session_id},
+            {"weapon_epoch",w.source_epoch},{"gsi_received_ns",std::chrono::duration_cast<std::chrono::nanoseconds>(w.received_at.time_since_epoch()).count()},
+            {"ammo",w.ammo_clip?Json(*w.ammo_clip):Json(nullptr)},{"weapon_id",w.canonical_id}};};
+        request.ammo=[&]() -> std::optional<int>{const auto w=gsi.snapshot();if((!w.valid&&w.status!=weapon::Status::EMPTY)||!w.identity_match||w.state!=weapon::WeaponState::ACTIVE||w.valid_until<=RecoilClock::now()||w.canonical_id!=weapon_id)return {};return w.ammo_clip;};
+        // 服务初次接收有界等待；不输出且取消保持即时可见。
+        const auto deadline=RecoilClock::now()+std::chrono::seconds(3);
+        if(progress)progress("保持测试键，等待源焦点与所选武器GSI就绪；松键或End取消");
+        while(!canceled.load()&&!request.context_valid()&&RecoilClock::now()<deadline){
+            InputSnapshot input;const int hold=plan.at("hold_key"),cancel=plan.at("cancel_key");
+            if(!device->poll_input(input)||!input.state_valid||input.status!=InputMonitorStatus::READY||!input.virtual_keys[hold]||input.virtual_keys[cancel])
+                return {{"success",false},{"cleanup_known",true},{"message","等待上下文期间测试键已释放、输入未知或已紧急停止"}};
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return recoil_tuner::run_target_capture(request,device,canceled,progress).report;
+    }
     std::filesystem::create_directories(directory);write(directory/"plan.json",plan);
     const bool testing=plan.at("kind")=="recoil_test", calibrating=plan.at("kind")=="recoil_calibrate";
     auto profile=std::make_shared<RecoilProfile>();std::string error;
@@ -380,6 +412,64 @@ Json run_recoil_debug(const Json& plan,const AppConfig& config,const std::shared
     if(testing&&!plan.contains("calibration")&&result["success"].get<bool>())
         result["message"]="已有曲线验证完成，请人工观察效果；未提供画面标定，本组不参与优化训练";
     write(directory/"result.json",result);return result;
+}
+Json prepare_target_debug_plan(const Json& options,const AppConfig& config){
+    if(config.keyboard.debug_test_virtual_keys.size()!=1||config.keyboard.emergency_virtual_keys.empty()||!valid_keyboard_config(config.keyboard))
+        throw std::runtime_error("请绑定一个独立测试键和紧急停止键");
+    const auto mode=options.value("mode",std::string("observe"));
+    if(mode!="observe"&&mode!="calibrate"&&mode!="control"&&mode!="test")throw std::runtime_error("未知固定目标实验模式");
+    const std::string weapon_id(weapon::normalize_weapon_id(options.value("weapon_id",std::string{})));const int duration=options.value("duration_ms",1500),shots=options.value("target_shots",5);
+    if(weapon_id.empty()||duration<100||duration>3000||shots<1||shots>5||!std::isfinite(config.recoil.sensitivity)||config.recoil.sensitivity<=0)
+        throw std::runtime_error("武器、100–3000ms时域或最多五发参数无效");
+    const bool fire=(mode=="control"||mode=="test")&&options.value("fire",mode=="test");
+    const auto split=options.value("split",std::string("fit"));if(split!="fit"&&split!="holdout"&&split!="test")throw std::runtime_error("数据用途无效");
+    Json plan{{"schema_version",1},{"kind","recoil_target"},{"target_mode",mode},{"mode",mode},{"fire",fire},{"duration_ms",duration},{"target_shots",shots},
+        {"weapon_id",weapon_id},{"sensitivity",config.recoil.sensitivity},{"hold_key",config.keyboard.debug_test_virtual_keys.front()},
+        {"cancel_key",config.keyboard.emergency_virtual_keys.front()},{"split",split},{"generation",0},{"device_epoch","exclusive_debug_session"},
+        {"session_id",options.value("session_id",std::string("target-session"))},{"max_alignment_uncertainty_us",100000},
+        {"environment_fingerprint",recoil_calibration_sha256(wall_fingerprint(weapon_id,config.recoil.sensitivity,config.capture)+"target_native_bgr_v1")},
+        {"roi",options.value("roi",Json::array({0,0,0,0}))},{"background_roi",options.value("background_roi",Json::array({0,0,0,0}))},
+        {"relative_tolerance",0.05},{"calibration_counts",4},{"command_counts_limit",64},{"total_counts_limit",4096},
+        {"ammo_limit_confirmed",options.value("ammo_limit_confirmed",false)}};
+    for(const auto* key:{"roi","background_roi"}){
+        const auto a=plan.at(key).get<std::array<int,4>>();
+        if(a[0]<0||a[1]<0||a[2]<0||a[3]<0||(mode!="observe"&&(a[2]<32||a[3]<32)))throw std::runtime_error("请在预览中选择两个至少32像素且互不重叠的ROI");
+    }
+    auto read=[](const std::filesystem::path& path)->std::string{
+        std::ifstream f(path,std::ios::binary);if(!f)throw std::runtime_error("实验依赖文件无法读取");std::string s(16*1024*1024+1,'\0');
+        f.read(s.data(),static_cast<std::streamsize>(s.size()));s.resize(static_cast<std::size_t>(f.gcount()));if(s.size()>16*1024*1024)throw std::runtime_error("实验依赖文件过大");return s;};
+    if(mode=="control"||mode=="test"){
+        const auto text=read(std::filesystem::u8path(options.value("calibration_path",std::string{})));const auto c=Json::parse(text);
+        if(c.value("schema",std::string{})!="recoil_target_calibration_v1"||c.at("environment_fingerprint")!=plan.at("environment_fingerprint")||
+            c.at("roi")!=plan.at("roi")||c.at("background_roi")!=plan.at("background_roi"))throw std::runtime_error("固定锚点标定环境或ROI不匹配");
+        std::vector<recoil_tuner::WallCalibrationSample> samples;for(const auto& s:c.at("samples"))samples.push_back({s.at("counts").get<std::array<double,2>>(),s.at("pixel_delta").get<std::array<double,2>>(),s.at("acknowledged"),s.at("evidence_id")});
+        std::array<double,4> response{};std::string why;if(samples.size()!=4||!recoil_tuner::fit_wall_calibration(samples,20,response,why)||response!=c.at("pixel_response").get<std::array<double,4>>())throw std::runtime_error("标定响应证据无法复算");
+        const double delay=c.at("response_upper_ms"),gap=c.at("frame_gap_limit_ms"),noise=c.at("noise_pixels");
+        if(!std::isfinite(delay)||!std::isfinite(gap)||!std::isfinite(noise)||delay<=0||delay>=duration||gap<=0||noise<0||c.at("feedback_gain")!=0.25)throw std::runtime_error("标定延迟、噪声或反馈协议无效");
+        plan["calibration"]=c;plan["calibration_sha256"]=recoil_calibration_sha256(text);plan["template_sha256"]=c.at("template_sha256");
+        plan["ff_schedule_tolerance_us"]=static_cast<std::int64_t>(std::ceil(gap*1000));
+        plan["relative_tolerance"]=c.at("relative_tolerance");plan["calibration_counts"]=c.at("calibration_counts");
+    }
+    const auto profile_path=options.value("profile_path",std::string{});
+    plan["baseline_sha256"]=recoil_calibration_sha256("zero_baseline_v1");
+    if(!profile_path.empty()&&(mode=="control"||mode=="test")){
+        RecoilProfile profile;std::string why;const auto text=read(std::filesystem::u8path(profile_path));
+        if(!load_recoil_profile(text,profile,why))throw std::runtime_error(why);
+        if(weapon::normalize_weapon_id(profile.weapon_id)!=weapon_id)throw std::runtime_error("父曲线武器不匹配");
+        if(profile.calibration.sensitivity&&std::abs(*profile.calibration.sensitivity-config.recoil.sensitivity)>1e-9)throw std::runtime_error("父曲线灵敏度与环境不匹配");
+        plan["profile"]=Json::parse(serialize_recoil_profile(profile));plan["baseline_sha256"]=recoil_calibration_sha256(text);plan["baseline_file_sha256"]=plan["baseline_sha256"];
+        plan["executed_profile_sha256"]=recoil_calibration_sha256(serialize_recoil_profile(profile));plan["baseline_source_text"]=text;
+    }else if(fire)throw std::runtime_error("首阶段射击实验必须选择认可的父曲线短段");
+    if(fire&&!plan.at("ammo_limit_confirmed").get<bool>())throw std::runtime_error("请确认本轮可发弹量最多五发、关闭自动补弹且不换弹");
+    if(fire&&mode=="control"){
+        const auto control=Json::parse(read(std::filesystem::u8path(options.value("control_reference_path",std::string{}))));
+        if(!options.value("control_observed_stable_confirmed",false)||!control.value("success",false)||!control.value("cleanup_known",false)||
+            !control.value("control_stable",false)||control.value("fire",true)||control.value("target_mode",std::string{})!="control")
+            throw std::runtime_error("先完成同标定的无射击反馈对照，并确认本轮对照画面稳定");
+        for(const auto* key:{"calibration_sha256","baseline_sha256","environment_fingerprint","template_sha256"})if(control.at(key)!=plan.at(key))throw std::runtime_error("无射击对照与本轮父版本、锚点或环境不一致");
+        plan["control_reference"]=control;plan["control_observed_stable_confirmed"]=true;
+    }
+    return plan;
 }
 Json prepare_recoil_debug_plan(const std::filesystem::path& path, const AppConfig& config,
         double x_strength, double y_strength) {

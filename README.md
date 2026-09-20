@@ -724,6 +724,30 @@ UI 和 CLI 共用当前用户 `%LOCALAPPDATA%/Xen/recoil-tuner-usage-v1` 用途�
 成功时，新结果目录根部另存可由编辑器加载的 `SCHEMA_VALID` 弹道版本，分析报告位于
 `analysis` 子目录。候选清除旧校准证据，需要重新校准后显式发布；命令不会修改活动版本。
 
+## 固定目标短段实验
+
+调试 → 弹道工具默认提供固定目标实验。先准备无输出短录像，在预览图中拖选目标纹理和独立背景；
+再准备两轴标定、无射击闭环对照。每一步均由用户在游戏前台按住测试键启动，松键或紧急停止键终止，
+不会自动接着执行下一轮。原曲线与旧工具保留在折叠的历史入口。
+
+当前实验固定 X/Y 100%，复用已选父曲线且不改动文件。开火前需完成同标定的无射击对照并人工确认
+画面稳定；还须现场限制可用弹药不超过本轮上限（最多五发），关闭自动补弹且本轮不换弹。
+GSI只核对收到的弹量变化，不能证明真实逐发时刻。前馈与反馈由同一个协调器合成输出，丢靶、
+目标与背景运动不一致、未知回执或饱和都使本轮停止；成功ACK不代表物理效果通过。
+
+同页“固定目标：审核与多轮分析”可核对Run、保存用户观察和合并同父版本的五个独立fit轮。
+使用已有Python解释器，只需标准库；不训练模型。后台工具也可以单独运行：
+
+```powershell
+python -B -X utf8 scripts/recoil_target_iteration.py inspect <Run目录> --registry cache/recoil/target-usage.json --output <新报告.json>
+python -B -X utf8 scripts/recoil_target_iteration.py review <Run目录> --identity-confirmed --observation "本轮人工观察" --registry cache/recoil/target-usage.json --output <新审核报告.json>
+python -B -X utf8 scripts/recoil_target_iteration.py fit <Run1> <Run2> <Run3> <Run4> <Run5> --parent <父曲线.json> --registry cache/recoil/target-usage.json --output <新分析报告.json>
+```
+
+当前输出是中位数/MAD残差及父基线只加一次残差的**分析报告**。尚未建立可核验的独立响应时序映射，
+因此不会把延迟反馈直接导出为可执行弹道，也不会覆盖或自动活动原30发曲线。目标画面稳定只支持视角
+稳定结论；完整射向与实际压枪效果仍需独立物理证据。软件专项与合成假设备测试不替代该验证。
+
 ## 技术栈
 
 C++20、CMake、ONNX Runtime、OpenCV、spdlog、SimpleIni、Dear ImGui、nlohmann/json。

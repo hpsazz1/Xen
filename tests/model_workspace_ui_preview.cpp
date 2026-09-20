@@ -218,11 +218,14 @@ int wmain(int argc, wchar_t** argv) {
         config.mouse.kmbox_ip = "127.0.0.1";
         config.mouse.kmbox_uuid = "00000000";
         config.trigger.require_stop = true;
+        config.recoil.sensitivity = 1.4;
+        bool target_only = false;
         for (int index = 2; index < argc; ++index) {
             const std::wstring_view argument(argv[index]);
             if (argument == L"--minimum") {
                 config.ui.width = kMinimumUiWidth; config.ui.height = kMinimumUiHeight;
             } else if (argument == L"--dark") config.ui.theme = UiTheme::DARK;
+            else if (argument == L"--target-only") target_only = true;
             else throw std::runtime_error("未知预览参数");
         }
         const auto fixture_directory = std::filesystem::temp_directory_path() /
@@ -302,6 +305,45 @@ int wmain(int argc, wchar_t** argv) {
             input.down = false; frame();
             input.position = {400,40}; frame(); frame();
         };
+        if (target_only) {
+            select_page(6);
+            auto* content=preview_window("content");
+            const auto id=ImHashStr("弹道工具",0,content->GetID("debug_tabs"));
+            input.focus_window=content; input.focus_id=id; frame();
+            require(ImGui::GetCurrentContext()->NavId==id && ImGui::GetCurrentContext()->NavIdIsAlive,
+                "未找到生产弹道工具页签");
+            auto rect=ImGui::WindowRectRelToAbs(content,content->NavRectRel[ImGuiNavLayer_Main]);
+            input.position=rect.GetCenter(); frame(); frame();
+            input.down=true; frame(); input.down=false; frame(); frame();
+            require(capture.text.find("固定目标迭代")!=std::string::npos,"固定目标实验未成为默认弹道工具");
+            require(capture.text.find("RGB 255/0/255")==std::string::npos,"默认页面仍要求已放弃的洋红准星");
+            require(actions.debug_action==debug_session::Action::NONE,"只浏览目标面板不得准备或启动实验");
+            save_window(capture,output/"target-top.png");
+            ImGui::SetScrollY(content,content->ScrollMax.y*0.5f);frame();frame();
+            save_window(capture,output/"target-middle.png");
+            ImGui::SetScrollY(content,content->ScrollMax.y);frame();frame();
+            save_window(capture,output/"target-bottom.png");
+            const auto analysis_id=ImHashStr("固定目标：审核与多轮分析",0,id);
+            input.focus_window=content;input.focus_id=analysis_id;frame();
+            require(ImGui::GetCurrentContext()->NavId==analysis_id && ImGui::GetCurrentContext()->NavIdIsAlive,
+                "未找到固定目标离线分析入口");
+            rect=ImGui::WindowRectRelToAbs(content,content->NavRectRel[ImGuiNavLayer_Main]);
+            ImGui::ScrollToRect(content,rect,ImGuiScrollFlags_AlwaysCenterY);frame();frame();
+            rect=ImGui::WindowRectRelToAbs(content,content->NavRectRel[ImGuiNavLayer_Main]);
+            input.position=rect.GetCenter();frame();frame();
+            input.down=true;frame();input.down=false;frame();frame();
+            ImGui::SetScrollY(content,content->ScrollMax.y);frame();frame();
+            require(capture.text.find("合并五轮残差分析")!=std::string::npos,"离线分析表单未展开");
+            require(actions.debug_action==debug_session::Action::NONE,"浏览离线表单不得触发实验");
+            input.position={400,40};frame();frame();
+            save_window(capture,output/"target-analysis.png");
+            ImGui::RemoveContextHook(ImGui::GetCurrentContext(),capture_hook_id);
+            ImGui::RemoveContextHook(ImGui::GetCurrentContext(),frame_hook_id);
+            ImGui::RemoveContextHook(ImGui::GetCurrentContext(),hook_id);
+            overlay.shutdown();Log::shutdown();
+            std::cout<<"固定目标默认界面已截图；业务动作0，设备输出0\n";
+            return 0;
+        }
         select_page(4);
         require_page_table("collection_settings");
         save_window(capture, output / "collection.png");

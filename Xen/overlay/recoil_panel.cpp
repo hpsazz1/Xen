@@ -1,4 +1,6 @@
 #include "overlay/recoil_panel.h"
+#include "overlay/recoil_target_panel.h"
+#include "overlay/recoil_target_analysis_panel.h"
 #include "overlay/overlay.h"
 #include "recoil/recoil_store.h"
 #include "recoil/recoil_calibration_io.h"
@@ -282,6 +284,10 @@ struct RecoilPanel::Impl {
     std::string calibration_request_file, calibration_command;
     std::string calibration_prepared_identity;
     std::string workflow_weapon = "ak47", workflow_calibration_path, workflow_run;
+    // 新实验与历史工具分开，历史状态不触发新的采集流程。
+    std::shared_ptr<RecoilTargetPanel> target_panel = std::make_shared<RecoilTargetPanel>();
+    std::shared_ptr<RecoilTargetAnalysisPanel> target_analysis = std::make_shared<RecoilTargetAnalysisPanel>();
+    bool show_legacy_workflow = false;
     int workflow_duration_ms = 3000, workflow_target_shots = 5, workflow_group_shots = 30, workflow_step_shots = 5;
     double workflow_locked_prefix_ms = 0;
     std::string workflow_locked_baseline_hash;
@@ -1529,7 +1535,7 @@ void RecoilPanel::render_diagnostics(const RuntimeSnapshot& snapshot) noexcept {
     } catch (...) { impl_->status = "射击归档状态显示失败。"; }
 }
 void RecoilPanel::render_tools(const RuntimeSnapshot& snapshot, AppConfig& config, bool can_edit,
-    OverlayActions& actions, const debug_session::Snapshot* debug_snapshot) noexcept {
+    OverlayActions& actions, const debug_session::Snapshot* debug_snapshot, ID3D11Device* graphics_device) noexcept {
     try {
         poll();
         ImGui::TextUnformatted("弹道工具与射击归档");
@@ -1540,6 +1546,9 @@ void RecoilPanel::render_tools(const RuntimeSnapshot& snapshot, AppConfig& confi
             help("取消尚未开始的任务；已经开始的同步存储和分析等待完成。不会连接设备。");
             return;
         }
+        // 实验运行期间仅禁用编辑；子面板自己的停止/取消必须保持可用。
+        impl_->target_panel->render(config, actions, debug_snapshot, graphics_device, can_edit);
+        impl_->target_analysis->render(can_edit && (!debug_snapshot || !debug_snapshot->busy));
         { DisabledScope disabled(!can_edit || busy());
             const auto prior_sensitivity = config.recoil.sensitivity;
             const auto prior_directory = config.recoil.profile_directory;
@@ -1550,7 +1559,12 @@ void RecoilPanel::render_tools(const RuntimeSnapshot& snapshot, AppConfig& confi
                 impl_->workflow_locked_prefix_ms = 0;
                 impl_->workflow_after_calibration.reset(); impl_->workflow_prepare_next.reset();
             }
-            impl_->workflow(snapshot, config, actions, debug_snapshot, can_edit);
+            if (ImGui::Checkbox("历史：原曲线与旧采集工具", &impl_->show_legacy_workflow)) {
+                actions.debug_plan_edited = true;
+                impl_->workflow_after_calibration.reset(); impl_->workflow_prepare_next.reset();
+            }
+            help("保留旧曲线的编辑、验证和回退入口。旧采集流程已放弃，不作为固定目标实验的测量来源。");
+            if (impl_->show_legacy_workflow) impl_->workflow(snapshot, config, actions, debug_snapshot, can_edit);
             ImGui::Checkbox("高级：曲线编辑与数据集优化", &impl_->show_editor);
             help("展开曲线草稿、人工校准与离线优化工具；不会自动加载、激活或执行曲线。");
             if (impl_->show_editor) impl_->editor(snapshot, config);

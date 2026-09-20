@@ -101,8 +101,8 @@ DebugRunMode run_mode(Mode mode) {
     default: return DebugRunMode::Counterpulse;
     }
 }
-bool recoil_mode(Mode mode) { return mode == Mode::RECOIL_TEST || mode == Mode::RECOIL_CALIBRATE || mode == Mode::RECOIL_CAPTURE; }
-bool single_use_recoil_mode(Mode mode) { return mode == Mode::RECOIL_CALIBRATE || mode == Mode::RECOIL_CAPTURE; }
+bool recoil_mode(Mode mode) { return mode == Mode::RECOIL_TEST || mode == Mode::RECOIL_CALIBRATE || mode == Mode::RECOIL_CAPTURE || mode == Mode::RECOIL_TARGET; }
+bool single_use_recoil_mode(Mode mode) { return mode == Mode::RECOIL_CALIBRATE || mode == Mode::RECOIL_CAPTURE || mode == Mode::RECOIL_TARGET; }
 bool physical_mode(Mode mode) { return mode == Mode::COUNTERPULSE || mode == Mode::FIRE_TEST || recoil_mode(mode); }
 bool uses_device(Mode mode) { return physical_mode(mode) || mode == Mode::MANUAL_RECORDING; }
 void admit(const Context& context, Mode mode) {
@@ -218,7 +218,9 @@ struct Session::Impl {
     void run(Prepared work, bool allow, const std::string& confirmation) {
         if (recoil_mode(work.request.mode)) {
             update([&](Snapshot& s) { s.state=State::RUNNING;s.report_directory=(work.directory/"run").string();
-                s.message="等待源端聚焦并松开键鼠，然后执行一组；紧急停止键可取消"; });
+                s.message=work.request.mode==Mode::RECOIL_TARGET ?
+                    "请保持游戏前台并按住测试键；松键或紧急停止键终止本轮" :
+                    "等待源端聚焦并松开键鼠，然后执行一组；紧急停止键可取消"; });
             auto result=run_recoil_debug(work.plan,work.context.config,work.context.device,work.directory/"run",canceled,{},
                 [this](const std::string& message){
                     if(view.load()->message!=message)update([&](Snapshot& s){s.message=message;});
@@ -552,13 +554,14 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
             if (action == Action::DERIVE_DEFAULTS) effective.mode = Mode::DERIVE_DEFAULTS;
             if (action == Action::DERIVE_PLAN) effective.mode = Mode::DERIVE_PLAN;
             if (action == Action::REEVALUATE && physical_mode(effective.mode)) throw std::runtime_error("离线重评拒绝物理模式");
-            auto plan = effective.mode==Mode::RECOIL_TEST ?
+            auto plan = effective.mode==Mode::RECOIL_TARGET ?
+                prepare_target_debug_plan(effective.recoil_target_options,context.config) : effective.mode==Mode::RECOIL_TEST ?
                 prepare_recoil_debug_plan(std::filesystem::u8path(effective.recoil_profile_path),context.config,
                     effective.recoil_x_strength,effective.recoil_y_strength) :
                 (effective.mode==Mode::RECOIL_CAPTURE||effective.mode==Mode::RECOIL_CALIBRATE) ?
                 prepare_wall_debug_plan(effective.mode==Mode::RECOIL_CALIBRATE,effective.weapon_id,effective.recoil_duration_ms,
                     std::filesystem::u8path(effective.recoil_calibration_path),context.config,effective.recoil_follow_crosshair) : request_plan(effective);
-            if(recoil_mode(effective.mode)) {
+            if(recoil_mode(effective.mode) && effective.mode!=Mode::RECOIL_TARGET) {
                 if(effective.recoil_target_shots<1||effective.recoil_target_shots>50||
                     !std::isfinite(effective.recoil_locked_prefix_ms)||effective.recoil_locked_prefix_ms<0)
                     throw std::runtime_error("阶段目标须1–50发且锁定前缀时间有效");

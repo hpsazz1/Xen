@@ -3187,6 +3187,7 @@ struct Overlay::Impl {
         }
         ImGui::EndDisabled();
         ImGui::TextWrapped("开启后，每次按键允许执行最近一次已准备的物理测试；每次独立一组，无自动循环。离开本页不会清除模板；编辑实验或切换实验类型需重新准备。");
+        ImGui::TextWrapped("固定目标实验需按住测试键至本轮完成；松键或紧急停止键会终止，结束后必须重新准备下一轮。");
         if (!hotkey_capture_message.empty()) ImGui::TextWrapped("%s",hotkey_capture_message.c_str());
         debug_panel.render_status(debug_snapshot, actions);
         if (!ImGui::BeginTabBar("debug_tabs")) return;
@@ -3208,7 +3209,7 @@ struct Overlay::Impl {
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("弹道工具")) {
-            recoil_panel.render_tools(snapshot, app_config, can_edit, actions, debug_snapshot);
+            recoil_panel.render_tools(snapshot, app_config, can_edit, actions, debug_snapshot, device.Get());
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("运行诊断")) {

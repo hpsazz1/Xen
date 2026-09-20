@@ -686,6 +686,35 @@ void test_recoil_existing_curve_without_measurement(const std::filesystem::path&
     require(device->outputs==0&&device->opens==0&&device->closes==0,"纯准备与拒绝不得设备输出或重建设备");
 }
 }
+void test_target_prepare_is_frozen_and_output_free(const std::filesystem::path& root) {
+    Session session;
+    auto device = std::make_shared<FakeDevice>();
+    auto context = context_for(device);
+    context.config.keyboard.debug_test_enabled = true;
+    context.config.keyboard.debug_test_virtual_keys = {0x76};
+    context.config.keyboard.emergency_virtual_keys = {0x23};
+    context.config.recoil.sensitivity = 1.4;
+    Request request;
+    request.mode = Mode::RECOIL_TARGET;
+    request.output_root = utf8(root / "target-prepare");
+    request.recoil_target_options = {{"mode","observe"},{"fire",false},{"weapon_id","weapon_ak47"},
+        {"duration_ms",300},{"target_shots",5},{"roi",{0,0,0,0}},{"background_roi",{0,0,0,0}},
+        {"split","fit"},{"session_id","target-prepare-test"},{"ammo_limit_confirmed",false}};
+    require(session.dispatch(Action::PREPARE,request,context),"固定锚点准备请求未接收");
+    wait_idle(session);
+    const auto prepared=session.snapshot();
+    require(prepared->state==State::PREPARED,"固定锚点准备未完成");
+    const auto frozen=prepared->plan;
+    request.recoil_target_options["duration_ms"]=999;
+    require(session.snapshot()->plan==frozen,"固定锚点准备必须冻结草稿");
+    require(device->outputs==0 && device->opens==0 && device->closes==0,"固定锚点Prepare不得输出或重建设备");
+    require(!session.dispatch(Action::START,request,context,prepared->prepared_id,false,{}),
+        "固定锚点实验不得绕过当轮前台许可");
+    require(device->outputs==0,"拒绝启动不得产生清理以外的隐藏输出");
+    session.invalidate_repeat("参数已编辑");
+    require(!session.snapshot()->repeat_ready,"编辑固定锚点参数必须使模板失效");
+}
+
 int main() {
     const auto root = std::filesystem::temp_directory_path() /
         ("xen-debug-session-tests-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -714,6 +743,7 @@ int main() {
             require(device->outputs == 0 && device->opens == 0 && device->closes == 0,
                 "无源配置且取消的测试不得真实输出或重建设备");
         }
+        test_target_prepare_is_frozen_and_output_free(root);
         test_recoil_freeze_and_admission(root);
         test_recoil_existing_curve_without_measurement(root);
         test_idle_hud_show();
