@@ -84,6 +84,38 @@ void controllers() {
     RecoilController mismatch(permit(p));input.profile=std::make_shared<const RecoilProfile>(*p);
     check(mismatch.advance(input,time(0)).snapshot.reason==RecoilReason::UNCALIBRATED,"未绑定对象不能顶替许可曲线");
 }
+void discrete_permit_preserves_events_and_limits() {
+    RecoilProfile value;std::string error;
+    check(load_recoil_profile(R"({"schema_version":3,"id":"synthetic_discrete_permit","revision":1,
+        "weapon_id":"ak47","sensitivity":1,"verified":false,"sample_semantics":"discrete_delta",
+        "events":[[40,1.25,-1.25],[45,2.75,-2.75]]})",value,error),error.c_str());
+    auto p=std::make_shared<const RecoilProfile>(value);
+    auto make_input=[&]{RecoilInput i;i.profile=p;i.enabled=i.healthy=i.focused=i.permission=i.profile_conditions_match=true;
+        i.device_epoch=i.weapon_generation=1;return i;};
+    RecoilController c(permit(p));auto input=make_input();
+    c.advance(input,time(0));input.held=true;input.firing_started_at=time(1);c.advance(input,time(1));
+    auto waiting=c.advance(input,time(30));
+    check(!waiting.has_intent&&waiting.snapshot.phase==RecoilPhase::FIRING,
+        "离散许可首步等待不误用累计采样20ms预算");
+    auto first=c.advance(input,time(41));
+    check(first.has_intent&&first.intent.dx_counts==1&&first.intent.dy_counts==-1&&first.intent.planned_at==time(41),
+        "许可路径按原离散首步输出，不执行累计插值");
+    check(first.intent.expires_at==time(61),"离散许可仍保留有限后端相位截止");
+    c.acknowledge({first.intent.command_id,RecoilReceiptStatus::ACKNOWLEDGED,time(42)},time(42));
+    auto second=c.advance(input,time(46));
+    check(second.has_intent&&second.intent.dx_counts==3&&second.intent.dy_counts==-3&&second.intent.planned_at==time(46),
+        "许可路径逐事件保留余量及绝对截止");
+    c.acknowledge({second.intent.command_id,RecoilReceiptStatus::ACKNOWLEDGED,time(46)},time(46));
+    input.held=false;c.advance(input,time(47));input.held=true;c.advance(input,time(48));
+    check(c.snapshot().session_id==1,"离散许可仍只能消费一次弹序");
+    RecoilController late(permit(p));input=make_input();late.advance(input,time(0));input.held=true;input.firing_started_at=time(1);
+    late.advance(input,time(1));
+    check(late.advance(input,time(62)).snapshot.reason==RecoilReason::LATE,"离散许可不豁免到期事件相位预算");
+    RecoilController late_ack(permit(p));input=make_input();late_ack.advance(input,time(0));input.held=true;input.firing_started_at=time(1);
+    late_ack.advance(input,time(1));first=late_ack.advance(input,time(41));
+    check(late_ack.acknowledge({first.intent.command_id,RecoilReceiptStatus::ACKNOWLEDGED,time(62)},time(62)).snapshot.reason==RecoilReason::LATE,
+        "离散许可超时ACK仍终止试验");
+}
 void files(const std::filesystem::path& root) {
     auto p=profile();const auto source=root/"source.json";{std::ofstream output(source);output<<serialize_recoil_profile(*p);}
     AppConfig config;config.gsi.enabled=true;
@@ -124,7 +156,7 @@ void files(const std::filesystem::path& root) {
 }
 int main() {
     const auto root=std::filesystem::temp_directory_path()/("xen-calibration-test-"+std::to_string(RecoilClock::now().time_since_epoch().count()));
-    try {std::filesystem::create_directory(root);contracts();budgets();controllers();files(root);std::filesystem::remove_all(root);
+    try {std::filesystem::create_directory(root);contracts();budgets();controllers();discrete_permit_preserves_events_and_limits();files(root);std::filesystem::remove_all(root);
         std::cout<<"recoil_calibration_tests passed\n";return 0;}
     catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

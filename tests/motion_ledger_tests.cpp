@@ -18,7 +18,8 @@ int main() {
         auto window = ledger.snapshot(t + milliseconds(3));
         check(window.complete && window.revision == 1 && window.events.size() == 1 &&
             window.events[0].dy_counts == 4, "只把外部已完成位移交给Aim");
-        check(!ledger.permits({1, 0}, t + milliseconds(3)), "总额度耗尽");
+        check(ledger.permits({4, 0}, t + milliseconds(3)), "Recoil外部位移不消费Aim剩余额度");
+        check(!ledger.permits({5, 0}, t + milliseconds(3)), "Aim自身额度仍受限");
         check(ledger.permits({10, 0}, t + milliseconds(16)), "按真实时间释放额度");
         ledger.record({1, 0}, {}, true);
         check(!ledger.snapshot(t + milliseconds(20)).complete &&

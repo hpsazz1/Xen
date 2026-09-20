@@ -13,6 +13,7 @@ public:
     void reset(double limit, int window_ms, std::chrono::steady_clock::time_point now);
     bool permits(const MouseMoveCommand& command, std::chrono::steady_clock::time_point now);
     bool record(const MouseMoveCommand& command, const MouseMoveReceipt& receipt, bool external);
+    bool healthy() const { std::lock_guard lock(mutex_); return !fault_; }
     ExternalMotionWindow snapshot(std::chrono::steady_clock::time_point now) const;
     std::uint64_t revision() const;
 private:

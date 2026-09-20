@@ -45,7 +45,8 @@ std::string fingerprint(const WeaponSnapshot& s) {
     const auto value = [](std::optional<int> v) { return v ? std::to_string(*v) : "?"; };
     return s.player_id + ":" + s.raw_name + ":" + std::to_string(static_cast<int>(s.state)) + ":" +
         value(s.ammo_clip) + ":" + value(s.ammo_clip_max) + ":" + value(s.ammo_reserve) + ":" +
-        std::to_string(static_cast<int>(s.status));
+        std::to_string(static_cast<int>(s.status)) + ":" + value(s.player_health) + ":" +
+        (s.player_playing ? "playing" : "inactive");
 }
 } // namespace
 
@@ -147,9 +148,9 @@ WeaponSnapshot parse_payload(std::string_view body, const GsiConfig& config, std
         const auto difference = source_ms > local_utc_ms ? source_ms - local_utc_ms : local_utc_ms - source_ms;
         if (difference > config.max_clock_skew_ms) { result.status = Status::CLOCK_REJECTED; return result; }
         result.provider_timestamp_seconds = static_cast<std::uint64_t>(timestamp);
-        if (!player.contains("activity") || !player["activity"].is_string() || player["activity"] != "playing" ||
-            !player.contains("state") || !player["state"].is_object() ||
-            !integer(player["state"], "health") || *integer(player["state"], "health") == 0) {
+        result.player_playing = player.contains("activity") && player["activity"].is_string() && player["activity"] == "playing";
+        if (player.contains("state") && player["state"].is_object()) result.player_health = integer(player["state"], "health");
+        if (!result.player_playing || !result.player_health || *result.player_health == 0) {
             result.status = Status::PLAYER_INACTIVE; return result;
         }
         if (!player.contains("weapons") || !player["weapons"].is_object() || player["weapons"].size() > 64) return result;
@@ -187,13 +188,16 @@ WeaponSnapshot parse_payload(std::string_view body, const GsiConfig& config, std
 void GsiState::reset() noexcept {
     current_ = {}; timestamp_ = 0; last_now_ = {}; timestamp_deadline_ = {}; seen_states_.clear();
     if (epoch_ != std::numeric_limits<std::uint64_t>::max()) ++epoch_;
+    if (recoil_safety_epoch_ != std::numeric_limits<std::uint64_t>::max()) ++recoil_safety_epoch_;
 }
 Status GsiState::ingest(std::string_view body, const GsiConfig& config,
                       Clock::time_point now, std::int64_t local_utc_ms) noexcept {
     try {
         auto incoming = parse_payload(body, config, local_utc_ms);
         if (epoch_ == 0) epoch_ = 1;
-        if (now < last_now_ || epoch_ == std::numeric_limits<std::uint64_t>::max() || revision_ == std::numeric_limits<std::uint64_t>::max()) {
+        if (recoil_safety_epoch_ == 0) recoil_safety_epoch_ = 1;
+        if (now < last_now_ || epoch_ == std::numeric_limits<std::uint64_t>::max() ||
+            recoil_safety_epoch_ == std::numeric_limits<std::uint64_t>::max() || revision_ == std::numeric_limits<std::uint64_t>::max()) {
             current_.valid = false; current_.status = Status::COUNTER_EXHAUSTED; return current_.status;
         }
         last_now_ = now;
@@ -213,6 +217,21 @@ Status GsiState::ingest(std::string_view body, const GsiConfig& config,
             incoming.valid_until = timestamp_deadline_;
             if (now >= timestamp_deadline_) { incoming.valid = false; incoming.status = Status::EXPIRED; }
         }
+        const auto ordinary_state = [](const WeaponSnapshot& snapshot) {
+            return snapshot.identity_match && snapshot.player_playing && snapshot.player_health &&
+                ((snapshot.status == Status::READY && snapshot.valid) || snapshot.status == Status::RELOADING || snapshot.status == Status::EMPTY ||
+                 (snapshot.status == Status::PLAYER_INACTIVE && *snapshot.player_health == 0));
+        };
+        // 在发布端记录断点，保证消费者即使跳过中间失败快照也不能按换枪自动恢复。
+        const bool trust_break = !ordinary_state(incoming) || incoming.valid_until <= now ||
+            (current_.revision && (!ordinary_state(current_) || current_.valid_until <= now || current_.player_id != incoming.player_id));
+        if (trust_break) {
+            if (recoil_safety_epoch_ == std::numeric_limits<std::uint64_t>::max()) {
+                current_.valid = false; current_.status = Status::COUNTER_EXHAUSTED; return current_.status;
+            }
+            ++recoil_safety_epoch_;
+        }
+        incoming.recoil_safety_epoch = recoil_safety_epoch_;
         if (current_.valid && (!incoming.valid || now >= current_.valid_until || current_.player_id != incoming.player_id)) ++epoch_;
         incoming.source_epoch = epoch_;
         incoming.revision = ++revision_;

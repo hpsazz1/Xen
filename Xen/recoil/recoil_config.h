@@ -14,8 +14,9 @@ struct RecoilConfig {
     std::string input_path = "kmbox_net";
     double sensitivity = 0;
     std::string fire_mode = "automatic";
-    // 同一真实时间窗口内Aim和压枪共同消费物理额度，不按worker tick补满。
+    // 兼容已有配置：此窗口仅约束Aim自身来源的额度，Recoil外部记录不消费它。
     int budget_window_ms = 16;
+    // 历史归档兼容字段，普通Recoil不再据此读取或判断视觉许可。
     int max_observation_age_ms = 50;
 };
 #endif

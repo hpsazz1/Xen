@@ -30,6 +30,9 @@ struct GsiConfig {
 struct WeaponSnapshot {
     bool valid = false;
     bool identity_match = false;
+    // 仅为普通压枪区分确认死亡与缺失/非游戏状态，不放宽 valid。
+    bool player_playing = false;
+    std::optional<int> player_health;
     Status status = Status::UNAVAILABLE;
     std::string player_id; // 自动从客户端身份取得，不是固定配置。
     std::string raw_name;
@@ -39,6 +42,8 @@ struct WeaponSnapshot {
     std::optional<std::uint64_t> provider_timestamp_seconds;
     // 这是本地接收连续性代际/发布序号，不冒充游戏进程session或逐发时间。
     std::uint64_t source_epoch = 0;
+    // 不可信间断的持久代际；普通死亡、换弹、空弹不改变它。
+    std::uint64_t recoil_safety_epoch = 0;
     std::uint64_t revision = 0;
     Clock::time_point received_at{}, valid_until{};
     // 原生GSI没有逐包序号；同秒完整变化可采纳，但无法证明源端严格顺序。

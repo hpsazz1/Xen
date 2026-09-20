@@ -2048,6 +2048,7 @@ struct Overlay::Impl {
             p95, std::size(p95), "%.2f ms", snapshot.pipeline_p95_ms);
         const char* output = snapshot.emergency_stopped
             ? "急停锁定"
+            : snapshot.visual_output_blocked ? "视觉输出阻断"
             : snapshot.output_armed
                 ? "已武装"
                 : snapshot.output_allowed_by_config
@@ -2055,6 +2056,7 @@ struct Overlay::Impl {
                     : "配置禁用";
         const ImVec4 output_color = snapshot.emergency_stopped
             ? rgba(kDanger)
+            : snapshot.visual_output_blocked ? rgba(kWarning)
             : snapshot.output_armed
                 ? rgba(kSuccess)
                 : snapshot.output_allowed_by_config
@@ -3453,6 +3455,18 @@ struct Overlay::Impl {
         end_config_panel();
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
 
+        if (snapshot.visual_output_blocked && !snapshot.emergency_stopped) {
+            ImGui::TextWrapped("视觉输出已阻断：Aim、扳机和急停辅助等待恢复；普通压枪仍按输入、焦点和武器条件运行。");
+            ImGui::BeginDisabled(snapshot.aim_hold_active || !overlay::detail::output_arm_available(
+                snapshot.state == RuntimeState::RUNNING, snapshot.emergency_stopped,
+                snapshot.output_allowed_by_config, snapshot.input_healthy,
+                snapshot.detector_reload_state == DetectorReloadState::LOADING));
+            if (ImGui::Button("恢复视觉输出")) {
+                actions.runtime_intents.push_back({RuntimeIntentType::ARM_OUTPUT, true});
+            }
+            show_help_tooltip("确认视觉链恢复并松开瞄准键后，重新武装视觉输出。全局急停或设备故障仍需各自复位。");
+            ImGui::EndDisabled();
+        }
         if (snapshot.emergency_stopped) {
             ImGui::PushStyleColor(ImGuiCol_ChildBg, rgba(kDangerSoft));
             ImGui::PushStyleColor(ImGuiCol_Border, rgba(kDanger, 0.35f));

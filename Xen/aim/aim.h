@@ -134,6 +134,8 @@ struct AimFrame {
     // Runtime 在按住键且安全门允许物理控制时置 true。未按键仍持续完成
     // 观测、跟踪、预选和命令计算，只是不启用锁定后的动态收缩范围。
     bool lock_active = false;
+    // 普通压枪弹序持有Y；Runtime在共享输出锁内采样和复核所有权。
+    bool recoil_y_owned = false;
     std::vector<Detection> detections;
     std::uint64_t observation_epoch = 0;
     AimBackgroundMotionX background_motion_x;

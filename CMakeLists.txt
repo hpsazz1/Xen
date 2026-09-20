@@ -1088,6 +1088,8 @@ add_custom_target(model_workspace_tools
         "${XEN_MODEL_TOOLS_OUTPUT}/tools/model-data"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${PROJECT_SOURCE_DIR}/scripts/import_recoil_profiles.py"
+        "${PROJECT_SOURCE_DIR}/scripts/migrate_legacy_recoil_profiles.py"
+        "${PROJECT_SOURCE_DIR}/scripts/invoke_recoil_legacy_acceptance.ps1"
         "${PROJECT_SOURCE_DIR}/scripts/build_recoil_dataset.py"
         "${XEN_MODEL_TOOLS_OUTPUT}/tools/recoil"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -1226,6 +1228,11 @@ if(BUILD_TESTING)
         add_test(NAME ${test_name} COMMAND ${test_name})
     endforeach()
     add_executable(recoil_worker_tests tests/recoil_worker_tests.cpp)
+    # 真实旧数据仅本地提供参数，不分发到默认测试夹具。
+    add_executable(recoil_legacy_parity_tests tests/recoil_legacy_parity_tests.cpp)
+    target_link_libraries(recoil_legacy_parity_tests PRIVATE recoil nlohmann_json::nlohmann_json)
+    add_test(NAME import_recoil_profiles_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/import_recoil_profiles_tests.py")
+    add_test(NAME migrate_legacy_recoil_profiles_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/migrate_legacy_recoil_profiles_tests.py")
     target_link_libraries(recoil_worker_tests PRIVATE recoil_worker)
     add_test(NAME recoil_worker_tests COMMAND recoil_worker_tests)
     add_executable(recoil_calibration_tests tests/recoil_calibration_tests.cpp)
@@ -2191,6 +2198,9 @@ if(BUILD_TESTING)
         "${PROJECT_SOURCE_DIR}/scripts/test_publish_worker_update.ps1"
         -ManifestValidator "$<TARGET_FILE:release_contract_tests>"
         -TestRoot "${CMAKE_BINARY_DIR}/worker-update-tests")
+    xen_add_windows_powershell_test(recoil_legacy_acceptance_tests
+        "${PROJECT_SOURCE_DIR}/scripts/test_recoil_legacy_acceptance.ps1"
+        -TestRoot "${CMAKE_BINARY_DIR}/recoil-legacy-acceptance-tests")
     xen_add_windows_powershell_test(aim_analysis_import_scope_tests
         "${PROJECT_SOURCE_DIR}/tests/aim_analysis_import_scope_tests.ps1"
         -ScriptsRoot "${PROJECT_SOURCE_DIR}/scripts")

@@ -37,6 +37,7 @@ std::optional<double> number(const Json& json,const char* key) {
 }
 Json optional(std::optional<double> value) { return value ? Json(*value) : Json(nullptr); }
 bool execution_profile(const RecoilProfile& profile) {
+    if(profile.schema_version==3)return profile.state==RecoilProfileState::USER_CONFIRMED;
     if(profile.state==RecoilProfileState::USER_CONFIRMED)return profile.execution_phase_budget_ms.has_value();
     return (profile.state==RecoilProfileState::CALIBRATED || profile.state==RecoilProfileState::ACCEPTED) &&
         profile.phase_tolerance_ms.has_value();
@@ -52,9 +53,10 @@ double elapsed(RecoilTime now,RecoilTime before) {
 bool validate_recoil_profile(const RecoilProfile& p,std::string& error) noexcept {
     try {
         auto reject=[&](const char* reason){error=reason;return false;};
-        if(p.schema_version!=1 || p.id.empty() || p.id.size()>128 || p.weapon_id.empty() || p.weapon_id.size()>128 || !p.revision)
+        const bool discrete=p.schema_version==3;
+        if((p.schema_version!=1&&!discrete) || p.id.empty() || p.id.size()>128 || p.weapon_id.empty() || p.weapon_id.size()>128 || !p.revision)
             return reject("压枪schema或版本身份无效");
-        if(p.unit!="device_counts" || p.sample_semantics!="cumulative" || p.fire_mode!="automatic")
+        if(p.unit!="device_counts" || p.sample_semantics!=(discrete?"discrete_delta":"cumulative") || p.fire_mode!="automatic")
             return reject("只支持显式累计device_counts及automatic曲线");
         if(std::string_view(stage(p.state))=="INVALID")return reject("曲线状态无效");
         if(p.points.size()<2 || p.points.size()>100000)return reject("曲线节点数量无效");
@@ -67,6 +69,22 @@ bool validate_recoil_profile(const RecoilProfile& p,std::string& error) noexcept
                 return reject("节点必须有限、时间严格递增且在有界范围内");
             previous=point.time_ms;
         }
+        if(discrete) {
+            if(p.events.empty()||p.events.size()>4095||p.points.size()!=p.events.size()+1||
+                p.phase_tolerance_ms||p.recovery_ms||p.execution_phase_budget_ms||
+                p.state==RecoilProfileState::CALIBRATED||p.state==RecoilProfileState::ACCEPTED)
+                return reject("离散事件数量或执行声明无效");
+            double time=0,x=0,y=0;
+            for(std::size_t i=0;i<p.events.size();++i) {
+                const auto& event=p.events[i];
+                if(!finite(event.time_ms)||!finite(event.x_counts)||!finite(event.y_counts)||event.time_ms<=time||
+                    event.time_ms>60000||std::abs(event.x_counts)>1e7||std::abs(event.y_counts)>1e7)
+                    return reject("离散事件必须有限且时间严格递增");
+                time=event.time_ms;x+=event.x_counts;y+=event.y_counts;
+                if(p.points[i+1].time_ms!=time||p.points[i+1].x_counts!=x||p.points[i+1].y_counts!=y)
+                    return reject("离散预览与事件不一致");
+            }
+        } else if(!p.events.empty())return reject("累计曲线不能携带离散事件");
         if(p.phase_tolerance_ms && (!finite(*p.phase_tolerance_ms)||*p.phase_tolerance_ms<=0||*p.phase_tolerance_ms>1000))
             return reject("相位容差无效");
         if(p.recovery_ms && (!finite(*p.recovery_ms)||*p.recovery_ms<0||*p.recovery_ms>60000))
@@ -82,7 +100,7 @@ bool validate_recoil_profile(const RecoilProfile& p,std::string& error) noexcept
         if(p.state==RecoilProfileState::USER_CONFIRMED) {
             const auto canonical=weapon::normalize_weapon_id(p.weapon_id);
             if(!canonical.empty()&&canonical!=p.weapon_id)return reject("人工确认曲线必须使用规范武器身份");
-            if(p.execution_phase_budget_ms!=kUserConfirmedPhaseBudgetMs||p.phase_tolerance_ms||p.recovery_ms||!p.calibration.sensitivity||
+            if((!discrete&&p.execution_phase_budget_ms!=kUserConfirmedPhaseBudgetMs)||p.phase_tolerance_ms||p.recovery_ms||!p.calibration.sensitivity||
                 p.calibration.input_path!="kmbox_net")
                 return reject("人工确认需有效灵敏度和既定软件预算，不得补造实测相位或恢复时间");
         }
@@ -104,18 +122,27 @@ bool load_recoil_profile(std::string_view input,RecoilProfile& output,std::strin
             if(depth>16)throw std::runtime_error("曲线JSON嵌套过深");return true;
         });
         RecoilProfile p;
-        if(json.at("schema_version")==2) {
+        if(json.at("schema_version")==2||json.at("schema_version")==3) {
+            const bool discrete=json.at("schema_version")==3;
+            if(discrete) {
+                p.schema_version=3;p.sample_semantics=json.at("sample_semantics").get<std::string>();
+                p.unit=json.value("unit",std::string("device_counts"));
+            }
             if(!json.at("revision").is_number_unsigned()||!json.at("verified").is_boolean())
                 throw std::runtime_error("精简曲线版本或确认状态类型无效");
             p.id=json.at("id").get<std::string>();p.weapon_id=json.at("weapon_id").get<std::string>();
             p.revision=json.at("revision").get<std::uint64_t>();
             p.calibration.sensitivity=number(json,"sensitivity");p.calibration.input_path="kmbox_net";
             p.state=RecoilProfileState::SCHEMA_VALID;
-            const auto& points=json.at("points");
+            const auto& points=json.at(discrete?"events":"points");
             if(!points.is_array()||points.size()>100000)throw std::runtime_error("曲线节点数量无效");
             for(const auto& point:points) {
                 if(!point.is_array()||point.size()!=3)throw std::runtime_error("节点必须为[time_ms,x_counts,y_counts]");
-                p.points.push_back({point[0].get<double>(),point[1].get<double>(),point[2].get<double>()});
+                (discrete?p.events:p.points).push_back({point[0].get<double>(),point[1].get<double>(),point[2].get<double>()});
+            }
+            if(discrete) {
+                p.points.push_back({});double x=0,y=0;
+                for(const auto& event:p.events) {x+=event.x_counts;y+=event.y_counts;p.points.push_back({event.time_ms,x,y});}
             }
             const auto canonical=weapon::normalize_weapon_id(p.weapon_id);
             if(!canonical.empty())p.weapon_id=canonical;
@@ -161,6 +188,7 @@ bool load_recoil_profile(std::string_view input,RecoilProfile& output,std::strin
       catch(...) {return false;}
 }
 std::string serialize_recoil_profile(const RecoilProfile& p) {
+    if(p.schema_version==3)return serialize_recoil_profile_storage(p);
     std::string error;if(!validate_recoil_profile(p,error))throw std::invalid_argument(error);
     const auto canonical = weapon::normalize_weapon_id(p.weapon_id);
     const std::string_view weapon_id = canonical.empty() ? std::string_view(p.weapon_id) : canonical;
@@ -186,7 +214,8 @@ bool confirm_recoil_profile(RecoilProfile& profile,std::string& error) noexcept 
         confirmed.source={};confirmed.calibration.game_build.clear();confirmed.calibration.conditions.clear();
         confirmed.calibration.evidence.clear();confirmed.calibration.input_path="kmbox_net";
         confirmed.phase_tolerance_ms.reset();confirmed.recovery_ms.reset();
-        confirmed.execution_phase_budget_ms=kUserConfirmedPhaseBudgetMs;
+        if(confirmed.schema_version==3)confirmed.execution_phase_budget_ms.reset();
+        else confirmed.execution_phase_budget_ms=kUserConfirmedPhaseBudgetMs;
         if(!validate_recoil_profile(confirmed,error))return false;
         confirmed.source.sha256=recoil_calibration_sha256(serialize_recoil_profile_storage(confirmed));
         profile=std::move(confirmed);return true;
@@ -194,6 +223,12 @@ bool confirm_recoil_profile(RecoilProfile& profile,std::string& error) noexcept 
 }
 std::string serialize_recoil_profile_storage(const RecoilProfile& p) {
     std::string error;if(!validate_recoil_profile(p,error))throw std::invalid_argument(error);
+    if(p.schema_version==3) {
+        Json events=Json::array();for(const auto& event:p.events)events.push_back({event.time_ms,event.x_counts,event.y_counts});
+        return Json{{"schema_version",3},{"id",p.id},{"revision",p.revision},{"weapon_id",p.weapon_id},
+            {"sensitivity",optional(p.calibration.sensitivity)},{"verified",p.state==RecoilProfileState::USER_CONFIRMED},
+            {"unit",p.unit},{"sample_semantics",p.sample_semantics},{"events",events}}.dump(2);
+    }
     // 老实测曲线不能在存储层悄悄丢失校准证据；新人工确认路径使用精简格式。
     if(p.state==RecoilProfileState::CALIBRATED||p.state==RecoilProfileState::ACCEPTED)
         return serialize_recoil_profile(p);
@@ -209,6 +244,7 @@ RecoilPoint sample_recoil_profile(const RecoilProfile& p,double time) noexcept {
     if(time>=p.points.back().time_ms)return p.points.back();
     auto right=std::upper_bound(p.points.begin(),p.points.end(),time,[](double t,const auto& point){return t<point.time_ms;});
     if(right==p.points.begin())return {};
+    if(p.schema_version==3)return *(right-1);
     const auto& a=*(right-1);const auto& b=*right;
     const double fraction=(time-a.time_ms)/(b.time_ms-a.time_ms);
     return {time,a.x_counts+(b.x_counts-a.x_counts)*fraction,a.y_counts+(b.y_counts-a.y_counts)*fraction};
@@ -222,6 +258,7 @@ bool compile_recoil_profile(const RecoilProfile& base,const RecoilTuning& tuning
         }
         RecoilProfile compiled=base;
         if(tuning.x_strength==1&&tuning.y_strength==1&&tuning.start_offset_ms==0&&tuning.time_scale==1) {output=std::move(compiled);return true;}
+        if(base.schema_version==3){error="旧离散弹道保留已确认事件，不支持累计曲线调参";return false;}
         if(base.revision==std::numeric_limits<std::uint64_t>::max()){error="曲线版本溢出";return false;}
         auto first=std::find_if(base.points.begin(),base.points.end(),[](const auto& p){return p.x_counts!=0||p.y_counts!=0;});
         const double anchor=first==base.points.end()?base.points.back().time_ms:first->time_ms;
@@ -269,14 +306,29 @@ double RecoilController::phase_budget_ms() const noexcept {
     if(profile_&&profile_->state==RecoilProfileState::USER_CONFIRMED)return profile_->execution_phase_budget_ms.value_or(0);
     return profile_ ? profile_->phase_tolerance_ms.value_or(0) : 0;
 }
+bool RecoilController::discrete_execution() const noexcept {
+    return profile_&&profile_->schema_version==3;
+}
+bool RecoilController::ordinary_discrete_execution() const noexcept {
+    return discrete_execution()&&!calibration_permit_&&offline_phase_budget_ms_==0;
+}
 RecoilDecision RecoilController::result() const noexcept {
     RecoilDecision decision;decision.snapshot=state_;
-    if(active_&&profile_&&phase_budget_ms()>0)
+    if(active_&&discrete_execution()&&next_event_<profile_->events.size())
+        decision.next_deadline=after(started_at_,profile_->events[next_event_].time_ms);
+    else if(active_&&profile_&&phase_budget_ms()>0)
         decision.next_deadline=after(last_sample_at_,phase_budget_ms());
     return decision;
 }
 RecoilDecision RecoilController::cancel(RecoilReason reason,RecoilTime now) noexcept {
+    ordinary_restart_allowed_=false;
+    if(ordinary_discrete_execution()&&reason!=RecoilReason::RELEASED&&reason!=RecoilReason::EXHAUSTED&&
+        reason!=RecoilReason::PROFILE_CHANGED)context_latched_=true;
     if(state_.pending) {
+        if(deferred_unsent_) {
+            state_.discarded_x+=pending_.dx_counts;state_.discarded_y+=pending_.dy_counts;
+            state_.pending=false;deferred_unsent_=false;
+        }
         state_.discarded_x+=pending_remainder_x_;state_.discarded_y+=pending_remainder_y_;
         pending_remainder_x_=pending_remainder_y_=0;
     }
@@ -287,8 +339,12 @@ RecoilDecision RecoilController::cancel(RecoilReason reason,RecoilTime now) noex
     last_now_=std::max(last_now_,now);
     return result();
 }
+bool RecoilController::defer_unsent(std::uint64_t command_id) noexcept {
+    if(!active_||!state_.pending||state_.faulted||command_id!=pending_.command_id)return false;
+    deferred_unsent_=true;return true;
+}
 bool RecoilController::restart_for_manual(RecoilTime now) noexcept {
-    if(now==RecoilTime{}||now<last_now_||state_.pending||state_.faulted||calibration_permit_||
+    if(now==RecoilTime{}||now<last_now_||state_.pending||state_.faulted||context_latched_||calibration_permit_||
         offline_phase_budget_ms_>0||!has_fired_||!profile_valid_||!profile_||!execution_profile(*profile_))return false;
     cancel(RecoilReason::RELEASED,now);
     // 只为一次明确的人工上升沿跳过旧弹序恢复等待；所有运行许可仍由advance检查。
@@ -299,13 +355,34 @@ RecoilDecision RecoilController::advance(const RecoilInput& input,RecoilTime now
     if(now==RecoilTime{}||now<last_now_)return cancel(RecoilReason::INVALID_TIME,last_now_);
     last_now_=now;
     state_.context_block=RecoilContextBlock::NONE;
-    if(!input.enabled){cancel(RecoilReason::DISABLED,now);state_.phase=RecoilPhase::DISABLED;return result();}
+    if(!input.enabled){context_latched_=true;ordinary_restart_allowed_=false;cancel(RecoilReason::DISABLED,now);state_.phase=RecoilPhase::DISABLED;return result();}
+    const bool device_changed=device_epoch_&&input.device_epoch!=device_epoch_;
+    const bool trust_changed=input.weapon_trust_generation!=weapon_trust_generation_;
+    const bool weapon_changed=profile_&&input.weapon_generation!=weapon_generation_;
     const bool changed=input.profile!=profile_||input.weapon_generation!=weapon_generation_||input.device_epoch!=device_epoch_;
+    if(device_changed||trust_changed) {
+        context_latched_=true;ordinary_restart_allowed_=false;cancel(RecoilReason::CONTEXT,now);
+    }
+    weapon_trust_generation_=input.weapon_trust_generation;
     if(changed) {
+        const bool ordinary_wait=ordinary_restart_allowed_;
         cancel(RecoilReason::PROFILE_CHANGED,now);
         profile_=input.profile;weapon_generation_=input.weapon_generation;device_epoch_=input.device_epoch;
         std::string error;
         profile_valid_=profile_&&validate_recoil_profile(*profile_,error);
+        if((weapon_changed||ordinary_wait)&&ordinary_discrete_execution()&&!context_latched_&&!state_.faulted)
+            ordinary_restart_allowed_=true;
+    }
+    const bool trusted_context=input.healthy&&input.focused&&input.permission&&input.weapon_generation&&input.device_epoch;
+    if(!trusted_context||input.weapon_block==RecoilWeaponBlock::UNTRUSTED) {
+        context_latched_=true;ordinary_restart_allowed_=false;
+    }
+    if(input.weapon_block==RecoilWeaponBlock::ORDINARY_UNAVAILABLE) {
+        const bool may_restart=trusted_context&&!context_latched_&&!state_.faulted;
+        state_.context_block=RecoilContextBlock::PROFILE_CONDITIONS;cancel(RecoilReason::CONTEXT,now);
+        // 只有本分支确认的普通武器状态可撤销内部CONTEXT锁存；外部cancel不能制造恢复资格。
+        ordinary_restart_allowed_=may_restart;if(may_restart)context_latched_=false;
+        return result();
     }
     if(!profile_valid_)return cancel(RecoilReason::INVALID_PROFILE,now);
     if(calibration_permit_) {
@@ -319,7 +396,9 @@ RecoilDecision RecoilController::advance(const RecoilInput& input,RecoilTime now
         if(profile_->state!=RecoilProfileState::SCHEMA_VALID || !profile_->calibration.evidence.empty() ||
             profile_->phase_tolerance_ms || profile_->recovery_ms)return cancel(RecoilReason::UNCALIBRATED,now);
     } else if(!execution_profile(*profile_))return cancel(RecoilReason::UNCALIBRATED,now);
-    if(!input.healthy||!input.focused||!input.permission||!input.profile_conditions_match||!weapon_generation_||!device_epoch_) {
+    if(!input.healthy||!input.focused||!input.permission||!input.profile_conditions_match||!weapon_generation_||!device_epoch_||
+        input.weapon_block==RecoilWeaponBlock::UNTRUSTED) {
+        context_latched_=true;ordinary_restart_allowed_=false;
         state_.context_block=!input.healthy ? RecoilContextBlock::INPUT_UNHEALTHY :
             !input.focused ? RecoilContextBlock::NOT_FOCUSED :
             !input.profile_conditions_match ? RecoilContextBlock::PROFILE_CONDITIONS :
@@ -328,15 +407,22 @@ RecoilDecision RecoilController::advance(const RecoilInput& input,RecoilTime now
     }
     if(state_.faulted)return result();
     if(!input.held) {
+        context_latched_=false;ordinary_restart_allowed_=false;
         if(active_||(!released_since_firing_&&has_fired_)){released_at_=now;released_since_firing_=true;}
         cancel(RecoilReason::RELEASED,now);release_seen_=true;
         state_.phase=RecoilPhase::READY;return result();
     }
     if(state_.pending) {
-        if(now>pending_.expires_at)return cancel(RecoilReason::LATE,now);
+        if(!ordinary_discrete_execution()&&now>pending_.expires_at)return cancel(RecoilReason::LATE,now);
+        if(deferred_unsent_) {
+            deferred_unsent_=false;
+            auto decision=result();decision.has_intent=true;decision.intent=pending_;return decision;
+        }
         state_.reason=RecoilReason::COMMAND_PENDING;return result();
     }
     if(!active_) {
+        const bool ordinary_restart=ordinary_discrete_execution()&&ordinary_restart_allowed_&&!context_latched_;
+        if(ordinary_restart){release_seen_=true;manual_restart_allowed_=true;}
         if(!release_seen_){state_.reason=RecoilReason::WAIT_RELEASE;return result();}
         // 人工确认采用明确的软件重放策略：观察到健康释放后，新按下从首发开始。
         // 不声称游戏后坐力已恢复；同一持续按下及校准permit仍不能循环。
@@ -344,31 +430,41 @@ RecoilDecision RecoilController::advance(const RecoilInput& input,RecoilTime now
         const bool recovered=confirmed_repress||manual_restart_allowed_||!has_fired_||input.recovery_qualified || (released_since_firing_&&profile_->recovery_ms &&
             elapsed(now,released_at_)>=*profile_->recovery_ms);
         if(!recovered)return cancel(RecoilReason::RESET_UNVERIFIED,now);
-        const auto start=input.firing_started_at==RecoilTime{}?now:input.firing_started_at;
-        if(start>now||elapsed(now,start)>phase_budget_ms())return cancel(RecoilReason::LATE,now);
+        const auto start=ordinary_restart||input.firing_started_at==RecoilTime{}?now:input.firing_started_at;
+        if(start>now||(!ordinary_discrete_execution()&&elapsed(now,start)>phase_budget_ms()))return cancel(RecoilReason::LATE,now);
         if(state_.session_id==std::numeric_limits<std::uint64_t>::max())return cancel(RecoilReason::LIMIT,now);
         ++state_.session_id;active_=has_fired_=true;released_since_firing_=false;release_seen_=false;manual_restart_allowed_=false;
-        sampled_={};started_at_=last_sample_at_=start;
+        sampled_={};started_at_=last_sample_at_=start;state_.firing_started_at=start;next_event_=0;ordinary_restart_allowed_=false;
         state_.phase=RecoilPhase::FIRING;state_.reason=RecoilReason::NONE;
         if(now==start)return result();
     }
-    if(elapsed(now,last_sample_at_)>phase_budget_ms())return cancel(RecoilReason::LATE,now);
-    auto sample=sample_recoil_profile(*profile_,elapsed(now,started_at_));
-    const double x=sample.x_counts-sampled_.x_counts+state_.remainder_x;
-    const double y=sample.y_counts-sampled_.y_counts+state_.remainder_y;
+    const bool discrete=discrete_execution();
+    if(!discrete&&elapsed(now,last_sample_at_)>phase_budget_ms())return cancel(RecoilReason::LATE,now);
+    if(discrete&&(next_event_>=profile_->events.size()||now<after(started_at_,profile_->events[next_event_].time_ms)))return result();
+    const auto event=discrete?profile_->events[next_event_]:RecoilPoint{};
+    if(discrete&&!ordinary_discrete_execution()&&elapsed(now,after(started_at_,event.time_ms))>phase_budget_ms())
+        return cancel(RecoilReason::LATE,now);
+    auto sample=discrete?RecoilPoint{event.time_ms,sampled_.x_counts+event.x_counts,sampled_.y_counts+event.y_counts}:
+        sample_recoil_profile(*profile_,elapsed(now,started_at_));
+    // 离散量直接与余量相加；累计再相减会引入不同的浮点舍入，破坏旧逐步整数。
+    const double delta_x=discrete?event.x_counts:sample.x_counts-sampled_.x_counts;
+    const double delta_y=discrete?event.y_counts:sample.y_counts-sampled_.y_counts;
+    const double x=delta_x+state_.remainder_x;
+    const double y=delta_y+state_.remainder_y;
     if(!finite(x)||!finite(y)||std::abs(x)>kCommandAxisLimitCounts||std::abs(y)>kCommandAxisLimitCounts)return cancel(RecoilReason::LIMIT,now);
     const int dx=static_cast<int>(x),dy=static_cast<int>(y);
-    state_.planned_x+=sample.x_counts-sampled_.x_counts;state_.planned_y+=sample.y_counts-sampled_.y_counts;
+    state_.planned_x+=delta_x;state_.planned_y+=delta_y;
     if(!dx&&!dy) {
         sampled_=sample;last_sample_at_=now;state_.remainder_x=x;state_.remainder_y=y;
-        if(elapsed(now,started_at_)>=profile_->points.back().time_ms) {
+        if(discrete)++next_event_;
+        if(discrete?next_event_==profile_->events.size():elapsed(now,started_at_)>=profile_->points.back().time_ms) {
             cancel(RecoilReason::EXHAUSTED,now);state_.phase=RecoilPhase::EXHAUSTED;
         }
         return result();
     }
     if(next_command_id_==std::numeric_limits<std::uint64_t>::max())return cancel(RecoilReason::LIMIT,now);
     pending_={++next_command_id_,state_.session_id,profile_->revision,weapon_generation_,device_epoch_,
-        now,after(now,phase_budget_ms()),dx,dy};
+        discrete?after(started_at_,event.time_ms):now,ordinary_discrete_execution()?RecoilTime::max():after(now,phase_budget_ms()),dx,dy};
     pending_sample_=sample;pending_remainder_x_=x-dx;pending_remainder_y_=y-dy;
     state_.remainder_x=state_.remainder_y=0;
     state_.command_id=pending_.command_id;state_.pending=true;state_.phase=RecoilPhase::PENDING;
@@ -377,7 +473,7 @@ RecoilDecision RecoilController::advance(const RecoilInput& input,RecoilTime now
 RecoilDecision RecoilController::acknowledge(const RecoilReceipt& receipt,RecoilTime now) noexcept {
     if(!state_.pending||receipt.command_id!=pending_.command_id)return result();
     const bool valid=now>=last_now_&&receipt.completed_at>=pending_.planned_at&&receipt.completed_at<=now;
-    state_.pending=false;last_now_=std::max(now,last_now_);
+    state_.pending=false;deferred_unsent_=false;last_now_=std::max(now,last_now_);
     if(!valid||receipt.status==RecoilReceiptStatus::UNKNOWN) {
         state_.unknown_x+=pending_.dx_counts;state_.unknown_y+=pending_.dy_counts;
         state_.discarded_x+=pending_remainder_x_;state_.discarded_y+=pending_remainder_y_;
@@ -392,7 +488,7 @@ RecoilDecision RecoilController::acknowledge(const RecoilReceipt& receipt,Recoil
     }
     state_.confirmed_x+=pending_.dx_counts;state_.confirmed_y+=pending_.dy_counts;
     if(!active_)return result();
-    if(receipt.completed_at>pending_.expires_at) {
+    if(!ordinary_discrete_execution()&&receipt.completed_at>pending_.expires_at) {
         state_.discarded_x+=pending_remainder_x_;state_.discarded_y+=pending_remainder_y_;
         pending_remainder_x_=pending_remainder_y_=0;
         return cancel(RecoilReason::LATE,now);
@@ -400,7 +496,8 @@ RecoilDecision RecoilController::acknowledge(const RecoilReceipt& receipt,Recoil
     sampled_=pending_sample_;last_sample_at_=pending_.planned_at;
     state_.remainder_x=pending_remainder_x_;state_.remainder_y=pending_remainder_y_;
     state_.phase=RecoilPhase::FIRING;state_.reason=RecoilReason::NONE;
-    if(sampled_.time_ms>=profile_->points.back().time_ms) {
+    if(discrete_execution())++next_event_;
+    if(discrete_execution()?next_event_==profile_->events.size():sampled_.time_ms>=profile_->points.back().time_ms) {
         cancel(RecoilReason::EXHAUSTED,now);state_.phase=RecoilPhase::EXHAUSTED;
     }
     return result();
@@ -414,7 +511,7 @@ bool validate_recoil_candidate_execution(const RecoilProfile& candidate,
         };
         report.advance_limit=kReplayAdvanceLimit;
         report.command_axis_limit_counts=kCommandAxisLimitCounts;
-        require(candidate.state==RecoilProfileState::SCHEMA_VALID && candidate.calibration.evidence.empty() &&
+        require(candidate.schema_version==1&&candidate.state==RecoilProfileState::SCHEMA_VALID && candidate.calibration.evidence.empty() &&
             !candidate.phase_tolerance_ms && !candidate.recovery_ms,"回放只接受无校准声明的SCHEMA_VALID候选");
         RecoilProfile compiled;
         if(!compile_recoil_profile(candidate,{},compiled,error))return false;

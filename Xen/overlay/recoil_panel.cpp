@@ -1180,6 +1180,10 @@ struct RecoilPanel::Impl {
             status = "已加载独立草稿；活动曲线未改变。"; } } catch (...) { status = "曲线文件或目录无效。"; }
     }
     bool strength_controls() {
+        if (base.schema_version == 3) {
+            ImGui::TextWrapped("旧版离散弹道保持原始逐步输出；强度调整请使用独立采集候选。");
+            return false;
+        }
         bool changed = false;
         if (form("recoil_tuning")) {
             row("垂直强度", "只改变草稿Y增量；100%保持基线，正比例保留原方向。不会热改正在执行的版本。");
@@ -1197,7 +1201,7 @@ struct RecoilPanel::Impl {
         if (form("recoil_settings")) {
             row("启用压枪", "在射击、源端焦点、GSI武器和已验证弹道匹配时补偿；启用本身不移动。");
             ImGui::Checkbox("##recoil_enabled", &c.enabled);
-            row("Aim混合模式", "关闭时选择独立压枪阶段能力；混合需外部运动账本和对应物理验收，不改变Aim参数。");
+            row("Aim混合模式", "开启时压枪弹序独占Y，Aim继续X；结束后恢复Aim Y。压枪不依赖目标检测或源视频时钟。关闭时仅压枪。");
             ImGui::Checkbox("##recoil_mixed", &c.mixed_aim);
             ImGui::EndTable();
         }
@@ -1288,6 +1292,7 @@ struct RecoilPanel::Impl {
             static_cast<unsigned long long>(base.revision));
         bool changed = false;
         changed |= strength_controls();
+        ImGui::BeginDisabled(base.schema_version == 3);
         if (ImGui::TreeNode("时序（高级）")) {
             changed |= ImGui::InputDouble("起压偏移 / ms", &tuning.start_offset_ms, 0.5, 1, "%.2f"); help("相对基线首次补偿时刻偏移；不允许跨到射击事件之前。0.5ms是编辑步长，不是硬实时保证。");
             changed |= ImGui::InputDouble("后续时间比例", &tuning.time_scale, 0.05, 0.1, "%.3f"); help("只伸缩首次非零节点后的时间，保持总位移；不改变扳机间隔或游戏射速。");
@@ -1328,6 +1333,7 @@ struct RecoilPanel::Impl {
             help("删除草稿最后一个节点；至少保留起点与一个末端节点，磁盘版本不变。");
             ImGui::EndDisabled(); ImGui::TreePop();
         }
+        ImGui::EndDisabled();
         if (changed) edited();
         if (preview_valid) { chart("recoil_x_chart", base, preview, true); chart("recoil_y_chart", base, preview, false); }
         else ImGui::TextWrapped("草稿未通过生产编译：%s", status.c_str());

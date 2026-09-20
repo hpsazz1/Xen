@@ -36,6 +36,8 @@ struct RecoilProfile {
     // 仅人工确认版本使用的软件调度预算，不是实测相位或恢复能力。
     std::optional<double> execution_phase_budget_ms;
     std::vector<RecoilPoint> points;
+    // schema3的唯一执行数据；points仅为从事件派生的累计预览。
+    std::vector<RecoilPoint> events;
 };
 struct RecoilTuning {
     double x_strength = 1, y_strength = 1;
@@ -61,10 +63,13 @@ enum class RecoilReason {
 };
 const char* RecoilReasonName(RecoilReason reason) noexcept;
 enum class RecoilContextBlock { NONE, INPUT_UNHEALTHY, NOT_FOCUSED, PROFILE_CONDITIONS, PERMISSION, GENERATION };
+enum class RecoilWeaponBlock { NONE, ORDINARY_UNAVAILABLE, UNTRUSTED };
 struct RecoilInput {
     bool enabled = false, held = false, healthy = false, focused = false, permission = false;
     bool profile_conditions_match = false, recovery_qualified = false;
     std::uint64_t weapon_generation = 0, device_epoch = 0;
+    RecoilWeaponBlock weapon_block = RecoilWeaponBlock::NONE;
+    std::uint64_t weapon_trust_generation = 0;
     RecoilTime firing_started_at{};
     std::shared_ptr<const RecoilProfile> profile;
 };
@@ -75,6 +80,7 @@ struct RecoilIntent {
     int dx_counts = 0, dy_counts = 0;
 };
 struct RecoilSnapshot {
+    RecoilTime firing_started_at{};
     RecoilPhase phase = RecoilPhase::DISABLED;
     RecoilReason reason = RecoilReason::DISABLED;
     RecoilContextBlock context_block = RecoilContextBlock::NONE;
@@ -132,6 +138,8 @@ public:
     // 普通运行的人工上升沿重启准入；未决意图须先结算。下一次advance仍复核全部条件，
     // 新起点取input.firing_started_at；旧账本不清零，不提供校准或故障恢复许可。
     bool restart_for_manual(RecoilTime now) noexcept;
+    // 仅后端尚未被调用的普通仲裁争用可延期；下一轮重新校验后返回原意图。
+    bool defer_unsent(std::uint64_t command_id) noexcept;
     RecoilSnapshot snapshot() const noexcept { return state_; }
 private:
     struct OfflineReplayTag {};
@@ -139,6 +147,8 @@ private:
     friend bool validate_recoil_candidate_execution(const RecoilProfile&,
         const RecoilCandidateReplayOptions&, RecoilCandidateReplayReport&, std::string&) noexcept;
     double phase_budget_ms() const noexcept;
+    bool discrete_execution() const noexcept;
+    bool ordinary_discrete_execution() const noexcept;
     double offline_phase_budget_ms_ = 0;
     std::shared_ptr<const RecoilCalibrationPermit> calibration_permit_;
     bool calibration_claimed_ = false;
@@ -154,5 +164,8 @@ private:
     bool release_seen_ = false, active_ = false, has_fired_ = false, released_since_firing_ = false;
     bool profile_valid_ = false;
     bool manual_restart_allowed_ = false;
+    std::size_t next_event_ = 0;
+    bool deferred_unsent_ = false, ordinary_restart_allowed_ = false, context_latched_ = false;
+    std::uint64_t weapon_trust_generation_ = 0;
 };
 #endif

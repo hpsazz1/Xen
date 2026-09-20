@@ -42,6 +42,8 @@ public:
     std::uint64_t sampled_firing_id = 0;
     std::optional<std::int64_t> sampled_firing_uncertainty_ns;
     RecoilTime physical_started{};
+    std::uint64_t observed_device_epoch = 0, observed_trust_generation = 0;
+    bool input_seen = false;
     RecoilInput input() {
         auto result = context();
         InputSnapshot raw;
@@ -51,7 +53,13 @@ public:
         const auto synthetic = firing();
         if ((mouse->left_button_cleanup_required() && !synthetic.confirmed_down && !automated_debug_firing) ||
             (synthetic.confirmed_down && (!synthetic.id || synthetic.started_at==RecoilTime{}))) result.healthy=false;
-        if (!result.permission || !result.focused || !result.profile_conditions_match) source_blocked = true;
+        if (!result.permission || !result.focused ||
+            (!result.profile_conditions_match && result.weapon_block != RecoilWeaponBlock::ORDINARY_UNAVAILABLE) ||
+            result.weapon_block == RecoilWeaponBlock::UNTRUSTED ||
+            (input_seen && (result.device_epoch != observed_device_epoch ||
+                result.weapon_trust_generation != observed_trust_generation))) source_blocked = true;
+        observed_device_epoch = result.device_epoch; observed_trust_generation = result.weapon_trust_generation;
+        input_seen = true;
         if (result.healthy && synthetic.confirmed_down && !physical) automatic_firing_seen = true;
         if (result.healthy && physical && !physical_previous) {
             physical_started = RecoilClock::now();
@@ -152,7 +160,7 @@ public:
         if(active_batch)end_batch(RecoilBatchEndReason::CONTEXT);
         last_begun_session=snapshot.session_id;
         RecoilExecutionEvent event;event.firing_id=snapshot.session_id;event.event_at=RecoilClock::now();
-        event.firing_started_at=input.firing_started_at;event.profile=input.profile;
+        event.firing_started_at=snapshot.firing_started_at;event.profile=input.profile;
         event.weapon_generation=input.weapon_generation;event.device_epoch=input.device_epoch;
         event.firing_source=last_source==1 ? RecoilFiringSource::INPUT_ESTIMATED :
             last_source==2 ? RecoilFiringSource::COMMAND_ESTIMATED : RecoilFiringSource::UNKNOWN;
@@ -190,35 +198,37 @@ public:
                 const auto before_source = last_source;
                 const auto before_firing_id = sampled_firing_id;
                 const auto before_firing_uncertainty_ns = sampled_firing_uncertainty_ns;
+                // 同一输出锁覆盖FIRING交接、规划和提交，Aim不会带着交接前的Y穿过此边界。
+                const auto arbitration_at = RecoilClock::now();
+                OutputArbiterRejection arbitration_rejection{};
+                auto lock = arbiter->try_enter_aim(OutputArbiterSource::RECOIL, &arbitration_rejection);
+                if (!lock.owns_lock()) {
+                    // 正常争用尚未调用后端：保留事件索引，每轮重新检查松键和安全状态。
+                    if (!before.enabled || !before.held || !before.healthy || !before.focused ||
+                        !before.permission || !before.profile_conditions_match ||
+                        arbitration_rejection == OutputArbiterRejection::OUTPUT_FAULT) {
+                        if (arbitration_rejection == OutputArbiterRejection::OUTPUT_FAULT)
+                            controller.cancel(RecoilReason::CONTEXT, RecoilClock::now());
+                        else controller.advance(before, RecoilClock::now());
+                        finish_if_ended();
+                    }
+                    std::unique_lock state_lock(mutex);
+                    state = controller.snapshot();
+                    wake.wait_for(state_lock, std::chrono::milliseconds(1), [&] { return stopping.load() || canceled.load(); });
+                    continue;
+                }
                 auto decision = controller.advance(before, RecoilClock::now());
+                arbiter->set_recoil_y_owned(!calibration_budget &&
+                    (decision.snapshot.phase == RecoilPhase::FIRING || decision.snapshot.phase == RecoilPhase::PENDING));
                 if(!begin_if_started(before))decision.has_intent=false;
                 finish_if_ended();
                 if (decision.has_intent) {
-                    const auto arbitration_at = RecoilClock::now();
-                    OutputArbiterRejection arbitration_rejection{};
-                    auto lock = arbiter->try_enter_aim(OutputArbiterSource::RECOIL, &arbitration_rejection);
                     const auto& intent = decision.intent;
-                    while (!lock.owns_lock() && arbitration_rejection == OutputArbiterRejection::LOCK_BUSY && manual_takeover) {
-                        // 人工接管时允许软件UP短事务先清债；复用原意图与期限，不补规划、不续期。
-                        const auto fresh = input();
-                        if (!fresh.healthy || !fresh.permission || !fresh.focused || !fresh.held ||
-                            fresh.firing_started_at != before.firing_started_at || fresh.profile != before.profile ||
-                            fresh.weapon_generation != before.weapon_generation || fresh.device_epoch != before.device_epoch ||
-                            !fresh.profile_conditions_match || stopping.load() || canceled.load() ||
-                            RecoilClock::now() >= intent.expires_at) break;
-                        const auto retry_until = std::min(intent.expires_at, RecoilClock::now() + std::chrono::milliseconds(2));
-                        {
-                            std::unique_lock state_lock(mutex);
-                            wake.wait_until(state_lock, retry_until, [&] { return stopping.load() || canceled.load(); });
-                        }
-                        if (!stopping.load() && !canceled.load() && RecoilClock::now() < intent.expires_at)
-                            lock = arbiter->try_enter_aim(OutputArbiterSource::RECOIL, &arbitration_rejection);
-                        else break;
-                    }
                     RecoilReceipt receipt{intent.command_id, RecoilReceiptStatus::NOT_SENT, RecoilClock::now()};
                     bool backend_called = false;
                     RecoilDispatchRejection rejection = RecoilDispatchRejection::NONE;
                     RecoilTime context_checked_at{}, backend_called_at{}, backend_returned_at{};
+                    std::optional<RecoilInput> ordinary_block;
                     switch (arbitration_rejection) {
                     case OutputArbiterRejection::LOCK_BUSY: rejection = RecoilDispatchRejection::ARBITER_LOCK_BUSY; break;
                     case OutputArbiterRejection::AUXILIARY_PENDING: rejection = RecoilDispatchRejection::ARBITER_AUXILIARY_PENDING; break;
@@ -227,11 +237,14 @@ public:
                     }
                     if (lock.owns_lock()) {
                         const auto current = input();
+                        if (current.weapon_block == RecoilWeaponBlock::ORDINARY_UNAVAILABLE && !current.profile_conditions_match)
+                            ordinary_block = current;
                         const auto now = RecoilClock::now();
                         context_checked_at = now;
                         const MouseMoveCommand command{intent.dx_counts, intent.dy_counts};
                         const bool same = current.profile == before.profile && current.weapon_generation == before.weapon_generation &&
-                            current.device_epoch == before.device_epoch && current.firing_started_at == before.firing_started_at;
+                            current.device_epoch == before.device_epoch && current.weapon_trust_generation == before.weapon_trust_generation &&
+                            current.firing_started_at == before.firing_started_at;
                         if (!same) rejection = RecoilDispatchRejection::CONTEXT_CHANGED;
                         else if (!current.enabled) rejection = RecoilDispatchRejection::DISABLED;
                         else if (!current.held) rejection = RecoilDispatchRejection::NOT_HELD;
@@ -241,7 +254,7 @@ public:
                         else if (!current.focused) rejection = RecoilDispatchRejection::NOT_FOCUSED;
                         else if (!current.profile_conditions_match) rejection = RecoilDispatchRejection::PROFILE_MISMATCH;
                         else if (now > intent.expires_at) rejection = RecoilDispatchRejection::EXPIRED;
-                        else if (!ledger->permits(command, now)) rejection = RecoilDispatchRejection::BUDGET_EXCEEDED;
+                        else if (!ledger->healthy()) rejection = RecoilDispatchRejection::ARBITER_OUTPUT_FAULT;
                         else if (canceled.load()) rejection = RecoilDispatchRejection::CANCELED;
                         else if (stopping.load()) rejection = RecoilDispatchRejection::STOPPING;
                         else if (calibration_budget&&!calibration_budget->reserve(intent.dx_counts,intent.dy_counts,RecoilClock::now()))
@@ -261,8 +274,7 @@ public:
                             if (receipt.status==RecoilReceiptStatus::UNKNOWN) arbiter->latch_output_fault();
                         }
                     }
-                    if(lock.owns_lock())lock.unlock();
-                    RecoilExecutionRecord execution{intent,receipt,before.profile,backend_called,before.firing_started_at,
+                    RecoilExecutionRecord execution{intent,receipt,before.profile,backend_called,controller.snapshot().firing_started_at,
                         before_source==1?RecoilFiringSource::INPUT_ESTIMATED:
                         before_source==2?RecoilFiringSource::COMMAND_ESTIMATED:RecoilFiringSource::UNKNOWN,
                         rejection,sampled_at,arbitration_at,context_checked_at,backend_called_at,backend_returned_at,
@@ -273,13 +285,18 @@ public:
                         event.event_at=RecoilClock::now();event.command=std::move(execution);publish_event(std::move(event));
                     }
                     controller.acknowledge(receipt, RecoilClock::now());
+                    if (!backend_called && ordinary_block) controller.advance(*ordinary_block, RecoilClock::now());
                     finish_if_ended();
                 }
+                const auto settled = controller.snapshot();
+                arbiter->set_recoil_y_owned(!calibration_budget &&
+                    (settled.phase == RecoilPhase::FIRING || settled.phase == RecoilPhase::PENDING));
+                lock.unlock();
                 {
                     std::unique_lock lock(mutex);
-                    state = controller.snapshot();
+                    state = settled;
                     if(calibration_budget)calibration_state=calibration_budget->snapshot();
-                    wake.wait_for(lock, std::chrono::milliseconds(2));
+                    wake.wait_for(lock, std::chrono::milliseconds(1), [&] { return stopping.load() || canceled.load(); });
                 }
             }
             controller.cancel(RecoilReason::CANCELED, RecoilClock::now());
@@ -339,6 +356,8 @@ bool RecoilWorker::start_calibration(const RecoilConfig& config,std::shared_ptr<
 void RecoilWorker::cancel() noexcept { impl_->canceled.store(true); impl_->wake.notify_one(); }
 void RecoilWorker::stop() noexcept {
     impl_->stopping.store(true); impl_->wake.notify_one(); if (impl_->thread.joinable()) impl_->thread.join();
+    // 输出线程已结束；在同一提交锁内归还Y，不能使在算的Aim帧跨过交接。
+    if (impl_->arbiter) impl_->arbiter->release_recoil_y();
 }
 RecoilSnapshot RecoilWorker::snapshot() const noexcept { std::lock_guard lock(impl_->mutex); return impl_->state; }
 RecoilExecutionLog RecoilWorker::execution_log() const {

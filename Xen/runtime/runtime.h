@@ -320,6 +320,7 @@ struct RuntimeSnapshot {
     bool output_armed = false;
     bool aim_hold_active = false;
     bool emergency_stopped = false;
+    bool visual_output_blocked = false;
     AimResult last_aim;
 };
 

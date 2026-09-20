@@ -91,6 +91,18 @@ int main(int argc, char** argv){
     expect(store.set_active("ak47",named_next,error)&&store.rollback("weapon_ak47",error),"旧索引切换后使用GSI键且可回退");
     {std::ifstream index(directory/"active.json");std::string content((std::istreambuf_iterator<char>(index)),{});
         expect(content.find("weapon_ak47")!=std::string::npos&&content.find("\"ak47\"")==std::string::npos,"写活动索引只保留GSI名称");}
+    RecoilProfile discrete;
+    expect(load_recoil_profile(R"({"schema_version":3,"id":"discrete_store","revision":1,"weapon_id":"ak47",
+        "sensitivity":1,"verified":true,"sample_semantics":"discrete_delta","events":[[5,0.5,-0.5],[10,2.5,-2.5]]})",
+        discrete,error),"离散曲线可由生产存储入口加载");
+    std::string discrete_file;
+    expect(store.save_new(discrete,discrete_file,error,true)&&store.load(discrete_file,loaded,error)&&
+        loaded.schema_version==3&&loaded.events.size()==2&&!loaded.execution_phase_budget_ms,
+        "新版本存储保留离散事件及无相位预算语义");
+    expect(store.set_active("ak47",discrete_file,error)&&store.resolve(cfg,"ak47",error)->schema_version==3,
+        "活动索引解析离散版本");
+    expect(store.rollback("ak47",error)&&store.resolve(cfg,"ak47",error)->schema_version==1,
+        "离散迁移可回退原累计版本");
     {std::ofstream broken(directory/"broken.json");broken<<"{}";}
     expect(!store.list(profiles,error),"损坏候选显式失败不假成功");
     std::filesystem::remove_all(directory);

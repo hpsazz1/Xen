@@ -10,6 +10,7 @@
     [string]$ManualAcceptancePath = '',
     [switch]$IncludeLauncher,
     [switch]$IncludeRecoilTools,
+    [switch]$IncludeRecoilMigrationScripts,
     [switch]$IncludeSourceSessionScript,
     [string]$SourceContextExecutable = '',
     [string]$SshIdentityFile = (Join-Path $env:USERPROFILE '.ssh\xen_foxos_ed25519'),
@@ -79,6 +80,7 @@ try {
         -RepositoryRoot $RepositoryRoot -GitExecutable $GitExecutable -ChangesOnly `
         -PackageNotesPath $PackageNotesPath -ManualAcceptancePath $ManualAcceptancePath `
         -SourceContextExecutable $SourceContextExecutable -IncludeLauncher:$IncludeLauncher -IncludeRecoilTools:$IncludeRecoilTools `
+        -IncludeRecoilMigrationScripts:$IncludeRecoilMigrationScripts `
         -IncludeSourceSessionScript:$IncludeSourceSessionScript
     $ownedStages.Add([pscustomobject]@{ parent = (Split-Path -Parent $localRoot); name = $stageName })
     $null = Resolve-XenDirectChildPath $localRoot $stageName '移入主机包前暂存'
@@ -88,6 +90,10 @@ try {
     if ($IncludeLauncher) { $relativeFiles += 'XenLauncher.exe' }
     if ($IncludeRecoilTools) {
         $relativeFiles += @("runtimes/$Runtime/xen_recoil_calibration.exe", "runtimes/$Runtime/xen_recoil_tuner.exe")
+    }
+    if ($IncludeRecoilMigrationScripts) {
+        $relativeFiles += @('tools/recoil/import_recoil_profiles.py', 'tools/recoil/migrate_legacy_recoil_profiles.py',
+            'tools/recoil/invoke_recoil_legacy_acceptance.ps1')
     }
     if ($PackageNotesPath) { $relativeFiles += 'tools/acceptance/PACKAGE-NOTES.md' }
     if ($ManualAcceptancePath) { $relativeFiles += 'tools/acceptance/MANUAL-ACCEPTANCE.md' }

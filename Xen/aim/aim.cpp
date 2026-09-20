@@ -1191,6 +1191,7 @@ struct Aim::Impl {
     // 量化连续请求的生命周期方向，不参与速度判断或浮点控制。
     int quantization_request_direction_x = 0;
     float residual_y = 0.0f;
+    bool recoil_y_owned = false;
     struct ModelResidualX {
         bool active=false;
         bool background_active=false;
@@ -4632,7 +4633,7 @@ struct Aim::Impl {
         const float error_x =
             (feedback_target_x - frame.control_center_x) *
             frame.source_pixels_per_roi_pixel_x;
-        const float error_y =
+        const float error_y = frame.recoil_y_owned ? 0.0f :
             (feedback_target_y - frame.control_center_y) *
             frame.source_pixels_per_roi_pixel_y;
         // 反馈目标可包含预测偏移；closing 导数只观察当前 Track 锚点。
@@ -5754,6 +5755,12 @@ Aim::Aim(Aim&&) noexcept = default;
 Aim& Aim::operator=(Aim&&) noexcept = default;
 
 AimResult Aim::process(const AimFrame& frame) noexcept {
+    if (impl_ && (frame.recoil_y_owned != impl_->recoil_y_owned || frame.recoil_y_owned)) {
+        // 交接只清理Y执行记忆；跟踪、X积分及命令回执历史继续保留。
+        impl_->filtered_y = impl_->shaped_y = impl_->feedforward_y = impl_->residual_y = 0.0f;
+        impl_->previous_command_y = 0.0f;
+        impl_->recoil_y_owned = frame.recoil_y_owned;
+    }
     AimResult result;
     using clock = std::chrono::steady_clock;
     using milliseconds = std::chrono::duration<double, std::milli>;

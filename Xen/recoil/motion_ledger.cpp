@@ -26,9 +26,13 @@ bool MotionLedger::record(const MouseMoveCommand& command, const MouseMoveReceip
         return false;
     }
     last_completed_ = receipt.backend_completed_at;
-    budget_.push_back({receipt.backend_completed_at,
-        std::hypot(static_cast<double>(command.dx_counts), static_cast<double>(command.dy_counts))});
-    if (!external) return true;
+    if (!external) {
+        const auto cutoff = receipt.backend_completed_at - std::chrono::milliseconds(window_ms_);
+        while (!budget_.empty() && budget_.front().at <= cutoff) budget_.pop_front();
+        budget_.push_back({receipt.backend_completed_at,
+            std::hypot(static_cast<double>(command.dx_counts), static_cast<double>(command.dy_counts))});
+        return true;
+    }
     if (revision_ == std::numeric_limits<std::uint64_t>::max()) { fault_ = true; return false; }
     external_.push_back({++revision_, receipt.backend_completed_at, command.dx_counts, command.dy_counts});
     while (external_.size() > 4096) {

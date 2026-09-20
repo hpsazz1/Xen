@@ -70,11 +70,71 @@ def convert(raw, entry, manifest, sensitivity):
                           "difference": "保留全部CSV行；不随机化、不跳过首子步；周期不是武器射速；未校准"}}
 
 
+def convert_discrete(raw, entry, manifest, sensitivity):
+    """按旧生产离散编译语义重建；默认仍是待确认版本。"""
+    if not math.isfinite(sensitivity) or sensitivity <= 0:
+        raise ValueError("灵敏度须有限且为正")
+    if len(raw) > 1024 * 1024 or hashlib.sha256(raw).hexdigest() != entry["sha256"]:
+        raise ValueError("CSV大小或SHA256与已审计版本不符")
+    multiple, length = entry["multiple"], entry["legacy_length"]
+    divider, suber = entry["sleep_divider"], entry["sleep_suber_ms"]
+    if (type(multiple) is not int or type(length) is not int or multiple <= 0 or length <= 0
+            or not math.isfinite(divider) or divider <= 0 or not math.isfinite(suber)):
+        raise ValueError("离散编译参数无效")
+    rows = [row for row in csv.reader(io.StringIO(raw.decode("utf-8-sig"))) if row]
+    if not 1 <= len(rows) <= 100000 or min(len(rows), length) * multiple > 4096:
+        raise ValueError("离散事件数量越界")
+    subdivided = []
+    scale = 2.45 / sensitivity
+    for index, row in enumerate(rows):
+        if len(row) != 3:
+            raise ValueError("每行必须为delta_x,delta_y,delay_ms")
+        dx, dy, delay = map(float, row)
+        if (not all(map(math.isfinite, (dx, dy, delay))) or delay <= 0 or delay > 1000
+                or abs(dx) > 10000 or abs(dy) > 10000):
+            raise ValueError("CSV位移与延迟无效")
+        if index >= length:
+            continue
+        # 正延迟使用C++ std::round的半数向上语义，不能用Python的偶数舍入。
+        normalized_delay = math.floor(delay * 10.0 + 0.5) / 10.0
+        if normalized_delay <= 0:
+            raise ValueError("归一后的旧子步延迟须为正")
+        interval = normalized_delay / divider - suber
+        x, y = dx * scale, dy * scale
+        if not all(map(math.isfinite, (interval, x, y))) or interval <= 0:
+            raise ValueError("离散位移或周期无效")
+        base_x, base_y = x / multiple, y / multiple
+        for substep in range(multiple):
+            last = substep == multiple - 1
+            subdivided.append((x if last else base_x, y if last else base_y, interval))
+            if not last:
+                x -= base_x
+                y -= base_y
+    if len(subdivided) < 2:
+        raise ValueError("首子步只等待后必须仍有事件")
+    events = []
+    elapsed = subdivided[0][2]
+    for dx, dy, interval in subdivided[1:]:
+        if elapsed > 60000 or abs(dx) > 1e7 or abs(dy) > 1e7:
+            raise ValueError("离散事件越界")
+        events.append([elapsed, dx, -dy])
+        elapsed += interval
+    return {"schema_version": 3, "id": entry["id"], "revision": 1,
+            "weapon_id": entry["canonical_weapon_id"], "sensitivity": sensitivity,
+            "sample_semantics": "discrete_delta", "unit": "device_counts", "verified": False,
+            "events": events,
+            "import_report": {"row_count": len(rows), "legacy_length": length,
+                              "conversion_revision": "legacy-discrete-v1", "source_sha256": entry["sha256"],
+                              "repository": manifest["repository"], "commit": manifest["commit"],
+                              "redistribution_verified": False}}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-directory", type=Path, required=True)
     parser.add_argument("--output-directory", type=Path, required=True)
     parser.add_argument("--reference-sensitivity", type=float, required=True)
+    parser.add_argument("--discrete-legacy", action="store_true", help="另存旧版离散schema3候选；不自动确认或切换active")
     args = parser.parse_args()
     if not math.isfinite(args.reference_sensitivity) or args.reference_sensitivity <= 0:
         parser.error("reference-sensitivity必须是明确正值；它不代表完成校准")
@@ -95,7 +155,9 @@ def main():
         file = source / entry["file"]
         if file.is_symlink() or file.resolve().parent != source:
             raise ValueError("不允许导入目录外文件")
-        outputs.append((entry["id"] + "-r1-imported.json", convert(file.read_bytes(), entry, manifest, args.reference_sensitivity)))
+        converter = convert_discrete if args.discrete_legacy else convert
+        suffix = "-r1-discrete.json" if args.discrete_legacy else "-r1-imported.json"
+        outputs.append((entry["id"] + suffix, converter(file.read_bytes(), entry, manifest, args.reference_sensitivity)))
     args.output_directory.mkdir(parents=True, exist_ok=True)
     if any((args.output_directory / name).exists() for name, _ in outputs):
         raise FileExistsError("输出版本已存在；请选择新的本地目录，不覆盖基线")

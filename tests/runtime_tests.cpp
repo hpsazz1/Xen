@@ -328,6 +328,12 @@ void test_safety_gate() {
            "辅助许可不能错误依赖 Aim 按住键");
     gate.set_hold(true);
     expect(gate.can_dispatch(), "物理武装且按住热键时允许派发");
+    gate.block_visual_output();
+    expect(gate.visual_output_blocked() && gate.output_armed() && !gate.emergency_stopped() &&
+           gate.can_dispatch_recoil() && !gate.can_dispatch_auxiliary() && !gate.can_dispatch(),
+           "视觉时效或Aim历史阻断只关闭视觉消费者，普通压枪保留全局许可");
+    expect(gate.arm() && !gate.visual_output_blocked() && gate.can_dispatch(),
+           "显式重新武装恢复视觉输出，不维护第二套武装状态");
     gate.set_input_health(false);
     expect(!gate.can_dispatch_auxiliary(), "输入丢失必须关闭辅助许可");
     expect(!gate.can_dispatch() && !gate.output_armed() &&
@@ -339,6 +345,7 @@ void test_safety_gate() {
     expect(gate.arm() && gate.can_dispatch(),
            "恢复后只允许显式重新武装");
     gate.emergency_stop();
+    expect(!gate.can_dispatch_recoil(), "全局急停仍关闭普通压枪");
     expect(!gate.can_dispatch_auxiliary(), "End 急停必须关闭辅助许可");
     expect(!gate.can_dispatch() && !gate.output_armed(),
            "急停必须原子解除武装并拒绝后续命令");
@@ -351,10 +358,53 @@ void test_safety_gate() {
     gate.emergency_stop();
     expect(!gate.reset_emergency(),
            "输入健康未验证时不得用缓存释放复位急停");
+    gate.block_visual_output();
     gate.reset_session();
+    expect(!gate.visual_output_blocked(), "新Runtime会话清除旧视觉阻断");
     expect(!gate.emergency_stopped() && !gate.output_armed() &&
                !gate.hold_active() && !gate.input_healthy(),
            "新会话应清安全状态但保留独立输入健康门");
+}
+
+void test_recoil_weapon_permission() {
+    using namespace std::chrono_literals;
+    using runtime::detail::recoil_weapon_block;
+    const auto now = weapon::Clock::time_point{} + 1s;
+    weapon::WeaponSnapshot current;
+    current.valid = current.identity_match = current.player_playing = true;
+    current.player_health = 100;
+    current.status = weapon::Status::READY;
+    current.canonical_id = "ak47";
+    current.state = weapon::WeaponState::ACTIVE;
+    current.ammo_clip = 30;
+    current.received_at = now;
+    current.valid_until = now + 1s;
+    expect(recoil_weapon_block(current, true, now) == RecoilWeaponBlock::NONE,
+           "普通压枪许可只使用有效武器事实，不需要图像或Aim时钟");
+    expect(recoil_weapon_block(current, false, now) == RecoilWeaponBlock::ORDINARY_UNAVAILABLE,
+           "已知武器尚无活动弹道只停止当前普通弹序");
+    for (const auto status : {weapon::Status::RELOADING, weapon::Status::EMPTY, weapon::Status::PLAYER_INACTIVE}) {
+        auto blocked = current;
+        blocked.valid = false; blocked.status = status;
+        if (status == weapon::Status::PLAYER_INACTIVE) blocked.player_health = 0;
+        expect(recoil_weapon_block(blocked, true, now) == RecoilWeaponBlock::ORDINARY_UNAVAILABLE,
+               "明确换弹空弹死亡允许后续合法武器会话重开");
+        expect(recoil_weapon_block(blocked, true, now + 1s) == RecoilWeaponBlock::UNTRUSTED,
+               "非valid武器快照也必须保持TTL，不把陈旧换弹当普通恢复");
+    }
+    for (const auto status : {weapon::Status::EXPIRED, weapon::Status::UNKNOWN_WEAPON,
+            weapon::Status::IDENTITY_MISMATCH, weapon::Status::INVALID_PAYLOAD, weapon::Status::CLOCK_REJECTED}) {
+        auto blocked = current; blocked.valid = false; blocked.status = status;
+        expect(recoil_weapon_block(blocked, true, now) == RecoilWeaponBlock::UNTRUSTED,
+               "未知身份时钟及协议异常不能按普通换枪恢复");
+    }
+    current.valid = false; current.status = weapon::Status::PLAYER_INACTIVE;
+    current.player_health.reset();
+    expect(recoil_weapon_block(current, true, now) == RecoilWeaponBlock::UNTRUSTED,
+           "缺少health不是确认死亡");
+    current.player_health = 0; current.player_playing = false;
+    expect(recoil_weapon_block(current, true, now) == RecoilWeaponBlock::UNTRUSTED,
+           "非playing状态不得冒充普通死亡恢复");
 }
 
 void test_bounded_sample_ring() {
@@ -777,6 +827,7 @@ int main() {
     test_gpu_storage_released_on_reset();
     test_directml_frame_requires_fence();
     test_safety_gate();
+    test_recoil_weapon_permission();
     test_bounded_sample_ring();
     test_runtime_preview_channel();
     test_runtime_preview_overwrite_and_truncation();

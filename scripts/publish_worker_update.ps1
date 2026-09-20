@@ -12,6 +12,7 @@
     [string]$SourceContextExecutable = '',
     [switch]$IncludeLauncher,
     [switch]$IncludeRecoilTools,
+    [switch]$IncludeRecoilMigrationScripts,
     [switch]$IncludeSourceSessionScript,
     [switch]$ChangesOnly
 )
@@ -149,6 +150,20 @@ if ($IncludeSourceSessionScript) {
     $sourceScriptHash = (Get-FileHash -LiteralPath $overrides[$sourceScriptRelative] -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 $recoilToolHashes = @{}
+$recoilScriptHashes = @{}
+if ($IncludeRecoilMigrationScripts) {
+    foreach ($tool in @('import_recoil_profiles.py', 'migrate_legacy_recoil_profiles.py', 'invoke_recoil_legacy_acceptance.ps1')) {
+        $relative = "tools/recoil/$tool"
+        $overrides[$relative] = Resolve-UpdateFile (Join-Path $sourceRoot "scripts/$tool")
+        $recoilScriptHashes[$relative] = (Get-FileHash -LiteralPath $overrides[$relative] -Algorithm SHA256).Hash.ToLowerInvariant()
+        # 新增迁移入口只允许这个固定工具集合，不扩展为任意包载荷写入。
+        if (-not $records.ContainsKey($relative)) {
+            $record = [pscustomobject][ordered]@{ path = $relative; runtime = ''; size = 0; sha256 = ''; source = '' }
+            $manifest.files = @($manifest.files) + @($record)
+            $records[$relative] = $record
+        }
+    }
+}
 if ($IncludeRecoilTools) {
     foreach ($tool in @('xen_recoil_calibration.exe', 'xen_recoil_tuner.exe')) {
         $relative = "runtimes/$Runtime/$tool"
@@ -210,9 +225,12 @@ try {
             if ($recoilToolHashes.ContainsKey($relative) -and $sourceHash -cne $recoilToolHashes[$relative]) {
                 throw '压枪工具在发布期间变化。'
             }
+            if ($recoilScriptHashes.ContainsKey($relative) -and $sourceHash -cne $recoilScriptHashes[$relative]) {
+                throw '压枪迁移脚本在发布期间变化。'
+            }
             $record.size = [long]$length
             $record.sha256 = $sourceHash
-            $record.source = if ($relative -in @($workerRelative, $sourceToolRelative, $sourceScriptRelative) -or $recoilToolHashes.ContainsKey($relative)) { "$source@$commit" } else { $source }
+            $record.source = if ($relative -in @($workerRelative, $sourceToolRelative, $sourceScriptRelative) -or $recoilToolHashes.ContainsKey($relative) -or $recoilScriptHashes.ContainsKey($relative)) { "$source@$commit" } else { $source }
         } elseif ($length -ne [long]$record.size) { throw "继承载荷复制长度错误：$relative" }
         $copiedBytes += $length
         Write-Progress -Activity '继承统一包显式载荷' -Status "$copiedBytes / $totalBytes 字节" `
@@ -258,6 +276,11 @@ try {
         $updateEvidence.updated_components += [ordered]@{
             runtime = $Runtime; path = $relative; git_commit = $commit.ToLowerInvariant()
             sha256 = $recoilToolHashes[$relative]; build_identity_sha256 = $identityHash
+        }
+    }
+    foreach ($relative in @($recoilScriptHashes.Keys | Sort-Object)) {
+        $updateEvidence.updated_components += [ordered]@{
+            runtime = ''; path = $relative; git_commit = $commit.ToLowerInvariant(); sha256 = $recoilScriptHashes[$relative]
         }
     }
     # 来源证据属于独立载荷；生产 Launcher 的 manifest 顶层严格固定为五字段。

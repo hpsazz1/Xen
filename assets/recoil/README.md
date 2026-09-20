@@ -17,3 +17,9 @@ python tools/recoil/import_recoil_profiles.py --source-directory <用户持有�
 武器内部身份与统一显示名以 `assets/weapon_catalog.inc` 为唯一目录，GSI、共享点射资料和导入器使用同表。保存的 `weapon_id` 保持现有 canonical ID，例如 `m4a1_s`；界面统一显示 `M4A1-S`。旧曲线的 `id`、文件名和来源哈希保留，旧清单 `m4a1.csv` 明确对应 `m4a1_s`，不可由裸 `m4a1` 猜测武器；GSI `weapon_m4a1` 明确对应 `m4a4`。G3SG1 可识别但没有已验证点射资料，不由名称目录补造时序。
 
 仅 `IMPORTED` 与 `SCHEMA_VALID` 候选允许自动归一明确别名。`CALIBRATED` / `ACCEPTED` 若使用需要转换的别名则明确拒绝加载、验证和保存，须以规范 ID 建立新候选并重新校准；不能通过改名沿用旧环境指纹与语义哈希。原规范 ID 及未知自定义 ID 保持原身份，不改写历史文件。
+
+## 已确认旧曲线的离散迁移
+
+`import_recoil_profiles.py --discrete-legacy` 输出未确认schema3事件：按旧length裁剪、delay归一到0.1ms、multiple细分和尾步余量、首子步仅等待、绝对计划时刻。默认导入及新采集候选继续保持原累计语义；新导入不会自动确认或启用。
+
+`migrate_legacy_recoil_profiles.py prepare` 仅为已确认且与审计源一致的17条活动曲线生成迁移计划；`apply` 重新校验源、待发布文件及活动索引，保存索引备份和previous、另存离散版本再切换。使用前运行 `--help` 查看明确输入。原CSV不进入发布包，其他候选、历史Run和配置不改写。普通离散弹道保持原始比例，不能用累计节点编辑或强度参数悄悄改变其执行语义；实际游戏效果仍须人工对照。

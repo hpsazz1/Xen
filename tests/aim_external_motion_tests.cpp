@@ -122,11 +122,30 @@ void test_background_not_double_counted() {
            result.control.observer_camera_motion_x_source_pixels == -3,
            "同源背景已包含全部相机运动，外部模型不得叠加");
 }
+void test_recoil_y_handoff() {
+    const auto t = Clock::time_point{} + 10s;
+    AimConfig c; c.min_confirmed_hits = 1; c.control_delay_ms = 0;
+    c.max_counts_per_frame = 100; c.enable_prediction = false; c.enable_delay_compensation = false;
+    Aim baseline(c), owned(c);
+    bool restored = false;
+    for (std::uint64_t id=1; id<=50; ++id) {
+        auto a = frame(id, t + std::chrono::milliseconds(id*4), false);
+        auto b = a; b.recoil_y_owned = id>=10 && id<40;
+        const auto x = baseline.process(a), y = owned.process(b);
+        expect(x.status==AimStatus::SUCCESS && y.status==AimStatus::SUCCESS, "Y交接通过生产Aim接口");
+        expect(x.command.dx_counts==y.command.dx_counts && x.control.shaped_x_counts==y.control.shaped_x_counts &&
+            x.control.feedforward_x_counts==y.control.feedforward_x_counts, "Y交接不复位X状态或改变未限幅的X请求");
+        if(b.recoil_y_owned)expect(y.command.dy_counts==0, "整个压枪弹序Aim Y必须为零");
+        if(id>=40 && y.command.dy_counts>0)restored=true;
+        zero_receipt(baseline,a);zero_receipt(owned,b);
+    }
+    expect(restored,"压枪退出后恢复Aim Y");
+}
 }
 int main() {
     LogConfig log; log.enable_console = false; log.enable_file = false; log.enable_ringbuf = false;
     Log::init(log);
-    test_window(); test_aim_only_equivalence(); test_coverage_and_accounting(); test_background_not_double_counted();
+    test_window(); test_aim_only_equivalence(); test_coverage_and_accounting(); test_background_not_double_counted(); test_recoil_y_handoff();
     Log::shutdown();
     return failures == 0 ? 0 : 1;
 }

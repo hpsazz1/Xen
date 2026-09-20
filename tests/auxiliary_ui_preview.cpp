@@ -10,6 +10,7 @@
 int main(int argc, char** argv) {
     bool input_training_preview = false;
     bool trigger_status_preview = false;
+    bool recoil_parity_preview = false;
     AppConfig config;
     config.mouse.allow_send_input = false;
     config.mouse.backend = MouseBackend::KMBOX_NET;
@@ -29,8 +30,10 @@ int main(int argc, char** argv) {
             input_training_preview = true;
         } else if (argument == "--trigger-status") {
             trigger_status_preview = true;
+        } else if (argument == "--recoil-parity") {
+            recoil_parity_preview = true;
         } else {
-            std::cerr << "用法：auxiliary_ui_preview [--minimum] [--dark] [--input-training] [--trigger-status]\n";
+            std::cerr << "用法：auxiliary_ui_preview [--minimum] [--dark] [--input-training] [--trigger-status] [--recoil-parity]\n";
             return 2;
         }
     }
@@ -44,6 +47,17 @@ int main(int argc, char** argv) {
     }
     RuntimeSnapshot snapshot;
     snapshot.state = RuntimeState::STOPPED;
+    if (recoil_parity_preview) {
+        snapshot.state = RuntimeState::RUNNING;
+        snapshot.output_armed = snapshot.input_healthy = snapshot.visual_output_blocked = true;
+        snapshot.output_allowed_by_config = true;
+        snapshot.recoil_telemetry_available = true;
+        snapshot.recoil.phase = RecoilPhase::FIRING; snapshot.recoil.reason = RecoilReason::NONE;
+        snapshot.recoil.confirmed_y = 339; snapshot.recoil.confirmed_x = -118;
+        snapshot.weapon_snapshot.canonical_id = "ak47";
+        snapshot.recoil_profile_status = "AK47：旧版离散事件已确认（合成展示）";
+        config.recoil.enabled = config.recoil.mixed_aim = true;
+    }
     if (input_training_preview) {
         auto training = std::make_shared<input_training::Snapshot>();
         training->status = input_training::Status::STOPPED;

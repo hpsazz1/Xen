@@ -19,7 +19,36 @@ RecoilInput input(){RecoilInput i;i.enabled=i.healthy=i.focused=i.permission=i.p
 void acknowledge(RecoilController& c,const RecoilDecision& d,double ms){
     if(d.has_intent)c.acknowledge({d.intent.command_id,RecoilReceiptStatus::ACKNOWLEDGED,time(ms)},time(ms));
 }
+void discrete_schema_keeps_absolute_events(){
+    const auto text=R"({"schema_version":3,"id":"synthetic_discrete","revision":1,
+        "weapon_id":"ak47","sensitivity":2.45,"verified":true,"sample_semantics":"discrete_delta",
+        "events":[[5,0,0],[10,0.75,-0.75],[15,0.75,-0.75],[20,-2.25,2.25],[25,0.75,-0.75]]})";
+    RecoilProfile p;std::string error;
+    const bool loaded=load_recoil_profile(text,p,error);
+    expect(loaded,"离散schema3生产加载成功");if(!loaded)return;
+    RecoilProfile restored;
+    expect(load_recoil_profile(serialize_recoil_profile_storage(p),restored,error)&&restored.schema_version==3,
+        "离散存储往返保留执行格式");
+    RecoilController c;auto i=input();i.profile=std::make_shared<RecoilProfile>(p);
+    c.advance(i,time(0));i.held=true;i.firing_started_at=time(1);c.advance(i,time(1));
+    expect(!c.advance(i,time(5)).has_intent,"首事件之前只等待");
+    expect(!c.advance(i,time(100)).has_intent,"迟到一次只处理首个零子步");
+    expect(!c.advance(i,time(101)).has_intent,"小数子步保留余量且不发零包");
+    auto d=c.advance(i,time(102));
+    expect(d.has_intent&&d.intent.dx_counts==1&&d.intent.dy_counts==-1&&d.intent.planned_at==time(16),
+        "迟到不合并节点且仍使用绝对截止与向零取整");
+    acknowledge(c,d,150);
+    d=c.advance(i,time(151));
+    expect(d.has_intent&&d.intent.dx_counts==-1&&d.intent.dy_counts==1&&d.intent.planned_at==time(21),
+        "延迟ACK不平移后续计划且负数余量保留");
+    acknowledge(c,d,152);
+    d=c.advance(i,time(153));
+    expect(!d.has_intent&&d.snapshot.phase==RecoilPhase::EXHAUSTED,
+        "尾部零子步耗尽而不循环");
+    expect(!c.advance(i,time(200)).has_intent&&c.snapshot().session_id==1,"耗尽长按不复活");
+}
 void schema_and_compile(){
+    discrete_schema_keeps_absolute_events();
     {
         RecoilController controller; auto sample=input();
         sample.focused=false;
@@ -93,7 +122,84 @@ void schema_and_compile(){
     expect(std::abs(sample_recoil_profile(p,15).x_counts-0.6)<1e-12,"分段线性求值");
     expect(sample_recoil_profile(p,999).x_counts==1.6,"尾部不外推");
 }
+void discrete_recovery_and_unsent_safety(){
+    RecoilProfile p;std::string error;
+    if(!load_recoil_profile(R"({"schema_version":3,"id":"synthetic_retry","revision":1,
+        "weapon_id":"ak47","sensitivity":2.45,"verified":true,"sample_semantics":"discrete_delta",
+        "events":[[5,1.25,-1.25],[10,2.25,-2.25]]})",p,error))return;
+    auto make_input=[&]{auto i=input();i.profile=std::make_shared<RecoilProfile>(p);return i;};
+    auto candidate=p;candidate.state=RecoilProfileState::SCHEMA_VALID;
+    RecoilCandidateReplayReport replay;
+    expect(!validate_recoil_candidate_execution(candidate,{},replay,error),
+        "离散格式不能静默进入累计候选回放");
+    {
+        auto i=make_input();RecoilController c;c.advance(i,time(0));i.held=true;i.firing_started_at=time(1);c.advance(i,time(1));
+        auto d=c.advance(i,time(6));const auto id=d.intent.command_id;
+        expect(c.defer_unsent(id),"未调用后端的争用可延期");
+        auto retry=c.advance(i,time(106));
+        expect(retry.has_intent&&retry.intent.command_id==id&&retry.intent.planned_at==d.intent.planned_at&&
+            retry.snapshot.planned_x==1.25&&retry.snapshot.confirmed_x==0,"正常争用只重试原未发子步，不重复记计划量");
+        expect(!c.advance(i,time(107)).has_intent,"未声明未发的pending不能重复返回");
+        expect(c.defer_unsent(id),"原未发子步可再次延期");
+        i.held=false;auto stopped=c.advance(i,time(108));
+        expect(!stopped.snapshot.pending&&!stopped.has_intent&&stopped.snapshot.confirmed_x==0,
+            "松键撤销争用未发步骤，无未知后端事务残留");
+    }
+    {
+        auto i=make_input();RecoilController c;c.advance(i,time(0));i.held=true;i.firing_started_at=time(1);c.advance(i,time(1));
+        auto d=c.advance(i,time(6));acknowledge(c,d,6);
+        i.profile_conditions_match=false;i.weapon_block=RecoilWeaponBlock::ORDINARY_UNAVAILABLE;c.advance(i,time(7));
+        i.profile_conditions_match=true;i.weapon_block=RecoilWeaponBlock::NONE;
+        auto resumed=c.advance(i,time(20));
+        expect(resumed.snapshot.session_id==2&&resumed.snapshot.firing_started_at==time(20)&&!resumed.has_intent,
+            "普通武器恢复长按从恢复时刻首步重开");
+        d=c.advance(i,time(25));expect(d.has_intent&&d.intent.dx_counts==1,"恢复不续接旧第二步");acknowledge(c,d,25);
+        ++i.weapon_generation;resumed=c.advance(i,time(26));
+        expect(resumed.snapshot.session_id==3&&resumed.snapshot.firing_started_at==time(26),"可信换枪从首步重开");
+    }
+    for(int fault=0;fault<4;++fault) {
+        auto i=make_input();RecoilController c;c.advance(i,time(0));i.held=true;i.firing_started_at=time(1);c.advance(i,time(1));
+        if(fault==0)i.focused=false;
+        if(fault==1)i.weapon_block=RecoilWeaponBlock::UNTRUSTED;
+        if(fault==2)++i.device_epoch;
+        if(fault==3)++i.weapon_trust_generation;
+        c.advance(i,time(2));i.focused=true;i.weapon_block=RecoilWeaponBlock::NONE;++i.weapon_generation;
+        expect(!c.restart_for_manual(time(3)),"硬阻断不能借人工重启接口绕过健康释放");
+        const auto rejected=c.advance(i,time(3));
+        expect(!rejected.has_intent&&rejected.snapshot.session_id==1,"故障恢复与换枪组合不能自动重开");
+        i.held=false;c.advance(i,time(4));i.held=true;i.firing_started_at=time(5);
+        expect(c.advance(i,time(5)).snapshot.session_id==2,"健康释放后的新按下可新建会话");
+    }
+    {
+        auto i=make_input();RecoilController c;c.advance(i,time(0));i.held=true;c.advance(i,time(1));
+        auto d=c.advance(i,time(6));c.acknowledge({d.intent.command_id,RecoilReceiptStatus::UNKNOWN,time(6)},time(6));
+        i.weapon_block=RecoilWeaponBlock::ORDINARY_UNAVAILABLE;c.advance(i,time(7));
+        i.weapon_block=RecoilWeaponBlock::NONE;++i.weapon_generation;
+        expect(c.advance(i,time(8)).snapshot.faulted&&!c.defer_unsent(d.intent.command_id),
+            "未知回执不因普通恢复或换枪重发");
+    }
+    {
+        auto i=make_input();RecoilController c;c.advance(i,time(0));i.held=true;c.advance(i,time(1));
+        auto d=c.advance(i,time(6));c.acknowledge({d.intent.command_id,RecoilReceiptStatus::NOT_SENT,time(6)},time(6));
+        ++i.weapon_generation;
+        expect(c.advance(i,time(7)).snapshot.session_id==1,"已调用后端的NOT_SENT不能借普通换枪自动重开");
+    }
+    {
+        auto i=make_input();RecoilController c;c.advance(i,time(0));i.held=true;c.advance(i,time(1));
+        i.weapon_block=RecoilWeaponBlock::ORDINARY_UNAVAILABLE;c.advance(i,time(2));
+        c.cancel(RecoilReason::CANCELED,time(3));i.weapon_block=RecoilWeaponBlock::NONE;++i.weapon_generation;
+        expect(c.advance(i,time(4)).snapshot.session_id==1,"总停撤销普通恢复令牌且换枪不能复活");
+    }
+    {
+        auto i=make_input();RecoilController c;c.advance(i,time(0));i.held=true;c.advance(i,time(1));
+        i.profile=std::make_shared<RecoilProfile>(p);
+        const auto changed=c.advance(i,time(2));
+        expect(changed.snapshot.session_id==1&&!changed.has_intent,
+            "同武器曲线对象重载不能伪装普通换枪自动重开");
+    }
+}
 void user_confirmed_execution_keeps_boundaries(){
+    discrete_recovery_and_unsent_safety();
     auto base=*profile();base.phase_tolerance_ms.reset();base.recovery_ms.reset();
     base.state=RecoilProfileState::IMPORTED;base.calibration.input_path="kmbox_net";
     auto text=serialize_recoil_profile(base);

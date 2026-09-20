@@ -62,6 +62,11 @@ int main() {
     bad = full; bad["player"]["state"]["health"] = 0;
     parsed = parse_payload(bad.dump(), config, utc);
     expect(!parsed.valid && parsed.status == Status::PLAYER_INACTIVE, "自身死亡使共享武器上下文无效，不能维持人工急停");
+    expect(parsed.player_playing && parsed.player_health == 0, "独立保留确认死亡，不放宽Trigger原valid");
+    bad["player"]["state"].erase("health");
+    parsed = parse_payload(bad.dump(), config, utc);
+    expect(!parsed.valid && !parsed.player_health && parsed.status == Status::PLAYER_INACTIVE,
+           "缺失健康与确认死亡可辨，但Trigger原状态不变");
     bad = full; bad["player"]["weapons"]["weapon_0"].erase("ammo_clip");
     parsed = parse_payload(bad.dump(), config, utc);
     expect(!parsed.valid && !parsed.ammo_clip, "缺字段不继承上一状态");
@@ -90,6 +95,38 @@ int main() {
     const auto start = Clock::time_point{} + 1s;
     expect(state.ingest(full.dump(), config, start, utc) == Status::READY, "首份完整快照");
     const auto first = state.snapshot(start);
+    GsiState recoil_continuity;
+    recoil_continuity.reset();
+    recoil_continuity.ingest(full.dump(), config, start, utc);
+    const auto trusted = recoil_continuity.snapshot(start).recoil_safety_epoch;
+    auto ordinary = full;
+    ordinary["player"]["weapons"]["weapon_0"]["state"] = "reloading";
+    recoil_continuity.ingest(ordinary.dump(), config, start + 1ms, utc + 1);
+    expect(recoil_continuity.snapshot(start + 1ms).recoil_safety_epoch == trusted,
+           "普通换弹不撤销压枪可信代际");
+    ordinary = full; ordinary["player"]["state"]["health"] = 0;
+    recoil_continuity.ingest(ordinary.dump(), config, start + 2ms, utc + 2);
+    expect(recoil_continuity.snapshot(start + 2ms).recoil_safety_epoch == trusted,
+           "确认死亡是普通武器停止原因");
+    ordinary["player"]["state"].erase("health");
+    recoil_continuity.ingest(ordinary.dump(), config, start + 3ms, utc + 3);
+    expect(recoil_continuity.snapshot(start + 3ms).recoil_safety_epoch != trusted,
+           "同秒同PLAYER_INACTIVE但缺health不能去重成已确认死亡");
+    auto recovered = payload(config, 1700000001);
+    recoil_continuity.ingest(recovered.dump(), config, start + 1s, utc + 1000);
+    const auto after_unknown = recoil_continuity.snapshot(start + 1s).recoil_safety_epoch;
+    expect(after_unknown != trusted && recoil_continuity.snapshot(start + 1s).valid,
+           "消费者跳过UNKNOWN中间帧仍能看到可信代际改变");
+    recovered = payload(config, 1700000005);
+    recoil_continuity.ingest(recovered.dump(), config, start + 5s, utc + 5000);
+    expect(recoil_continuity.snapshot(start + 5s).recoil_safety_epoch != after_unknown,
+           "未读取过期快照也不能跳过TTL间断后自动恢复");
+    const auto before_identity = recoil_continuity.snapshot(start + 5s).recoil_safety_epoch;
+    recovered["provider"]["steamid"] = "76561198000000002";
+    recovered["player"]["steamid"] = "76561198000000002";
+    recoil_continuity.ingest(recovered.dump(), config, start + 5001ms, utc + 5001);
+    expect(recoil_continuity.snapshot(start + 5001ms).recoil_safety_epoch != before_identity,
+           "合法新身份不能按同枪换枪静默继承压枪会话");
     expect(first.source_epoch != 0 && first.revision != 0, "本地代际与revision存在");
     GsiState accounts;
     accounts.reset();

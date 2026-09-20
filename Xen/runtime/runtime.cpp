@@ -79,7 +79,6 @@ struct Runtime::Impl {
     std::unordered_map<std::string, std::shared_ptr<const RecoilProfile>> recoil_profiles;
     // 只在启动时写入，并受snapshot_mutex保护；就绪提示按当前武器查询。
     std::unordered_map<std::string, std::string> recoil_profile_statuses;
-    std::atomic<std::int64_t> recoil_observation_ns{0};
     std::atomic<std::uint64_t> stop_request_watermark{0};
     runtime::detail::LatestFrameQueue frame_queue;
     runtime::detail::RuntimePreviewChannel preview_channel;
@@ -448,7 +447,7 @@ struct Runtime::Impl {
         if (config.recoil.enabled) {
             motion_ledger = std::make_shared<MotionLedger>();
             motion_ledger->reset(config.aim.max_counts_per_frame, config.recoil.budget_window_ms, RecoilClock::now());
-            recoil_profiles.clear(); recoil_observation_ns.store(0);
+            recoil_profiles.clear();
             { std::lock_guard lock(snapshot_mutex); recoil_profile_statuses.clear(); }
             RecoilStore store(std::filesystem::u8path(config.recoil.profile_directory));
             std::vector<RecoilStoredProfile> profiles;
@@ -478,20 +477,14 @@ struct Runtime::Impl {
                         previous_weapon = weapon.canonical_id; previous_epoch = weapon.source_epoch; ++generation;
                     }
                     input.device_epoch = 1; input.weapon_generation = generation;
+                    input.weapon_trust_generation = weapon.recoil_safety_epoch;
                     const auto found = recoil_profiles.find(weapon.canonical_id);
                     if (found != recoil_profiles.end()) input.profile = found->second;
-                    input.profile_conditions_match = weapon.valid && weapon.identity_match &&
-                        weapon.state == weapon::WeaponState::ACTIVE && weapon.ammo_clip && *weapon.ammo_clip > 0 &&
-                        weapon.valid_until > RecoilClock::now() && input.profile != nullptr;
+                    input.weapon_block = runtime::detail::recoil_weapon_block(weapon, input.profile != nullptr, RecoilClock::now());
+                    input.profile_conditions_match = input.weapon_block == RecoilWeaponBlock::NONE;
                     input.focused = focus.available && focus.focused && focus.session_id == focus_session;
                     focus_session = focus.available && focus.focused ? focus.session_id : 0;
-                    input.permission = config.mouse.allow_send_input && !stop_requested.load() && safety_gate.can_dispatch_auxiliary();
-                    if (config.recoil.mixed_aim) {
-                        const auto stamp = RecoilTime(std::chrono::nanoseconds(recoil_observation_ns.load()));
-                        const auto now = RecoilClock::now();
-                        input.permission = input.permission && stamp != RecoilTime{} && stamp <= now &&
-                            now - stamp < std::chrono::milliseconds(config.recoil.max_observation_age_ms);
-                    }
+                    input.permission = config.mouse.allow_send_input && !stop_requested.load() && safety_gate.can_dispatch_recoil();
                     return input;
                 },
                 [this] { if (auto trigger = trigger_worker.load()) return trigger->firing_signal(); return TriggerFiringSignal{}; });
@@ -651,6 +644,7 @@ struct Runtime::Impl {
         }
         if (mouse_sent) ++current_snapshot.mouse_commands;
         current_snapshot.output_armed = safety_gate.output_armed();
+        current_snapshot.visual_output_blocked = safety_gate.visual_output_blocked();
         current_snapshot.input_healthy = safety_gate.input_healthy();
         current_snapshot.aim_hold_active = safety_gate.hold_active();
         current_snapshot.emergency_stopped =
@@ -881,8 +875,6 @@ struct Runtime::Impl {
                     stop->publish_target({}); stop->publish_tracking_target({});
                 }
                 if (auto trigger = trigger_worker.load()) trigger->publish(std::make_shared<TriggerObservation>());
-                recoil_observation_ns.store(0);
-                if (config.recoil.mixed_aim) if (auto recoil = recoil_worker.load()) recoil->cancel();
             }
             AimResult aim_result;
             AimFrame aim_frame;
@@ -899,7 +891,6 @@ struct Runtime::Impl {
                     if (auto stop = auto_stop_worker.load()) {
                         stop->publish_target({}); stop->publish_tracking_target({});
                     }
-                    if (auto recoil = recoil_worker.load()) recoil->cancel();
                     aim->reset();
                 }
                 aim_frame = std::move(prepared.frame);
@@ -945,7 +936,8 @@ struct Runtime::Impl {
                     OutputArbiterRejection rejection = OutputArbiterRejection::NONE;
                     output_guard = output_arbiter->enter_aim_until(slot_deadline, &rejection);
                     if (!output_guard.owns_lock() || std::chrono::steady_clock::now() > slot_deadline) {
-                        safety_gate.emergency_stop();
+                        if (rejection == OutputArbiterRejection::OUTPUT_FAULT) safety_gate.emergency_stop();
+                        else safety_gate.block_visual_output();
                         aim_reset_requested.store(true, std::memory_order_release);
                         aim_frame.lock_active = false;
                         set_error("Aim输出等待超过观测时效、事务预算或共享输出故障");
@@ -960,24 +952,12 @@ struct Runtime::Impl {
                     aim_frame.control_at - frame->timing.captured_at).count();
                 if (profile.source_timing_valid) profile.source_to_control_ms = std::chrono::duration<double, std::milli>(
                     aim_frame.control_at - frame->timing.source_time_at).count();
-                std::int64_t candidate_recoil_observation_ns = 0;
                 if (config.recoil.enabled) {
                     if (!config.recoil.mixed_aim) aim_frame.lock_active = false;
                     else aim_frame.external_motion = motion_ledger->snapshot(RecoilClock::now());
-                    const bool fresh_source = frame->timing.source_time_timing_valid &&
-                        std::isfinite(frame->timing.source_clock_uncertainty_ms) && frame->timing.source_clock_uncertainty_ms >= 0 &&
-                        frame->timing.source_clock_uncertainty_ms < config.recoil.max_observation_age_ms;
-                    candidate_recoil_observation_ns = fresh_source ? std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        (frame->timing.source_time_at - std::chrono::duration_cast<RecoilClock::duration>(
-                            std::chrono::duration<double, std::milli>(frame->timing.source_clock_uncertainty_ms))).time_since_epoch()).count() : 0;
                 }
+                aim_frame.recoil_y_owned = output_arbiter && output_arbiter->recoil_y_owned();
                 aim_result = aim->process(aim_frame);
-                if (config.recoil.enabled && aim_result.status == AimStatus::SUCCESS)
-                    recoil_observation_ns.store(candidate_recoil_observation_ns);
-                if (config.recoil.mixed_aim && aim_result.status != AimStatus::SUCCESS) {
-                    recoil_observation_ns.store(0);
-                    if (auto recoil = recoil_worker.load()) recoil->cancel();
-                }
                 profile.aim = aim_result.profile;
 
                 if (aim_result.status == AimStatus::SUCCESS &&
@@ -987,7 +967,8 @@ struct Runtime::Impl {
                         aim_result.command.dy_counts};
                     bool dispatch_allowed = runtime::detail::aim_frame_dispatch_allowed(
                         aim_frame, safety_gate.can_dispatch()) && (!config.recoil.enabled || config.recoil.mixed_aim);
-                    if (output_arbiter) dispatch_allowed = dispatch_allowed && output_guard.owns_lock();
+                    if (output_arbiter) dispatch_allowed = dispatch_allowed && output_guard.owns_lock() &&
+                        aim_frame.recoil_y_owned == output_arbiter->recoil_y_owned();
                     if (dispatch_allowed && config.recoil.enabled) {
                         dispatch_allowed = motion_ledger->revision() == aim_frame.external_motion.revision &&
                             motion_ledger->permits(command, RecoilClock::now());
@@ -997,7 +978,7 @@ struct Runtime::Impl {
                     MouseMoveReceipt mouse_receipt;
                     if (dispatch_allowed && mouse_backend_completed > slot_deadline) {
                         dispatch_allowed = false;
-                        safety_gate.emergency_stop();
+                        safety_gate.block_visual_output();
                         aim_reset_requested.store(true, std::memory_order_release);
                         set_error("Aim输出计算超过观测时效或事务预算");
                         LOG_ERROR("runtime", "Aim发送前时效失效：seq={}", aim_frame.sequence);
@@ -1082,7 +1063,7 @@ struct Runtime::Impl {
                             mouse_sent ? command.dx_counts : 0,
                             mouse_sent ? command.dy_counts : 0);
                     if (!backend_completion_recorded) {
-                        safety_gate.emergency_stop();
+                        safety_gate.block_visual_output();
                         aim_reset_requested.store(
                             true, std::memory_order_release);
                         set_error("Aim 后端完成反馈与预计算历史不一致");
@@ -1091,7 +1072,8 @@ struct Runtime::Impl {
                             command.dx_counts, command.dy_counts,
                             std::chrono::duration_cast<std::chrono::nanoseconds>(aim_frame.control_at.time_since_epoch()).count(),
                             std::chrono::duration_cast<std::chrono::nanoseconds>(mouse_backend_completed.time_since_epoch()).count());
-                    } else if (dispatch_allowed && !mouse_sent) {
+                    }
+                    if (dispatch_allowed && !mouse_sent) {
                         safety_gate.emergency_stop();
                         aim_reset_requested.store(true,
                                                   std::memory_order_release);
@@ -1513,7 +1495,7 @@ bool Runtime::reload_detector(const DetectorConfig& config) noexcept {
                     }
                     retired = std::move(state->detector);
                     state->detector = std::move(candidate);
-                    state->safety_gate.disarm();
+                    state->safety_gate.block_visual_output();
                     state->aim_reset_requested.store(
                         true, std::memory_order_release);
                     state->current_snapshot.provider.swap(provider);
@@ -1524,10 +1506,11 @@ bool Runtime::reload_detector(const DetectorConfig& config) noexcept {
                     state->current_snapshot.detector_reload_error.clear();
                     generation = ++state->current_snapshot.detector_generation;
                     state->active_detector_generation = generation;
-                    state->current_snapshot.output_armed = false;
+                    state->current_snapshot.output_armed = state->safety_gate.output_armed();
+                    state->current_snapshot.visual_output_blocked = true;
                 }
 
-                // 新模型不能继承旧轨迹和旧武装状态。retired 在本加载线程析构，
+                // 新模型不能继承旧轨迹和视觉输出许可；普通压枪保留全局武装。retired 在本加载线程析构，
                 // 避免 Pipeline 热路径释放 ORT/TensorRT 大型资源。
                 LOG_INFO(
                     "runtime", "Detector 热重载成功: generation={}, provider={}, model={}",
@@ -1618,6 +1601,7 @@ bool Runtime::post_intent(const RuntimeIntent& intent) noexcept {
         std::lock_guard<std::mutex> lock(impl_->snapshot_mutex);
         impl_->current_snapshot.output_armed =
             impl_->safety_gate.output_armed();
+        impl_->current_snapshot.visual_output_blocked = impl_->safety_gate.visual_output_blocked();
         impl_->current_snapshot.input_healthy =
             impl_->safety_gate.input_healthy();
         impl_->current_snapshot.aim_hold_active =

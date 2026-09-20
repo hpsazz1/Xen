@@ -427,6 +427,7 @@ PreviewStats RuntimePreviewChannel::stats() const noexcept {
 }
 
 void SafetyGate::reset_session() noexcept {
+    visual_output_blocked_.store(false, std::memory_order_release);
     armed_.store(false, std::memory_order_release);
     hold_active_.store(false, std::memory_order_release);
     emergency_stopped_.store(false, std::memory_order_release);
@@ -438,6 +439,7 @@ bool SafetyGate::arm() noexcept {
         return false;
     }
     armed_.store(true, std::memory_order_release);
+    visual_output_blocked_.store(false, std::memory_order_release);
     return true;
 }
 
@@ -463,6 +465,10 @@ void SafetyGate::emergency_stop() noexcept {
     emergency_stopped_.store(true, std::memory_order_release);
 }
 
+void SafetyGate::block_visual_output() noexcept {
+    visual_output_blocked_.store(true, std::memory_order_release);
+}
+
 bool SafetyGate::reset_emergency() noexcept {
     if (!input_healthy_.load(std::memory_order_acquire) ||
         hold_active_.load(std::memory_order_acquire)) {
@@ -478,9 +484,17 @@ bool SafetyGate::can_dispatch() const noexcept {
 }
 
 bool SafetyGate::can_dispatch_auxiliary() const noexcept {
+    return can_dispatch_recoil() && !visual_output_blocked_.load(std::memory_order_acquire);
+}
+
+bool SafetyGate::can_dispatch_recoil() const noexcept {
     return input_healthy_.load(std::memory_order_acquire) &&
            armed_.load(std::memory_order_acquire) &&
            !emergency_stopped_.load(std::memory_order_acquire);
+}
+
+bool SafetyGate::visual_output_blocked() const noexcept {
+    return visual_output_blocked_.load(std::memory_order_acquire);
 }
 
 bool SafetyGate::input_healthy() const noexcept {

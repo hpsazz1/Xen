@@ -32,6 +32,13 @@ public:
     // 撤销本owner既有按钮债务不受普通发送门禁阻挡。
     std::unique_lock<std::timed_mutex> try_enter_cleanup() noexcept;
     void latch_output_fault() noexcept;
+    // 调用者必须持本arbiter返回的输出锁；所有权与Aim计算/提交在同一边界切换。
+    void set_recoil_y_owned(bool owned) noexcept { recoil_y_owned_.store(owned, std::memory_order_release); }
+    bool recoil_y_owned() const noexcept { return recoil_y_owned_.load(std::memory_order_acquire); }
+    void release_recoil_y() noexcept {
+        std::lock_guard lock(mutex_);
+        recoil_y_owned_.store(false, std::memory_order_release);
+    }
     std::uint64_t aim_skips() const noexcept { return aim_skips_.load(std::memory_order_relaxed); }
 private:
     friend class AutoStopWorker;
@@ -42,6 +49,7 @@ private:
     std::condition_variable pending_changed_;
     std::atomic<bool> auxiliary_pending_{false};
     std::atomic<bool> faulted_{false};
+    std::atomic<bool> recoil_y_owned_{false};
     std::atomic<std::uint64_t> aim_skips_{0};
     struct Counters {
         std::atomic<std::uint64_t> acquired{0}, lock_busy{0}, auxiliary_pending{0}, output_fault{0};

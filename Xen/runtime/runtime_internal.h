@@ -19,8 +19,25 @@
 #include "runtime/runtime.h"
 #include "weapon/weapon_timing.h"
 #include "weapon/weapon_catalog.h"
+#include "recoil/recoil.h"
 
 namespace runtime::detail {
+
+inline RecoilWeaponBlock recoil_weapon_block(const weapon::WeaponSnapshot& current,
+        bool has_profile, weapon::Clock::time_point now) noexcept {
+    if (!current.identity_match || current.valid_until <= now || current.received_at > now ||
+        !current.player_playing || !current.player_health)
+        return RecoilWeaponBlock::UNTRUSTED;
+    if (current.status == weapon::Status::PLAYER_INACTIVE && *current.player_health == 0)
+        return RecoilWeaponBlock::ORDINARY_UNAVAILABLE;
+    if ((current.status == weapon::Status::RELOADING || current.status == weapon::Status::EMPTY) &&
+        !current.canonical_id.empty()) return RecoilWeaponBlock::ORDINARY_UNAVAILABLE;
+    if (current.valid && current.status == weapon::Status::READY && *current.player_health > 0 &&
+        current.state == weapon::WeaponState::ACTIVE && current.ammo_clip && *current.ammo_clip > 0 &&
+        !current.canonical_id.empty())
+        return has_profile ? RecoilWeaponBlock::NONE : RecoilWeaponBlock::ORDINARY_UNAVAILABLE;
+    return RecoilWeaponBlock::UNTRUSTED;
+}
 
 // 急停与扳机共用启动时冻结的实际资料；循环无可用点射资料时不得先接管键盘。
 inline AutoStopWeaponContext auto_stop_weapon_context(const weapon::WeaponSnapshot& current,
@@ -448,10 +465,13 @@ public:
     void set_input_health(bool healthy) noexcept;
     void set_hold(bool active) noexcept;
     void emergency_stop() noexcept;
+    void block_visual_output() noexcept;
     bool reset_emergency() noexcept;
     bool can_dispatch() const noexcept;
     // 辅助请求不依赖 Aim 按住键，但仍必须经过同一全局武装与输入门。
     bool can_dispatch_auxiliary() const noexcept;
+    bool can_dispatch_recoil() const noexcept;
+    bool visual_output_blocked() const noexcept;
     bool input_healthy() const noexcept;
     bool output_armed() const noexcept;
     bool hold_active() const noexcept;
@@ -462,6 +482,7 @@ private:
     std::atomic<bool> armed_{false};
     std::atomic<bool> hold_active_{false};
     std::atomic<bool> emergency_stopped_{false};
+    std::atomic<bool> visual_output_blocked_{false};
 };
 
 } // namespace runtime::detail
