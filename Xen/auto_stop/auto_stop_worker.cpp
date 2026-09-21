@@ -322,30 +322,32 @@ public:
             }
             return success;
         };
-        const auto normal_target_cancellation = [&]() {
-            bool target_change = false;
+        const auto normal_cancellation = [&](bool target_only = false) {
+            bool normal_change = false;
             {
                 std::lock_guard<std::mutex> lock(mutex);
-                target_change = active_id && independent && manual_fire_id.load() == 0 &&
-                    active_generation != cancel_generation.load() && normal_target_generation == cancel_generation.load() &&
+                normal_change = active_id && independent && manual_fire_id.load() == 0 &&
+                    active_generation != cancel_generation.load() &&
+                    (normal_target_generation == cancel_generation.load() ||
+                     (!target_only && normal_weapon_generation == cancel_generation.load() && state.weapon_context.session_trusted)) &&
                     !state.release_required && !fault;
             }
             InputSnapshot fresh;
-            return target_change && mouse->poll_input(fresh) && fresh.state_valid && fresh.status == InputMonitorStatus::READY &&
+            return normal_change && mouse->poll_input(fresh) && fresh.state_valid && fresh.status == InputMonitorStatus::READY &&
                 intent.input_continuous && intent.epoch == active_input_epoch && held_wasd(fresh) == intent.held_mask &&
                 !fresh.virtual_keys[0x23] && !release_key_held(fresh) && allowed && allowed() && focused && focused() &&
                 !paused.load() && !stopping.load() && !arbiter->faulted_.load();
         };
         auto cancel_active = [&](bool force_fault, const char* reason, bool normal_activation_release = false,
                                  bool cycle_resume = false, bool manual_finished = false, bool ordinary_transition = false) {
-            const bool target_transition = !force_fault && normal_target_cancellation();
-            if (target_transition && mouse->left_button_cleanup_required()) {
+            const bool session_transition = !force_fault && normal_cancellation();
+            if (session_transition && mouse->left_button_cleanup_required()) {
                 // 先撤销估计资格让Trigger抬键；未知UP由共享故障/有界清理处理。
                 // 等待时不占仲裁器，否则会阻止负责UP的worker完成清理。
                 release_reservation();
                 return false;
             }
-            if (target_transition) { ordinary_transition = true; cycle_resume = false; }
+            if (session_transition) { ordinary_transition = true; cycle_resume = false; }
             // 点射归还等待ACK时仍保留目标代际，避免中途丢失目标被误算成恢复失败。
             const bool track_cleanup = cycle_resume && independent && manual_fire_id.load() == 0 && !force_fault;
             { std::lock_guard<std::mutex> lock(mutex);
@@ -388,8 +390,10 @@ public:
                     checked_sequence = event.sequence;
                 }
                 continuous = continuous && after_cursor.sequence == checked_sequence;
+                // 武器可能在清理ACK期间变化；先刷新，再统一判定普通过渡，不能在分流后才读取。
+                const bool cycle_permission = cycle_resume && permission(after_cleanup);
                 const bool session_valid = (can_resume || ordinary_transition) && session_permission(false);
-                if (track_cleanup && normal_target_cancellation()) {
+                if (track_cleanup && normal_cancellation()) {
                     ordinary_transition = true;
                     cycle_resume = false;
                 }
@@ -401,7 +405,7 @@ public:
                         std::lock_guard<std::mutex> lock(mutex);
                         state.release_required = true;
                     }
-                } else if (continuous && (cycle_resume ? permission(after_cleanup) : !after_cleanup.virtual_keys[config.activation_virtual_key]) &&
+                } else if (continuous && (cycle_resume ? cycle_permission : !after_cleanup.virtual_keys[config.activation_virtual_key]) &&
                     !after_cleanup.virtual_keys[0x23] && !release_key_held(after_cleanup) && allowed && allowed() &&
                     !paused.load() && !stopping.load() && !arbiter->faulted_.load() &&
                     active_generation == cancel_generation.load() && session_valid)
@@ -692,7 +696,7 @@ public:
                     target_consumed = false;
                     continue;
                 }
-                if (normal_target_cancellation()) {
+                if (normal_cancellation(true)) {
                     cancel_active(false, "tracking_target_lost");
                     target_consumed = false;
                     std::unique_lock<std::mutex> lock(mutex);

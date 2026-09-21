@@ -103,6 +103,25 @@ inline std::chrono::steady_clock::time_point tracking_target_deadline(
     return target_deadline(detections, config, timing, now, std::nullopt, reason);
 }
 
+struct AutoStopTargetPermits {
+    std::chrono::steady_clock::time_point admission_until{}, tracking_until{};
+    AutoStopBlockReason reason = AutoStopBlockReason::NO_TARGET;
+};
+
+inline AutoStopTargetPermits auto_stop_target_permits(
+        const AimFrame& frame, const AimResult& selected, const AimConfig& config,
+        const FrameTiming& timing, std::chrono::steady_clock::time_point now) noexcept {
+    AutoStopTargetPermits result;
+    // 跟踪生命周期与实际输出分离：未持Aim键或没有命令仍可存在有效目标。
+    // 无选中目标/处理失败时，原始集合的残留框不能独立创建或续期急停。
+    if (selected.status != AimStatus::SUCCESS || !selected.has_target) return result;
+    result.tracking_until = tracking_target_deadline(frame.detections, config, timing, now, &result.reason);
+    if (result.tracking_until == std::chrono::steady_clock::time_point{}) return result;
+    result.admission_until = auto_stop_target_deadline(frame.detections, config, timing, now,
+        frame.control_center_x, frame.control_center_y, &result.reason);
+    return result;
+}
+
 // 同一生产入口维护 observation 时间基准及连续性；不重新判定 Capture 的映射质量。
 class RuntimeObservationClock {
 public:

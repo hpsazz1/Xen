@@ -82,6 +82,86 @@ void publish(runtime::detail::LatestFrameQueue& queue,
            "合法 CPU 帧应显式报告发布成功");
 }
 
+void test_auto_stop_permits_follow_actual_aim_selection() {
+    using Clock = std::chrono::steady_clock;
+    using namespace std::chrono_literals;
+    AimConfig config;
+    config.min_confirmed_hits = 2;
+    config.max_lost_frames = 3;
+    config.acquisition_range_percent = 50.0f;
+    config.body_aim_height_ratio = 0.5f;
+    config.deadzone_pixels = 100.0f;
+    Aim aim(config);
+    AimFrame frame;
+    frame.roi_width = frame.roi_height = 320;
+    frame.control_center_x = frame.control_center_y = 160;
+    frame.observation_epoch = 1;
+    frame.lock_active = false;
+    const auto start = Clock::time_point{1s};
+    FrameTiming timing;
+    timing.source_time_timing_valid = true;
+    timing.source_clock_uncertainty_ms = 1.0;
+    auto process = [&](Detection detection) {
+        ++frame.sequence;
+        frame.captured_at = start + frame.sequence * 16ms;
+        frame.control_at = frame.captured_at + 1ms;
+        frame.detections = {detection};
+        timing.source_time_at = frame.captured_at;
+        timing.sequence = frame.sequence;
+        const auto result = aim.process(frame);
+        if (result.has_command)
+            expect(aim.record_backend_completed_command(result.command.sequence, frame.control_at, 0, 0),
+                "实际Aim测试仅回送零输出，不连接物理设备");
+        return result;
+    };
+    AimResult selected;
+    for (int step = 0; step < 6; ++step) selected = process({140, 130, 180, 190, 0.95f, 0});
+    expect(selected.status == AimStatus::SUCCESS && selected.has_target && !selected.has_command && !frame.lock_active,
+        "真实Aim先确认有效居中目标，即使不锁定且没有鼠标命令仍须有目标");
+    const auto admitted = runtime::detail::auto_stop_target_permits(frame, selected, config, timing, frame.control_at);
+    expect(admitted.admission_until > frame.control_at && admitted.tracking_until > frame.control_at,
+        "当前选中目标有效时急停许可不依赖Aim命令或lock_active");
+    auto invalid_selected = selected;
+    invalid_selected.status = AimStatus::INVALID_INPUT;
+    const auto invalid = runtime::detail::auto_stop_target_permits(
+        frame, invalid_selected, config, timing, frame.control_at);
+    expect(invalid.admission_until == Clock::time_point{} && invalid.tracking_until == Clock::time_point{} &&
+               invalid.reason == AutoStopBlockReason::NO_TARGET,
+        "Aim状态无效时残留has_target字段不得续期急停许可");
+    const auto expired = runtime::detail::auto_stop_target_permits(
+        frame, selected, config, timing, timing.source_time_at + 50ms);
+    expect(expired.admission_until == Clock::time_point{} && expired.tracking_until == Clock::time_point{} &&
+               expired.reason == AutoStopBlockReason::TARGET_STALE,
+        "有效选中目标仍须服从原始源期限，调用helper不能重新起算TTL");
+    const auto old_track = selected.target.track_id;
+    bool observed_lost = false;
+    for (int step = 0; step < 16; ++step) {
+        selected = process({285, 130, 315, 190, 0.99f, 0});
+        if (selected.has_target) continue;
+        observed_lost = true;
+        expect(!frame.detections.empty() && frame.detections.front().confidence >= config.high_confidence,
+            "丢失回归仍保留域外高置信人物原始框，不能用空检测替代");
+        const auto lost = runtime::detail::auto_stop_target_permits(frame, selected, config, timing, frame.control_at);
+        expect(lost.admission_until == Clock::time_point{} && lost.tracking_until == Clock::time_point{} &&
+                   lost.reason == AutoStopBlockReason::NO_TARGET,
+            "实际Aim无选中目标时残留域外人物框不得维持准入或跟踪期限");
+    }
+    expect(observed_lost, "原目标消失后实际Aim必须进入无目标状态");
+    for (int step = 0; step < 6; ++step) selected = process({145, 130, 185, 190, 0.95f, 0});
+    const auto recovered = runtime::detail::auto_stop_target_permits(frame, selected, config, timing, frame.control_at);
+    expect(selected.status == AimStatus::SUCCESS && selected.has_target && selected.target.track_id != old_track &&
+               !selected.has_command && recovered.admission_until > frame.control_at && recovered.tracking_until > frame.control_at,
+        "真实新目标恢复后无需鼠标命令即可重新建立两种许可");
+    for (int step = 1; step <= 8; ++step)
+        selected = process({145.0f + step * 4, 130, 185.0f + step * 4, 190, 0.95f, 0});
+    const auto outside = runtime::detail::auto_stop_target_permits(frame, selected, config, timing, frame.control_at);
+    expect(selected.status == AimStatus::SUCCESS && selected.has_target,
+        "准星离框对照须仍由实际Aim选中范围内目标");
+    expect(outside.admission_until == Clock::time_point{} && outside.tracking_until > frame.control_at &&
+               outside.reason == AutoStopBlockReason::CROSSHAIR_OUTSIDE_TARGET,
+        "准星离开当前有效目标只撤销首次准入，仍保留跟踪期限");
+}
+
 void test_processed_frame_timing_evidence_preserves_raw_identity() {
     using Clock = std::chrono::steady_clock;
     const auto at = [](std::int64_t ns) {
@@ -671,6 +751,7 @@ void test_runtime_preview_held_slots_and_reset() {
 } // namespace
 
 int main() {
+    test_auto_stop_permits_follow_actual_aim_selection();
     {
         auto catalog = weapon::default_timing_catalog();
         weapon::WeaponSnapshot current;

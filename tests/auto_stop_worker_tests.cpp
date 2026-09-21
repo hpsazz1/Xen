@@ -678,6 +678,50 @@ void weapon_session_recovery_contracts() {
     }
 }
 
+void weapon_change_during_cycle_cleanup() {
+    using namespace std::chrono_literals;
+    auto fake = std::make_shared<Fake>();
+    std::atomic<std::uint64_t> id{0};
+    std::atomic<int> stage{0};
+    std::atomic<bool> injected{false};
+    AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+        [&] { return ++id; }, [] { return true; }, [&] {
+            const auto step = stage.load();
+            return AutoStopWeaponContext{true, step != 1, static_cast<std::uint64_t>(step + 1),
+                "ak47", 1, true};
+        });
+    AutoStopConfig config{true, 5}; config.cycle_enabled = true;
+    require(worker.start(config), "点射归还中可信武器变化回归启动");
+    ready(worker, fake);
+    publish_present_target(worker, Clock::now() + 2s);
+    wait_for([&] { return worker.estimated_completion_id() != 0; });
+    const auto first_id = worker.estimated_completion_id();
+    {
+        std::lock_guard lock(fake->mutex);
+        fake->before_cleanup = [&] {
+            // 固定在归还已被接收、清理ACK尚未返回的窗口，模拟空弹和Trigger对旧请求的UP撤销。
+            stage = 1;
+            worker.cancel(first_id);
+            injected = true;
+        };
+    }
+    require(worker.resume_movement(first_id, Clock::now() + 20ms), "先接受同一请求的正常点射归还");
+    wait_for([&] { return injected.load() && fake->released() &&
+        (worker.snapshot().canceled != 0 || worker.snapshot().cycle_count != 0); });
+    require(worker.estimated_completion_id() == 0, "归还期间空弹撤销旧完成编号");
+    require(!worker.snapshot().release_required,
+        "清理ACK期间发生可信空弹不得误锁存许可松键");
+    stage = 2;
+    wait_for([&] { return worker.snapshot().weapon_context.generation == 3; });
+    publish_present_target(worker, Clock::now() + 2s);
+    wait_for([&] { return worker.estimated_completion_id() > first_id; });
+    require(!worker.snapshot().release_required, "武器就绪后持续持键必须重新完成新一轮急停");
+    { std::lock_guard lock(fake->mutex);
+        require(fake->software.size() == 6, "恢复后必须重新完成完整zero反向zero，不能继承旧制动");
+    }
+    worker.stop();
+}
+
 void cleanup_report_preserves_next_brake() {
     using namespace std::chrono_literals;
     for (const bool target_loss : {false, true}) {
@@ -709,6 +753,8 @@ void cleanup_report_preserves_next_brake() {
 }
 int main(int argc, char** argv) {
     try {
+        weapon_change_during_cycle_cleanup();
+        if (argc == 2 && std::string_view(argv[1]) == "--weapon-cleanup") return 0;
         cleanup_report_preserves_next_brake();
         if (argc == 2 && std::string_view(argv[1]) == "--cleanup-report") return 0;
         target_loss_releases_hold();

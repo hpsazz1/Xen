@@ -224,10 +224,11 @@ void gsi_session_recovery(const char* transition) {
     auto arbiter = std::make_shared<AutoStopOutputArbiter>();
     std::atomic<std::uint64_t> next_id{0};
     AutoStopWorker stop(mouse, arbiter, [] { return true; }, [&] { return ++next_id; }, [] { return true; },
-        [&] { return runtime::detail::auto_stop_weapon_context(snapshot(), true, &catalog, Clock::now()); });
+        [&] { const auto current = snapshot();
+            return runtime::detail::auto_stop_weapon_context(current, true, &catalog, Clock::now()); });
     TriggerWorker trigger(mouse, arbiter, [] { return true; }, [] { return true; }, [&] { return ++next_id; },
         [&](std::uint64_t id) { return stop.request(id); }, [&](std::uint64_t id) { stop.cancel(id); },
-        [&] { return trigger_context.update(snapshot(), catalog, Clock::now()); },
+        [&] { const auto current = snapshot(); return trigger_context.update(current, catalog, Clock::now()); },
         [&] { return stop.estimated_completion_id(); },
         [&](std::uint64_t id, TriggerTime deadline) { stop.resume_movement(id, deadline - 58ms); });
     AutoStopConfig sc{true, 5}; sc.cycle_enabled = true; sc.counter_hold_ms = 40; sc.shot_after_release_ms = 18;

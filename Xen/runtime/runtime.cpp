@@ -343,7 +343,8 @@ struct Runtime::Impl {
                     [this, timing_catalog] {
                         if (!config.gsi.enabled) return AutoStopWeaponContext{};
                         // 可被急停及扳机线程同时读取；使用不可变快照，不维护可变闭包。
-                        return runtime::detail::auto_stop_weapon_context(gsi_receiver.snapshot(),
+                        const auto current = gsi_receiver.snapshot();
+                        return runtime::detail::auto_stop_weapon_context(current,
                             config.auto_stop.cycle_enabled, timing_catalog.get(), weapon::Clock::now());
                     });
                 if (!worker->start(config.auto_stop, config.mouse.kmbox_command_timeout_ms)) {
@@ -407,7 +408,8 @@ struct Runtime::Impl {
                 },
                 [this](std::uint64_t id) { if (auto stop = auto_stop_worker.load()) stop->cancel(id); },
                 [this, timing_catalog, context = runtime::detail::TriggerWeaponContext{}]() mutable {
-                    return context.update(gsi_receiver.snapshot(), *timing_catalog, TriggerClock::now());
+                    const auto current = gsi_receiver.snapshot();
+                    return context.update(current, *timing_catalog, TriggerClock::now());
                 },
                 [this] { auto stop = auto_stop_worker.load(); return stop ? stop->estimated_completion_id() : 0; },
                 std::move(resume_movement), [this](std::uint64_t id) {
@@ -787,9 +789,11 @@ struct Runtime::Impl {
         runtime::detail::CameraMotionEstimator camera_motion;
         runtime::detail::AimWeaponSessionGate aim_weapon_session;
         const auto sample_aim_weapon_session = [this, &aim_weapon_session] {
-            return aim_weapon_session.update(config.gsi.enabled ? gsi_receiver.snapshot() : weapon::WeaponSnapshot{},
-                config.gsi.enabled, config.source_context.enabled ? source_context_client.snapshot() :
-                    source_context::SourceContextSnapshot{}, config.source_context.enabled,
+            // 函数实参不保证从左到右求值；必须先读状态，再取用于有效期检查的时间。
+            const auto current_weapon = config.gsi.enabled ? gsi_receiver.snapshot() : weapon::WeaponSnapshot{};
+            const auto source = config.source_context.enabled ? source_context_client.snapshot() :
+                source_context::SourceContextSnapshot{};
+            return aim_weapon_session.update(current_weapon, config.gsi.enabled, source, config.source_context.enabled,
                 safety_gate.hold_active(), weapon::Clock::now());
         };
         const bool probes_enabled = config.runtime.enable_performance_probes;
@@ -878,16 +882,6 @@ struct Runtime::Impl {
                     aim->reset();
                 }
                 aim_frame = std::move(prepared.frame);
-                if (auto stop = auto_stop_worker.load()) {
-                    // 使用同一画面的实际准星控制中心判断完整人物范围，不依赖 Trigger 开关。
-                    AutoStopBlockReason reason;
-                    const auto deadline = runtime::detail::auto_stop_target_deadline(
-                        aim_frame.detections, config.aim, frame->timing, std::chrono::steady_clock::now(),
-                        aim_frame.control_center_x, aim_frame.control_center_y, &reason);
-                    stop->publish_target(deadline, reason);
-                    stop->publish_tracking_target(runtime::detail::tracking_target_deadline(
-                        aim_frame.detections, config.aim, frame->timing, std::chrono::steady_clock::now()));
-                }
                 profile.background_motion_ms = prepared.background_motion_ms;
                 if (auto trigger = trigger_worker.load()) {
                     auto observation = std::make_shared<TriggerObservation>();
@@ -946,6 +940,13 @@ struct Runtime::Impl {
                 aim_frame.recoil_y_owned = output_arbiter && output_arbiter->recoil_y_owned();
                 aim_result = aim->process(aim_frame);
                 profile.aim = aim_result.profile;
+                if (auto stop = auto_stop_worker.load()) {
+                    // 同帧选中目标决定准入和保持；不以原始集合中的任意残留框延续旧接管。
+                    const auto permits = runtime::detail::auto_stop_target_permits(
+                        aim_frame, aim_result, config.aim, frame->timing, std::chrono::steady_clock::now());
+                    stop->publish_target(permits.admission_until, permits.reason);
+                    stop->publish_tracking_target(permits.tracking_until);
+                }
 
                 if (aim_result.status == AimStatus::SUCCESS &&
                     aim_result.has_command) {
