@@ -3075,12 +3075,12 @@ struct Overlay::Impl {
         ImGui::TextWrapped("准星进入有效头部或人体检测框的设定范围即判断开火；100%%覆盖完整目标框，按共享GSI武器资料点射。检测框不保证弹道命中。");
         ImGui::BeginDisabled(!can_edit);
         if (begin_form("trigger_form", 150.0f)) {
-            form_row("启用自动扳机", "默认关闭；启用后仍需全局武装、按住绑定键、健康输入、源端焦点与有效图像。启用GSI时还需有效武器上下文；切枪或失效会取消旧会话，恢复后须松键再按下。仅支持 KMBOX NET。");
+            form_row("启用自动扳机", "默认关闭；启用后仍需全局武装、按住绑定键、健康输入、源端焦点与有效图像。启用GSI时还需有效武器上下文；正常切枪、换弹和空弹暂停旧会话，持键可在重新核验后恢复；失焦、输入异常或GSI信任中断仍须松键再按下。仅支持 KMBOX NET。");
             ImGui::BeginDisabled(app_config.mouse.backend != MouseBackend::KMBOX_NET && !trigger.enabled);
             toggle_switch("##trigger_enabled", &trigger.enabled);
             ImGui::EndDisabled();
             render_hotkey_row("开火许可（按住）", "##trigger_hold_key",
-                "可以与瞄准键或自动急停快捷键共用；禁止左键、WASD、安全急停和运行启停键。恢复或重新启动后须先松开再按下。Esc 清空。",
+                "可以与瞄准键或自动急停快捷键共用；禁止左键、WASD、安全急停和运行启停键。安全中断或重新启动后须先松开再按下；正常武器状态恢复不要求松键。Esc 清空。",
                 HotkeyBindingTarget::TRIGGER,
                 trigger.hold_virtual_key == 0 ? std::vector<int>{} : std::vector<int>{trigger.hold_virtual_key}, key_active);
             form_row("移动急停联动", "按住移动键或存在制动事务时等待急停完成；无WASD且无制动事务时直接按目标范围判断，不等待停稳资格。");
