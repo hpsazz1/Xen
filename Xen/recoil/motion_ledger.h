@@ -10,6 +10,7 @@
 // 调用方持有唯一输出arbiter；账本自己的锁只保护短时间快照，不覆盖设备等待。
 class MotionLedger {
 public:
+    // window_ms仅保留旧调用兼容；普通Aim不再使用滚动累计额度。
     void reset(double limit, int window_ms, std::chrono::steady_clock::time_point now);
     bool permits(const MouseMoveCommand& command, std::chrono::steady_clock::time_point now);
     bool record(const MouseMoveCommand& command, const MouseMoveReceipt& receipt, bool external);
@@ -18,11 +19,8 @@ public:
     std::uint64_t revision() const;
 private:
     mutable std::mutex mutex_;
-    struct BudgetEntry { std::chrono::steady_clock::time_point at; double magnitude; };
-    std::deque<BudgetEntry> budget_;
     std::deque<ExternalMotionEvent> external_;
     double limit_ = 0;
-    int window_ms_ = 16;
     bool fault_ = false;
     std::uint64_t revision_ = 0;
     std::chrono::steady_clock::time_point covered_from_{};

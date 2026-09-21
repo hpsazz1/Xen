@@ -14,7 +14,7 @@ struct RecoilConfig {
     std::string input_path = "kmbox_net";
     double sensitivity = 0;
     std::string fire_mode = "automatic";
-    // 兼容已有配置：此窗口仅约束Aim自身来源的额度，Recoil外部记录不消费它。
+    // 历史配置/归档兼容字段；不再对Aim逐帧输出追加滚动累计额度。
     int budget_window_ms = 16;
     // 历史归档兼容字段，普通Recoil不再据此读取或判断视觉许可。
     int max_observation_age_ms = 50;

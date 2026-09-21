@@ -515,16 +515,27 @@ void unverified_stop_and_contention() {
     expect(until([&] { return f.cancellations.load()==1; }), "无新帧过期须取消急停");
     f.worker.stop();
 
-    Fixture busy; expect(busy.start(), "仲裁测试启动");
+    Fixture busy; expect(busy.start(false, 1000), "仲裁测试启动");
     auto lock = busy.arbiter->try_enter_cleanup();
     expect(lock.owns_lock(), "测试持有输出门");
     busy.fire();
     expect(until([&] {
-        const auto value=busy.worker.snapshot();
-        return value.command_id>0 && (value.reason==TriggerReason::CANCELED || value.reason==TriggerReason::NO_CANDIDATE);
-    }), "仲裁忙时拒绝down且不阻塞");
+        for (const auto& event : busy.worker.execution_log().events)
+            if (event.button_action == TriggerButtonAction::DOWN &&
+                std::string_view(event.rejection_reason) == "arbiter_lock_busy") return true;
+        return false;
+    }), "短事务竞争须可见且不阻塞worker");
+    const auto queued_id = busy.worker.snapshot().command_id;
     expect(busy.mouse->count(true)==0, "未获得门不能down");
-    lock.unlock(); busy.worker.stop();
+    lock.unlock();
+    expect(until([&] { return busy.mouse->count(true) == 1; }),
+        "短锁竞争结束后原有效候选无需新图即可开火");
+    bool same_command = false;
+    for (const auto& event : busy.worker.execution_log().events)
+        if (event.button_action == TriggerButtonAction::DOWN && event.backend_called &&
+            event.snapshot.command_id == queued_id) same_command = true;
+    expect(same_command, "争锁重试保留原DOWN命令编号，不取消再建候选");
+    busy.worker.stop();
 }
 void not_sent_up_receipt_regression() {
     TriggerController controller;
@@ -549,6 +560,79 @@ void not_sent_up_receipt_regression() {
         TriggerReceiptStatus::ACKNOWLEDGED, value->observed_at}, value->observed_at);
     expect(controller.snapshot().faulted && !controller.snapshot().button_may_be_down,
         "同id UP重试ACK可消债但不复活fault会话");
+}
+void deferred_down_revalidates_and_cancels() {
+    for (int ending = 0; ending < 8; ++ending) {
+        Fixture f;
+        expect(f.start(false, ending == 7 ? 50 : 1000), "待发命令撤销回归启动");
+        auto lock = f.arbiter->try_enter_cleanup();
+        f.fire();
+        expect(until([&] { return f.worker.snapshot().phase == TriggerPhase::DOWN_PENDING; }),
+            "争锁期间保留待发DOWN");
+        if (ending == 0) f.mouse->held = false;
+        if (ending == 1) f.focused = false;
+        if (ending == 2) f.worker.cancel();
+        if (ending == 3) {
+            auto expired = observation(2); expired->observed_at -= 2s;
+            f.worker.publish(expired);
+        }
+        if (ending == 4) {
+            auto missing = observation(2); missing->detections.clear();
+            f.worker.publish(missing);
+        }
+        if (ending == 6) {
+            auto changed = observation(2);
+            changed->detections = {{45, 45, 55, 55, 0.9f, 0}};
+            f.worker.publish(changed);
+        }
+        if (ending == 5) {
+            f.worker.publish(observation(2));
+            expect(until([&] { return f.worker.snapshot().observation_sequence == 2; }),
+                "等待短事务期间仍消费同候选的新帧");
+            lock.unlock();
+            expect(until([&] { return f.mouse->count(true) == 1; }), "同候选新鲜帧允许重试原命令");
+        } else {
+            expect(until([&] { return !f.worker.snapshot().button_may_be_down; }),
+                "未提交DOWN撤销无需等待设备锁或发送UP");
+            lock.unlock();
+            std::this_thread::sleep_for(15ms);
+            expect(f.mouse->count(true) == 0 && f.mouse->count(false) == 0,
+                "松键失焦取消过期或候选退出更换后不补发DOWN也不伪造UP");
+        }
+        f.worker.stop();
+    }
+}
+void withdraw_unsent_rejects_backend_debt() {
+    for (int mode = 0; mode < 3; ++mode) {
+        TriggerController controller;
+        TriggerConfig cfg; cfg.enabled = true; cfg.fire_delay_ms = 0;
+        expect(controller.configure(cfg), "未提交撤销契约配置");
+        TriggerPermit p; p.enabled = p.healthy = p.focused = p.armed = true;
+        const auto now = TriggerClock::now();
+        controller.tick(p, now); p.held = true;
+        auto frame = observation(); frame->observed_at = now;
+        const auto down = controller.observe(*frame, p, now + 1ms);
+        expect(down.button_action == TriggerButtonAction::DOWN &&
+            !controller.withdraw_unsent(down.command_id + 1, now + 1ms) &&
+            controller.snapshot().button_may_be_down,
+            "错误命令ID不能清理待发或真实按钮债务");
+        if (mode == 0) {
+            controller.cancel(TriggerReason::CANCELED, now + 2ms);
+            expect(controller.withdraw_unsent(down.command_id, now + 2ms) &&
+                !controller.snapshot().button_may_be_down &&
+                !controller.withdraw_unsent(down.command_id, now + 3ms),
+                "原未提交DOWN只能撤销一次，取消生成的逻辑UP不需要设备回执");
+        } else {
+            TriggerReceipt receipt;
+            receipt.command_id = down.command_id; receipt.action = TriggerButtonAction::DOWN;
+            receipt.status = mode == 1 ? TriggerReceiptStatus::ACKNOWLEDGED : TriggerReceiptStatus::UNKNOWN;
+            receipt.completed_at = now + 2ms;
+            controller.acknowledge(receipt, now + 2ms);
+            expect(!controller.withdraw_unsent(down.command_id, now + 3ms) &&
+                controller.snapshot().button_may_be_down,
+                "已ACK或UNKNOWN的实际按钮债务不可当未提交撤销");
+        }
+    }
 }
 void shared_debt_and_shutdown_contention() {
     Fixture dirty; dirty.mouse->dirty=true;
@@ -693,6 +777,8 @@ void exception_uses_bounded_cleanup() {
 
 }
 int main() {
+    deferred_down_revalidates_and_cancels();
+    withdraw_unsent_rejects_backend_debt();
     stationary_stop_bypass_and_revalidation();
     cycle_resume_after_safe_up();
     physical_left_takes_over_until_trigger_rearmed();

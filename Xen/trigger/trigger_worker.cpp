@@ -28,6 +28,7 @@ public:
     TriggerController controller;
     std::atomic<std::shared_ptr<const TriggerObservation>> latest;
     std::shared_ptr<const TriggerObservation> evaluated_observation;
+    std::optional<TriggerDecision> deferred_down;
     std::atomic<bool> stopping{false}, canceled{false};
     mutable std::mutex mutex;
     std::condition_variable wake;
@@ -119,6 +120,20 @@ public:
     }
     void execute(TriggerDecision decision) {
         for (int chain = 0; chain < 4; ++chain) {
+            // 待发DOWN从未接触后端；撤销它不能伪造UP，也不能启动实际按钮清理预算。
+            if (decision.button_action == TriggerButtonAction::UP && deferred_down &&
+                controller.withdraw_unsent(deferred_down->command_id, TriggerClock::now())) {
+                TriggerExecutionEvent withdrawn;
+                withdrawn.snapshot = deferred_down->snapshot;
+                withdrawn.button_action = TriggerButtonAction::DOWN;
+                withdrawn.receipt_status = TriggerReceiptStatus::NOT_SENT;
+                withdrawn.rejection_reason = "deferred_down_canceled";
+                withdrawn.planned_at = withdrawn.observed_at = TriggerClock::now();
+                record(withdrawn);
+                deferred_down.reset();
+                decision.button_action = TriggerButtonAction::NONE;
+                decision.snapshot = controller.snapshot();
+            }
             TriggerExecutionEvent event;
             event.snapshot = decision.snapshot;
             event.button_action = decision.button_action;
@@ -156,6 +171,19 @@ public:
             }
             OutputArbiterRejection rejection = OutputArbiterRejection::NONE;
             auto lock = down ? arbiter->try_enter_aim(OutputArbiterSource::TRIGGER, &rejection) : arbiter->try_enter_cleanup();
+            if (down && !lock.owns_lock() && (rejection == OutputArbiterRejection::LOCK_BUSY ||
+                rejection == OutputArbiterRejection::AUXILIARY_PENDING)) {
+                if (!deferred_down) {
+                    event.rejection_reason = rejection == OutputArbiterRejection::LOCK_BUSY ?
+                        "arbiter_lock_busy" : "arbiter_auxiliary_pending";
+                    event.observed_at = TriggerClock::now();
+                    event.receipt_status = TriggerReceiptStatus::NOT_SENT;
+                    record(event);
+                }
+                deferred_down = decision;
+                break;
+            }
+            if (down) deferred_down.reset();
             TriggerReceipt receipt;
             receipt.command_id = decision.command_id;
             receipt.action = decision.button_action;
@@ -366,6 +394,15 @@ public:
                     execute(controller.observe(*observation, p, now));
                     consumed = std::move(observation);
                 } else execute(controller.tick(p, now));
+                if (deferred_down) {
+                    const auto pending = controller.snapshot();
+                    if (pending.phase == TriggerPhase::DOWN_PENDING &&
+                        pending.command_id == deferred_down->command_id) {
+                        auto retry = *deferred_down;
+                        retry.snapshot = pending;
+                        execute(retry);
+                    }
+                }
                 const auto current = controller.snapshot();
                 check_cleanup_budget(TriggerClock::now());
                 if (current.faulted && current.button_may_be_down && !cleanup_exhausted &&

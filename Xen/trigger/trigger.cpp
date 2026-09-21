@@ -384,6 +384,20 @@ TriggerDecision TriggerController::tick(const TriggerPermit& permit, TriggerTime
     return decision;
 }
 
+bool TriggerController::withdraw_unsent(std::uint64_t down_command_id, TriggerTime now) noexcept {
+    const bool down_matches = pending_ == TriggerButtonAction::DOWN && state_.command_id == down_command_id;
+    const bool release_matches = pending_ == TriggerButtonAction::UP && down_command_id != 0 &&
+        state_.command_id > down_command_id && state_.command_id - down_command_id == 1;
+    if (down_command_id == 0 || state_.faulted || !unconfirmed_down_ ||
+        (!down_matches && !release_matches) || now < last_now_) return false;
+    last_now_ = now;
+    pending_ = TriggerButtonAction::NONE;
+    unconfirmed_down_ = false;
+    state_.button_may_be_down = false;
+    state_.phase = config_.enabled ? TriggerPhase::WAITING : TriggerPhase::DISABLED;
+    return true;
+}
+
 TriggerDecision TriggerController::acknowledge(const TriggerReceipt& receipt, TriggerTime now) noexcept {
     if (pending_ == TriggerButtonAction::NONE || receipt.command_id != state_.command_id || receipt.action != pending_) return result(now);
     const auto submitted_at = receipt.submitted_at == TriggerTime{} ? receipt.completed_at : receipt.submitted_at;

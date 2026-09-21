@@ -132,6 +132,9 @@ public:
     TriggerDecision observe(const TriggerObservation& observation, const TriggerPermit& permit, TriggerTime now) noexcept;
     TriggerDecision tick(const TriggerPermit& permit, TriggerTime now) noexcept;
     TriggerDecision acknowledge(const TriggerReceipt& receipt, TriggerTime now) noexcept;
+    // 仅由确认尚未调用后端的owner撤销待发DOWN；兼容已生成但未发送的UP，不创建设备回执。
+    // 已ACK、UNKNOWN或不匹配的命令不能通过此接口清债。
+    bool withdraw_unsent(std::uint64_t down_command_id, TriggerTime now) noexcept;
     TriggerDecision cancel(TriggerReason reason, TriggerTime now) noexcept;
     TriggerSnapshot snapshot() const noexcept { return state_; }
 private:
