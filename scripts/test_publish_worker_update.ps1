@@ -177,6 +177,28 @@ try {
     Write-UpdateFixture $baseManifestPath $baseJson
     $parameters.OutputDirectory = Join-Path $baseRoot 'nested'
     Assert-UpdateReject $parameters '目标嵌入基包拒绝'
+    # UI保存后旧清单长度过期；只允许明确替换的可变文件跳过旧长度，且校验新源与最终SHA。
+    foreach ($mutable in @(
+        @('config.ini', 'ConfigPath', '[fixture]', '[fixture] updated=true'),
+        @('cache/model-workspace/settings.json', 'WorkspaceSettingsPath', '{}', '{"updated":true}'))) {
+        $mutablePath = Join-Path $baseRoot $mutable[0]
+        Write-UpdateFixture $mutablePath ($mutable[2] + ' user changed old file length')
+        $mutableParameters = $parameters.Clone()
+        $mutableParameters.OutputDirectory = Join-Path $runRoot ("mutable-no-override-" + $mutable[1])
+        Assert-UpdateReject $mutableParameters '未显式替换时仍拒绝旧配置长度不符'
+        $replacement = Join-Path $runRoot ("mutable-replacement-" + $mutable[1])
+        Write-UpdateFixture $replacement $mutable[3]
+        $mutableParameters[$mutable[1]] = $replacement
+        $mutableParameters.OutputDirectory = Join-Path $runRoot ("mutable-explicit-" + $mutable[1])
+        & $publisher @mutableParameters
+        Assert-ProductionManifest $mutableParameters.OutputDirectory
+        Assert-UpdateTest ((Get-FileHash -LiteralPath (Join-Path $mutableParameters.OutputDirectory $mutable[0])).Hash -ceq
+            (Get-FileHash -LiteralPath $replacement).Hash) '显式替换采用新源内容及SHA'
+        $mutableParameters.OutputDirectory = Join-Path $runRoot ("mutable-invalid-" + $mutable[1])
+        Write-UpdateFixture $replacement ''
+        Assert-UpdateReject $mutableParameters '放行旧长度不豁免新源非空校验'
+        Write-UpdateFixture $mutablePath $mutable[2]
+    }
     $parameters.OutputDirectory = Join-Path $runRoot 'config-update'
     $config = Join-Path $runRoot 'replacement.ini'
     Write-UpdateFixture $config 'new non-secret fixture config'

@@ -130,8 +130,11 @@ foreach ($record in $manifest.files) {
         throw '基包清单包含重复或无效文件记录。'
     }
     $path = Resolve-UpdatePayload $baseRoot $relative (-not $ChangesOnly)
+    # UI会保存可变配置；仅显式指定替换源时，不要求已弃用的旧配置长度仍匹配发布清单。
+    $replacedMutable = ($relative -ieq 'config.ini' -and $ConfigPath) -or
+        ($relative -ieq 'cache/model-workspace/settings.json' -and $WorkspaceSettingsPath)
     if (-not $ChangesOnly -and (-not (Test-Path -LiteralPath $path -PathType Leaf) -or
-        (Get-Item -LiteralPath $path).Length -ne [long]$record.size)) {
+        (-not $replacedMutable -and (Get-Item -LiteralPath $path).Length -ne [long]$record.size))) {
         throw "基包显式载荷缺失或长度变化：$relative"
     }
     $records[$relative] = $record

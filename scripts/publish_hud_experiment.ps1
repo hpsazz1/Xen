@@ -54,6 +54,14 @@ foreach ($file in Get-ChildItem -LiteralPath $profilePath -File) {
     if ($file.Extension -ieq '.json') { Add-Payload $file.FullName ($profile+'/'+$file.Name) }
 }
 Add-Payload (Join-Path $settings 'cache/recoil/weapon-timing.json') 'cache/recoil/weapon-timing.json'
+# 同一辅机与依赖闭包复用现有TensorRT缓存，避免比较首次启动额外重建引擎。
+$engineCache=Join-Path $settings 'cache/tensorrt'
+if (Test-Path -LiteralPath $engineCache) {
+    Assert-XenNoReparsePathChain $engineCache '原推理缓存' -RequireExistingLeaf
+    foreach ($file in Get-ChildItem -LiteralPath $engineCache -File) {
+        if ($file.Extension -in @('.engine','.timing')) { Add-Payload $file.FullName ('cache/tensorrt/'+$file.Name) }
+    }
+}
 if ((Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash -ne $sourceHash) { throw '原配置在打包期间变化，请重新准备新目录。' }
 $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
 Write-Output $output
