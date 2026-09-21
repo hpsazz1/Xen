@@ -1,4 +1,5 @@
 #include "auto_stop/auto_stop_worker.h"
+#include "auto_stop/stop_driver_internal.h"
 #include "log/log.h"
 
 #include <algorithm>
@@ -240,7 +241,14 @@ public:
         WasdInputHistory history;
         WasdMotionIntent intent;
         WasdEventCursor cursor;
-        AutoStopController controller(config);
+        detail::StopDriver controller(config);
+        const auto report_hud = [&]() {
+            if (!config.experimental_hud_model) return;
+            const auto model = controller.hud_telemetry();
+            std::lock_guard lock(mutex);
+            state.hud_velocity = model.velocity; state.hud_plan_ms = model.planned_ms;
+            state.hud_seeded = model.seeded;
+        };
         InputSnapshot input;
         std::uint64_t active_id = 0, active_generation = 0, active_input_epoch = 0;
         std::uint8_t software_mask = 0, original_mask = 0;
@@ -416,7 +424,8 @@ public:
                     if (rescue_continuous) {
                         // 救援仍锁重新武装；只保存逐事件验证的物理流，不承接旧制动资格。
                         history = checked_history; intent = checked_intent; cursor = after_cursor; input = after_cleanup;
-                        controller = AutoStopController(config);
+                        controller = detail::StopDriver(config);
+                        if (config.experimental_hud_model) controller.restart_after_cleanup(intent, released_at);
                     }
                 }
                 if (ordinary_transition) {
@@ -431,7 +440,7 @@ public:
                         resumed = controller.restart_after_cleanup(intent, released_at);
                         if (!resumed && direction_transition && !intent.history_valid) {
                             // 当前仍冲突时只保留连续输入，之后重新核验方向，不伪造运动历史。
-                            controller = AutoStopController(config);
+                            controller = detail::StopDriver(config);
                             resumed = true;
                         }
                     }
@@ -449,7 +458,9 @@ public:
             } else if (can_resume && active_id) controller.cancel(active_id, now_ns());
             const bool retain_release = clean_ok && !force_fault && intent.input_continuous && (config.use_counterpulse_timing || intent.history_valid) && !intent.conflicting &&
                 intent.held_mask == 0 && input.state_valid && input.status == InputMonitorStatus::READY && held_wasd(input) == 0;
-            if (retain_release && !resumed) controller.observe(intent, now_ns());
+            // HUD松键路径由下方归还入口接纳清理期间连续报告，避免先按普通单事件校验使模型失效。
+            if (retain_release && !resumed && !(config.experimental_hud_model && manual_release))
+                controller.observe(intent, now_ns());
             if (resumed) LOG_INFO("auto_stop", "键盘归还已确认；保留连续输入以支持再次急停");
             // 正常归还不破坏真实事件连续性；无法承接模型时，下次仅屏蔽，不伪造运动历史。
             // 清理期间的事件留给正式游标，下一轮先验证再准入。
@@ -457,8 +468,12 @@ public:
                 !force_fault && intent.input_continuous) || rescue_continuous;
             if (manual_release && !ordinary_transition) {
                 // 松键动作结束后仅用真实当前输入建立下一计划，不承接软件反向期间的运动估算。
-                controller = AutoStopController(config);
-                if (intent.history_valid) controller.observe(intent, now_ns());
+                if (config.experimental_hud_model && clean_ok && !force_fault)
+                    controller.restart_after_cleanup(intent, released_at);
+                else {
+                    controller = detail::StopDriver(config);
+                    if (intent.history_valid) controller.observe(intent, now_ns());
+                }
             }
             std::lock_guard<std::mutex> lock(mutex);
             if (active_id && !(cycle_resume && resumed) && !manual_finished) ++state.canceled;
@@ -513,7 +528,8 @@ public:
                         break;
                     }
                     // 全部屏蔽确认后，物理改向不再是施加给游戏的输入；制动沿原ACK模型推进。
-                    if (!estimated && !independent_acquired && !manual_release) controller.observe(intent, event.received_at_steady_ns);
+                    if (!estimated && !independent_acquired && !manual_release)
+                        controller.observe(intent, config.experimental_hud_model ? now_ns() : event.received_at_steady_ns);
                 }
                 // 事件读取晚于快照：真实UP可能刚进入事件流，旧DOWN快照不能吃掉唯一全松边沿。
                 // 仅在该错配发生时刷新；后续许可与发送前事件复核仍拒绝新按下/缺口。
@@ -618,7 +634,7 @@ public:
                     std::lock_guard<std::mutex> lock(mutex);
                     if (id > last_request_id && !pending_id) {
                         // 全松是本次真实事件；独立建立固定时序计划，无需沿用上一次运动模型。
-                        controller = AutoStopController(config);
+                        if (!config.experimental_hud_model) controller = detail::StopDriver(config);
                         controller.observe(intent, now_ns());
                         const auto decision = controller.request_manual_release(id, released_axes, now_ns());
                         if (decision.phase == AutoStopPhase::WAITING_ACK && decision.request_id == id) {
@@ -690,6 +706,7 @@ public:
                                 else {
                                     software_mask = decision.desired_mask;
                                     decision = controller.acknowledge(active_id, decision.command_id, software_mask, ack);
+                                    report_hud();
                                     if (decision.completion_ready_ns) {
                                         std::lock_guard<std::mutex> lock(mutex);
                                         state.counter_release_ack_ns = ack;
@@ -881,6 +898,11 @@ public:
                                 publish(AutoStopStatus::BRAKING);
                                 LOG_INFO("auto_stop", "开始请求{}，来源={}，物理方向mask={}", active_id,
                                     independent ? "目标识别" : "显式调用", original_mask);
+                                if (config.experimental_hud_model) {
+                                    const auto model = controller.hud_telemetry();
+                                    LOG_INFO("auto_stop", "HUD实验请求{}：归一模型纵横=({:.6f},{:.6f})，保守重建={}",
+                                        active_id, model.velocity[0], model.velocity[1], model.seeded);
+                                }
                                 // 独立锁存覆盖全部WASD，避免完成后换方向键绕过屏蔽。
                                 const std::uint8_t mask_to_install = independent ? 15 : original_mask;
                                 for (std::uint8_t key = 1; key <= 8; key <<= 1) if (mask_to_install & key) {
@@ -995,6 +1017,13 @@ public:
                                 software_mask = decision.desired_mask;
                                 const auto completed = controller.acknowledge(active_id, decision.command_id, software_mask,
                                     config.use_counterpulse_timing ? ack_time : returned);
+                                report_hud();
+                                if (config.experimental_hud_model) {
+                                    const auto model = controller.hud_telemetry();
+                                    LOG_INFO("auto_stop", "HUD实验请求{}命令{}：mask={} ACK={}，纵横计划ms=({:.3f},{:.3f})，模型=({:.6f},{:.6f})",
+                                        active_id, decision.command_id, unsigned(software_mask), ack_time,
+                                        model.planned_ms[0], model.planned_ms[1], model.velocity[0], model.velocity[1]);
+                                }
                                 if (config.use_counterpulse_timing && completed.completion_ready_ns != 0) {
                                     std::lock_guard<std::mutex> lock(mutex);
                                     state.counter_release_ack_ns = ack_time;
@@ -1069,6 +1098,7 @@ bool AutoStopWorker::start(const AutoStopConfig& config, int command_timeout_ms)
         std::lock_guard<std::mutex> lock(impl_->mutex);
         if (impl_->running || impl_->thread.joinable() || impl_->fault) return false;
         impl_->config = config;
+        if (config.experimental_hud_model && !config.use_counterpulse_timing) return false;
         impl_->state = {};
         impl_->trigger_idle = false;
         impl_->trigger_idle_cursor = {};
@@ -1081,6 +1111,7 @@ bool AutoStopWorker::start(const AutoStopConfig& config, int command_timeout_ms)
         impl_->tracked_request_id = 0;
         impl_->movement_not_before = {};
         impl_->state.use_counterpulse_timing = config.use_counterpulse_timing;
+        impl_->state.experimental_hud_model = config.experimental_hud_model;
         if (config.use_counterpulse_timing) {
             if (config.counter_hold_ms < 1 || config.counter_hold_ms > 200 ||
                 config.shot_after_release_ms < 0 || config.shot_after_release_ms > 200) return false;

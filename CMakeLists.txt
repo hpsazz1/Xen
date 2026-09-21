@@ -916,6 +916,9 @@ target_link_libraries(mouse PUBLIC log PRIVATE user32 ws2_32 shell32 ole32 uuid)
 add_library(auto_stop_worker STATIC Xen/auto_stop/auto_stop_worker.cpp)
 target_include_directories(auto_stop_worker PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(auto_stop_worker PUBLIC auto_stop mouse PRIVATE Threads::Threads)
+add_library(hud_stop STATIC Xen/auto_stop/hud_stop.cpp)
+target_link_libraries(hud_stop PUBLIC auto_stop)
+target_link_libraries(auto_stop_worker PRIVATE hud_stop)
 
 add_library(trigger STATIC Xen/trigger/trigger.cpp)
 target_include_directories(trigger PUBLIC ${PROJECT_SOURCE_DIR}/Xen ${OpenCV_INCLUDE_DIRS})
@@ -1649,6 +1652,13 @@ if(BUILD_TESTING)
     add_executable(reference_assessment_tests tests/reference_assessment_tests.cpp)
     target_link_libraries(reference_assessment_tests PRIVATE reference_assessment)
     add_test(NAME reference_assessment_tests COMMAND reference_assessment_tests)
+    add_executable(hud_stop_tests tests/hud_stop_tests.cpp)
+    target_link_libraries(hud_stop_tests PRIVATE hud_stop)
+    add_test(NAME hud_stop_tests COMMAND hud_stop_tests)
+    add_test(NAME hud_stop_worker_tests COMMAND auto_stop_worker_tests --hud-reference)
+    add_test(NAME hud_weapon_stop_integration_tests COMMAND weapon_stop_integration_tests --hud-reference)
+    add_test(NAME hud_stop_acceptance_tests COMMAND "${XEN_PYTHON_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/tests/hud_stop_acceptance_tests.py")
     add_test(NAME reference_compare_cli_tests COMMAND "${XEN_PYTHON_EXECUTABLE}"
         "${PROJECT_SOURCE_DIR}/tests/reference_compare_cli_tests.py"
         "$<TARGET_FILE:xen_reference_compare>" "${PROJECT_SOURCE_DIR}/assets/reference_assessment/example.json")

@@ -15,6 +15,8 @@ struct AutoStopConfig {
     bool use_counterpulse_timing = true;
     int counter_hold_ms = 40, shot_after_release_ms = 18;
     bool cycle_enabled = false;
+    // 仅用户明确选择的独立实验；默认保留原H40路径，启动后固定策略。
+    bool experimental_hud_model = false;
 };
 
 enum class AutoStopStatus {
@@ -69,6 +71,9 @@ struct AutoStopWeaponContext {
 };
 
 struct AutoStopSnapshot {
+    bool experimental_hud_model = false;
+    std::array<double, 2> hud_velocity{}, hud_plan_ms{};
+    bool hud_seeded = false;
     AutoStopWeaponContext weapon_context;
     bool cycle_moving = false;
     std::uint64_t cycle_count = 0;

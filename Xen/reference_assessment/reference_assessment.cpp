@@ -1,4 +1,5 @@
 #include "reference_assessment/reference_assessment.h"
+#include "reference_assessment/basic_motion_internal.h"
 
 #include <algorithm>
 #include <cmath>
@@ -14,27 +15,7 @@ template<class T> void append(std::vector<T>& history, const T& value) {
     history.push_back(value);
     if (history.size() > kHistoryLimit) history.erase(history.begin());
 }
-struct AxisResult { bool counter{}; std::optional<double> cross; };
-AxisResult advance_axis(double& velocity, int input, double dt) {
-    const double start = velocity;
-    const bool counter = std::abs(start) > 0.001 && input * start < 0;
-    const double decel = input == 0 ? 2.5 : 14.0;
-    AxisResult result{counter, std::nullopt};
-    if ((input == 0 || counter) && std::abs(start) > kThreshold) {
-        const double cross = (std::abs(start) - kThreshold) / decel;
-        if (cross <= dt) result.cross = cross;
-    }
-    if (input == 0) {
-        velocity = std::copysign(std::max(0.0, std::abs(start) - decel * dt), start);
-    } else if (!counter) {
-        velocity += input * 5.5 * dt;
-    } else {
-        const double to_zero = std::abs(start) / 14.0;
-        velocity = to_zero >= dt ? start + input * 14.0 * dt : input * 5.5 * (dt - to_zero);
-    }
-    velocity = std::clamp(velocity, -1.0, 1.0);
-    return result;
-}
+using detail::advance_axis;
 }
 bool Engine::validate_time(TimeMs time, Output& output) {
     if (!std::isfinite(time) || time < 0 || time < last_external_ms_ || time > 1000000000.0) {

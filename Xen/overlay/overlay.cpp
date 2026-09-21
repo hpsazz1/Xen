@@ -2954,7 +2954,7 @@ struct Overlay::Impl {
             bool can_edit, OverlayActions& actions) {
         ImGui::TextWrapped("停止运行后可编辑并保存参数；下次启动生效。");
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        begin_config_panel("auto_stop_panel", "自动急停", 300.0f);
+        begin_config_panel("auto_stop_panel", app_config.auto_stop.experimental_hud_model ? "自动急停（HUD参考实验）" : "自动急停", 300.0f);
         const char* status = "已关闭";
         switch (snapshot.auto_stop.status) {
             case AutoStopStatus::DISABLED: status = "已关闭"; break;
@@ -3014,7 +3014,11 @@ struct Overlay::Impl {
                 HotkeyBindingTarget::AUTO_STOP_RELEASE,
                 app_config.auto_stop.release_virtual_keys, key_active);
             form_row("反向保持 / ms", "从反向按下确认起算；默认 40 ms。");
+            ImGui::BeginDisabled(app_config.auto_stop.experimental_hud_model);
             slider_int_control("auto_stop_counter_hold", &app_config.auto_stop.counter_hold_ms, 1, 200);
+            ImGui::EndDisabled();
+            if (app_config.auto_stop.experimental_hud_model)
+                show_help_tooltip("HUD参考实验按输入模型逐轴计算制动时长，此固定参数不参与实验制动。");
             form_row("反向释放后等待 / ms", "从反向释放确认起算；默认 18 ms，仅表示预计完成。");
             slider_int_control("auto_stop_after_release", &app_config.auto_stop.shot_after_release_ms, 0, 200);
             ImGui::EndTable();

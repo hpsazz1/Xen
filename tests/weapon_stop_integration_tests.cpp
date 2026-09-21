@@ -203,7 +203,7 @@ void gsi_trust_breaks_require_release() {
 }
 
 // 走生产解析/连续性/Runtime转换，再驱动两个生产worker；许可始终来自FakeMouse。
-void gsi_session_recovery(const char* transition) {
+void gsi_session_recovery(const char* transition, bool hud_reference = false) {
     const auto catalog = weapon::default_timing_catalog();
     weapon::GsiConfig gsi_config; gsi_config.enabled = true;
     weapon::detail::GsiState gsi;
@@ -241,6 +241,7 @@ void gsi_session_recovery(const char* transition) {
     TriggerConfig tc; tc.enabled = true; tc.hold_virtual_key = 5; tc.fire_delay_ms = 0;
     tc.require_stop = tc.allow_estimated_stop = true; tc.max_observation_age_ms = 300;
     mouse->physical(0, false);
+    sc.experimental_hud_model = hud_reference;
     require(stop.start(sc) && trigger.start(tc), "GSI组合worker启动");
     until([&] { return mouse->drained() && trigger.snapshot().reason == TriggerReason::RELEASED; });
     mouse->physical(2, true);
@@ -334,7 +335,7 @@ void gsi_session_recovery(const char* transition) {
         });
         require(keys.size() >= old_keys + 3 && keys[old_keys].mask == 0 && keys[old_keys + 1].mask == 8 &&
             keys[old_keys + 2].mask == 0, "刀雷切回枪须基于当前持A新发zero到D到zero完整制动");
-        require(keys[old_keys + 2].submitted >= keys[old_keys + 1].acknowledged + 40ms &&
+        require(keys[old_keys + 2].submitted >= keys[old_keys + 1].acknowledged + (hud_reference ? 0ms : 40ms) &&
             down != log.events.end() && down->call_started_at >= keys[old_keys + 2].acknowledged + 18ms &&
             !down->snapshot.stop_not_needed, "刀雷恢复的实际DOWN必须等待新制动ACK，禁止原地绕过");
     }
@@ -479,7 +480,7 @@ void run_weapon(const char* weapon_id, bool cycle = false, bool lose_candidate =
     std::cout << weapon_id << "：共享生产worker组合证据通过，未连接设备\n";
 }
 // 从未DOWN和已DOWN两个阶段验证真实人物消失；纯触发域丢失仍保留跟踪资格。
-void target_loss_lifecycle(bool already_down) {
+void target_loss_lifecycle(bool already_down, bool hud_reference = false) {
     auto mouse = std::make_shared<FakeMouse>();
     auto arbiter = std::make_shared<AutoStopOutputArbiter>();
     std::atomic<std::uint64_t> next_id{0};
@@ -493,6 +494,7 @@ void target_loss_lifecycle(bool already_down) {
     tc.hold_virtual_key = 5; tc.fire_delay_ms = 0; tc.range_percent = 50;
     tc.press_duration_ms = 200; tc.shot_interval_ms = 500; tc.max_observation_age_ms = 300;
     mouse->physical(0, false);
+    sc.experimental_hud_model = hud_reference;
     require(stop.start(sc) && trigger.start(tc), "目标生命周期组合worker启动");
     until([&] { return mouse->drained() && trigger.snapshot().reason == TriggerReason::RELEASED; });
     mouse->physical(2, true);
@@ -556,7 +558,7 @@ void target_loss_lifecycle(bool already_down) {
     trigger.stop(); stop.stop();
     require(mouse->released() && !mouse->cleanup_during_shot.load(), "组合关闭仍遵循先UP后键盘归还");
 }
-void held_direction_after_overlap_requires_completed_brake() {
+void held_direction_after_overlap_requires_completed_brake(bool hud_reference = false) {
     auto mouse = std::make_shared<FakeMouse>();
     auto arbiter = std::make_shared<AutoStopOutputArbiter>();
     std::atomic<std::uint64_t> next_id{0};
@@ -572,6 +574,7 @@ void held_direction_after_overlap_requires_completed_brake() {
     config.hold_virtual_key = 5; config.fire_delay_ms = 0;
     config.press_duration_ms = 150; config.shot_interval_ms = 500; config.max_observation_age_ms = 500;
     mouse->physical(0, false);
+    stop_config.experimental_hud_model = hud_reference;
     require(stop.start(stop_config) && trigger.start(config), "方向重叠组合worker启动");
     until([&] { return mouse->drained() && trigger.snapshot().reason == TriggerReason::RELEASED; });
     // 连续真实事件清空旧运动历史，随后始终保持D和许可；目标在重叠结束后才出现。
@@ -579,6 +582,8 @@ void held_direction_after_overlap_requires_completed_brake() {
         mouse->physical(static_cast<std::uint8_t>(mask), true);
         until([&] { return mouse->drained(); });
     }
+    // HUD保留历史积分；给最新D实际输入时间，不能假定换键瞬间速度已变号。
+    if (hud_reference) std::this_thread::sleep_for(220ms);
     std::uint64_t sequence = 0;
     until([&] {
         stop.publish_tracking_target(Clock::now() + 300ms);
@@ -591,10 +596,35 @@ void held_direction_after_overlap_requires_completed_brake() {
     const auto down = std::find_if(log.events.begin(), log.events.end(), [](const auto& event) {
         return event.button_action == TriggerButtonAction::DOWN && event.backend_called;
     });
-    require(keys.size() >= 3 && keys[0].mask == 0 && keys[1].mask == 2 && keys[2].mask == 0,
+    if (hud_reference) {
+        const auto state = stop.snapshot();
+        nlohmann::json diagnostic = {
+            {"case", "held_direction_after_overlap"}, {"stop_status", AutoStopStatusName(state.status)},
+            {"stop_block", AutoStopBlockReasonName(state.block_reason)}, {"request_id", state.request_id},
+            {"requests", state.requests}, {"completed", state.completed}, {"canceled", state.canceled},
+            {"hud_velocity", state.hud_velocity}, {"hud_plan_ms", state.hud_plan_ms},
+            {"hud_seeded", state.hud_seeded}, {"release_ack_ns", state.counter_release_ack_ns},
+            {"completion_ready_ns", state.completion_ready_ns}, {"keys", nlohmann::json::array()},
+            {"trigger_down", down == log.events.end() ? nlohmann::json(nullptr) : nlohmann::json{
+                {"time_ns", ns(down->call_started_at)}, {"stop_id", down->snapshot.estimated_stop_request_id},
+                {"stop_not_needed", down->snapshot.stop_not_needed}}}};
+        for (const auto& key : keys) diagnostic["keys"].push_back({{"mask", key.mask},
+            {"submitted_ns", ns(key.submitted)}, {"ack_ns", ns(key.acknowledged)}});
+        std::cerr << "HUD方向重叠组合现场：" << diagnostic.dump() << '\n';
+    }
+    // HUD冲突保护先取消mask-only请求，允许此前的全UP清理；不能把其索引冒充新反向。
+    const auto start = hud_reference && keys.size() >= 3 ? keys.size() - 3 : 0;
+    require(!hud_reference || std::all_of(keys.begin(), keys.begin() + start,
+        [](const auto& key) { return key.mask == 0; }), "HUD新制动前不能发送旧方向反向");
+    require(keys.size() >= 3 && keys[start].mask == 0 && keys[start + 1].mask == 2 && keys[start + 2].mask == 0,
         "持D必须完成zero到A反向到zero，不能长期MASKED或误判原地");
-    require(keys[2].submitted >= keys[1].acknowledged + 40ms, "反向必须从协议ACK保持完整40ms");
-    require(down != log.events.end() && down->call_started_at >= keys[2].acknowledged + 18ms,
+    if (hud_reference)
+        require(keys[start + 2].submitted >= keys[start + 1].acknowledged + 60ms &&
+            std::chrono::duration<double, std::milli>(keys[start + 2].submitted - keys[start + 1].acknowledged).count()
+                >= stop.snapshot().hud_plan_ms[1],
+            "HUD持续D的满幅模型应按14减速，不能退回固定40ms");
+    else require(keys[2].submitted >= keys[1].acknowledged + 40ms, "反向必须从协议ACK保持完整40ms");
+    require(down != log.events.end() && down->call_started_at >= keys[start + 2].acknowledged + 18ms,
         "真实DOWN提交必须晚于反向释放ACK加18ms");
     require(!down->snapshot.stop_not_needed && down->snapshot.estimated_stop_request_id != 0 &&
         down->snapshot.estimated_stop_request_id == stop.snapshot().request_id,
@@ -639,8 +669,17 @@ void stationary_owner_does_not_interrupt_shot() {
     trigger.stop(); stop.stop();
 }
 } // namespace
-int main() {
+int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--hud-reference") {
+            held_direction_after_overlap_requires_completed_brake(true);
+            target_loss_lifecycle(false, true);
+            target_loss_lifecycle(true, true);
+            for (const char* transition : {"weapon_knife", "weapon_hegrenade", "reloading", "active", "switch"})
+                gsi_session_recovery(transition, true);
+            std::cout << "HUD实验组合专项通过：AD、目标消失、持续键武器恢复及UP ACK后等待\n";
+            return 0;
+        }
         for (const char* item : {"weapon_knife", "weapon_hegrenade"}) gsi_session_recovery(item);
         held_direction_after_overlap_requires_completed_brake();
         target_loss_lifecycle(false);

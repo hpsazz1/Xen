@@ -228,7 +228,59 @@ void bounded_aim_transaction_wait() {
     require(arbiter.try_enter_cleanup().owns_lock(), "故障后仍可进入清理事务");
 }
 
-void manual_release_contracts() {
+void hud_manual_release_contracts() {
+    using namespace std::chrono_literals;
+    // 保持足够真实按键历史；原固定时序的零时长按下/松开fixture不能代表HUD已有运动。
+    for (const bool rearm : {false, true}) {
+        auto fake = std::make_shared<Fake>(); fake->activation = false;
+        std::atomic<std::uint64_t> id{0};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [&] { return ++id; }, [] { return true; });
+        AutoStopConfig config{true, 0}; config.experimental_hud_model = true;
+        require(worker.start(config), "HUD manual无绑定启动");
+        fake->physical(0); wait_for([&] { return fake->drained(); });
+        fake->physical(1); wait_for([&] { return fake->drained(); });
+        std::this_thread::sleep_for(220ms);
+        require(fake->reports().empty(), "HUD人工方向持续按住且无目标不得先制动");
+        fake->physical(0);
+        wait_for([&] { const auto reports = fake->reports(); return std::find(reports.begin(), reports.end(), 4) != reports.end(); });
+        if (rearm) {
+            fake->physical(8);
+            wait_for([&] { return fake->has_cleanup(); });
+            const auto before = fake->reports().size();
+            // W模型自然减速上界400ms；不把残余W误称作错误继承或先强制模型清零。
+            std::this_thread::sleep_for(450ms);
+            require(fake->reports().size() == before, "HUD manual取消后新D持续按住不得再输出");
+            fake->physical(0);
+            wait_for([&] { const auto reports = fake->reports(); return std::find(reports.begin(), reports.end(), 2) != reports.end(); });
+        }
+        wait_for([&] { std::lock_guard lock(fake->mutex); return fake->cleanup_checks >= (rearm ? 3 : 2); });
+        require(!fake->has_masks() && worker.estimated_completion_id() == 0,
+            "HUD manual不得屏蔽真实方向或授予扳机完成编号");
+        {
+            std::lock_guard lock(fake->mutex);
+            std::vector<int> nonzero;
+            for (const int value : fake->software) if (value) nonzero.push_back(value);
+            require(nonzero == (rearm ? std::vector<int>{4, 2} : std::vector<int>{4}),
+                "HUD manual下一次真实释放建立新方向，不重放旧释放");
+            const auto n = fake->software.size();
+            require(n >= 3 && fake->software.back() == 0 && fake->software[n - 2] == (rearm ? 2 : 4),
+                "HUD manual最终反向必须有全UP报告");
+            require(fake->software_started[n - 1] >= fake->software_ack[n - 2] + 60ms,
+                "HUD长持manual须按满幅零点计划，不能使用固定40ms");
+            require(fake->cleanup_started.back() >= fake->software_ack.back() + 18ms,
+                "HUD manual归还仍等待最终UP ACK后18ms");
+        }
+        const auto count = fake->reports().size();
+        fake->physical(0); wait_for([&] { return fake->drained(); });
+        std::this_thread::sleep_for(30ms);
+        require(fake->reports().size() == count, "HUD重复全松不补发已消费人工释放");
+        worker.stop();
+    }
+}
+
+void manual_release_contracts(bool hud_reference = false) {
+    if (hud_reference) { hud_manual_release_contracts(); return; }
     using namespace std::chrono_literals;
     {
         auto fake = std::make_shared<Fake>(); fake->activation = false;
@@ -530,7 +582,7 @@ void manual_fire_retains_stop_contracts() {
     }
 }
 
-void target_loss_releases_hold() {
+void target_loss_releases_hold(bool hud_reference = false) {
     using namespace std::chrono_literals;
     for (int mode = 0; mode < 5; ++mode) {
         auto fake = std::make_shared<Fake>();
@@ -538,6 +590,7 @@ void target_loss_releases_hold() {
         AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
             [&] { return ++id; }, [] { return true; });
         AutoStopConfig config{true, 5}; config.cycle_enabled = true;
+        config.experimental_hud_model = hud_reference;
         require(worker.start(config), "目标消失回归启动");
         ready(worker, fake);
         worker.publish_tracking_target(Clock::now() + 1s);
@@ -629,7 +682,7 @@ void trigger_idle_contracts() {
     require(!worker.idle_for_trigger(input), "停止owner不再发布空闲事实");
 }
 
-void weapon_session_recovery_contracts() {
+void weapon_session_recovery_contracts(bool hud_reference = false) {
     for (int scenario = 0; scenario < 9; ++scenario) {
         auto fake = std::make_shared<Fake>();
         std::atomic<std::uint64_t> id{0};
@@ -642,6 +695,7 @@ void weapon_session_recovery_contracts() {
                     step != 0 && scenario == 2 ? 2u : 1u, !(step != 0 && scenario == 3)};
             });
         AutoStopConfig config{true, 5}; config.cycle_enabled = true;
+        config.experimental_hud_model = hud_reference;
         require(worker.start(config), "可信武器暂停恢复回归启动");
         ready(worker, fake);
         publish_present_target(worker, Clock::now() + std::chrono::seconds(2));
@@ -855,7 +909,7 @@ void acquisition_direction_change_retries() {
     }
 }
 
-void weapon_hotkey_nonfireable_context() {
+void weapon_hotkey_nonfireable_context(bool hud_reference = false) {
     using namespace std::chrono_literals;
     for (const bool trusted_nonfireable : {false, true}) {
         auto fake = std::make_shared<Fake>();
@@ -870,6 +924,7 @@ void weapon_hotkey_nonfireable_context() {
             });
         AutoStopConfig config{true, 5}; config.cycle_enabled = true;
         config.release_virtual_keys = {49, 50, 51, 52, 53, 81};
+        config.experimental_hud_model = hud_reference;
         require(worker.start(config), "默认切枪键与非可开火上下文回归启动");
         ready(worker, fake);
         fake->physical(3);
@@ -1036,7 +1091,7 @@ void weapon_change_during_cycle_cleanup() {
     worker.stop();
 }
 
-void cleanup_report_preserves_next_brake() {
+void cleanup_report_preserves_next_brake(bool hud_reference = false) {
     using namespace std::chrono_literals;
     for (const bool target_loss : {false, true}) {
         auto fake = std::make_shared<Fake>();
@@ -1044,6 +1099,7 @@ void cleanup_report_preserves_next_brake() {
         AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
             [&] { return ++id; }, [] { return true; });
         AutoStopConfig config{true, 5}; config.cycle_enabled = true;
+        config.experimental_hud_model = hud_reference;
         require(worker.start(config), "清理报告连续制动回归启动");
         ready(worker, fake);
         publish_present_target(worker, Clock::now() + 2s);
@@ -1065,8 +1121,64 @@ void cleanup_report_preserves_next_brake() {
         worker.stop();
     }
 }
+void hud_reference_output_contracts() {
+    using namespace std::chrono_literals;
+    std::array<Clock::duration, 2> durations{};
+    for (int sample = 0; sample < 2; ++sample) {
+        auto fake = std::make_shared<Fake>();
+        std::atomic<std::uint64_t> id{0};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [&] { return ++id; }, [] { return true; });
+        AutoStopConfig config{true, 5}; config.experimental_hud_model = true;
+        require(worker.start(config), "HUD输入积分与ACK时序启动");
+        ready(worker, fake); // 真实全松同步，再持W约50ms。
+        if (sample) std::this_thread::sleep_for(200ms);
+        publish_present_target(worker, Clock::now() + 2s);
+        wait_for([&] { return worker.estimated_completion_id() != 0; });
+        const auto state = worker.snapshot();
+        require(!state.fire_permitted && !state.stop_evidence_available,
+            "HUD模型完成仍不是游戏停稳或独立开火许可");
+        require(state.completion_ready_ns - state.counter_release_ack_ns == 18000000,
+            "HUD继续保留最终UP ACK后18ms契约");
+        {
+            std::lock_guard lock(fake->mutex);
+            require(fake->software == std::vector<int>({0, 4, 0}), "HUD只发送全UP、反向S、全UP");
+            durations[sample] = fake->software_started[2] - fake->software_ack[1];
+            require(durations[sample] > Clock::duration::zero(), "HUD反向持续从DOWN ACK开始");
+        }
+        worker.stop();
+        require(fake->released(), "HUD完成关闭必须归还所有权");
+    }
+    require(durations[1] > durations[0] + 20ms && durations[1] >= 60ms,
+        "HUD短持与长持应按积分生成不同计划，不能伪装固定H40");
+    for (std::size_t failed_command : {1u, 2u, 3u}) {
+        auto fake = std::make_shared<Fake>(); fake->software_fail_at = failed_command;
+        std::atomic<std::uint64_t> id{0};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [&] { return ++id; }, [] { return true; });
+        AutoStopConfig config{true, 5}; config.experimental_hud_model = true;
+        require(worker.start(config), "HUD未知ACK故障启动");
+        ready(worker, fake);
+        publish_present_target(worker, Clock::now() + 2s);
+        wait_for([&] { return worker.snapshot().canceled != 0 && fake->released(); });
+        require(worker.estimated_completion_id() == 0 && !worker.snapshot().fire_permitted,
+            "任一阶段UNKNOWN不能发布HUD完成资格或开火许可");
+        worker.stop();
+    }
+}
+
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--hud-reference") {
+            hud_reference_output_contracts();
+            cleanup_report_preserves_next_brake(true);
+            manual_release_contracts(true);
+            target_loss_releases_hold(true);
+            weapon_session_recovery_contracts(true);
+            weapon_hotkey_nonfireable_context(true);
+            std::cout << "HUD实验worker专项通过：动态计划、ACK、目标消失、武器恢复与重新武装\n";
+            return 0;
+        }
         weapon_hotkey_nonfireable_context();
         if (argc == 2 && std::string_view(argv[1]) == "--nonfireable-switch") return 0;
         rescue_rearm_preserves_real_input();

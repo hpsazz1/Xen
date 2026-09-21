@@ -385,7 +385,8 @@ struct Runtime::Impl {
                     if (auto stop = auto_stop_worker.load()) {
                         // 下一轮制动可占用冷却尾段；扳机仍独立守住相邻DOWN最小间隔。
                         const auto next_brake = next_down - std::chrono::milliseconds(
-                            config.auto_stop.counter_hold_ms + config.auto_stop.shot_after_release_ms);
+                            (config.auto_stop.experimental_hud_model ? 72 : config.auto_stop.counter_hold_ms) +
+                            config.auto_stop.shot_after_release_ms);
                         if (!stop->resume_movement(id, next_brake)) stop->cancel(id);
                     }
                 };

@@ -1341,10 +1341,11 @@ void test_shared_weapon_timing_config() {
     config.auto_stop.use_counterpulse_timing = true;
     config.auto_stop.counter_hold_ms = 40;
     config.auto_stop.shot_after_release_ms = 18;
+    config.auto_stop.experimental_hud_model = true;
     expect(save_app_config(path.string(), config, error) && load_app_config(path.string(), loaded, error) &&
         loaded.gsi.enabled &&
         loaded.weapon_timing_file == config.weapon_timing_file && loaded.trigger.allow_estimated_stop &&
-        loaded.auto_stop.use_counterpulse_timing && loaded.auto_stop.counter_hold_ms == 40 &&
+        loaded.auto_stop.experimental_hud_model && loaded.auto_stop.use_counterpulse_timing && loaded.auto_stop.counter_hold_ms == 40 &&
         loaded.auto_stop.shot_after_release_ms == 18,
         "共享武器资料独立于压枪关闭且完整往返");
     config.weapon_timing_file.clear();
@@ -1376,12 +1377,14 @@ void test_shared_weapon_timing_config() {
     expect(!load_app_config(path.string(), loaded, error), "联动迁移不得掩盖旧估计策略非法布尔值");
     { std::ofstream out(path); out << "[auto_stop]\nuse_counterpulse_timing=perhaps\n"; }
     expect(!load_app_config(path.string(), loaded, error), "H40策略严格布尔校验");
+    { std::ofstream out(path); out << "[auto_stop]\nexperimental_hud_model=perhaps\n"; }
+    expect(!load_app_config(path.string(), loaded, error), "实验策略严格布尔校验");
     { std::ofstream out(path); out << "[auto_stop]\ncounter_hold_ms=40.5\n"; }
     expect(!load_app_config(path.string(), loaded, error), "H40时长严格整数校验");
     { std::ofstream out(path); out << "[trigger]\nenabled=false\n"; }
     expect(load_app_config(path.string(), loaded, error) && !loaded.gsi.enabled &&
         !loaded.trigger.allow_estimated_stop &&
-        loaded.auto_stop.use_counterpulse_timing && loaded.auto_stop.counter_hold_ms == 40 &&
+        !loaded.auto_stop.experimental_hud_model && loaded.auto_stop.use_counterpulse_timing && loaded.auto_stop.counter_hold_ms == 40 &&
         loaded.auto_stop.shot_after_release_ms == 18,
         "旧配置不继承调用方已启用共享或估计策略");
     expect(AppConfig{}.auto_stop.use_counterpulse_timing,

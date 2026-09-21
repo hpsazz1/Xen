@@ -363,7 +363,11 @@ std::string auto_stop_metadata_json(const AutoStopConfig& config,
     std::ostringstream output;
     output << "{\"schema\":2,\"enabled\":" << bool_name(config.enabled)
            << ",\"activation_virtual_key\":" << config.activation_virtual_key
-           << ",\"strategy\":\"" << (config.use_counterpulse_timing ? "H40_COUNTERPULSE" : "LEGACY_ESTIMATED") << '"'
+           << ",\"strategy\":\"" << (config.experimental_hud_model ? "HUD_REFERENCE_EXPERIMENT" :
+                config.use_counterpulse_timing ? "H40_COUNTERPULSE" : "LEGACY_ESTIMATED") << '"'
+           << ",\"hud_seeded\":" << bool_name(snapshot.hud_seeded)
+           << ",\"hud_velocity\":[" << snapshot.hud_velocity[0] << ',' << snapshot.hud_velocity[1] << ']'
+           << ",\"hud_plan_ms\":[" << snapshot.hud_plan_ms[0] << ',' << snapshot.hud_plan_ms[1] << ']'
            << ",\"counter_hold_ms\":" << config.counter_hold_ms
            << ",\"shot_after_release_ms\":" << config.shot_after_release_ms
            << ",\"status\":\"" << AutoStopStatusName(snapshot.status)
