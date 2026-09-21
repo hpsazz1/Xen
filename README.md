@@ -9,6 +9,21 @@ Capture → Detector → Aim → Runtime SafetyGate → Mouse
 项目支持本机与双机采集、多种 ONNX Runtime 执行后端、可视化控制台、离线基准和受控输入设备。
 当前重点是稳定现有闭环与真实环境验收，不继续无边界扩展模型或后端。
 
+## 独立参考评估与离线比较
+
+`xen_reference_compare` 生成 `XenReferenceCompare.exe`，只读输入训练归档或合成事件，
+并列展示 cs-match-hud 固定提交的 Basic 评分与现有 Xen 输入评估；另可显示当前 H40 纯状态机的假 ACK 计划。
+它不连接设备、不修改生产急停/扳机、不代表完整控制策略 A/B 或游戏实际停稳。
+参考来源、MIT 许可、参数和完整用法见 [独立工具说明](assets/reference_assessment/GUIDE.md)。
+
+```powershell
+cmake --build build/reference --config Release --target xen_reference_compare reference_assessment_tests
+ctest --test-dir build/reference -C Release -R '^(reference_assessment_tests|reference_compare_cli_tests)$' --output-on-failure
+.\build\reference\Release\XenReferenceCompare.exe --events .\assets\reference_assessment\example.json --output .\cache\reference-report-1
+```
+
+构建目录须先按项目依赖完成 CMake 配置。独立打包使用 `scripts/package_reference_compare.ps1`，只创建新目录，保留原发布入口。
+
 > 物理鼠标输出默认关闭。任何真实输出都必须由用户在当轮前台明确授权、手动启动，并保留武装、
 > 按住启用与急停门禁。请只在私有、离线或明确允许的环境中使用。
 

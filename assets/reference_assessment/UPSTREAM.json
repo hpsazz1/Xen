@@ -1,0 +1,27 @@
+{
+  "repository": "https://github.com/qianjiachun/cs-match-hud",
+  "files": [
+    {
+      "path": "src-tauri/src/counter_strafing/engine.rs",
+      "sha256": "809AE8D283DA289A65268572EA4F0C43C571698E4F332ABCA072ACD4A54B0446"
+    },
+    {
+      "path": "src-tauri/src/counter_strafing/assessment_engine.rs",
+      "sha256": "A2D855429C9CADF13AA6FE74D21E0C5BB35256EE7EE95E43E26303B0E612C01C"
+    },
+    {
+      "path": "src-tauri/src/counter_strafing/types.rs",
+      "sha256": "E49BA53451C4E3BB0737AC30EB379B0D84355008B18D2EBE108053F95B81C840"
+    },
+    {
+      "path": "src-tauri/src/counter_strafing/runtime.rs",
+      "sha256": "C95D26A68A261CD845BFF6E252B1C8D2B7104E2C61E910E60078208B460DAD57"
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "F63BF3956179168D65E3D479DA99FDA3B6B4F9E953F5C4539D59F914863CAC1A"
+    }
+  ],
+  "commit": "e632605f8b6c20ac5ab8ac3284e4fdc33735d431",
+  "license": "MIT"
+}

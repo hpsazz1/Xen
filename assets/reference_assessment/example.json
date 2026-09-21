@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "description": "合成离线样例：A/D分离、重叠、同包换向和输入断档；不是真实Run",
+  "events": [
+    {"at_ms": 0, "held_mask": 0, "left_down": false},
+    {"at_ms": 100, "held_mask": 2},
+    {"at_ms": 500, "held_mask": 0},
+    {"at_ms": 505, "held_mask": 8},
+    {"at_ms": 520, "held_mask": 8, "left_down": true},
+    {"at_ms": 550, "held_mask": 8, "left_down": false},
+    {"at_ms": 700, "held_mask": 0},
+    {"at_ms": 1000, "held_mask": 2},
+    {"at_ms": 1400, "held_mask": 10},
+    {"at_ms": 1415, "held_mask": 8},
+    {"at_ms": 1420, "held_mask": 8, "left_down": true},
+    {"at_ms": 1600, "held_mask": 8, "left_down": false},
+    {"at_ms": 1700, "held_mask": 0},
+    {"at_ms": 2000, "held_mask": 2},
+    {"at_ms": 2400, "held_mask": 8},
+    {"at_ms": 2500, "held_mask": 8, "gap": true},
+    {"at_ms": 2600, "held_mask": 8, "left_down": true},
+    {"at_ms": 2700, "held_mask": 0},
+    {"at_ms": 2800, "held_mask": 0, "left_down": true},
+    {"at_ms": 2850, "held_mask": 0}
+  ],
+  "h40_plans": [
+    {"label": "A方向H40计划", "held_mask": 2, "ack_delay_ms": 1},
+    {"label": "W+D方向H40计划", "held_mask": 9, "ack_delay_ms": 1},
+    {"label": "等待中取消", "held_mask": 8, "ack_delay_ms": 1, "cancel_after_ms": 20}
+  ]
+}

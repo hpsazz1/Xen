@@ -898,6 +898,14 @@ target_link_libraries(aim_landmark PUBLIC aim)
 add_library(auto_stop STATIC Xen/auto_stop/auto_stop.cpp)
 target_include_directories(auto_stop PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 
+# 独立离线比较工具不链接 mouse、worker 或 runtime，参考速度评分不能进入控制链。
+add_library(reference_assessment STATIC Xen/reference_assessment/reference_assessment.cpp)
+target_include_directories(reference_assessment PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+add_executable(xen_reference_compare Xen/reference_assessment/main.cpp)
+set_target_properties(xen_reference_compare PROPERTIES OUTPUT_NAME XenReferenceCompare)
+target_link_libraries(xen_reference_compare PRIVATE reference_assessment input_training auto_stop nlohmann_json::nlohmann_json)
+xen_deploy_runtime_dlls(xen_reference_compare)
+
 add_library(mouse STATIC
     Xen/mouse/mouse.cpp
     Xen/mouse/kmbox_net.cpp
@@ -1637,6 +1645,13 @@ if(BUILD_TESTING)
     add_executable(auto_stop_tests tests/auto_stop_tests.cpp)
     target_link_libraries(auto_stop_tests PRIVATE auto_stop)
     add_test(NAME auto_stop_tests COMMAND auto_stop_tests)
+
+    add_executable(reference_assessment_tests tests/reference_assessment_tests.cpp)
+    target_link_libraries(reference_assessment_tests PRIVATE reference_assessment)
+    add_test(NAME reference_assessment_tests COMMAND reference_assessment_tests)
+    add_test(NAME reference_compare_cli_tests COMMAND "${XEN_PYTHON_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/tests/reference_compare_cli_tests.py"
+        "$<TARGET_FILE:xen_reference_compare>" "${PROJECT_SOURCE_DIR}/assets/reference_assessment/example.json")
 
     add_executable(auto_stop_worker_tests tests/auto_stop_worker_tests.cpp)
     target_link_libraries(auto_stop_worker_tests PRIVATE auto_stop_worker)
