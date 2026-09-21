@@ -273,7 +273,9 @@ AutoStopDecision AutoStopController::observe(const WasdMotionIntent& intent, std
         synchronized_ = false;
         return decision_;
     }
-    if (active() && intent.received_at_ns < time_ns_ && !changed) {
+    // 归还ACK也会推进模型时间；IDLE随后消费清理期间的同键报告不代表时钟倒退。
+    // 上方已核验原始事件顺序，只更新输入连续性，不回拨模型或重算屏蔽区间。
+    if ((active() || decision_.phase == AutoStopPhase::IDLE) && intent.received_at_ns < time_ns_ && !changed) {
         input_ = intent;
         return decision_;
     }

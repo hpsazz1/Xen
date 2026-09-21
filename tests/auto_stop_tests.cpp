@@ -14,6 +14,57 @@ int main() {
     constexpr std::int64_t base = 1000000000, ms = 1000000;
     AutoStopConfig legacy;
     legacy.use_counterpulse_timing = false;
+    for (const bool restart : {false, true}) {
+        AutoStopController restored;
+        WasdInputHistory input;
+        restored.observe(input.observe(0, 1, 1, base), base);
+        const auto held = input.observe(1, 1, 2, base + ms);
+        restored.observe(held, base + ms);
+        auto d = restored.request(1, base + 2 * ms);
+        d = restored.acknowledge(1, d.command_id, 0, base + 3 * ms);
+        d = restored.acknowledge(1, d.command_id, 4, base + 4 * ms);
+        d = restored.tick(base + 44 * ms);
+        restored.acknowledge(1, d.command_id, 0, base + 45 * ms);
+        expect(restored.tick(base + 63 * ms).phase == AutoStopPhase::COMPLETE_ESTIMATED,
+               "迟交报告回归先建立完整反向及零ACK完成资格");
+        constexpr auto cleanup_at = base + 100 * ms;
+        if (restart) {
+            restored.cancel(1, base + 70 * ms);
+            expect(restored.restart_after_cleanup(held, cleanup_at), "正常撤销后清理重建空闲计划");
+        } else expect(restored.resume_after_masked_hold(held, cleanup_at), "正常点射清理后归还空闲模型");
+        const auto late = input.observe(1, 1, 3, base + 80 * ms);
+        expect(restored.observe(late, late.received_at_ns).phase == AutoStopPhase::IDLE,
+               "归还ACK后连续同键报告虽早于模型时钟，仍应保留空闲资格");
+        for (int failure = 0; failure < 4; ++failure) {
+            auto candidate = restored;
+            auto invalid = late;
+            invalid.sequence = 4; invalid.received_at_ns = base + 90 * ms;
+            if (failure == 0) invalid.received_at_ns = base + 79 * ms;
+            if (failure == 1) invalid.sequence = 5;
+            if (failure == 2) {
+                invalid.held_mask = 2; invalid.longitudinal = 0; invalid.horizontal = -1;
+                invalid.held_since_ns = {0, base + 90 * ms, 0, 0};
+            }
+            if (failure == 3) invalid.epoch = 2;
+            expect(candidate.observe(invalid, invalid.received_at_ns).phase == AutoStopPhase::INVALID &&
+                       candidate.request(2, base + 110 * ms).phase != AutoStopPhase::WAITING_ACK,
+                   "迟交同键例外不得放行真实接收时间倒退、序号缺口、改向或来源换代");
+        }
+        const auto next_late = input.observe(1, 1, 4, base + 90 * ms);
+        expect(restored.observe(next_late, next_late.received_at_ns).phase == AutoStopPhase::IDLE,
+               "多个有序迟交报告保留原始接收时间，不钳制为清理时刻");
+        auto backward_request = restored;
+        expect(backward_request.request(2, cleanup_at - 1).phase == AutoStopPhase::INVALID,
+               "接受迟交报告不得回拨控制模型时钟到旧事件时间");
+        d = restored.request(2, base + 110 * ms);
+        expect(d.phase == AutoStopPhase::WAITING_ACK && d.request_id == 2 && d.desired_mask == 0,
+               "迟交同键报告后新请求仍须开始完整zero反向zero制动");
+        d = restored.acknowledge(2, d.command_id, 0, base + 111 * ms);
+        expect(d.desired_mask == 4, "新一轮仍按真实W方向计划反向S");
+        d = restored.acknowledge(2, d.command_id, 4, base + 112 * ms);
+        expect(d.axis_deadline_ns[0] == base + 152 * ms,
+               "新反向时长仍从本轮ACK计算，不继承旧报告或旧清理期限");
+    }
     for (const std::uint8_t before_mask : {1, 2, 4, 8, 3, 9, 6, 12}) {
         for (const std::uint8_t after_mask : {0, 1, 2, 4, 8, 3, 9, 6, 12}) {
             WasdInputHistory history;

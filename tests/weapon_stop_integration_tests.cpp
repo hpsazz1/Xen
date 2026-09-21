@@ -91,6 +91,8 @@ public:
         std::lock_guard lock(mutex);
         if (left_down.load()) cleanup_during_shot = true;
         masks = software = 0;
+        if (same_key_cleanup_report)
+            events.push_back({held, true, 1, ++sequence, ns(Clock::now())});
         return receipt;
     }
     ButtonReceipt set_left_button(bool down) noexcept override {
@@ -116,6 +118,7 @@ public:
     std::string last_error() const override { return {}; }
     std::atomic<unsigned> downs{0}, ups{0}, moves{0};
     std::atomic<bool> cleanup_during_shot{false};
+    bool same_key_cleanup_report = false;
 private:
     std::mutex mutex;
     std::vector<WasdEvent> events;
@@ -287,6 +290,8 @@ void run_weapon(const char* weapon_id, bool cycle = false, bool lose_candidate =
     const auto* profile = weapon::find_timing(catalog, weapon_id);
     require(profile && profile->enabled, "组合测试须使用共享表有效武器");
     auto mouse = std::make_shared<FakeMouse>();
+    // 清理期间的同键监听报告必须允许下一轮真正制动完成并解除Trigger等待。
+    mouse->same_key_cleanup_report = cycle;
     auto arbiter = std::make_shared<AutoStopOutputArbiter>();
     std::atomic<std::uint64_t> next_id{0};
     std::atomic<unsigned> trigger_requests{0};

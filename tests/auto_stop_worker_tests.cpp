@@ -678,8 +678,39 @@ void weapon_session_recovery_contracts() {
     }
 }
 
+void cleanup_report_preserves_next_brake() {
+    using namespace std::chrono_literals;
+    for (const bool target_loss : {false, true}) {
+        auto fake = std::make_shared<Fake>();
+        std::atomic<std::uint64_t> id{0};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [&] { return ++id; }, [] { return true; });
+        AutoStopConfig config{true, 5}; config.cycle_enabled = true;
+        require(worker.start(config), "清理报告连续制动回归启动");
+        ready(worker, fake);
+        publish_present_target(worker, Clock::now() + 2s);
+        wait_for([&] { return worker.estimated_completion_id() != 0; });
+        const auto first_id = worker.estimated_completion_id();
+        { std::lock_guard lock(fake->mutex); fake->cleanup_report_mode = 1; }
+        if (target_loss) worker.publish_tracking_target({});
+        else require(worker.resume_movement(first_id, Clock::now() + 20ms), "首轮归还请求成功");
+        wait_for([&] { return fake->released() && (target_loss ? worker.snapshot().canceled == 1 : worker.snapshot().cycle_count == 1); });
+        publish_present_target(worker, Clock::now() + 2s);
+        const auto deadline = Clock::now() + 300ms;
+        while (Clock::now() < deadline && worker.estimated_completion_id() <= first_id)
+            std::this_thread::sleep_for(1ms);
+        require(worker.estimated_completion_id() > first_id,
+            "清理期间同键重复报告后下一轮必须完成制动，不能卡在MASKED等待急停");
+        { std::lock_guard lock(fake->mutex);
+            require(fake->software.size() == 6, "两轮均须完整zero、反向、zero，不能只安装屏蔽");
+        }
+        worker.stop();
+    }
+}
 int main(int argc, char** argv) {
     try {
+        cleanup_report_preserves_next_brake();
+        if (argc == 2 && std::string_view(argv[1]) == "--cleanup-report") return 0;
         target_loss_releases_hold();
         if (argc == 2 && std::string_view(argv[1]) == "--target-loss") return 0;
         weapon_session_recovery_contracts();
@@ -731,6 +762,7 @@ int main(int argc, char** argv) {
                 require(worker.snapshot().cycle_moving, "归还成功显示真实移动阶段");
                 require(worker.snapshot().requests == 1, "移动期限前不得立即重接管");
                 wait_for([&] { return worker.snapshot().requests == 2; });
+                wait_for([&] { return worker.estimated_completion_id() > completed_id; });
                 require(Clock::now() >= deadline, "按住方向与允许键时按期限发起下一次急停");
                 require(!worker.snapshot().release_required, "成功循环不要求松键重按");
             }
