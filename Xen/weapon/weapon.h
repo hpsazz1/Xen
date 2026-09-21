@@ -13,7 +13,7 @@ using Clock = std::chrono::steady_clock;
 enum class WeaponState { UNKNOWN, ACTIVE, RELOADING, HOLSTERED };
 enum class Status { DISABLED, UNAVAILABLE, READY, EXPIRED, INVALID_PAYLOAD,
                     IDENTITY_MISMATCH, PLAYER_INACTIVE, UNKNOWN_WEAPON, RELOADING, EMPTY,
-                    CLOCK_REJECTED, OUT_OF_ORDER, DUPLICATE, COUNTER_EXHAUSTED };
+                    CLOCK_REJECTED, OUT_OF_ORDER, DUPLICATE, COUNTER_EXHAUSTED, NON_FIREARM };
 const char* status_name(Status status) noexcept;
 
 struct GsiConfig {

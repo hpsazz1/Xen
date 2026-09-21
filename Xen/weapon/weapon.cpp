@@ -16,6 +16,17 @@
 namespace weapon {
 namespace {
 using Json = nlohmann::json;
+// 精确识别普通非枪装备；未知名称仍失信，不用前缀或 type 泛化放行。
+bool known_non_firearm(const Json& item, std::string_view name) {
+    std::string_view type;
+    if (name == "weapon_knife" || name == "weapon_knife_t" || name == "weapon_bayonet") type = "Knife";
+    else if (name == "weapon_hegrenade" || name == "weapon_flashbang" || name == "weapon_smokegrenade" ||
+             name == "weapon_molotov" || name == "weapon_incgrenade" || name == "weapon_decoy") type = "Grenade";
+    else if (name == "weapon_c4") type = "C4";
+    else return false;
+    return item.contains("type") && item["type"].is_string() &&
+        item["type"].get_ref<const std::string&>() == type && item["state"] == "active";
+}
 bool digits(std::string_view text) noexcept {
     return !text.empty() && std::all_of(text.begin(), text.end(), [](char c) { return c >= '0' && c <= '9'; });
 }
@@ -57,7 +68,7 @@ const char* status_name(Status status) noexcept {
         WEAPON_STATUS(INVALID_PAYLOAD); WEAPON_STATUS(IDENTITY_MISMATCH);
         WEAPON_STATUS(PLAYER_INACTIVE); WEAPON_STATUS(UNKNOWN_WEAPON); WEAPON_STATUS(RELOADING);
         WEAPON_STATUS(EMPTY); WEAPON_STATUS(CLOCK_REJECTED); WEAPON_STATUS(OUT_OF_ORDER);
-        WEAPON_STATUS(DUPLICATE); WEAPON_STATUS(COUNTER_EXHAUSTED);
+        WEAPON_STATUS(DUPLICATE); WEAPON_STATUS(COUNTER_EXHAUSTED); WEAPON_STATUS(NON_FIREARM);
 #undef WEAPON_STATUS
     }
     return "UNKNOWN";
@@ -175,7 +186,10 @@ WeaponSnapshot parse_payload(std::string_view body, const GsiConfig& config, std
         result.ammo_clip = integer(*selected, "ammo_clip");
         result.ammo_clip_max = integer(*selected, "ammo_clip_max");
         result.ammo_reserve = integer(*selected, "ammo_reserve");
-        if (result.canonical_id.empty()) { result.status = Status::UNKNOWN_WEAPON; return result; }
+        if (result.canonical_id.empty()) {
+            result.status = known_non_firearm(*selected, result.raw_name) ? Status::NON_FIREARM : Status::UNKNOWN_WEAPON;
+            return result;
+        }
         if (!result.ammo_clip || !result.ammo_clip_max || !result.ammo_reserve || *result.ammo_clip > *result.ammo_clip_max) return result;
         if (result.state == WeaponState::RELOADING) { result.status = Status::RELOADING; return result; }
         if (*result.ammo_clip == 0) { result.status = Status::EMPTY; return result; }
@@ -234,14 +248,19 @@ Status GsiState::ingest(std::string_view body, const GsiConfig& config,
             }
             ++recoil_safety_epoch_;
         }
-        const bool control_break = trust_break || !incoming.player_health || *incoming.player_health == 0 ||
-            (current_.revision && (!current_.player_health || *current_.player_health == 0));
+        // 控制会话允许已识别非枪装备暂挂；压枪仍保留原有撤销语义。
+        const auto control_state = [&](const WeaponSnapshot& snapshot) {
+            return snapshot.identity_match && snapshot.player_playing && snapshot.player_health && *snapshot.player_health > 0 &&
+                (ordinary_state(snapshot) || snapshot.status == Status::NON_FIREARM);
+        };
+        const bool control_break = !control_state(incoming) || incoming.valid_until <= now ||
+            (current_.revision && (!control_state(current_) || current_.valid_until <= now || current_.player_id != incoming.player_id));
         if (control_break) ++control_safety_epoch_;
         incoming.control_safety_epoch = control_safety_epoch_;
         incoming.recoil_safety_epoch = recoil_safety_epoch_;
         // 武器切换也持久撤销旧工作，即使消费者跳过中间武器快照。
         if ((current_.valid && (!incoming.valid || now >= current_.valid_until || current_.player_id != incoming.player_id)) ||
-            (current_.revision && current_.canonical_id != incoming.canonical_id)) ++epoch_;
+            (current_.revision && current_.raw_name != incoming.raw_name)) ++epoch_;
         incoming.source_epoch = epoch_;
         incoming.revision = ++revision_;
         incoming.received_at = now;

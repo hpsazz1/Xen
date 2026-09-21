@@ -855,6 +855,64 @@ void acquisition_direction_change_retries() {
     }
 }
 
+void weapon_hotkey_nonfireable_context() {
+    using namespace std::chrono_literals;
+    for (const bool trusted_nonfireable : {false, true}) {
+        auto fake = std::make_shared<Fake>();
+        std::atomic<std::uint64_t> id{0};
+        std::atomic<int> stage{0};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [&] { return ++id; }, [] { return true; }, [&] {
+                const auto current = stage.load();
+                return AutoStopWeaponContext{true, current != 1, static_cast<std::uint64_t>(current + 1),
+                    current == 1 ? "" : "ak47", trusted_nonfireable || current == 0 ? 67u : 68u,
+                    current != 1 || trusted_nonfireable};
+            });
+        AutoStopConfig config{true, 5}; config.cycle_enabled = true;
+        config.release_virtual_keys = {49, 50, 51, 52, 53, 81};
+        require(worker.start(config), "默认切枪键与非可开火上下文回归启动");
+        ready(worker, fake);
+        fake->physical(3);
+        wait_for([&] { return fake->drained(); });
+        { std::lock_guard lock(fake->mutex); fake->extra_keys[51] = true; }
+        wait_for([&] { return worker.snapshot().rescue_succeeded == 1; });
+        require(!worker.snapshot().release_required, "可信上下文首个切枪边沿普通归还不锁许可");
+        { std::lock_guard lock(fake->mutex); fake->extra_keys[51] = false; }
+        fake->physical(1);
+        wait_for([&] { return fake->drained(); });
+        stage = 1;
+        wait_for([&] { return worker.snapshot().weapon_context.generation == 2; });
+        { std::lock_guard lock(fake->mutex); fake->extra_keys[81] = true; }
+        wait_for([&] { return worker.snapshot().rescue_succeeded == 2; });
+        require(worker.snapshot().release_required == !trusted_nonfireable,
+            "可开火资格与会话信任分离：可信非枪不锁许可，真实失信仍要求重武装");
+        { std::lock_guard lock(fake->mutex); fake->extra_keys[81] = false; fake->activation = false; }
+        publish_present_target(worker, Clock::now() + 2s);
+        std::this_thread::sleep_for(20ms);
+        { std::lock_guard lock(fake->mutex); fake->activation = true; }
+        require(fake->reports().empty() && worker.estimated_completion_id() == 0,
+            "非可开火上下文无论功能键如何操作均不能生成急停输出或完成资格");
+        stage = 2;
+        wait_for([&] { return worker.snapshot().weapon_context.generation == 3; });
+        publish_present_target(worker, Clock::now() + 2s);
+        if (!trusted_nonfireable) {
+            std::this_thread::sleep_for(20ms);
+            require(worker.snapshot().release_required && fake->reports().empty(),
+                "真实失信恢复后不自动重新武装，非枪期间松按不能冒充READY期间重武装");
+            { std::lock_guard lock(fake->mutex); fake->activation = false; }
+            wait_for([&] { return !worker.snapshot().release_required; });
+            { std::lock_guard lock(fake->mutex); fake->activation = true; }
+        }
+        fake->physical(1);
+        wait_for([&] { return fake->drained(); });
+        publish_present_target(worker, Clock::now() + 2s);
+        wait_for([&] { return worker.estimated_completion_id() != 0; });
+        require(fake->reports() == std::vector<int>({0, 4, 0}),
+            "默认切枪边沿后健康W持续按住无需全松，新目标仍执行完整反向制动");
+        worker.stop();
+    }
+}
+
 void rescue_rearm_preserves_real_input() {
     using namespace std::chrono_literals;
     for (int failure = 0; failure < 10; ++failure) {
@@ -1009,6 +1067,8 @@ void cleanup_report_preserves_next_brake() {
 }
 int main(int argc, char** argv) {
     try {
+        weapon_hotkey_nonfireable_context();
+        if (argc == 2 && std::string_view(argv[1]) == "--nonfireable-switch") return 0;
         rescue_rearm_preserves_real_input();
         if (argc == 2 && std::string_view(argv[1]) == "--rescue-continuity") return 0;
         held_direction_after_overlap_brakes();

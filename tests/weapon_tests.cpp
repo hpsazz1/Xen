@@ -95,6 +95,32 @@ int main() {
     const auto start = Clock::time_point{} + 1s;
     expect(state.ingest(full.dump(), config, start, utc) == Status::READY, "首份完整快照");
     const auto first = state.snapshot(start);
+    for (const auto& [name, type] : {std::pair{"weapon_knife", "Knife"}, {"weapon_knife_t", "Knife"},
+            {"weapon_bayonet", "Knife"}, {"weapon_hegrenade", "Grenade"}, {"weapon_flashbang", "Grenade"},
+            {"weapon_smokegrenade", "Grenade"}, {"weapon_molotov", "Grenade"}, {"weapon_incgrenade", "Grenade"},
+            {"weapon_decoy", "Grenade"}, {"weapon_c4", "C4"}}) {
+        GsiState transition;
+        transition.ingest(full.dump(), config, start, utc);
+        const auto before = transition.snapshot(start);
+        auto item = full;
+        item["player"]["weapons"]["weapon_0"] = {{"name", name}, {"type", type}, {"state", "active"}};
+        expect(transition.ingest(item.dump(), config, start + 1ms, utc + 1) == Status::NON_FIREARM,
+               "明确非枪装备无需虚构弹药字段");
+        const auto held = transition.snapshot(start + 1ms);
+        expect(!held.valid && !held.ammo_clip && held.canonical_id.empty() &&
+               held.control_safety_epoch == before.control_safety_epoch &&
+               held.recoil_safety_epoch != before.recoil_safety_epoch && held.source_epoch != before.source_epoch,
+               "非枪暂挂控制并撤销旧工作，保留压枪独立撤销");
+        auto restored = full;
+        restored["provider"]["timestamp"] = 1700000001;
+        transition.ingest(restored.dump(), config, start + 1s, utc + 1000);
+        expect(transition.snapshot(start + 1s).control_safety_epoch == before.control_safety_epoch &&
+               transition.snapshot(start + 1s).source_epoch != held.source_epoch, "回枪保持持键会话但新建工作");
+        item["player"]["weapons"]["weapon_0"]["type"] = "Rifle";
+        expect(parse_payload(item.dump(), config, utc).status == Status::UNKNOWN_WEAPON, "非枪类型矛盾不自动恢复");
+        item["player"]["weapons"]["weapon_0"].erase("type");
+        expect(parse_payload(item.dump(), config, utc).status == Status::UNKNOWN_WEAPON, "缺失装备类型不猜测");
+    }
     GsiState recoil_continuity;
     recoil_continuity.reset();
     recoil_continuity.ingest(full.dump(), config, start, utc);

@@ -14,9 +14,10 @@ namespace runtime::detail {
 inline bool weapon_session_trusted(const weapon::WeaponSnapshot& current, weapon::Clock::time_point now) noexcept {
     return current.identity_match && current.player_playing && current.player_health && *current.player_health > 0 &&
         current.source_epoch != 0 && current.control_safety_epoch != 0 && current.received_at <= now &&
-        current.valid_until > now && !current.canonical_id.empty() &&
-        ((current.status == weapon::Status::READY && current.valid) ||
-         current.status == weapon::Status::RELOADING || current.status == weapon::Status::EMPTY);
+        current.valid_until > now &&
+        (current.status == weapon::Status::NON_FIREARM || (!current.canonical_id.empty() &&
+         ((current.status == weapon::Status::READY && current.valid) ||
+          current.status == weapon::Status::RELOADING || current.status == weapon::Status::EMPTY)));
 }
 inline bool weapon_ready(const weapon::WeaponSnapshot& current, weapon::Clock::time_point now) noexcept {
     return weapon_session_trusted(current, now) && current.valid && current.status == weapon::Status::READY &&

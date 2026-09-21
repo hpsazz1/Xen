@@ -139,7 +139,7 @@ std::shared_ptr<TriggerObservation> fresh_observation(std::uint64_t sequence) {
 }
 void gsi_trust_breaks_require_release() {
     const auto catalog = weapon::default_timing_catalog();
-    for (const std::string_view failure : {"identity", "death", "invalid", "timeout", "focus", "input", "manual", "emergency"}) {
+    for (const std::string_view failure : {"identity", "death", "invalid", "unknown_weapon", "timeout", "focus", "input", "manual", "emergency"}) {
         weapon::GsiConfig gc; gc.enabled = true;
         weapon::detail::GsiState gsi;
         runtime::detail::TriggerWeaponContext adapter;
@@ -164,12 +164,13 @@ void gsi_trust_breaks_require_release() {
         now += 1ms;
         // 未产生旧按钮债务；健康上下文下已建立许可，随后只施加一个安全断点。
         controller.tick(permit(), now);
-        if (failure == "identity" || failure == "death" || failure == "invalid" || failure == "timeout") {
+        if (failure == "identity" || failure == "death" || failure == "invalid" || failure == "unknown_weapon" || failure == "timeout") {
             if (failure == "timeout") now += 3s;
             else {
                 if (failure == "identity") data["provider"]["steamid"] = data["player"]["steamid"] = "456";
                 if (failure == "death") data["player"]["state"]["health"] = 0;
                 if (failure == "invalid") data["player"].erase("weapons");
+                if (failure == "unknown_weapon") data["player"]["weapons"]["weapon_0"]["name"] = "weapon_unrecognized_future_item";
                 ingest();
                 // 故意不让controller读失败快照，信任断点必须由发布端持久保存。
             }
@@ -215,6 +216,11 @@ void gsi_session_recovery(const char* transition) {
             {"player", {{"steamid", "76561198000000000"}, {"activity", "playing"}, {"state", {{"health", 100}}},
                 {"weapons", {{"weapon_0", {{"name", name}, {"state", state}, {"ammo_clip", ammo},
                     {"ammo_clip_max", 30}, {"ammo_reserve", 90}}}}}}}};
+        if (std::string_view(name) == "weapon_knife" || std::string_view(name) == "weapon_hegrenade") {
+            auto& item = payload["player"]["weapons"]["weapon_0"];
+            item["type"] = std::string_view(name) == "weapon_knife" ? "Knife" : "Grenade";
+            item.erase("ammo_clip"); item.erase("ammo_clip_max"); item.erase("ammo_reserve");
+        }
         std::lock_guard lock(gsi_mutex);
         gsi.ingest(payload.dump(), gsi_config, Clock::now(), timestamp * 1000);
     };
@@ -252,8 +258,10 @@ void gsi_session_recovery(const char* transition) {
         return true;
     });
     const auto old_stop = initial_down.estimated_stop_request_id;
+    const auto old_keys = mouse->keyboard_commands().size();
     const auto before = mouse->downs.load();
-    if (std::string_view(transition) == "switch") ingest("weapon_deagle", "active", 7);
+    if (std::string_view(transition).starts_with("weapon_")) ingest(transition, "active", 0);
+    else if (std::string_view(transition) == "switch") ingest("weapon_deagle", "active", 7);
     else ingest("weapon_ak47", transition, 0);
     until([&] { return !trigger.snapshot().button_may_be_down && stop.estimated_completion_id() == 0; });
     if (std::string_view(transition) != "switch") {
@@ -276,12 +284,60 @@ void gsi_session_recovery(const char* transition) {
         std::this_thread::sleep_for(1ms);
     }
     const bool stop_latched = stop.snapshot().release_required;
+    if (!recovered) {
+        // 失败时先收现场，再停止worker，避免清理覆盖真正阻断；不改变等待或断言。
+        const auto stopped = stop.snapshot();
+        const auto current_gsi = snapshot();
+        const auto observed_at = Clock::now();
+        const auto log = trigger.execution_log();
+        nlohmann::json diagnostic = {
+            {"transition", transition}, {"observed_at_ns", ns(observed_at)},
+            {"stop", {{"status", AutoStopStatusName(stopped.status)},
+                {"block", AutoStopBlockReasonName(stopped.block_reason)}, {"request_id", stopped.request_id},
+                {"requests", stopped.requests}, {"completed", stopped.completed}, {"canceled", stopped.canceled},
+                {"release_required", stopped.release_required}, {"cleanup_unknown", stopped.cleanup_unknown},
+                {"target_available", stopped.target_available}, {"focused", stopped.source_focused},
+                {"counter_release_ack_ns", stopped.counter_release_ack_ns}, {"completion_ready_ns", stopped.completion_ready_ns},
+                {"cleanup_attempts", stopped.cleanup_attempts}, {"cleanup_failures", stopped.cleanup_failures},
+                {"weapon_valid", stopped.weapon_context.valid}, {"session_trusted", stopped.weapon_context.session_trusted},
+                {"weapon_generation", stopped.weapon_context.generation}, {"trust_generation", stopped.weapon_context.trust_generation}}},
+            {"gsi", {{"status", weapon::status_name(current_gsi.status)}, {"valid", current_gsi.valid},
+                {"source_epoch", current_gsi.source_epoch}, {"control_safety_epoch", current_gsi.control_safety_epoch},
+                {"received_at_ns", ns(current_gsi.received_at)}, {"valid_until_ns", ns(current_gsi.valid_until)}}},
+            {"trigger_dropped", log.dropped_count}, {"keyboard", nlohmann::json::array()},
+            {"trigger_tail", nlohmann::json::array()}};
+        for (const auto& key : mouse->keyboard_commands())
+            diagnostic["keyboard"].push_back({{"mask", key.mask}, {"submitted_ns", ns(key.submitted)}, {"ack_ns", ns(key.acknowledged)}});
+        const auto tail = log.events.size() > 24 ? log.events.size() - 24 : 0;
+        for (auto i = tail; i < log.events.size(); ++i) {
+            const auto& event = log.events[i];
+            diagnostic["trigger_tail"].push_back({{"sequence", event.sequence}, {"observed_at_ns", ns(event.observed_at)},
+                {"reason", TriggerReasonName(event.snapshot.reason)}, {"phase", static_cast<int>(event.snapshot.phase)},
+                {"command_id", event.snapshot.command_id}, {"estimated_stop_id", event.snapshot.estimated_stop_request_id},
+                {"stop_not_needed", event.snapshot.stop_not_needed}, {"backend_called", event.backend_called},
+                {"button_action", static_cast<int>(event.button_action)}, {"rejection", event.rejection_reason}});
+        }
+        std::cerr << "GSI恢复失败现场：" << diagnostic.dump() << '\n';
+    }
     trigger.stop(); stop.stop();
     if (!recovered) std::cerr << "transition=" << transition << " trigger=" << static_cast<int>(state.reason)
         << " stop_release_required=" << stop_latched << '\n';
     require(recovered, "持续持键的正常GSI武器过渡必须恢复，不要求松键");
     require(state.estimated_stop_request_id != old_stop && state.estimated_stop_request_id != 0,
         "恢复不得继承旧武器急停编号");
+    if (std::string_view(transition).starts_with("weapon_")) {
+        const auto keys = mouse->keyboard_commands();
+        const auto log = trigger.execution_log();
+        const auto down = std::find_if(log.events.begin(), log.events.end(), [&](const auto& event) {
+            return event.button_action == TriggerButtonAction::DOWN && event.backend_called &&
+                event.snapshot.command_id == state.command_id;
+        });
+        require(keys.size() >= old_keys + 3 && keys[old_keys].mask == 0 && keys[old_keys + 1].mask == 8 &&
+            keys[old_keys + 2].mask == 0, "刀雷切回枪须基于当前持A新发zero到D到zero完整制动");
+        require(keys[old_keys + 2].submitted >= keys[old_keys + 1].acknowledged + 40ms &&
+            down != log.events.end() && down->call_started_at >= keys[old_keys + 2].acknowledged + 18ms &&
+            !down->snapshot.stop_not_needed, "刀雷恢复的实际DOWN必须等待新制动ACK，禁止原地绕过");
+    }
     require(state.firing_context.timing_weapon_id == (std::string_view(transition) == "switch" ? "deagle" : "ak47"),
         "恢复必须使用当前武器时序");
 }
@@ -585,6 +641,7 @@ void stationary_owner_does_not_interrupt_shot() {
 } // namespace
 int main() {
     try {
+        for (const char* item : {"weapon_knife", "weapon_hegrenade"}) gsi_session_recovery(item);
         held_direction_after_overlap_requires_completed_brake();
         target_loss_lifecycle(false);
         target_loss_lifecycle(true);

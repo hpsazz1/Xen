@@ -151,6 +151,60 @@ int main() {
         frame.control_at += std::chrono::milliseconds(4); frame.detections.clear();
         expect(!delayed_aim.process(frame).has_target, "切枪后的新帧不得继承被撤销命令对应目标");
     }
+    for (const auto& item : std::array<std::pair<const char*, const char*>, 3>{{
+            {"weapon_knife", "Knife"}, {"weapon_flashbang", "Grenade"}, {"weapon_c4", "C4"}}}) {
+        weapon::GsiConfig gsi_config;
+        gsi_config.enabled = true;
+        weapon::detail::GsiState gsi;
+        runtime::detail::AimWeaponSessionGate gate;
+        const source_context::SourceContextSnapshot focus{true, true, 1, 1, 0};
+        AimConfig local_config;
+        local_config.min_confirmed_hits = 1;
+        local_config.deadzone_pixels = 0;
+        Aim current_aim(local_config);
+        gsi.ingest(weapon_payload("active", 30), gsi_config, start, 1700000000000);
+        const auto initial_weapon = gsi.snapshot(start);
+        const auto initial_session = gate.update(initial_weapon, true, focus, true, true, start);
+        AimFrame frame;
+        frame.sequence = 1; frame.roi_width = frame.roi_height = 320;
+        frame.control_center_x = frame.control_center_y = 160;
+        frame.captured_at = start; frame.control_at = start + std::chrono::milliseconds(1);
+        frame.lock_active = initial_session.allowed;
+        frame.detections = {{180, 120, 220, 200, 0.95f, 0}};
+        const auto prepared = current_aim.process(frame);
+        expect(initial_session.allowed && prepared.has_command, "非枪切换前实际Aim已有旧武器命令");
+        auto nonfirearm_payload = weapon_payload("active", 0, item.first);
+        const auto insertion = nonfirearm_payload.find(",\"ammo_clip\"");
+        nonfirearm_payload.replace(insertion, nonfirearm_payload.size() - insertion,
+            std::string(",\"type\":\"") + item.second + "\"}}}}");
+        const auto changed_at = start + std::chrono::milliseconds(2);
+        gsi.ingest(nonfirearm_payload, gsi_config, changed_at, 1700000000000);
+        const auto nonfirearm = gsi.snapshot(changed_at);
+        const auto paused = gate.update(nonfirearm, true, focus, true, true, changed_at);
+        expect(!nonfirearm.valid && nonfirearm.control_safety_epoch == initial_weapon.control_safety_epoch &&
+            runtime::detail::weapon_session_trusted(nonfirearm, changed_at),
+            "已识别刀手雷C4无需弹匣字段且仅暂停开火，不打断控制会话信任");
+        expect(!paused.allowed && paused.reset_aim &&
+            !runtime::detail::aim_frame_dispatch_allowed(frame, true, initial_session, paused),
+            "切非枪立即拒绝已计算的旧枪Aim命令并撤销旧目标");
+        expect(current_aim.record_backend_completed_command(prepared.command.sequence, changed_at, 0, 0),
+            "被非枪撤销的Aim命令记录零反馈");
+        current_aim.reset();
+        const auto ready_at = start + std::chrono::milliseconds(4);
+        gsi.ingest(weapon_payload("active", 29), gsi_config, ready_at, 1700000000000);
+        const auto recovered = gate.update(gsi.snapshot(ready_at), true, focus, true, true, ready_at);
+        expect(recovered.allowed && recovered.reset_aim,
+            "非枪回枪持续许可直接恢复新Aim会话，不要求松方向或功能键");
+        if (recovered.reset_aim) current_aim.reset();
+        ++frame.sequence; frame.captured_at = ready_at; frame.control_at = ready_at + std::chrono::milliseconds(1);
+        frame.lock_active = recovered.allowed; frame.detections.clear();
+        expect(!current_aim.process(frame).has_target, "非枪恢复空观测不能继承旧枪目标");
+        ++frame.sequence; frame.captured_at += std::chrono::milliseconds(4); frame.control_at += std::chrono::milliseconds(4);
+        frame.detections = {{180, 120, 220, 200, 0.95f, 0}};
+        const auto fresh = current_aim.process(frame);
+        expect(fresh.has_command && runtime::detail::aim_frame_dispatch_allowed(frame, true, recovered, recovered),
+            "恢复后新观测经实际Aim产生可发送新命令");
+    }
     for (int failure = 0; failure != 7; ++failure) {
         weapon::GsiConfig gsi_config;
         gsi_config.enabled = true;
