@@ -19,7 +19,7 @@ TriggerRegion role(const TriggerConfig& config, int id) noexcept {
 bool valid_box(const Detection& box, const TriggerObservation& observation, float confidence) noexcept {
     return std::isfinite(box.x1) && std::isfinite(box.y1) && std::isfinite(box.x2) && std::isfinite(box.y2) &&
         std::isfinite(box.confidence) && box.confidence >= confidence && box.confidence <= 1.0f &&
-        box.x1 > 0.0f && box.y1 > 0.0f && box.x2 < observation.roi_width && box.y2 < observation.roi_height &&
+        box.x1 >= 0.0f && box.y1 >= 0.0f && box.x2 <= observation.roi_width && box.y2 <= observation.roi_height &&
         box.x2 > box.x1 && box.y2 > box.y1;
 }
 bool contains(const Detection& body, const Detection& head) noexcept {

@@ -63,13 +63,41 @@ void geometry_and_timing() {
     TriggerController outside; arm(outside, fast); o.center_x = 175.01f;
     expect(outside.observe(o, permit(), at(1)).button_action == TriggerButtonAction::NONE, "不添加框外epsilon");
     TriggerController clipped; arm(clipped, fast); o = frame(1); o.detections[0].x1 = 0;
-    expect(clipped.observe(o, permit(), at(1)).button_action == TriggerButtonAction::NONE, "ROI截边拒绝开火");
+    expect(clipped.observe(o, permit(), at(1)).button_action == TriggerButtonAction::DOWN, "检测器裁剪到ROI边界的有效框仍可开火");
     TriggerController unknown; arm(unknown, fast); o = frame(1); o.detections[0].class_id = 42;
     expect(unknown.observe(o, permit(), at(1)).snapshot.reason == TriggerReason::NO_CANDIDATE, "未知类别不能自动泛化");
     TriggerController stale; arm(stale, fast); o = frame(1); o.uncertainty = std::chrono::milliseconds(40);
     expect(stale.observe(o, permit(), at(11)).snapshot.reason == TriggerReason::STALE, "年龄上界包括时钟不确定性");
     TriggerController nan; arm(nan, fast); o = frame(1); o.detections[0].x1 = std::numeric_limits<float>::quiet_NaN();
     expect(nan.observe(o, permit(), at(1)).button_action == TriggerButtonAction::NONE, "NaN框必须拒绝");
+}
+void roi_clipped_detection_bounds() {
+    auto cfg = config(); cfg.fire_delay_ms = 0;
+    cfg.body_width_percent = cfg.body_height_percent = 100;
+    for (int edge = 0; edge < 5; ++edge) {
+        TriggerController c; arm(c, cfg);
+        auto o = frame(1);
+        if (edge == 0 || edge == 4) o.detections[0].x1 = 0;
+        if (edge == 1 || edge == 4) o.detections[0].y1 = 0;
+        if (edge == 2 || edge == 4) o.detections[0].x2 = 300;
+        if (edge == 3 || edge == 4) o.detections[0].y2 = 300;
+        expect(c.observe(o, permit(), at(1)).button_action == TriggerButtonAction::DOWN,
+            "四边贴边及全ROI身体框均遵循检测器闭区间裁剪契约");
+    }
+    for (int invalid = 0; invalid < 8; ++invalid) {
+        TriggerController c; arm(c, cfg);
+        auto o = frame(1);
+        if (invalid == 0) o.detections[0].x1 = -.01f;
+        if (invalid == 1) o.detections[0].y1 = -.01f;
+        if (invalid == 2) o.detections[0].x2 = 300.01f;
+        if (invalid == 3) o.detections[0].y2 = 300.01f;
+        if (invalid == 4) o.detections[0].x1 = std::numeric_limits<float>::quiet_NaN();
+        if (invalid == 5) o.detections[0].x2 = o.detections[0].x1;
+        if (invalid == 6) o.detections[0].y2 = o.detections[0].y1;
+        if (invalid == 7) o.detections[0].x2 = o.detections[0].x1 - 1;
+        expect(c.observe(o, permit(), at(1)).snapshot.reason == TriggerReason::NO_CANDIDATE,
+            "包含ROI边界不放行真越界、NaN、零面积或反向框");
+    }
 }
 void full_detection_bounds() {
     auto cfg = config(); cfg.fire_delay_ms = 0;
@@ -507,6 +535,7 @@ void blocked_status_does_not_alternate_with_observations() {
 }
 
 int main() {
+    roi_clipped_detection_bounds();
     acknowledged_single_shot_can_leave_trigger_region();
     acknowledged_shot_region_fallback_keeps_safety_boundaries();
     {
