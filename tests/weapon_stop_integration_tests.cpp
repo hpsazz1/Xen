@@ -129,7 +129,8 @@ std::shared_ptr<TriggerObservation> fresh_observation(std::uint64_t sequence) {
     result->observed_at = Clock::now(); result->valid = result->timing_valid = true;
     return result;
 }
-void run_weapon(const char* weapon_id, bool cycle = false, bool lose_candidate = false, bool lose_target = false) {
+void run_weapon(const char* weapon_id, bool cycle = false, bool lose_candidate = false, bool lose_target = false,
+                bool leave_trigger_region = false) {
     const auto catalog = weapon::default_timing_catalog();
     const auto* profile = weapon::find_timing(catalog, weapon_id);
     require(profile && profile->enabled, "组合测试须使用共享表有效武器");
@@ -158,6 +159,7 @@ void run_weapon(const char* weapon_id, bool cycle = false, bool lose_candidate =
     trigger_config.enabled = true; trigger_config.hold_virtual_key = 5; trigger_config.fire_delay_ms = 0;
     trigger_config.require_stop = trigger_config.allow_estimated_stop = true;
     trigger_config.max_observation_age_ms = 300;
+    if (leave_trigger_region) trigger_config.range_percent = 50;
     mouse->physical(0, false);
     require(stop.start(stop_config), "急停生产worker启动失败");
     require(trigger.start(trigger_config), "扳机生产worker启动失败");
@@ -168,6 +170,23 @@ void run_weapon(const char* weapon_id, bool cycle = false, bool lose_candidate =
     require(mouse->downs == 0, "允许键未按下不得开火");
     mouse->allow(true);
     std::uint64_t sequence = 0;
+    if (leave_trigger_region) {
+        until([&] {
+            stop.publish_target(Clock::now() + 300ms);
+            trigger.publish(fresh_observation(++sequence));
+            return mouse->downs == 1 && trigger.firing_signal().confirmed_down;
+        });
+        until([&] {
+            auto moved = fresh_observation(++sequence);
+            // 原身体仍唯一连续匹配，但准星已离开缩小后的触发范围。
+            moved->detections[0].x1 += 11;
+            moved->detections[0].x2 += 11;
+            stop.publish_target(Clock::now() + 300ms);
+            trigger.publish(moved);
+            return mouse->ups == 1 && !trigger.snapshot().button_may_be_down;
+        });
+        require(stop.snapshot().cycle_count <= 1, "短点射未结束前不得提前启动下一轮急停");
+    }
     if (lose_candidate) {
         until([&] {
             stop.publish_target(Clock::now() + 300ms);
@@ -277,6 +296,7 @@ int main() {
         for (const char* id : {"deagle", "ak47", "awp"}) { run_weapon(id); run_weapon(id, true); }
         run_weapon("ak47", true, true);
         run_weapon("ak47", true, true, true);
+        run_weapon("ak47", true, false, false, true);
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "武器急停组合回归失败：" << error.what() << '\n';

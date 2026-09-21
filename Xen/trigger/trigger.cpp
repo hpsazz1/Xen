@@ -202,19 +202,32 @@ bool TriggerController::select_candidate(const TriggerObservation& observation, 
             selected = i; best_margin = margin; best_confidence = box.confidence;
         }
     }
-    if (selected == observation.detections.size()) return false;
-    const std::size_t selected_anchor = anchor_index(config_, observation, selected);
-    const auto& next_anchor = observation.detections[selected_anchor];
-    const auto next_region = role(config_, next_anchor.class_id);
     unsigned matches = 0;
+    std::size_t matched_anchor = observation.detections.size();
     // 成对头框折叠到人体索引，只计一次；关联检查包含未覆盖准星的有效检测。
     if (candidate_valid_) {
         for (std::size_t i = 0; i < observation.detections.size(); ++i) {
             const auto& box = observation.detections[i];
             if (!valid_box(box, observation, config_.min_confidence) || anchor_index(config_, observation, i) != i) continue;
-            if (role(config_, box.class_id) == anchor_region_ && iou(anchor_, box) > 0.5f) ++matches;
+            if (role(config_, box.class_id) == anchor_region_ && iou(anchor_, box) > 0.5f) {
+                ++matches;
+                matched_anchor = i;
+            }
         }
     }
+    if (selected == observation.detections.size()) {
+        // 范围只决定新点射准入。已ACK的短点射在唯一原目标仍可关联时完成原按住时长。
+        // NONE明确本帧没有准入区域；期满后不能借此观测再发一枪。
+        if (config_.fire_mode != TriggerFireMode::SINGLE || state_.phase != TriggerPhase::HELD ||
+            pending_ != TriggerButtonAction::NONE || !candidate_valid_ || matches != 1) return false;
+        anchor_ = observation.detections[matched_anchor];
+        state_.region = TriggerRegion::NONE;
+        state_.normalized_margin = 0.0f;
+        return true;
+    }
+    const std::size_t selected_anchor = anchor_index(config_, observation, selected);
+    const auto& next_anchor = observation.detections[selected_anchor];
+    const auto next_region = role(config_, next_anchor.class_id);
     const bool same = candidate_valid_ && matches == 1 && next_region == anchor_region_ && iou(anchor_, next_anchor) > 0.5f;
     if (!same) {
         if (next_candidate_id_ == std::numeric_limits<std::uint64_t>::max()) return false;
@@ -323,7 +336,7 @@ TriggerDecision TriggerController::tick(const TriggerPermit& permit, TriggerTime
             const auto region = state_.region;
             auto decision = release(TriggerReason::RELEASED, now);
             // 正常点射结束不意味着准星离域，连续驻留与冷却互相独立。
-            candidate_valid_ = true;
+            candidate_valid_ = region != TriggerRegion::NONE;
             state_.region = region;
             decision.snapshot = state_;
             return decision;

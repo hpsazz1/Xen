@@ -107,6 +107,67 @@ void configured_range() {
         expect(!valid_trigger_config(cfg), "范围必须有限且位于1到100%，不允许框外开火");
     }
 }
+void acknowledged_single_shot_can_leave_trigger_region() {
+    auto cfg = config(); cfg.fire_delay_ms = 0; cfg.press_duration_ms = 60;
+    cfg.max_observation_age_ms = 1000; cfg.body_width_percent = cfg.body_height_percent = 100;
+    TriggerController c; arm(c, cfg);
+    auto first = frame(1); first.detections = {{145,100,245,200,.9f,0}};
+    auto down = c.observe(first, permit(), at(1));
+    expect(down.button_action == TriggerButtonAction::DOWN, "范围内首发正常准入");
+    ack(c, down, 2);
+    auto outside = frame(20, 2); outside.detections = {{155,100,255,200,.9f,0}};
+    auto held = c.observe(outside, permit(), at(20));
+    expect(held.button_action == TriggerButtonAction::NONE && held.snapshot.phase == TriggerPhase::HELD &&
+        held.snapshot.candidate_id == down.snapshot.candidate_id,
+        "已ACK短点射的唯一原目标离域仍完成原按住时长");
+    auto up = c.tick(permit(), at(62));
+    expect(up.button_action == TriggerButtonAction::UP, "离域保持不延长原ACK起算的60ms期限");
+    ack(c, up, 63);
+    expect(c.tick(permit(), at(122)).button_action == TriggerButtonAction::NONE,
+        "冷却结束不得复用离域观测再次开火");
+    outside.sequence = 3; outside.observed_at = at(123);
+    expect(c.observe(outside, permit(), at(123)).button_action == TriggerButtonAction::NONE,
+        "新鲜但仍离域的原目标不能产生下一枪");
+    first.sequence = 4; first.observed_at = at(124);
+    expect(c.observe(first, permit(), at(124)).button_action == TriggerButtonAction::DOWN,
+        "重新进入触发范围后才允许下一枪");
+}
+void acknowledged_shot_region_fallback_keeps_safety_boundaries() {
+    for (int cause = 0; cause < 9; ++cause) {
+        auto cfg = config(); cfg.fire_delay_ms = 0; cfg.press_duration_ms = 60;
+        cfg.max_observation_age_ms = 1000; cfg.body_width_percent = cfg.body_height_percent = 100;
+        if (cause == 5) cfg.fire_mode = TriggerFireMode::AUTOMATIC;
+        TriggerController c; arm(c, cfg);
+        auto first = frame(1); first.detections = {{145,100,245,200,.9f,0}};
+        const auto down = c.observe(first, permit(), at(1));
+        if (cause != 4) ack(c, down, 2);
+        auto next = frame(20, 2); next.detections = {{155,100,255,200,.9f,0}};
+        auto p = permit();
+        if (cause == 0) next.detections.clear();
+        if (cause == 1) next.detections.push_back({156,100,256,200,.8f,0});
+        if (cause == 2) next.detections = {{205,100,295,200,.9f,0}};
+        if (cause == 3) next.detections.push_back({100,100,170,200,.9f,0});
+        if (cause == 6) p.focused = false;
+        if (cause == 7) next.observed_at = at(-1000);
+        if (cause == 8) p.held = false;
+        const auto stopped = c.observe(next, p, at(20));
+        expect(stopped.button_action == TriggerButtonAction::UP,
+            "空框歧义换目标、未ACK、连续扫射、失焦过期松键均不能使用短点射离域保持");
+    }
+    auto cfg = config(); cfg.fire_delay_ms = 0; cfg.press_duration_ms = 60;
+    cfg.max_observation_age_ms = 1000; cfg.body_width_percent = cfg.body_height_percent = 100;
+    cfg.head_width_percent = cfg.head_height_percent = 100;
+    TriggerController paired; arm(paired, cfg);
+    auto first = frame(1);
+    first.detections = {{145,100,245,220,.9f,0}, {170,110,190,140,.9f,1}};
+    auto down = paired.observe(first, permit(), at(1)); ack(paired, down, 2);
+    auto outside = frame(20, 2);
+    outside.detections = {{155,100,255,220,.9f,0}, {180,110,200,140,.9f,1}};
+    const auto held = paired.observe(outside, permit(), at(20));
+    expect(held.button_action == TriggerButtonAction::NONE && held.snapshot.phase == TriggerPhase::HELD &&
+        held.snapshot.candidate_id == down.snapshot.candidate_id,
+        "唯一头身配对折叠为一个原目标，离域不被误判为多人歧义");
+}
 void association() {
     TriggerController c; arm(c);
     auto o = frame(1);
@@ -446,6 +507,8 @@ void blocked_status_does_not_alternate_with_observations() {
 }
 
 int main() {
+    acknowledged_single_shot_can_leave_trigger_region();
+    acknowledged_shot_region_fallback_keeps_safety_boundaries();
     {
         auto cfg = config(); cfg.require_stop = cfg.allow_estimated_stop = true; cfg.fire_delay_ms = 0;
         TriggerController c; arm(c, cfg);
