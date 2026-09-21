@@ -855,6 +855,85 @@ void acquisition_direction_change_retries() {
     }
 }
 
+void rescue_rearm_preserves_real_input() {
+    using namespace std::chrono_literals;
+    for (int failure = 0; failure < 10; ++failure) {
+    auto fake = std::make_shared<Fake>();
+    std::atomic<std::uint64_t> id{0};
+    std::atomic<bool> focused{true}, trusted{true};
+    AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+        [&] { return ++id; }, [&] { return focused.load(); }, [&] {
+            return AutoStopWeaponContext{true, trusted.load(), 1, "ak47", 1, trusted.load()};
+        });
+    AutoStopConfig config{true, 5}; config.cycle_enabled = true;
+    config.release_virtual_keys = {0x52};
+    require(worker.start(config), "无活动请求救援后仅重按许可回归启动");
+    ready(worker, fake);
+    if (failure && failure != 9) {
+        publish_present_target(worker, Clock::now() + 2s);
+        wait_for([&] { return worker.estimated_completion_id() != 0; });
+        std::lock_guard lock(fake->mutex);
+        fake->before_cleanup = [&] {
+            if (failure == 5) { focused = false; return; }
+            if (failure == 6) { trusted = false; return; }
+            if (failure == 7) { worker.cancel(); return; }
+            std::lock_guard input_lock(fake->mutex);
+            if (failure == 8) { fake->cleanup_fails = true; return; }
+            if (failure == 1) ++fake->sequence;
+            fake->events.push_back({1, failure != 4, failure == 2 ? 2u : 1u,
+                ++fake->sequence, failure == 3 ? 1 : clock_ns()});
+        };
+    }
+    if (failure == 9) {
+        trusted = false;
+        wait_for([&] { return !worker.snapshot().weapon_context.session_trusted; });
+    }
+    { std::lock_guard lock(fake->mutex); fake->extra_keys[0x52] = true; }
+    wait_for([&] { return worker.snapshot().rescue_succeeded + worker.snapshot().rescue_failed == 1; });
+    require(worker.snapshot().release_required && worker.estimated_completion_id() == 0,
+        "真实救援仍撤销资格且要求许可重新武装");
+    if (failure == 8) {
+        require(worker.snapshot().cleanup_unknown && worker.snapshot().status == AutoStopStatus::FAULT,
+            "未知清理ACK保持FAULT且不能复活旧完成编号");
+        worker.stop(); continue;
+    }
+    const auto reports_before_rearm = fake->reports();
+    { std::lock_guard lock(fake->mutex); fake->extra_keys[0x52] = false; }
+    if (failure == 6 || failure == 7 || failure == 9) {
+        publish_present_target(worker, Clock::now() + 2s);
+        fake->physical(1);
+        wait_for([&] { return fake->drained(); });
+        std::this_thread::sleep_for(20ms);
+        require(worker.snapshot().release_required && worker.estimated_completion_id() == 0 &&
+            fake->reports() == reports_before_rearm,
+            "GSI失信或未知取消期间保留输入不等于恢复输出许可");
+        trusted = true;
+        wait_for([&] { return worker.snapshot().weapon_context.session_trusted; });
+        publish_present_target(worker, Clock::now() + 2s);
+        std::this_thread::sleep_for(20ms);
+        require(worker.snapshot().release_required && worker.estimated_completion_id() == 0 &&
+            fake->reports() == reports_before_rearm,
+            "GSI恢复但许可持续按住时不能自动重武装或发送新输出");
+    }
+    focused = true; trusted = true;
+    { std::lock_guard lock(fake->mutex); fake->extra_keys[0x52] = false; fake->activation = false; }
+    wait_for([&] { return !worker.snapshot().release_required; });
+    { std::lock_guard lock(fake->mutex); fake->activation = true; }
+    fake->physical(1); // 同一真实按键重复报告，不插入WASD全松。
+    wait_for([&] { return fake->drained(); });
+    publish_present_target(worker, Clock::now() + 2s);
+    const auto limit = Clock::now() + 300ms;
+    while (!worker.estimated_completion_id() && Clock::now() < limit) std::this_thread::sleep_for(1ms);
+    require((worker.estimated_completion_id() != 0) == (failure == 0 || failure == 6 || failure == 7 || failure == 9),
+        "救援ACK后仅许可重新武装不得把连续真实持键伪造成输入断流并等待WASD全松");
+    auto expected_reports = reports_before_rearm;
+    if (failure == 0 || failure == 6 || failure == 7 || failure == 9)
+        expected_reports.insert(expected_reports.end(), {0, 4, 0});
+    require(fake->reports() == expected_reports, "重新武装仍须完整制动ACK链，真实输入断点不能放行");
+    worker.stop();
+    }
+}
+
 void weapon_change_during_cycle_cleanup() {
     using namespace std::chrono_literals;
     auto fake = std::make_shared<Fake>();
@@ -930,6 +1009,8 @@ void cleanup_report_preserves_next_brake() {
 }
 int main(int argc, char** argv) {
     try {
+        rescue_rearm_preserves_real_input();
+        if (argc == 2 && std::string_view(argv[1]) == "--rescue-continuity") return 0;
         held_direction_after_overlap_brakes();
         if (argc == 2 && std::string_view(argv[1]) == "--held-direction") return 0;
         acquisition_direction_change_retries();
@@ -1591,7 +1672,10 @@ int main(int argc, char** argv) {
             wait_for([&] {
                 // 非目标撤销仍提供新鲜目标，不能让50ms到期掩盖撤销入口失效。
                 if (ending >= 2) publish_present_target(worker, Clock::now() + std::chrono::milliseconds(50));
-                return fake->released() && worker.snapshot().canceled == 1;
+                const auto state = worker.snapshot();
+                // fault可能在本轮早期检查后到达；普通撤销先归还，下轮才发布共享FAULT。
+                return fake->released() && state.canceled == 1 &&
+                    (ending != 10 || state.status == AutoStopStatus::FAULT);
             });
             require(worker.snapshot().requests == 1 && fake->reports().size() == reports_while_holding,
                 "目标到期清理不得重发反向制动或分配第二个请求");

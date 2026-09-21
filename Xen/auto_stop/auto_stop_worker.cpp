@@ -340,7 +340,7 @@ public:
         };
         auto cancel_active = [&](bool force_fault, const char* reason, bool normal_activation_release = false,
                                  bool cycle_resume = false, bool manual_finished = false, bool ordinary_transition = false,
-                                 bool direction_transition = false) {
+                                 bool direction_transition = false, bool rescue_input = false) {
             ordinary_transition = ordinary_transition || direction_transition;
             const bool session_transition = !force_fault && normal_cancellation();
             if (session_transition && mouse->left_button_cleanup_required()) {
@@ -367,8 +367,8 @@ public:
             if (active_id && !can_resume) controller.cancel(active_id, now_ns());
             const bool clean_ok = clean();
             const auto released_at = now_ns();
-            bool resumed = false;
-            if ((can_resume || ordinary_transition) && clean_ok) {
+            bool resumed = false, rescue_continuous = false;
+            if ((can_resume || ordinary_transition || rescue_input) && clean_ok) {
                 InputSnapshot after_cleanup;
                 WasdEventBatch after_events;
                 auto after_cursor = cursor;
@@ -407,6 +407,18 @@ public:
                     ordinary_transition = true;
                     cycle_resume = false;
                 }
+                if (rescue_input) {
+                    weapon_permission();
+                    // GSI或调用方撤销只影响重新武装；不能把健康物理事件流改写为断流。
+                    rescue_continuous = continuous && intent.input_continuous &&
+                        allowed && allowed() && focused && focused() &&
+                        !after_cleanup.virtual_keys[0x23] && !paused.load() && !stopping.load() && !arbiter->faulted_.load();
+                    if (rescue_continuous) {
+                        // 救援仍锁重新武装；只保存逐事件验证的物理流，不承接旧制动资格。
+                        history = checked_history; intent = checked_intent; cursor = after_cursor; input = after_cleanup;
+                        controller = AutoStopController(config);
+                    }
+                }
                 if (ordinary_transition) {
                     const bool direction_permitted = !direction_transition ||
                         ((cleanup_permission && session_valid && active_generation == cancel_generation.load()) ||
@@ -441,7 +453,8 @@ public:
             if (resumed) LOG_INFO("auto_stop", "键盘归还已确认；保留连续输入以支持再次急停");
             // 正常归还不破坏真实事件连续性；无法承接模型时，下次仅屏蔽，不伪造运动历史。
             // 清理期间的事件留给正式游标，下一轮先验证再准入。
-            const bool retain_input = (normal_activation_release || manual_release || ordinary_transition) && clean_ok && !force_fault && intent.input_continuous;
+            const bool retain_input = ((normal_activation_release || manual_release || ordinary_transition) && clean_ok &&
+                !force_fault && intent.input_continuous) || rescue_continuous;
             if (manual_release && !ordinary_transition) {
                 // 松键动作结束后仅用真实当前输入建立下一计划，不承接软件反向期间的运动估算。
                 controller = AutoStopController(config);
@@ -508,10 +521,15 @@ public:
                     input_ok = mouse->poll_input(input) && input.state_valid && input.status == InputMonitorStatus::READY;
                 // 救援只信任本设备的新按键边沿；失联缓存不产生救援动作。
                 bool rescue_pressed = false, only_weapon_keys = true;
+                std::string reported_release_keys;
                 if (input_ok) for (const int key : config.release_virtual_keys) {
                     if (key <= 0 || key >= 256) continue;
                     const bool pressed = input.virtual_keys[key] && !previous_release_keys[key];
                     rescue_pressed |= pressed;
+                    if (pressed) {
+                        if (!reported_release_keys.empty()) reported_release_keys += ',';
+                        reported_release_keys += std::to_string(key);
+                    }
                     if (pressed && !((key >= 0x31 && key <= 0x35) || key == 0x51)) only_weapon_keys = false;
                     previous_release_keys[key] = input.virtual_keys[key];
                 }
@@ -527,6 +545,14 @@ public:
                     normal_switch = normal_switch && input_ok && events_ok && intent.input_continuous &&
                         allowed && allowed() && focused && focused() && !input.virtual_keys[0x23] &&
                         !paused.load() && !arbiter->faulted_.load();
+                    {
+                        std::lock_guard lock(mutex);
+                        LOG_INFO("auto_stop", "监听报告救援边沿：vk={}，snapshot_seq={}，wasd_epoch={}，wasd_seq={}，held={}，continuous={}，trusted={}，trust_generation={}，release_required={}，only_weapon_keys={}，input_ok={}，events_ok={}，focused={}，allowed={}，fault={}，manual={}，normal_switch={}",
+                            reported_release_keys, input.sequence, intent.epoch, intent.sequence, unsigned(intent.held_mask),
+                            intent.input_continuous, state.weapon_context.session_trusted, state.weapon_context.trust_generation,
+                            state.release_required, only_weapon_keys, input_ok, events_ok, state.source_focused,
+                            allowed && allowed(), fault || arbiter->faulted_.load(), manual_fire_id.load() != 0, normal_switch);
+                    }
                     cancel_generation.fetch_add(1, std::memory_order_acq_rel);
                     {
                         std::lock_guard<std::mutex> lock(mutex);
@@ -539,7 +565,7 @@ public:
                     // 即使普通许可/焦点/暂停/FAULT已阻断，也只走键盘债务清理，不发新DOWN。
                     debt = true;
                     cancel_active(false, normal_switch ? "weapon_switch_hotkey" : "release_hotkey",
-                        false, false, false, normal_switch);
+                        false, false, false, normal_switch, false, !normal_switch);
                     target_consumed = false;
                     bool acknowledged = false, fault_remains = false;
                     {
