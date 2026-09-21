@@ -171,13 +171,13 @@ bool AutoStopController::resume_after_masked_hold(
     return true;
 }
 bool AutoStopController::restart_after_cleanup(const WasdMotionIntent& intent, std::int64_t cleanup_ns) noexcept {
-    if (!counterpulse_ || !timing_valid_ || !intent.input_continuous || !intent.history_valid ||
+    if (!counterpulse_ || !timing_valid_ || !intent.input_continuous ||
         intent.conflicting || intent.epoch == 0 || intent.sequence == 0 || intent.received_at_ns <= 0 ||
         cleanup_ns < intent.received_at_ns || intent.held_mask > 15 ||
         (intent.held_mask & 5) == 5 || (intent.held_mask & 10) == 10 ||
         intent.longitudinal != int(bool(intent.held_mask & 1)) - int(bool(intent.held_mask & 4)) ||
         intent.horizontal != int(bool(intent.held_mask & 8)) - int(bool(intent.held_mask & 2))) return false;
-    for (unsigned key = 0; key < 4; ++key) {
+    for (unsigned key = 0; intent.history_valid && key < 4; ++key) {
         const auto edge = intent.held_since_ns[key];
         if ((intent.held_mask & (1U << key)) ? edge <= 0 || edge > intent.received_at_ns : edge != 0) return false;
     }
@@ -234,17 +234,21 @@ AutoStopDecision AutoStopController::observe(const WasdMotionIntent& intent, std
         if ((intent.held_mask & (1U << key)) ? edge <= 0 || edge > intent.received_at_ns : edge != 0)
             edges_valid = false;
     }
-    if (!intent.history_valid || intent.conflicting || intent.epoch == 0 || intent.sequence == 0 ||
-        !edges_valid || intent.longitudinal != int(bool(intent.held_mask & 1)) - int(bool(intent.held_mask & 4)) ||
+    if ((counterpulse_ ? !intent.input_continuous : !intent.history_valid) || intent.epoch == 0 || intent.sequence == 0 ||
+        ((!counterpulse_ || intent.history_valid) && !edges_valid) || intent.longitudinal != int(bool(intent.held_mask & 1)) - int(bool(intent.held_mask & 4)) ||
         intent.horizontal != int(bool(intent.held_mask & 8)) - int(bool(intent.held_mask & 2)) ||
         intent.received_at_ns <= 0 || intent.received_at_ns > now_ns || intent.held_mask > 15 ||
-        (intent.held_mask & 5) == 5 || (intent.held_mask & 10) == 10 ||
         (input_.epoch && intent.epoch < input_.epoch) ||
         (!epoch_changed && (intent.sequence < input_.sequence ||
-                           (synchronized_ && input_.sequence != 0 && intent.sequence > input_.sequence &&
+                           ((synchronized_ || (counterpulse_ && intent.held_mask != 0)) && input_.sequence != 0 && intent.sequence > input_.sequence &&
                             intent.sequence - input_.sequence > 1) ||
                            intent.received_at_ns < input_.received_at_ns ||
                            (intent.sequence == input_.sequence && changed)))) {
+        invalidate(); return decision_;
+    }
+    if (intent.conflicting || (intent.held_mask & 5) == 5 || (intent.held_mask & 10) == 10) {
+        // 保留可信冲突报告的原始水位；固定时序不依赖已失效的速度历史。
+        if (counterpulse_) input_ = intent;
         invalidate(); return decision_;
     }
     if (epoch_changed || !synchronized_) {
@@ -253,8 +257,8 @@ AutoStopDecision AutoStopController::observe(const WasdMotionIntent& intent, std
         input_ = intent;
         if (now_ns <= 0 || now_ns < time_ns_) return decision_;
         if (was_active) return decision_;
-        // 缺口后已持键不补历史，只有明确释放可以开始新的意图估计。
-        if (intent.held_mask == 0) {
+        // 旧模型只接受真实释放重同步；固定时序可使用连续且无冲突的当前方向。
+        if (intent.held_mask == 0 || (counterpulse_ && !epoch_changed && intent.input_continuous)) {
             state_ = {}; synchronized_ = true; output_started_ = false; applied_mask_ = 0;
             time_ns_ = intent.received_at_ns;
             decision_.phase = AutoStopPhase::IDLE;

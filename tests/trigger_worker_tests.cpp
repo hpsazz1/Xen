@@ -366,7 +366,13 @@ void estimated_stop_callback_and_revalidation() {
     expect(f.requests == 0 && f.ids == 0 && f.mouse->count(true) == 0, "估计策略不申请显式租约");
     f.estimated_id = 77;
     expect(until([&] { return f.worker.firing_signal().confirmed_down; }), "独立估计资格就绪允许DOWN");
-    expect(f.worker.snapshot().estimated_stop_request_id == 77, "运行快照保存独立急停id");
+    // 按钮ACK信号先于普通状态快照发布，等待同一命令的快照，不假设两次读取原子同步。
+    expect(until([&] {
+        const auto signal = f.worker.firing_signal();
+        const auto state = f.worker.snapshot();
+        return signal.confirmed_down && state.phase == TriggerPhase::HELD &&
+            state.command_id == signal.id && state.estimated_stop_request_id == 77;
+    }), "运行快照保存独立急停id");
     f.estimated_id = 0;
     expect(until([&] { return f.mouse->count(false) == 1 && !f.worker.firing_signal().confirmed_down; }),
         "估计资格撤销立即UP并归零开火信号");

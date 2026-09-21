@@ -362,7 +362,7 @@ public:
                 AutoStopBlockReasonName(block_reason));
             // 正常松键或点射完成后的循环归还才承接受控输出模型；原始物理历史不补零事件。
             const bool can_resume = (normal_activation_release || cycle_resume) && independent && estimated && software_mask == 0 &&
-                !force_fault && intent.history_valid && !intent.conflicting && intent.held_mask == held_wasd(input);
+                !force_fault && intent.input_continuous && (config.use_counterpulse_timing || intent.history_valid) && !intent.conflicting && intent.held_mask == held_wasd(input);
             const auto before_cleanup_cursor = cursor;
             if (active_id && !can_resume) controller.cancel(active_id, now_ns());
             const bool clean_ok = clean();
@@ -391,7 +391,7 @@ public:
                     const auto checked = checked_history.observe(event.held_mask, event.epoch, event.sequence,
                         event.received_at_steady_ns, event.state_valid);
                     checked_intent = checked;
-                    continuous = checked.input_continuous && (direction_transition || (checked.history_valid && !checked.conflicting));
+                    continuous = checked.input_continuous && (direction_transition || ((config.use_counterpulse_timing || checked.history_valid) && !checked.conflicting));
                     checked_sequence = event.sequence;
                 }
                 continuous = continuous && after_cursor.sequence == checked_sequence;
@@ -417,8 +417,8 @@ public:
                         !after_cleanup.virtual_keys[0x23] && !paused.load() && !stopping.load() && !arbiter->faulted_.load())
                     {
                         resumed = controller.restart_after_cleanup(intent, released_at);
-                        if (direction_transition && !intent.history_valid) {
-                            // A/D重叠仍只有连续输入，没有运动历史；等真实全松重同步，不要求松许可键。
+                        if (!resumed && direction_transition && !intent.history_valid) {
+                            // 当前仍冲突时只保留连续输入，之后重新核验方向，不伪造运动历史。
                             controller = AutoStopController(config);
                             resumed = true;
                         }
@@ -431,10 +431,11 @@ public:
                     !after_cleanup.virtual_keys[0x23] && !release_key_held(after_cleanup) && allowed && allowed() &&
                     !paused.load() && !stopping.load() && !arbiter->faulted_.load() &&
                     active_generation == cancel_generation.load() && session_valid)
-                    resumed = controller.resume_after_masked_hold(intent, released_at);
+                    resumed = config.use_counterpulse_timing ? controller.restart_after_cleanup(intent, released_at) :
+                        controller.resume_after_masked_hold(intent, released_at);
                 if (!resumed && active_id) controller.cancel(active_id, now_ns());
             } else if (can_resume && active_id) controller.cancel(active_id, now_ns());
-            const bool retain_release = clean_ok && !force_fault && intent.history_valid && !intent.conflicting &&
+            const bool retain_release = clean_ok && !force_fault && intent.input_continuous && (config.use_counterpulse_timing || intent.history_valid) && !intent.conflicting &&
                 intent.held_mask == 0 && input.state_valid && input.status == InputMonitorStatus::READY && held_wasd(input) == 0;
             if (retain_release && !resumed) controller.observe(intent, now_ns());
             if (resumed) LOG_INFO("auto_stop", "键盘归还已确认；保留连续输入以支持再次急停");
@@ -777,6 +778,15 @@ public:
                         active_generation != cancel_generation.load() ? "caller_canceled" : "lease_expired";
                     cancel_active(false, reason, normal_release);
                 }
+                // 冲突解除后先归还旧屏蔽责任，再以当前可信方向创建完整制动请求。
+                if (active_id && independent && mask_only && masked_hold && config.use_counterpulse_timing &&
+                    manual_fire_id.load() == 0 && input_ok && events_ok && intent.input_continuous &&
+                    intent.epoch == active_input_epoch && !intent.conflicting && intent.held_mask != 0 &&
+                    held_wasd(input) == intent.held_mask) {
+                    cancel_active(false, "masked_direction_resolved", false, false, false, true, true);
+                    target_consumed = false;
+                    continue;
+                }
                 // 仅屏蔽没有制动完成资格；真实方向键全松后清理屏蔽，交回原地几何扳机。
                 // 已完成反向制动或人工接管仍沿用原保持契约，不补发接管期间的松键反向。
                 if (active_id && independent && masked_hold && manual_fire_id.load() == 0 &&
@@ -829,7 +839,7 @@ public:
                         original_mask = intent.held_mask;
                         estimated = false;
                         masked_hold = false;
-                        mask_only = independent && (!intent.history_valid || intent.conflicting);
+                        mask_only = independent && ((!config.use_counterpulse_timing && !intent.history_valid) || intent.conflicting);
                         if (!input_ok || !events_ok || (independent ? !intent.input_continuous : !intent.history_valid) || !permission(input) ||
                             (independent && !session_permission(false)) ||
                             active_generation != cancel_generation.load() || Clock::now() >= lease_end) {

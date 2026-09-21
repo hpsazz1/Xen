@@ -678,6 +678,89 @@ void weapon_session_recovery_contracts() {
     }
 }
 
+void held_direction_after_overlap_brakes() {
+    using namespace std::chrono_literals;
+    for (const bool initially_masked : {false, true}) for (const std::uint8_t held : {2, 3, 8}) {
+        auto fake = std::make_shared<Fake>();
+        std::atomic<std::uint64_t> id{0};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [&] { return ++id; }, [] { return true; });
+        AutoStopConfig config{true, 5}; config.cycle_enabled = true;
+        require(worker.start(config), "持续方向重叠后H40完整制动回归启动");
+        ready(worker, fake);
+        fake->physical_batch({2, 10});
+        wait_for([&] { return fake->drained(); });
+        if (initially_masked) {
+            publish_present_target(worker, Clock::now() + 2s);
+            wait_for([&] { return worker.snapshot().status == AutoStopStatus::MASKED; });
+            require(worker.estimated_completion_id() == 0 && fake->reports() == std::vector<int>({0}),
+                "当前AD仍重叠只能零报告保持，不能估算制动或授予完成编号");
+        }
+        fake->physical(held);
+        wait_for([&] { return fake->drained(); });
+        publish_present_target(worker, Clock::now() + 2s);
+        const auto deadline = Clock::now() + 300ms;
+        while (Clock::now() < deadline && worker.estimated_completion_id() == 0)
+            std::this_thread::sleep_for(1ms);
+        require(worker.estimated_completion_id() != 0,
+            "连续AD重叠解除后持续许可和方向必须完整制动，不能永久MASKED等全松");
+        const auto first = worker.estimated_completion_id();
+        const auto inverse = static_cast<int>(((held & 1) << 2) | ((held & 4) >> 2) |
+            ((held & 2) << 2) | ((held & 8) >> 2));
+        auto expected = initially_masked ? std::vector<int>({0, 0, inverse, 0}) : std::vector<int>({0, inverse, 0});
+        require(fake->reports() == expected,
+            "首次完成编号必须对应完整zero反向zero，不能给MASKED直接授资格");
+        require(worker.resume_movement(first, Clock::now() + 20ms), "固定时序首轮归还请求");
+        wait_for([&] { return worker.snapshot().cycle_count == 1; });
+        wait_for([&] { return worker.estimated_completion_id() > first; });
+        expected.insert(expected.end(), {0, inverse, 0});
+        require(fake->reports() == expected && !worker.snapshot().release_required,
+            "持续同方向的第二轮仍完整制动，不在点射清理后重新锁许可或丢失资格");
+        worker.stop();
+    }
+    for (int failure = 0; failure < 5; ++failure) {
+        auto fake = std::make_shared<Fake>();
+        std::atomic<std::uint64_t> id{0};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [&] { return ++id; }, [] { return true; });
+        if (failure == 0) fake->physical(8);
+        require(worker.start(AutoStopConfig{true, 5}), "当前方向不得越过输入信任断点");
+        if (failure != 0) {
+            ready(worker, fake);
+            fake->physical_batch({2, 10});
+            wait_for([&] { return fake->drained(); });
+            std::lock_guard lock(fake->mutex);
+            if (failure == 1) ++fake->sequence;
+            fake->held = 8;
+            fake->events.push_back({8, failure != 3, failure == 2 ? 2u : 1u,
+                ++fake->sequence, failure == 4 ? 1 : clock_ns()});
+        }
+        wait_for([&] { return fake->drained(); });
+        publish_present_target(worker, Clock::now() + 1s);
+        wait_for([&] { return worker.snapshot().block_reason == AutoStopBlockReason::INPUT_HISTORY; });
+        require(worker.estimated_completion_id() == 0 && !fake->has_masks() && !fake->has_software(),
+            "启动持键、序号缺口、epoch改变、无效报告及时间倒退不能借当前方向生成H40输出");
+        worker.stop();
+    }
+    {
+        auto fake = std::make_shared<Fake>();
+        std::atomic<std::uint64_t> id{0};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [&] { return ++id; }, [] { return true; });
+        require(worker.start(AutoStopConfig{true, 5}), "冲突解除清理UNKNOWN回归");
+        ready(worker, fake); fake->physical_batch({2, 10});
+        wait_for([&] { return fake->drained(); });
+        publish_present_target(worker, Clock::now() + 1s);
+        wait_for([&] { return worker.snapshot().status == AutoStopStatus::MASKED; });
+        { std::lock_guard lock(fake->mutex); fake->cleanup_fails = true; }
+        fake->physical(8);
+        wait_for([&] { return worker.snapshot().status == AutoStopStatus::FAULT; });
+        require(worker.estimated_completion_id() == 0 && fake->reports() == std::vector<int>({0}),
+            "冲突解除清理未ACK不得建立新反向计划或放行旧MASKED编号");
+        worker.stop();
+    }
+}
+
 void acquisition_direction_change_retries() {
     using namespace std::chrono_literals;
     for (int scenario = 0; scenario < 18; ++scenario) {
@@ -743,18 +826,6 @@ void acquisition_direction_change_retries() {
             { std::lock_guard lock(fake->mutex);
                 require(fake->software.empty(), "部分接管后换向不能先发送旧A方向制动");
             }
-            if (scenario == 5) {
-                // 重叠后仍可仅屏蔽，不能伪造完成；整个过程许可键始终保持按下。
-                publish_present_target(worker, Clock::now() + 2s);
-                wait_for([&] { return worker.snapshot().status == AutoStopStatus::MASKED; });
-                require(!worker.snapshot().release_required && worker.estimated_completion_id() == 0,
-                    "重叠后新目标可仅屏蔽但不得假造制动资格或锁许可");
-                fake->physical(0);
-                wait_for([&] { return fake->drained() && fake->released(); });
-                fake->physical(8);
-                wait_for([&] { return fake->drained(); });
-                require(!worker.snapshot().release_required, "A/D重叠后的历史重同步不要求释放许可键");
-            }
             if (scenario == 17) {
                 weapon_stage = 2;
                 wait_for([&] { return worker.snapshot().weapon_context.generation == 3; });
@@ -762,7 +833,7 @@ void acquisition_direction_change_retries() {
             publish_present_target(worker, Clock::now() + 2s);
             wait_for([&] { return worker.estimated_completion_id() > 1; });
             { std::lock_guard lock(fake->mutex);
-                require(fake->software == (scenario == 5 ? std::vector<int>({0, 0, 2, 0}) : scenario == 13 ? std::vector<int>({0, 8, 0}) : std::vector<int>({0, 2, 0})),
+                require(fake->software == (scenario == 13 ? std::vector<int>({0, 8, 0}) : std::vector<int>({0, 2, 0})),
                     "持续许可下重新准入须按最新真实D方向制动A，并完成zero反向zero");
             }
         }
@@ -859,6 +930,8 @@ void cleanup_report_preserves_next_brake() {
 }
 int main(int argc, char** argv) {
     try {
+        held_direction_after_overlap_brakes();
+        if (argc == 2 && std::string_view(argv[1]) == "--held-direction") return 0;
         acquisition_direction_change_retries();
         if (argc == 2 && std::string_view(argv[1]) == "--acquisition-direction") {
             std::cout << "取得控制期间换向与安全断点专项通过\n"; return 0;

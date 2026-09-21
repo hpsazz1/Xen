@@ -500,6 +500,54 @@ void target_loss_lifecycle(bool already_down) {
     trigger.stop(); stop.stop();
     require(mouse->released() && !mouse->cleanup_during_shot.load(), "组合关闭仍遵循先UP后键盘归还");
 }
+void held_direction_after_overlap_requires_completed_brake() {
+    auto mouse = std::make_shared<FakeMouse>();
+    auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+    std::atomic<std::uint64_t> next_id{0};
+    AutoStopWorker stop(mouse, arbiter, [] { return true; }, [&] { return ++next_id; }, [] { return true; });
+    TriggerWorker trigger(mouse, arbiter, [] { return true; }, [] { return true; }, [&] { return ++next_id; },
+        [&](std::uint64_t id) { return stop.request(id); }, [&](std::uint64_t id) { stop.cancel(id); }, {},
+        [&] { return stop.estimated_completion_id(); }, {}, {},
+        [&](const InputSnapshot& input) { return stop.idle_for_trigger(input); });
+    AutoStopConfig stop_config{true, 5};
+    stop_config.counter_hold_ms = 40; stop_config.shot_after_release_ms = 18;
+    TriggerConfig config;
+    config.enabled = config.require_stop = config.allow_estimated_stop = true;
+    config.hold_virtual_key = 5; config.fire_delay_ms = 0;
+    config.press_duration_ms = 150; config.shot_interval_ms = 500; config.max_observation_age_ms = 500;
+    mouse->physical(0, false);
+    require(stop.start(stop_config) && trigger.start(config), "方向重叠组合worker启动");
+    until([&] { return mouse->drained() && trigger.snapshot().reason == TriggerReason::RELEASED; });
+    // 连续真实事件清空旧运动历史，随后始终保持D和许可；目标在重叠结束后才出现。
+    for (const auto mask : {2, 10, 8}) {
+        mouse->physical(static_cast<std::uint8_t>(mask), true);
+        until([&] { return mouse->drained(); });
+    }
+    std::uint64_t sequence = 0;
+    until([&] {
+        stop.publish_tracking_target(Clock::now() + 300ms);
+        stop.publish_target(Clock::now() + 300ms);
+        trigger.publish(fresh_observation(++sequence));
+        return trigger.firing_signal().confirmed_down;
+    });
+    const auto keys = mouse->keyboard_commands();
+    const auto log = trigger.execution_log();
+    const auto down = std::find_if(log.events.begin(), log.events.end(), [](const auto& event) {
+        return event.button_action == TriggerButtonAction::DOWN && event.backend_called;
+    });
+    require(keys.size() >= 3 && keys[0].mask == 0 && keys[1].mask == 2 && keys[2].mask == 0,
+        "持D必须完成zero到A反向到zero，不能长期MASKED或误判原地");
+    require(keys[2].submitted >= keys[1].acknowledged + 40ms, "反向必须从协议ACK保持完整40ms");
+    require(down != log.events.end() && down->call_started_at >= keys[2].acknowledged + 18ms,
+        "真实DOWN提交必须晚于反向释放ACK加18ms");
+    require(!down->snapshot.stop_not_needed && down->snapshot.estimated_stop_request_id != 0 &&
+        down->snapshot.estimated_stop_request_id == stop.snapshot().request_id,
+        "持方向开火必须引用本轮制动资格，不能用原地绕过");
+    mouse->allow(false);
+    until([&] { return !trigger.firing_signal().confirmed_down; });
+    trigger.stop(); stop.stop();
+    require(mouse->released(), "方向重叠组合结束必须收齐UP和键盘归还");
+}
 void stationary_owner_does_not_interrupt_shot() {
     auto mouse = std::make_shared<FakeMouse>();
     auto arbiter = std::make_shared<AutoStopOutputArbiter>();
@@ -537,6 +585,7 @@ void stationary_owner_does_not_interrupt_shot() {
 } // namespace
 int main() {
     try {
+        held_direction_after_overlap_requires_completed_brake();
         target_loss_lifecycle(false);
         target_loss_lifecycle(true);
         gsi_trust_breaks_require_release();

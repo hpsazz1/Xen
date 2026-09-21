@@ -14,6 +14,49 @@ int main() {
     constexpr std::int64_t base = 1000000000, ms = 1000000;
     AutoStopConfig legacy;
     legacy.use_counterpulse_timing = false;
+    for (const std::uint8_t held : {2, 3, 8}) {
+        AutoStopController fixed;
+        AutoStopController old_model(legacy);
+        WasdInputHistory input;
+        std::int64_t time = base;
+        std::uint64_t sequence = 0;
+        for (const std::uint8_t mask : {std::uint8_t(0), std::uint8_t(2), std::uint8_t(10), held}) {
+            const auto intent = input.observe(mask, 1, ++sequence, time += ms);
+            fixed.observe(intent, time);
+            old_model.observe(intent, time);
+        }
+        const auto current = input.observe(held, 1, ++sequence, time += ms);
+        expect(current.input_continuous && !current.history_valid && !current.conflicting,
+            "真实AD重叠后当前方向可信但旧运动历史仍失效，不伪造全松");
+        for (int failure = 0; failure < 5; ++failure) {
+            auto checked = fixed;
+            auto invalid = current;
+            if (failure == 0) ++invalid.sequence;
+            if (failure == 1) invalid.received_at_ns = time + ms;
+            if (failure == 2) invalid.received_at_ns = time - 2 * ms;
+            if (failure == 3) ++invalid.epoch;
+            if (failure == 4) {
+                --invalid.sequence;
+                invalid.held_mask = held == 8 ? 2 : 8;
+                invalid.longitudinal = 0;
+                invalid.horizontal = invalid.held_mask == 8 ? 1 : -1;
+            }
+            expect(checked.observe(invalid, time).phase == AutoStopPhase::INVALID &&
+                checked.request(1, time + ms).phase != AutoStopPhase::WAITING_ACK,
+                "H40无旧历史分支仍拒绝序号缺口、未来/倒退时间、换代、同序号改键");
+        }
+        fixed.observe(current, time); old_model.observe(current, time);
+        auto d = fixed.request(1, time + ms);
+        expect(d.phase == AutoStopPhase::WAITING_ACK && d.desired_mask == 0,
+            "H40当前可信方向无需旧速度历史，仍须从零报告ACK开始完整制动");
+        d = fixed.acknowledge(1, d.command_id, 0, time + 2 * ms);
+        const auto inverse = static_cast<std::uint8_t>(((held & 1) << 2) | ((held & 4) >> 2) |
+            ((held & 2) << 2) | ((held & 8) >> 2));
+        expect(d.phase == AutoStopPhase::WAITING_ACK && d.desired_mask == inverse,
+            "H40只依据当前真实方向形成反向，不能假造历史或授予完成");
+        expect(old_model.request(1, time + ms).phase != AutoStopPhase::WAITING_ACK,
+            "旧动量模型仍拒绝未知历史，不借固定时序资格越权恢复");
+    }
     for (const bool restart : {false, true}) {
         AutoStopController restored;
         WasdInputHistory input;
