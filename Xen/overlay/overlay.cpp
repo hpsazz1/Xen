@@ -2959,63 +2959,39 @@ struct Overlay::Impl {
         switch (snapshot.auto_stop.status) {
             case AutoStopStatus::DISABLED: status = "已关闭"; break;
             case AutoStopStatus::UNSUPPORTED_BACKEND: status = "需要 KMBOX NET"; break;
-            case AutoStopStatus::UNBOUND: status = "未绑定允许键，松键急停仍可用"; break;
+            case AutoStopStatus::UNBOUND: status = "未绑定允许键"; break;
             case AutoStopStatus::AWAITING_VALIDATION: status = "待设备与制动验证"; break;
             case AutoStopStatus::PAUSED: status = "已暂停"; break;
-            case AutoStopStatus::READY: status = "等待方向松键或快捷键与目标"; break;
+            case AutoStopStatus::READY: status = "待命"; break;
             case AutoStopStatus::WAITING_INPUT: status = "等待有效输入"; break;
-            case AutoStopStatus::MASKED: status = "已屏蔽保持（未估算制动）"; break;
+            case AutoStopStatus::MASKED: status = "保持中（未制动）"; break;
             case AutoStopStatus::BRAKING: status = "制动中"; break;
-            case AutoStopStatus::ESTIMATED: status = app_config.auto_stop.cycle_enabled ? "制动预计完成，等待点射释放后恢复移动" : "制动预计完成，松开允许键恢复移动"; break;
+            case AutoStopStatus::ESTIMATED: status = "制动预计完成"; break;
             case AutoStopStatus::CANCELED: status = "已取消"; break;
-            case AutoStopStatus::FAULT: status = "故障，需检查清理状态"; break;
+            case AutoStopStatus::FAULT: status = "输出故障"; break;
         }
+        if (snapshot.auto_stop.cycle_moving && snapshot.auto_stop.status != AutoStopStatus::FAULT &&
+            snapshot.auto_stop.status != AutoStopStatus::PAUSED) status = "移动中，等待下一轮";
         ImGui::TextWrapped("会话：%s", status);
-        ImGui::TextWrapped("GSI武器：%s（%s）", weapon::display_name(snapshot.weapon_snapshot.canonical_id).data(),
-            weapon::status_name(snapshot.weapon_snapshot.status));
-
-        if (app_config.auto_stop.cycle_enabled) {
-            ImGui::TextWrapped("循环：%s；已归还移动 %llu 次", snapshot.auto_stop.cycle_moving ? "移动中，等待下一轮目标与间隔" : "等待准入、制动或点射",
-                static_cast<unsigned long long>(snapshot.auto_stop.cycle_count));
-        }
-        if (snapshot.auto_stop.independent_trigger_enabled) {
-            ImGui::TextWrapped("快捷键急停阻断：%s", AutoStopBlockReasonName(snapshot.auto_stop.block_reason));
-            if (!snapshot.auto_stop.source_focused)
-                ImGui::TextWrapped("等待源机焦点：请检查设置中的源状态桥接与源机前台游戏。");
-            if (snapshot.auto_stop.block_reason == AutoStopBlockReason::SOURCE_TIMING_INVALID)
-                ImGui::TextWrapped("源机时钟服务不可用或映射尚未建立，请检查源机时钟服务与连接状态。");
-            else if (!snapshot.auto_stop.target_available)
-                ImGui::TextWrapped("快捷键急停等待新鲜目标：需要有效源时钟及50毫秒内的配置目标检测；人工松键急停无需目标。");
-        }
-        if (snapshot.auto_stop.telemetry_available) {
-            if (snapshot.auto_stop.use_counterpulse_timing)
-                ImGui::Text("运行急停时序：反向 %dms / 释放后 %dms", snapshot.auto_stop.counter_hold_ms,
-                    snapshot.auto_stop.shot_after_release_ms);
-            if (snapshot.auto_stop.status == AutoStopStatus::FAULT)
-                ImGui::TextWrapped("故障锁存仍保留；检查清理状态后停止并重新启动。");
-            if (snapshot.auto_stop.cleanup_unknown)
-                ImGui::TextWrapped("设备清理尚未确认；控制状态未知。");
-        } else {
-            ImGui::TextWrapped("本次会话暂无制动执行记录。");
-        }
-        ImGui::TextWrapped("预计完成仅表示制动计划结束，不代表实测停稳或允许开火。");
-        if (snapshot.auto_stop.status == AutoStopStatus::MASKED)
-            ImGui::TextWrapped("方向重叠或制动历史不可用：已阻止方向键继续输入，保持至松开急停键；未执行反向制动，可能仍有惯性滑行。");
+        if (snapshot.state == RuntimeState::RUNNING && snapshot.auto_stop.independent_trigger_enabled &&
+            snapshot.auto_stop.status != AutoStopStatus::FAULT && snapshot.auto_stop.status != AutoStopStatus::PAUSED &&
+            snapshot.auto_stop.block_reason != AutoStopBlockReason::NONE)
+            ImGui::TextWrapped("当前条件：%s", AutoStopBlockReasonName(snapshot.auto_stop.block_reason));
+        if (snapshot.auto_stop.cleanup_unknown)
+            ImGui::TextWrapped("按键释放未确认，请检查设备连接。");
+        if (snapshot.auto_stop.status == AutoStopStatus::FAULT)
+            ImGui::TextWrapped("检查设备后停止并重新启动。");
         ImGui::Separator();
-        ImGui::TextWrapped("启用后，WASD全部松开时按最后释放方向轻点反方向，无需快捷键或目标。仍有方向键按住时不制动，例如W+D先松W不动作，再松D才轻点A。重新按方向键立即归还；快捷键急停接管期间的松键不叠加、不补发。");
-        ImGui::TextWrapped("按住快捷键且准星进入人物完整检测范围时制动；无需开启自动扳机，不使用扳机缩小区域。");
-        ImGui::TextWrapped("准星进入人物范围用于首次触发；接管WASD后，制动途中和保持期间的离框、目标消失或换向都不会解除。松开允许键恢复移动；循环开启时每次点射释放后也会归还移动。失焦、救援、GSI失效和输入异常仍会安全释放。");
-        ImGui::TextWrapped("面向单方向及相邻双键移动；自动急停与物理输出安全急停相互独立。");
         ImGui::BeginDisabled(!can_edit);
         const auto key_active = current_virtual_key_state();
         if (can_edit) process_hotkey_capture(app_config, actions, key_active);
         if (begin_form("auto_stop_form", 126.0f)) {
-            form_row("启用自动急停", "同时控制快捷键急停和人工松方向键急停，仅支持 KMBOX NET；运行后满足安全条件即可响应人工松键，预计完成不等于角色已停稳。");
+            form_row("启用自动急停", "启用持键急停与松方向键急停，仅支持 KMBOX NET。");
             ImGui::BeginDisabled(app_config.mouse.backend != MouseBackend::KMBOX_NET &&
                                  !app_config.auto_stop.enabled);
             toggle_switch("##auto_stop_enabled", &app_config.auto_stop.enabled);
             ImGui::EndDisabled();
-            form_row("移动点射循环", "持续按住方向键及允许键；点射释放确认后解除WASD屏蔽，下一轮按武器间隔重新准入。开启会同时配置点射、估计急停联动、共用允许键、GSI自动选枪及共享资料；GSI身份与连接须已配置。保存不会启动输出。");
+            form_row("移动点射循环", "联动开启扳机点射、估计急停与 GSI，共用允许键；保存不会启动输出。");
             if (toggle_switch("##auxiliary_cycle", &app_config.auto_stop.cycle_enabled) && app_config.auto_stop.cycle_enabled) {
                 app_config.auto_stop.enabled = true;
                 app_config.trigger.enabled = app_config.trigger.fire_enabled = true;
@@ -3024,22 +3000,22 @@ struct Overlay::Impl {
                 app_config.trigger.hold_virtual_key = app_config.auto_stop.activation_virtual_key;
                 app_config.gsi.enabled = true;
             }
-            form_row("GSI自动识别", "与弹道和共享武器资料使用同一套名称；身份、地址和认证仍在设置页配置。GSI只提供武器状态，不证明角色已停稳。");
+            form_row("GSI自动识别", "读取当前武器状态；源端连接在设置页配置。");
             toggle_switch("##auxiliary_gsi_enabled", &app_config.gsi.enabled);
             const int key = app_config.auto_stop.activation_virtual_key;
             render_hotkey_row("允许键（按住）", "##auto_stop_activation_key",
-                "按住且准星进入配置人物范围时触发制动，可与瞄准输出、自动扳机共用；禁止 WASD，不能与运行启停或安全急停重复。支持本机及已连接后端的按键，Esc 清空。",
+                "可与瞄准、扳机共用；不能绑定 WASD、运行启停或安全急停键。Esc 清空。",
                 HotkeyBindingTarget::AUTO_STOP,
                 key == 0 ? std::vector<int>{} : std::vector<int>{key}, key_active);
             if (app_config.auto_stop.cycle_enabled)
                 app_config.trigger.hold_virtual_key = app_config.auto_stop.activation_virtual_key;
             render_hotkey_row("释放急停按键", "##auto_stop_release_keys",
-                "任意一个键即取消急停、释放软件按键并解除 WASD 屏蔽。默认数字1至5和Q；重复采集可追加多个键，Esc清空。不能使用WASD或急停允许键。设备失联时无法保证收到按键或确认释放。",
+                "任意一键取消接管；可追加多个键，Esc 清空。不能绑定 WASD 或允许键。",
                 HotkeyBindingTarget::AUTO_STOP_RELEASE,
                 app_config.auto_stop.release_virtual_keys, key_active);
-            form_row("反向保持 / ms", "从反向按下协议ACK起算，默认40ms；范围1至200ms。按实际WASD方向制动，运行中不热改。");
+            form_row("反向保持 / ms", "从反向按下确认起算；默认 40 ms。");
             slider_int_control("auto_stop_counter_hold", &app_config.auto_stop.counter_hold_ms, 1, 200);
-            form_row("反向释放后等待 / ms", "从反向UP协议ACK起算，默认18ms；范围0至200ms，到期才报告估计完成。与点射冷却并行，不叠加完整武器间隔。");
+            form_row("反向释放后等待 / ms", "从反向释放确认起算；默认 18 ms，仅表示预计完成。");
             slider_int_control("auto_stop_after_release", &app_config.auto_stop.shot_after_release_ms, 0, 200);
             ImGui::EndTable();
         }
@@ -3058,7 +3034,7 @@ struct Overlay::Impl {
                 {RuntimeIntentType::SET_AUTO_STOP_PAUSED, !paused});
         }
         ImGui::EndDisabled();
-        show_help_tooltip("仅调整本次会话；暂停会取消当前请求，恢复不会重放旧请求。预计完成不是观察停稳；只有显式估计联动才将其作为扳机的一项条件。");
+        show_help_tooltip("暂停会释放当前接管；恢复仅接受新请求。");
         end_config_panel();
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         render_trigger_config(snapshot, app_config, can_edit, key_active);

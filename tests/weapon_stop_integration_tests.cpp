@@ -10,6 +10,7 @@
 #include <iostream>
 #include <mutex>
 #include <stdexcept>
+#include <source_location>
 #include <thread>
 #include <vector>
 
@@ -22,10 +23,11 @@ void require(bool value, const char* message) {
 std::int64_t ns(Clock::time_point time) {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch()).count();
 }
-template<class Predicate> void until(Predicate predicate, std::chrono::milliseconds budget = 500ms) {
+template<class Predicate> void until(Predicate predicate, std::chrono::milliseconds budget = 500ms,
+        const std::source_location source = std::source_location::current()) {
     const auto deadline = Clock::now() + budget;
     while (!predicate()) {
-        if (Clock::now() >= deadline) throw std::runtime_error("组合测试等待超时，未获得所需执行证据");
+        if (Clock::now() >= deadline) throw std::runtime_error(std::string("组合测试等待超时：") + source.file_name() + ":" + std::to_string(source.line()));
         std::this_thread::sleep_for(1ms);
     }
 }
@@ -233,9 +235,19 @@ void gsi_session_recovery(const char* transition) {
     until([&] { return mouse->drained() && trigger.snapshot().reason == TriggerReason::RELEASED; });
     mouse->physical(2, true);
     std::uint64_t sequence = 0;
-    auto publish = [&] { stop.publish_target(Clock::now() + 300ms); trigger.publish(fresh_observation(++sequence)); };
-    until([&] { publish(); return trigger.firing_signal().confirmed_down; });
-    const auto old_stop = trigger.snapshot().estimated_stop_request_id;
+    auto publish = [&] { stop.publish_tracking_target(Clock::now() + 300ms); stop.publish_target(Clock::now() + 300ms); trigger.publish(fresh_observation(++sequence)); };
+    TriggerSnapshot initial_down;
+    until([&] {
+        publish();
+        const auto firing = trigger.firing_signal();
+        const auto current = trigger.snapshot();
+        // 按钮ACK先于完整快照发布；两个getter必须用命令编号关联。
+        if (!firing.confirmed_down || current.command_id != firing.id ||
+            !current.button_may_be_down || current.estimated_stop_request_id == 0) return false;
+        initial_down = current;
+        return true;
+    });
+    const auto old_stop = initial_down.estimated_stop_request_id;
     const auto before = mouse->downs.load();
     if (std::string_view(transition) == "switch") ingest("weapon_deagle", "active", 7);
     else ingest("weapon_ak47", transition, 0);
@@ -247,14 +259,18 @@ void gsi_session_recovery(const char* transition) {
         ingest("weapon_ak47", "active", 30);
     }
     bool recovered = false;
+    TriggerSnapshot state;
     const auto end = Clock::now() + 1200ms;
     while (Clock::now() < end) {
         publish();
-        if (mouse->downs > before && trigger.snapshot().estimated_stop_request_id != 0 &&
-            trigger.snapshot().estimated_stop_request_id != old_stop && trigger.firing_signal().confirmed_down) { recovered = true; break; }
+        const auto firing = trigger.firing_signal();
+        const auto current = trigger.snapshot();
+        state = current;
+        if (firing.confirmed_down && current.command_id == firing.id && current.button_may_be_down &&
+            current.command_id != initial_down.command_id && current.estimated_stop_request_id != 0 &&
+            current.estimated_stop_request_id != old_stop) { recovered = true; break; }
         std::this_thread::sleep_for(1ms);
     }
-    const auto state = trigger.snapshot();
     const bool stop_latched = stop.snapshot().release_required;
     trigger.stop(); stop.stop();
     if (!recovered) std::cerr << "transition=" << transition << " trigger=" << static_cast<int>(state.reason)
@@ -277,7 +293,10 @@ void run_weapon(const char* weapon_id, bool cycle = false, bool lose_candidate =
     AutoStopWorker stop(mouse, arbiter, [] { return true; }, [&] { return ++next_id; }, [] { return true; });
     std::function<void(std::uint64_t, TriggerTime)> resume;
     if (cycle) resume = [&](std::uint64_t id, TriggerTime deadline) {
-        require(stop.resume_movement(id, deadline - 58ms), "循环必须接收当前点射对应的急停归还");
+        const bool accepted = stop.resume_movement(id, deadline - 58ms);
+        // 与生产回调一致：跟踪已撤销时归还可拒绝，继续取消旧请求以收齐清理责任。
+        if (!accepted && lose_target) stop.cancel(id);
+        else require(accepted, "有效循环必须接收当前点射对应的急停归还");
     };
     TriggerWorker trigger(mouse, arbiter, [] { return true; }, [] { return true; }, [&] { return ++next_id; },
         [&](std::uint64_t id) { ++trigger_requests; return stop.request(id); },
@@ -308,7 +327,7 @@ void run_weapon(const char* weapon_id, bool cycle = false, bool lose_candidate =
     std::uint64_t sequence = 0;
     if (leave_trigger_region) {
         until([&] {
-            stop.publish_target(Clock::now() + 300ms);
+            stop.publish_tracking_target(Clock::now() + 300ms); stop.publish_target(Clock::now() + 300ms);
             trigger.publish(fresh_observation(++sequence));
             return mouse->downs == 1 && trigger.firing_signal().confirmed_down;
         });
@@ -317,26 +336,31 @@ void run_weapon(const char* weapon_id, bool cycle = false, bool lose_candidate =
             // 原身体仍唯一连续匹配，但准星已离开缩小后的触发范围。
             moved->detections[0].x1 += 11;
             moved->detections[0].x2 += 11;
-            stop.publish_target(Clock::now() + 300ms);
+            stop.publish_tracking_target(Clock::now() + 300ms); stop.publish_target(Clock::now() + 300ms);
             trigger.publish(moved);
             return mouse->ups == 1 && !trigger.snapshot().button_may_be_down;
         });
         require(stop.snapshot().cycle_count <= 1, "短点射未结束前不得提前启动下一轮急停");
     }
+    std::uint64_t expected_cycles = 2;
     if (lose_candidate) {
         until([&] {
-            stop.publish_target(Clock::now() + 300ms);
+            stop.publish_tracking_target(Clock::now() + 300ms); stop.publish_target(Clock::now() + 300ms);
             trigger.publish(fresh_observation(++sequence));
             return mouse->downs == 1 && trigger.firing_signal().confirmed_down;
         });
         auto missing = fresh_observation(++sequence);
         missing->detections.clear();
         trigger.publish(missing);
+        if (lose_target) stop.publish_tracking_target({});
         until([&] { return mouse->ups == 1 && !trigger.snapshot().button_may_be_down; });
-        until([&] { return stop.snapshot().cycle_count == 1 && mouse->released(); });
+        until([&] { const auto current = stop.snapshot();
+            return mouse->released() && (lose_target ? current.canceled + current.cycle_count >= 1 : current.cycle_count == 1); });
+        expected_cycles = stop.snapshot().cycle_count + 1;
         require(!stop.snapshot().release_required, "候选丢失后的已确认抬键不得要求松键重按");
         const auto waiting_until = Clock::now() + std::chrono::milliseconds(profile->fire_interval_ms) + 80ms;
         while (Clock::now() < waiting_until) {
+            stop.publish_tracking_target(lose_target ? Clock::time_point{} : Clock::now() + 300ms);
             stop.publish_target(lose_target ? Clock::now() : Clock::now() + 300ms);
             auto empty = fresh_observation(++sequence);
             empty->detections.clear();
@@ -347,17 +371,17 @@ void run_weapon(const char* weapon_id, bool cycle = false, bool lose_candidate =
         }
     }
     until([&] {
-        stop.publish_target(Clock::now() + 300ms);
+        stop.publish_tracking_target(Clock::now() + 300ms); stop.publish_target(Clock::now() + 300ms);
         trigger.publish(fresh_observation(++sequence));
         return mouse->ups >= 2 && !trigger.snapshot().button_may_be_down &&
-            (!cycle || (stop.snapshot().cycle_count >= 2 && mouse->released()));
+            (!cycle || (stop.snapshot().cycle_count >= expected_cycles && mouse->released()));
     }, 2500ms);
     const auto keys = mouse->keyboard_commands();
     const auto stopped = stop.snapshot();
     require(keys.size() == (cycle ? 6 : 3) && keys[0].mask == 0 && keys[1].mask == 8 && keys[2].mask == 0,
         "每次接管均须zero→D→zero，循环每发重新制动；旧模式只制动一次");
     if (cycle) require(keys[3].mask == 0 && keys[4].mask == 8 && keys[5].mask == 0 &&
-        stopped.cycle_moving && stopped.cycle_count == 2 && !mouse->cleanup_during_shot.load(),
+        stopped.cycle_moving && stopped.cycle_count == expected_cycles && !mouse->cleanup_during_shot.load(),
         "持续按A必须完成两轮反向制动，且仅在LEFT UP确认后归还移动");
     require(keys[2].submitted >= keys[1].acknowledged + 40ms, "反向按住不得早于ACK加40ms释放");
     require(stopped.requests == (cycle ? 2 : 1) && stopped.completed == (cycle ? 2 : 1) && trigger_requests == 0,
@@ -379,7 +403,8 @@ void run_weapon(const char* weapon_id, bool cycle = false, bool lose_candidate =
         "武器两次DOWN实际提交间隔不得短于共享参数");
     for (std::size_t index = 0; index < 2; ++index) {
         if (lose_candidate && index == 0)
-            require(up_events[index].snapshot.reason == TriggerReason::NO_CANDIDATE,
+            require(up_events[index].snapshot.reason == TriggerReason::NO_CANDIDATE ||
+                (lose_target && up_events[index].snapshot.reason == TriggerReason::STOP_EXPIRED),
                 "首发必须由候选失效提前抬键，不能用正常到期冒充恢复回归");
         else require(up_events[index].call_started_at >= down_events[index].protocol_ack_received_at + std::chrono::milliseconds(profile->shot_hold_ms),
             "正常LEFT UP提交不得早于DOWN协议ACK加武器按住时长");
@@ -390,6 +415,84 @@ void run_weapon(const char* weapon_id, bool cycle = false, bool lose_candidate =
     }
     require(mouse->released() && mouse->moves == 0, "松允许键清理必须归还键鼠且不得产生鼠标位移");
     std::cout << weapon_id << "：共享生产worker组合证据通过，未连接设备\n";
+}
+// 从未DOWN和已DOWN两个阶段验证真实人物消失；纯触发域丢失仍保留跟踪资格。
+void target_loss_lifecycle(bool already_down) {
+    auto mouse = std::make_shared<FakeMouse>();
+    auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+    std::atomic<std::uint64_t> next_id{0};
+    AutoStopWorker stop(mouse, arbiter, [] { return true; }, [&] { return ++next_id; }, [] { return true; });
+    TriggerWorker trigger(mouse, arbiter, [] { return true; }, [] { return true; }, [&] { return ++next_id; },
+        [&](std::uint64_t id) { return stop.request(id); }, [&](std::uint64_t id) { stop.cancel(id); }, {},
+        [&] { return stop.estimated_completion_id(); },
+        [&](std::uint64_t id, TriggerTime deadline) { stop.resume_movement(id, deadline - 58ms); });
+    AutoStopConfig sc{true, 5}; sc.cycle_enabled = true;
+    TriggerConfig tc; tc.enabled = tc.require_stop = tc.allow_estimated_stop = true;
+    tc.hold_virtual_key = 5; tc.fire_delay_ms = 0; tc.range_percent = 50;
+    tc.press_duration_ms = 200; tc.shot_interval_ms = 500; tc.max_observation_age_ms = 300;
+    mouse->physical(0, false);
+    require(stop.start(sc) && trigger.start(tc), "目标生命周期组合worker启动");
+    until([&] { return mouse->drained() && trigger.snapshot().reason == TriggerReason::RELEASED; });
+    mouse->physical(2, true);
+    std::uint64_t sequence = 0;
+    auto publish_visible = [&](bool inside) {
+        stop.publish_tracking_target(Clock::now() + 300ms);
+        stop.publish_target(Clock::now() + 300ms);
+        auto observation = fresh_observation(++sequence);
+        if (!inside) {
+            observation->detections[0].x1 += 11;
+            observation->detections[0].x2 += 11;
+        }
+        trigger.publish(observation);
+    };
+    until([&] {
+        publish_visible(already_down);
+        return already_down ? trigger.firing_signal().confirmed_down :
+            stop.estimated_completion_id() != 0 && trigger.snapshot().reason == TriggerReason::NO_CANDIDATE;
+    });
+    const auto previous_stop = stop.estimated_completion_id();
+    require(previous_stop != 0, "人物消失前必须已拥有本轮完成资格");
+    if (!already_down) {
+        // 仅准星离开人物或触发范围，仍有同一跟踪人物，不得归还键盘。
+        const auto keep_until = Clock::now() + 80ms;
+        while (Clock::now() < keep_until) {
+            stop.publish_tracking_target(Clock::now() + 300ms);
+            stop.publish_target({}, AutoStopBlockReason::CROSSHAIR_OUTSIDE_TARGET);
+            auto outside = fresh_observation(++sequence);
+            outside->detections[0].x1 += 40; outside->detections[0].x2 += 40;
+            trigger.publish(outside);
+            require(stop.estimated_completion_id() == previous_stop && !mouse->released() && mouse->downs == 0,
+                "仍有跟踪人物时离开触发域或准星离人物不得误释放急停");
+            std::this_thread::sleep_for(1ms);
+        }
+    }
+    auto missing = fresh_observation(++sequence); missing->detections.clear();
+    trigger.publish(missing);
+    stop.publish_target({}, AutoStopBlockReason::NO_TARGET);
+    stop.publish_tracking_target({});
+    until([&] { return mouse->released() && !trigger.snapshot().button_may_be_down &&
+        stop.estimated_completion_id() == 0; });
+    require(!stop.snapshot().release_required, "真实人物消失只撤销本轮急停，不要求松许可键");
+    require(!mouse->cleanup_during_shot.load(), "已DOWN后人物消失必须先LEFT UP ACK再归还键盘");
+    const auto requests_after_loss = stop.snapshot().requests;
+    const auto missing_until = Clock::now() + 70ms;
+    while (Clock::now() < missing_until) {
+        auto empty = fresh_observation(++sequence); empty->detections.clear(); trigger.publish(empty);
+        require(mouse->released() && stop.snapshot().requests == requests_after_loss,
+            "人物未恢复期间不得凭旧目标再次接管");
+        std::this_thread::sleep_for(1ms);
+    }
+    until([&] {
+        publish_visible(true);
+        const auto firing = trigger.firing_signal();
+        const auto state = trigger.snapshot();
+        return firing.confirmed_down && state.estimated_stop_request_id != 0 &&
+            state.estimated_stop_request_id != previous_stop;
+    }, 1500ms);
+    require(stop.snapshot().requests > requests_after_loss && !stop.snapshot().release_required,
+        "持续许可下新人物必须重新急停并绑定新编号后才触发");
+    trigger.stop(); stop.stop();
+    require(mouse->released() && !mouse->cleanup_during_shot.load(), "组合关闭仍遵循先UP后键盘归还");
 }
 void stationary_owner_does_not_interrupt_shot() {
     auto mouse = std::make_shared<FakeMouse>();
@@ -428,6 +531,8 @@ void stationary_owner_does_not_interrupt_shot() {
 } // namespace
 int main() {
     try {
+        target_loss_lifecycle(false);
+        target_loss_lifecycle(true);
         gsi_trust_breaks_require_release();
         for (const char* transition : {"reloading", "active", "switch"}) gsi_session_recovery(transition);
         stationary_owner_does_not_interrupt_shot();

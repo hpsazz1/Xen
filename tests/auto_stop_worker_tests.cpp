@@ -8,6 +8,7 @@
 #include <string_view>
 #include <source_location>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -106,11 +107,15 @@ public:
     }
     KeyboardReceipt cleanup_wasd_keyboard() noexcept override {
         BackendCall call(*this);
-        std::lock_guard<std::mutex> lock(mutex); ++cleanup_checks;
+        std::unique_lock<std::mutex> lock(mutex); ++cleanup_checks;
         cleanup_started.push_back(Clock::now());
         if (installed_masks == 0 && current_software == 0) {
             KeyboardReceipt result; result.disposition = KeyboardDisposition::ACKNOWLEDGED; return result;
         }
+        auto callback = std::exchange(before_cleanup, {});
+        lock.unlock();
+        if (callback) callback();
+        lock.lock();
         ++cleanups; auto receipt = acknowledged();
         cleanup_at = Clock::now();
         if (cleanup_fails) receipt.disposition = KeyboardDisposition::APPLICATION_UNKNOWN;
@@ -169,10 +174,15 @@ public:
     int cleanup_report_mode = 0;
     std::function<void()> after_first_software;
     std::function<void()> before_wasd_read;
+    std::function<void()> before_cleanup;
     std::function<void(std::size_t)> after_mask;
     std::atomic<int> closes{0};
     Clock::time_point cleanup_at{};
 };
+void publish_present_target(AutoStopWorker& worker, Clock::time_point deadline) {
+    worker.publish_tracking_target(deadline);
+    worker.publish_target(deadline);
+}
 void bounded_aim_transaction_wait() {
     AutoStopOutputArbiter arbiter;
     auto owner = arbiter.try_enter_cleanup();
@@ -414,7 +424,7 @@ void manual_release_contracts() {
         require(worker.start(config), "manual抑制启动失败");
         fake->physical(0); wait_for([&] { return fake->drained(); });
         fake->physical(1); wait_for([&] { return fake->drained(); });
-        worker.publish_target(Clock::now() + 1s);
+        publish_present_target(worker, Clock::now() + 1s);
         { std::lock_guard lock(fake->mutex); fake->activation = true; }
         wait_for([&] { return fake->has_masks() && fake->has_software(); });
         fake->physical(0); wait_for([&] { return fake->drained(); });
@@ -440,7 +450,7 @@ void manual_release_contracts() {
         { std::lock_guard lock(fake->mutex);
             fake->after_mask = [&](std::size_t) { if (!fake->has_cleanup()) cleaned_before_mask = false; };
         }
-        worker.publish_target(Clock::now() + 1s);
+        publish_present_target(worker, Clock::now() + 1s);
         { std::lock_guard lock(fake->mutex); fake->activation = true; }
         fake->physical(8);
         wait_for([&] { return fake->has_masks(); });
@@ -474,7 +484,7 @@ void manual_fire_retains_stop_contracts() {
         AutoStopConfig config{true, 5}; config.cycle_enabled = true;
         require(worker.start(config), "人工开火保持回归启动");
         ready(worker, fake);
-        worker.publish_target(Clock::now() + std::chrono::seconds(2));
+        publish_present_target(worker, Clock::now() + std::chrono::seconds(2));
         worker.publish_tracking_target(Clock::now() + std::chrono::seconds(2));
         wait_for([&] { return worker.estimated_completion_id() != 0; });
         const auto stop_id = worker.estimated_completion_id();
@@ -516,6 +526,56 @@ void manual_fire_retains_stop_contracts() {
         });
         require(worker.snapshot().requests == 1 && worker.snapshot().cycle_count == 0,
             "人工保持结束只清理原请求，不恢复点射周期或分配新请求");
+        worker.stop();
+    }
+}
+
+void target_loss_releases_hold() {
+    using namespace std::chrono_literals;
+    for (int mode = 0; mode < 5; ++mode) {
+        auto fake = std::make_shared<Fake>();
+        std::atomic<std::uint64_t> id{0};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [&] { return ++id; }, [] { return true; });
+        AutoStopConfig config{true, 5}; config.cycle_enabled = true;
+        require(worker.start(config), "目标消失回归启动");
+        ready(worker, fake);
+        worker.publish_tracking_target(Clock::now() + 1s);
+        publish_present_target(worker, Clock::now() + 1s);
+        wait_for([&] { return worker.estimated_completion_id() != 0; });
+        const auto previous_id = worker.estimated_completion_id();
+        // 仅准星离开准入范围仍有真实人物：不应归还正在持有的急停。
+        worker.publish_target({}, AutoStopBlockReason::CROSSHAIR_OUTSIDE_TARGET);
+        std::this_thread::sleep_for(15ms);
+        require(!fake->released(), "仅离开准入范围不能冒充目标消失");
+        if (mode >= 3) {
+            { std::lock_guard lock(fake->mutex); fake->before_cleanup = [&] {
+                worker.publish_tracking_target({});
+                if (mode == 4) worker.publish_tracking_target(Clock::now() + 1s);
+            }; }
+            require(worker.resume_movement(previous_id, Clock::now()), "目标消失穿插已确认点射归还");
+        } else worker.publish_tracking_target(mode == 0 ? Clock::time_point{} : Clock::now() + 10ms);
+        if (mode == 2) {
+            std::lock_guard lock(fake->mutex); fake->cleanup_fails = true;
+        }
+        const auto deadline = Clock::now() + 200ms;
+        while (Clock::now() < deadline && (mode == 2 ? !worker.snapshot().cleanup_unknown : !fake->released()))
+            std::this_thread::sleep_for(1ms);
+        require(worker.estimated_completion_id() == 0 &&
+            (mode == 2 ? worker.snapshot().cleanup_unknown : fake->released()),
+            "持续许可键下目标消失或跟踪过期必须撤销急停并尝试归还方向键");
+        if (mode != 2) {
+            require(!worker.snapshot().release_required, "正常目标消失清理ACK后不要求松许可键");
+            worker.publish_tracking_target(Clock::now() + 1s);
+            publish_present_target(worker, Clock::now() + 1s);
+            wait_for([&] { return worker.estimated_completion_id() > previous_id; });
+        } else {
+            worker.publish_tracking_target(Clock::now() + 1s);
+            publish_present_target(worker, Clock::now() + 1s);
+            std::this_thread::sleep_for(20ms);
+            require(worker.snapshot().status == AutoStopStatus::FAULT && worker.estimated_completion_id() == 0,
+                "清理UNKNOWN后新目标不能解除故障或重复制动");
+        }
         worker.stop();
     }
 }
@@ -584,7 +644,7 @@ void weapon_session_recovery_contracts() {
         AutoStopConfig config{true, 5}; config.cycle_enabled = true;
         require(worker.start(config), "可信武器暂停恢复回归启动");
         ready(worker, fake);
-        worker.publish_target(Clock::now() + std::chrono::seconds(2));
+        publish_present_target(worker, Clock::now() + std::chrono::seconds(2));
         if (scenario == 6) wait_for([&] { return fake->has_software(); });
         else wait_for([&] { return worker.estimated_completion_id() != 0; });
         const auto old_id = worker.estimated_completion_id();
@@ -604,13 +664,13 @@ void weapon_session_recovery_contracts() {
             require(worker.snapshot().release_required || worker.snapshot().cleanup_unknown,
                 "信任换代、中断及未知清理不能自动恢复");
         } else {
-            require(!worker.snapshot().release_required, "可信换弹空弹或切枪不能要求松键重新武装");
+            require(!worker.snapshot().release_required, (std::string("可信武器恢复锁存，scenario=") + std::to_string(scenario)).c_str());
             require(worker.snapshot().requests == 1, "新武器不能继承旧目标资格");
             if (scenario == 5) { std::lock_guard<std::mutex> lock(fake->mutex); fake->extra_keys[0x32] = false; }
             stage = 2;
             wait_for([&] { return worker.snapshot().weapon_context.generation == 3; });
             require(worker.snapshot().requests == 1, "武器恢复仍需重新发布目标");
-            worker.publish_target(Clock::now() + std::chrono::seconds(2));
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(2));
             wait_for([&] { return worker.estimated_completion_id() > old_id; });
             require(!worker.snapshot().release_required, "持续按键重新完成新一轮急停");
         }
@@ -620,6 +680,8 @@ void weapon_session_recovery_contracts() {
 
 int main(int argc, char** argv) {
     try {
+        target_loss_releases_hold();
+        if (argc == 2 && std::string_view(argv[1]) == "--target-loss") return 0;
         weapon_session_recovery_contracts();
         trigger_idle_contracts();
         if (argc == 2 && std::string_view(argv[1]) == "--manual-fire") {
@@ -647,7 +709,7 @@ int main(int argc, char** argv) {
             AutoStopConfig cycle{true, 5}; cycle.cycle_enabled = true;
             require(worker.start(cycle), "持续按键循环回归启动");
             ready(worker, fake);
-            worker.publish_target(Clock::now() + std::chrono::seconds(2));
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(2));
             wait_for([&] { return worker.estimated_completion_id() != 0; });
             const auto completed_id = worker.estimated_completion_id();
             require(!worker.resume_movement(completed_id + 1, Clock::now() + std::chrono::seconds(1)),
@@ -686,7 +748,7 @@ int main(int argc, char** argv) {
                 });
             require(worker.start(AutoStopConfig{true, 5}), "GSI上下文回归启动");
             ready(worker, fake);
-            worker.publish_target(Clock::now() + std::chrono::seconds(2));
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(2));
             wait_for([&] { return worker.estimated_completion_id() != 0; });
             changed.store(true);
             wait_for([&] { return fake->released() && worker.snapshot().canceled == 1; });
@@ -704,7 +766,7 @@ int main(int argc, char** argv) {
             require(worker.snapshot().requests == 1, "GSI恢复不能在持续按键下再次接管");
             { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
             wait_for([&] { return !worker.snapshot().release_required; });
-            worker.publish_target(Clock::now() + std::chrono::seconds(2));
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(2));
             { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = true; }
             wait_for([&] { return worker.snapshot().requests == 2; });
             worker.stop();
@@ -717,7 +779,7 @@ int main(int argc, char** argv) {
             AutoStopConfig h40{true, 5};
             require(worker.start(h40), "H40生产worker回归启动");
             ready(worker, fake);
-            worker.publish_target(Clock::now() + std::chrono::seconds(1));
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(1));
             wait_for([&] { return worker.snapshot().completion_ready_ns != 0; });
             const auto settling = worker.snapshot();
             require(settling.use_counterpulse_timing && settling.counter_hold_ms == 40 && settling.shot_after_release_ms == 18 &&
@@ -744,7 +806,7 @@ int main(int argc, char** argv) {
                 [&] { return ++id; }, [] { return true; });
             auto h40 = config; h40.use_counterpulse_timing = true; h40.shot_after_release_ms = 150;
             require(worker.start(h40), "H40等待期取消回归启动"); ready(worker, fake);
-            worker.publish_target(Clock::now() + std::chrono::seconds(1));
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(1));
             wait_for([&] { return worker.snapshot().completion_ready_ns != 0; });
             if (revoke == 0) worker.set_paused(true);
             if (revoke == 1) { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
@@ -766,7 +828,7 @@ int main(int argc, char** argv) {
             require(worker.start(config), "独立估计资格回归启动");
             ready(worker, fake);
             require(worker.estimated_completion_id() == 0, "尚未完成不能提供估计资格");
-            worker.publish_target(Clock::now() + std::chrono::seconds(1));
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(1));
             wait_for([&] { return worker.snapshot().status == AutoStopStatus::ESTIMATED; });
             const auto completed_id = worker.estimated_completion_id();
             require(completed_id != 0 && completed_id == worker.snapshot().request_id && !worker.snapshot().fire_permitted,
@@ -791,7 +853,7 @@ int main(int argc, char** argv) {
                 fake->physical(static_cast<std::uint8_t>(mask));
                 wait_for([&] { return fake->drained(); });
             }
-            worker.publish_target(Clock::now() + std::chrono::seconds(5));
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(5));
             const auto limit = Clock::now() + std::chrono::milliseconds(300);
             while (Clock::now() < limit && !fake->has_masks()) {
                 for (const auto mask : {10, 8, 10, 2}) {
@@ -818,12 +880,12 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(520));
             require(worker.snapshot().status == AutoStopStatus::MASKED && worker.snapshot().requests == 1 &&
                 fake->reports() == masked_reports && !fake->released(),
-                "仅屏蔽保持不受目标失效或500ms制动期限解除，不重复制动");
+                "跟踪仍有效时仅准星准入失效不解除屏蔽，500ms不是保持期限");
             { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
             wait_for([&] { return fake->released() && worker.snapshot().canceled == 1; });
             // 当前仍持D，不补任何全松事件，恢复侧键应可重新进入仅屏蔽。
             { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = true; }
-            worker.publish_target(Clock::now() + std::chrono::seconds(5));
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(5));
             wait_for([&] { return worker.snapshot().requests == 2 && worker.snapshot().status == AutoStopStatus::MASKED; });
             const auto repeated_reports = fake->reports();
             require(std::all_of(repeated_reports.begin(), repeated_reports.end(), [](int mask) { return mask == 0; }) &&
@@ -858,7 +920,7 @@ int main(int argc, char** argv) {
                 fake->physical(static_cast<std::uint8_t>(mask));
                 wait_for([&] { return fake->drained(); });
             }
-            worker.publish_target(Clock::now() + std::chrono::seconds(5));
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(5));
             wait_for([&] { return worker.snapshot().status == AutoStopStatus::MASKED; });
             if (reason == 0) focused.store(false);
             if (reason == 1) permitted.store(false);
@@ -899,7 +961,7 @@ int main(int argc, char** argv) {
                 fake->physical(static_cast<std::uint8_t>(mask));
                 wait_for([&] { return fake->drained(); });
             }
-            worker.publish_target(Clock::now() + std::chrono::seconds(5));
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(5));
             if (failure == 5) {
                 wait_for([&] { return worker.snapshot().status == AutoStopStatus::MASKED; });
                 { std::lock_guard<std::mutex> lock(fake->mutex); fake->cleanup_fails = true; fake->activation = false; }
@@ -943,7 +1005,7 @@ int main(int argc, char** argv) {
             };
             require(worker.start(config), "屏蔽安装窗口一致性回归启动");
             ready(worker, fake);
-            worker.publish_target(Clock::now() + std::chrono::seconds(1));
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(1));
             wait_for([&] { return worker.snapshot().canceled != 0 || fake->has_software(); });
             require(worker.snapshot().canceled == 1 && !fake->has_software() && fake->released(),
                 "安装窗口改向或原始输入异常须在首个软件反向报告前拒绝并归还");
@@ -958,13 +1020,13 @@ int main(int argc, char** argv) {
                 // 在第一次非零报告返回ACK前注入，确保覆盖BRAKING而非完成后的保持。
                 if (change == 0) worker.publish_target({}, AutoStopBlockReason::CROSSHAIR_OUTSIDE_TARGET);
                 if (change == 1) worker.publish_target(Clock::now() - std::chrono::milliseconds(1));
-                if (change == 2) { worker.publish_target({}); worker.publish_target(Clock::now() + std::chrono::seconds(1)); }
+                if (change == 2) { worker.publish_target({}); publish_present_target(worker, Clock::now() + std::chrono::seconds(1)); }
                 if (change >= 3) fake->physical(static_cast<std::uint8_t>(change == 3 ? 2 : change == 4 ? 0 :
                     change == 5 ? 5 : change == 6 ? 8 : 10));
             };
             require(worker.start(config), "制动途中锁存回归启动");
             ready(worker, fake);
-            worker.publish_target(Clock::now() + std::chrono::seconds(1));
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(1));
             wait_for([&] { return worker.snapshot().status == AutoStopStatus::ESTIMATED || worker.snapshot().canceled != 0; });
             require(worker.snapshot().canceled == 0 && worker.snapshot().status == AutoStopStatus::ESTIMATED,
                 "已接管后制动途中离框、过期、改向不得取消，必须完成零报告并保持");
@@ -982,7 +1044,7 @@ int main(int argc, char** argv) {
                 [&] { return ++id; }, [] { return true; });
             require(worker.start(config), "清理期间真实按键事件不得丢失");
             ready(worker, fake);
-            worker.publish_target(Clock::now() + std::chrono::seconds(1));
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(1));
             wait_for([&] { return worker.snapshot().status == AutoStopStatus::ESTIMATED; });
             fake->physical(0);
             wait_for([&] { return fake->drained(); });
@@ -990,7 +1052,7 @@ int main(int argc, char** argv) {
                 fake->physical_during_cleanup = 1; fake->activation = false; }
             wait_for([&] { return fake->released() && worker.snapshot().canceled == 1; });
             { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = true; }
-            worker.publish_target(Clock::now() + std::chrono::seconds(1));
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(1));
             wait_for([&] { return worker.snapshot().requests == 2 && worker.snapshot().status == AutoStopStatus::ESTIMATED; });
             worker.stop();
         }
@@ -1003,7 +1065,7 @@ int main(int argc, char** argv) {
             ready(worker, fake);
             for (int cycle = 1; cycle <= 3; ++cycle) {
                 { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = true; }
-                worker.publish_target(Clock::now() + std::chrono::seconds(1));
+                publish_present_target(worker, Clock::now() + std::chrono::seconds(1));
                 wait_for([&] { return worker.snapshot().requests == cycle &&
                     worker.snapshot().status == AutoStopStatus::ESTIMATED; });
                 worker.publish_target({});
@@ -1022,7 +1084,7 @@ int main(int argc, char** argv) {
                 [&] { return ++id; }, [] { return true; });
             require(worker.start(config), "锁存式急停回归启动");
             ready(worker, fake);
-            worker.publish_target(Clock::now() + std::chrono::seconds(1));
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(1));
             wait_for([&] { return worker.snapshot().status == AutoStopStatus::ESTIMATED; });
             worker.publish_target({}, AutoStopBlockReason::CROSSHAIR_OUTSIDE_TARGET);
             std::this_thread::sleep_for(std::chrono::milliseconds(80));
@@ -1121,7 +1183,7 @@ int main(int argc, char** argv) {
                 [&] { return ++id; }, [&] { return focused.load(); });
             require(worker.start(config), "焦点恢复重新按键回归启动");
             ready(worker, fake);
-            worker.publish_target(Clock::now() + std::chrono::seconds(2));
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(2));
             wait_for([&] { return fake->has_software(); });
             focused.store(false);
             wait_for([&] { return fake->released() && worker.snapshot().canceled == 1; });
@@ -1146,12 +1208,12 @@ int main(int argc, char** argv) {
             require(worker.start(config), "独立目标急停应启动");
             ready(worker, fake);
             require(worker.snapshot().requests == 0, "只有允许键没有目标不得请求急停");
-            worker.publish_target(Clock::now() + std::chrono::seconds(1));
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(1));
             wait_for([&] { return fake->has_software(); });
             require(worker.snapshot().requests == 1, "目标和允许键应独立触发急停，不依赖Trigger");
             worker.publish_target({});
             wait_for([&] { return worker.snapshot().status == AutoStopStatus::ESTIMATED; });
-            require(!fake->released() && worker.snapshot().canceled == 0, "目标仅准入，已触发的制动不能因目标消失撤销");
+            require(!fake->released() && worker.snapshot().canceled == 0, "跟踪人物仍存在，仅准星准入撤销不取消已触发制动");
             { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
             wait_for([&] { return fake->released(); });
             require(!worker.snapshot().fire_permitted, "独立急停不得授予开火资格");
@@ -1170,13 +1232,13 @@ int main(int argc, char** argv) {
                 accepted_id = ++watermark;
                 require(worker.request(accepted_id), "显式先到必须占有唯一请求槽");
                 wait_for([&] { return worker.snapshot().status == AutoStopStatus::ESTIMATED; });
-                worker.publish_target(Clock::now() + std::chrono::seconds(1));
+                publish_present_target(worker, Clock::now() + std::chrono::seconds(1));
                 wait_for([&] { return worker.snapshot().target_available; });
                 require(allocations.load() == 0, "显式请求在途时独立目标不能分配第二个请求");
                 rejected_id = ++watermark;
                 require(!worker.request(rejected_id), "占用期间第二个显式请求必须拒绝");
             } else {
-                worker.publish_target(Clock::now() + std::chrono::seconds(1));
+                publish_present_target(worker, Clock::now() + std::chrono::seconds(1));
                 wait_for([&] { return worker.snapshot().status == AutoStopStatus::ESTIMATED; });
                 accepted_id = worker.snapshot().request_id;
                 rejected_id = ++watermark;
@@ -1203,18 +1265,18 @@ int main(int argc, char** argv) {
                 [&] { return ++id; }, [&] { return focused.load(); });
             require(worker.start(config), "取消矩阵启动");
             ready(worker, fake);
-            worker.publish_target(Clock::now() + std::chrono::seconds(1));
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(1));
             wait_for([&] { return fake->has_software(); });
             if (reason == 0) worker.publish_target({});
             if (reason == 1) worker.publish_target(Clock::now() + std::chrono::milliseconds(10));
             if (reason == 2) focused.store(false);
             if (reason == 3) { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
             if (reason == 4) permitted.store(false);
-            if (reason == 5) { worker.publish_target({}); worker.publish_target(Clock::now() + std::chrono::seconds(1)); }
+            if (reason == 5) { worker.publish_target({}); publish_present_target(worker, Clock::now() + std::chrono::seconds(1)); }
             if (reason == 0 || reason == 1 || reason == 5) {
                 wait_for([&] { return worker.snapshot().status == AutoStopStatus::ESTIMATED; });
                 require(!fake->released() && worker.snapshot().canceled == 0,
-                    "制动途中目标消失、旧帧与代际变化必须保持原请求");
+                    "跟踪仍新鲜时准星准入变化不取消原请求");
                 { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
             }
             wait_for([&] { return fake->released() && worker.snapshot().canceled != 0; });
@@ -1230,14 +1292,14 @@ int main(int argc, char** argv) {
                 [&] { return ++id; }, [&] { return focused.load(); });
             require(worker.start(config), "持续目标保持测试启动");
             ready(worker, fake);
-            worker.publish_target(Clock::now() + std::chrono::seconds(1));
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(1));
             wait_for([&] { return fake->has_software(); });
             worker.cancel(99);
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             require(worker.snapshot().canceled == 0, "其他owner的id不得取消独立请求");
             const auto until = Clock::now() + std::chrono::milliseconds(650);
             while (Clock::now() < until) {
-                worker.publish_target(Clock::now() + std::chrono::milliseconds(50));
+                publish_present_target(worker, Clock::now() + std::chrono::milliseconds(50));
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
             require(!fake->released() && !fake->has_cleanup() && worker.snapshot().requests == 1 &&
@@ -1258,15 +1320,16 @@ int main(int argc, char** argv) {
             if (ending == 8) worker.set_paused(true);
             if (ending == 9) { std::lock_guard<std::mutex> lock(fake->mutex); fake->gap = true; }
             if (ending == 10) arbiter->latch_output_fault();
-            if (ending == 0 || ending == 1 || ending == 7) {
+            if (ending == 1 || ending == 7) {
+                worker.publish_tracking_target(Clock::now() + std::chrono::milliseconds(200));
                 std::this_thread::sleep_for(std::chrono::milliseconds(80));
                 require(!fake->released() && worker.snapshot().canceled == 0,
-                    "锁存后目标到期、离框及改向均不能归还方向键");
+                    "跟踪人物仍新鲜时准星准入到期、离框及改向不归还方向键");
                 { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
             }
             wait_for([&] {
                 // 非目标撤销仍提供新鲜目标，不能让50ms到期掩盖撤销入口失效。
-                if (ending >= 2) worker.publish_target(Clock::now() + std::chrono::milliseconds(50));
+                if (ending >= 2) publish_present_target(worker, Clock::now() + std::chrono::milliseconds(50));
                 return fake->released() && worker.snapshot().canceled == 1;
             });
             require(worker.snapshot().requests == 1 && fake->reports().size() == reports_while_holding,
