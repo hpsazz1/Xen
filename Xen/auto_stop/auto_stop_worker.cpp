@@ -339,7 +339,9 @@ public:
                 !paused.load() && !stopping.load() && !arbiter->faulted_.load();
         };
         auto cancel_active = [&](bool force_fault, const char* reason, bool normal_activation_release = false,
-                                 bool cycle_resume = false, bool manual_finished = false, bool ordinary_transition = false) {
+                                 bool cycle_resume = false, bool manual_finished = false, bool ordinary_transition = false,
+                                 bool direction_transition = false) {
+            ordinary_transition = ordinary_transition || direction_transition;
             const bool session_transition = !force_fault && normal_cancellation();
             if (session_transition && mouse->left_button_cleanup_required()) {
                 // 先撤销估计资格让Trigger抬键；未知UP由共享故障/有界清理处理。
@@ -349,7 +351,7 @@ public:
             }
             if (session_transition) { ordinary_transition = true; cycle_resume = false; }
             // 点射归还等待ACK时仍保留目标代际，避免中途丢失目标被误算成恢复失败。
-            const bool track_cleanup = cycle_resume && independent && manual_fire_id.load() == 0 && !force_fault;
+            const bool track_cleanup = (cycle_resume || direction_transition) && independent && manual_fire_id.load() == 0 && !force_fault;
             { std::lock_guard<std::mutex> lock(mutex);
                 estimated_id = 0; manual_fire_id = 0;
                 if (!track_cleanup) tracked_request_id = 0;
@@ -373,39 +375,59 @@ public:
                 bool continuous = mouse->poll_input(after_cleanup) && after_cleanup.state_valid &&
                     after_cleanup.status == InputMonitorStatus::READY &&
                     mouse->read_wasd_events(after_cursor, after_events) && after_events.subscribed && !after_events.gap &&
-                    after_cursor.epoch == before_cleanup_cursor.epoch && held_wasd(after_cleanup) == intent.held_mask;
+                    after_cursor.epoch == before_cleanup_cursor.epoch &&
+                    (direction_transition || held_wasd(after_cleanup) == intent.held_mask);
                 // 监听报告可重复同一键态；逐条验证连续性，不把新报告误当松键或改向。
-                // 临时检查不推进正式历史，下一轮仍按原事件时间消费这些报告。
+                // 普通归还仅临时检查；换向重试在完整校验后推进真实游标，以最新方向建立新计划。
                 auto checked_history = history;
                 auto checked_sequence = before_cleanup_cursor.sequence;
+                auto checked_intent = intent;
                 for (std::size_t i = 0; continuous && i < after_events.count; ++i) {
                     const auto& event = after_events.events[i];
                     continuous = event.state_valid && event.epoch == before_cleanup_cursor.epoch &&
                         event.sequence > checked_sequence && event.sequence - checked_sequence == 1 &&
-                        event.held_mask == intent.held_mask;
+                        (direction_transition || event.held_mask == intent.held_mask);
                     if (!continuous) break;
                     const auto checked = checked_history.observe(event.held_mask, event.epoch, event.sequence,
                         event.received_at_steady_ns, event.state_valid);
-                    continuous = checked.input_continuous && checked.history_valid && !checked.conflicting;
+                    checked_intent = checked;
+                    continuous = checked.input_continuous && (direction_transition || (checked.history_valid && !checked.conflicting));
                     checked_sequence = event.sequence;
                 }
                 continuous = continuous && after_cursor.sequence == checked_sequence;
+                if (direction_transition) {
+                    continuous = continuous && held_wasd(after_cleanup) == checked_intent.held_mask;
+                    if (continuous) { history = checked_history; intent = checked_intent; cursor = after_cursor; input = after_cleanup; }
+                }
                 // 武器可能在清理ACK期间变化；先刷新，再统一判定普通过渡，不能在分流后才读取。
-                const bool cycle_permission = cycle_resume && permission(after_cleanup);
+                const bool cleanup_permission = (cycle_resume || direction_transition) && permission(after_cleanup);
                 const bool session_valid = (can_resume || ordinary_transition) && session_permission(false);
-                if (track_cleanup && normal_cancellation()) {
+                const bool known_transition = track_cleanup && normal_cancellation();
+                if (known_transition) {
                     ordinary_transition = true;
                     cycle_resume = false;
                 }
                 if (ordinary_transition) {
-                    if (continuous && allowed && allowed() && focused && focused() &&
+                    const bool direction_permitted = !direction_transition ||
+                        ((cleanup_permission && session_valid && active_generation == cancel_generation.load()) ||
+                         (known_transition && after_cleanup.virtual_keys[config.activation_virtual_key] &&
+                          !release_key_held(after_cleanup)));
+                    if (continuous && direction_permitted &&
+                        allowed && allowed() && focused && focused() &&
                         !after_cleanup.virtual_keys[0x23] && !paused.load() && !stopping.load() && !arbiter->faulted_.load())
+                    {
                         resumed = controller.restart_after_cleanup(intent, released_at);
+                        if (direction_transition && !intent.history_valid) {
+                            // A/D重叠仍只有连续输入，没有运动历史；等真实全松重同步，不要求松许可键。
+                            controller = AutoStopController(config);
+                            resumed = true;
+                        }
+                    }
                     if (!resumed) {
                         std::lock_guard<std::mutex> lock(mutex);
                         state.release_required = true;
                     }
-                } else if (continuous && (cycle_resume ? cycle_permission : !after_cleanup.virtual_keys[config.activation_virtual_key]) &&
+                } else if (continuous && (cycle_resume ? cleanup_permission : !after_cleanup.virtual_keys[config.activation_virtual_key]) &&
                     !after_cleanup.virtual_keys[0x23] && !release_key_held(after_cleanup) && allowed && allowed() &&
                     !paused.load() && !stopping.load() && !arbiter->faulted_.load() &&
                     active_generation == cancel_generation.load() && session_valid)
@@ -761,6 +783,7 @@ public:
                     input_ok && events_ok && intent.input_continuous && intent.epoch == active_input_epoch &&
                     intent.held_mask == 0 && held_wasd(input) == 0) {
                     cancel_active(false, "masked_directions_released", true);
+                    target_consumed = false;
                 }
                 if (latched_fault) {
                     report_block();
@@ -826,7 +849,7 @@ public:
                                 const std::uint8_t mask_to_install = independent ? 15 : original_mask;
                                 for (std::uint8_t key = 1; key <= 8; key <<= 1) if (mask_to_install & key) {
                                     if (!mouse->poll_input(input) || !permission(input) ||
-                                        (independent && !session_permission(false)) || (!mask_only && held_wasd(input) != original_mask) ||
+                                        (independent && !session_permission(false)) || (!independent && !mask_only && held_wasd(input) != original_mask) ||
                                         active_generation != cancel_generation.load() || Clock::now() >= lease_end) { cancel_active(false, "permission_changed_before_mask"); break; }
                                     const auto started = now_ns();
                                     const auto result = mouse->set_wasd_mask(key, true);
@@ -841,18 +864,33 @@ public:
                                     auto acquisition_cursor = cursor;
                                     WasdEventBatch acquisition_events;
                                     auto acquisition_history = history;
-                                    const bool acquisition_valid = mouse->read_wasd_events(acquisition_cursor, acquisition_events) &&
+                                    bool acquisition_continuous = mouse->read_wasd_events(acquisition_cursor, acquisition_events) &&
                                         acquisition_events.subscribed && !acquisition_events.gap &&
                                         acquisition_cursor.epoch == active_input_epoch &&
-                                        acquisition_events.count < acquisition_events.events.size() &&
-                                        std::all_of(acquisition_events.events.begin(),
-                                            acquisition_events.events.begin() + acquisition_events.count, [&](const auto& event) {
-                                                const auto observed = acquisition_history.observe(event.held_mask, event.epoch,
-                                                    event.sequence, event.received_at_steady_ns, event.state_valid);
-                                                return event.state_valid && event.epoch == active_input_epoch && observed.input_continuous &&
-                                                    (mask_only || event.received_at_steady_ns > acquired_at || event.held_mask == original_mask);
-                                            });
-                                    if (!acquisition_valid) cancel_active(false, "input_changed_during_acquisition");
+                                        acquisition_events.count < acquisition_events.events.size();
+                                    bool direction_changed = false;
+                                    auto acquisition_intent = intent;
+                                    for (std::size_t i = 0; acquisition_continuous && i < acquisition_events.count; ++i) {
+                                        const auto& event = acquisition_events.events[i];
+                                        acquisition_intent = acquisition_history.observe(event.held_mask, event.epoch,
+                                            event.sequence, event.received_at_steady_ns, event.state_valid);
+                                        acquisition_continuous = event.state_valid && event.epoch == active_input_epoch &&
+                                            acquisition_intent.input_continuous;
+                                        direction_changed |= !mask_only && event.received_at_steady_ns <= acquired_at &&
+                                            event.held_mask != original_mask;
+                                    }
+                                    if (!acquisition_continuous) cancel_active(false, "input_changed_during_acquisition");
+                                    else if (direction_changed) {
+                                        // 部分屏蔽期间真实换向只撤销旧方向计划，完整ACK归还后重新核验目标和输入。
+                                        history = acquisition_history; intent = acquisition_intent; cursor = acquisition_cursor;
+                                        const bool retry_allowed = mouse->poll_input(input) && permission(input) && session_permission(false) &&
+                                            held_wasd(input) == intent.held_mask && active_generation == cancel_generation.load();
+                                        if (retry_allowed) {
+                                            cancel_active(false, "direction_changed_during_acquisition", false, false, false, false, true);
+                                            { std::lock_guard<std::mutex> lock(mutex); target_until = {}; tracking_target_until = {}; }
+                                            target_consumed = false;
+                                        } else cancel_active(false, "permission_changed_during_acquisition");
+                                    }
                                     else {
                                         independent_acquired = true;
                                         LOG_INFO("auto_stop", "请求{}全部WASD屏蔽已确认，模式={}", active_id,

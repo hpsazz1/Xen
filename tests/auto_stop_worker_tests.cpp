@@ -678,6 +678,112 @@ void weapon_session_recovery_contracts() {
     }
 }
 
+void acquisition_direction_change_retries() {
+    using namespace std::chrono_literals;
+    for (int scenario = 0; scenario < 18; ++scenario) {
+        auto fake = std::make_shared<Fake>();
+        std::atomic<std::uint64_t> id{0};
+        std::atomic<bool> focused{true}, injected{false};
+        std::atomic<int> weapon_stage{0};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [&] { return ++id; }, [&] { return focused.load(); }, [&] {
+                const auto stage = weapon_stage.load();
+                return AutoStopWeaponContext{scenario == 17, stage != 1,
+                    static_cast<std::uint64_t>(stage + 1), "ak47", 1, true};
+            });
+        AutoStopConfig config{true, 5}; config.cycle_enabled = true;
+        require(worker.start(config), "取得控制期间换向回归启动");
+        ready(worker, fake);
+        fake->physical(2);
+        wait_for([&] { return fake->drained(); });
+        fake->after_mask = [&](std::size_t index) {
+            if (index != (scenario == 6 ? 1 : 4)) return;
+            if (scenario == 0 || scenario >= 6) fake->physical_batch({0, 8});
+            else if (scenario == 5) fake->physical_batch({10, 8});
+            else if (scenario == 4) focused = false;
+            else {
+                std::lock_guard lock(fake->mutex);
+                if (scenario == 1) fake->gap = true;
+                if (scenario == 2) fake->events.push_back({2, true, 2, ++fake->sequence, clock_ns()});
+                if (scenario == 3) fake->healthy = false;
+            }
+            injected = true;
+        };
+        if (scenario >= 7) {
+            std::lock_guard lock(fake->mutex);
+            fake->before_cleanup = [&] {
+                if (scenario == 10) focused = false;
+                else if (scenario == 11) worker.cancel();
+                else if (scenario == 13) fake->physical_batch({0, 2});
+                else if (scenario == 16) worker.publish_tracking_target({});
+                else if (scenario == 17) { weapon_stage = 1; worker.cancel(1); }
+                else {
+                    std::lock_guard cleanup_lock(fake->mutex);
+                    if (scenario == 7) fake->activation = false;
+                    if (scenario == 8) fake->extra_keys[0x51] = true;
+                    if (scenario == 9) fake->healthy = false;
+                    if (scenario == 12) fake->cleanup_fails = true;
+                    if (scenario == 14) fake->gap = true;
+                    if (scenario == 15) fake->events.push_back({8, true, 2, ++fake->sequence, clock_ns()});
+                }
+            };
+        }
+        publish_present_target(worker, Clock::now() + 2s);
+        wait_for([&] { return injected.load() && worker.snapshot().canceled >= 1 && (scenario == 12 ? worker.snapshot().cleanup_unknown : fake->released()); });
+        if ((scenario >= 1 && scenario <= 4) || (scenario >= 7 && scenario <= 12) || scenario == 14 || scenario == 15) {
+            require(scenario == 7 || worker.snapshot().release_required || worker.snapshot().cleanup_unknown,
+                "取得或清理期间真实事件缺口、换代、输入失信、失焦、救援及未知ACK不能普通恢复");
+            require(worker.estimated_completion_id() == 0 && worker.snapshot().requests == 1,
+                "许可松开或安全断点后不得建立新制动资格");
+        } else {
+            require(!worker.snapshot().release_required,
+                "取得控制期间连续真实A松开再按D不能锁存许可松键");
+            require(worker.estimated_completion_id() == 0 && worker.snapshot().requests == 1,
+                "正常换向撤销旧方向完成资格，重选目标前不复用旧请求");
+            { std::lock_guard lock(fake->mutex);
+                require(fake->software.empty(), "部分接管后换向不能先发送旧A方向制动");
+            }
+            if (scenario == 5) {
+                // 重叠后仍可仅屏蔽，不能伪造完成；整个过程许可键始终保持按下。
+                publish_present_target(worker, Clock::now() + 2s);
+                wait_for([&] { return worker.snapshot().status == AutoStopStatus::MASKED; });
+                require(!worker.snapshot().release_required && worker.estimated_completion_id() == 0,
+                    "重叠后新目标可仅屏蔽但不得假造制动资格或锁许可");
+                fake->physical(0);
+                wait_for([&] { return fake->drained() && fake->released(); });
+                fake->physical(8);
+                wait_for([&] { return fake->drained(); });
+                require(!worker.snapshot().release_required, "A/D重叠后的历史重同步不要求释放许可键");
+            }
+            if (scenario == 17) {
+                weapon_stage = 2;
+                wait_for([&] { return worker.snapshot().weapon_context.generation == 3; });
+            }
+            publish_present_target(worker, Clock::now() + 2s);
+            wait_for([&] { return worker.estimated_completion_id() > 1; });
+            { std::lock_guard lock(fake->mutex);
+                require(fake->software == (scenario == 5 ? std::vector<int>({0, 0, 2, 0}) : scenario == 13 ? std::vector<int>({0, 8, 0}) : std::vector<int>({0, 2, 0})),
+                    "持续许可下重新准入须按最新真实D方向制动A，并完成zero反向zero");
+            }
+        }
+        worker.stop();
+    }
+    {
+        auto fake = std::make_shared<Fake>();
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; });
+        require(worker.start(AutoStopConfig{true, 5}), "显式请求安装期间换向负例启动");
+        ready(worker, fake);
+        fake->physical(3);
+        wait_for([&] { return fake->drained(); });
+        fake->after_mask = [&](std::size_t index) { if (index == 1) fake->physical(8); };
+        require(worker.request(1), "显式请求先取得旧方向计划");
+        wait_for([&] { return worker.snapshot().canceled == 1 && fake->released(); });
+        require(!fake->has_software() && worker.estimated_completion_id() == 0,
+            "显式调用仍在逐键安装期间拒绝方向变化，不套用独立急停自动重试");
+        worker.stop();
+    }
+}
+
 void weapon_change_during_cycle_cleanup() {
     using namespace std::chrono_literals;
     auto fake = std::make_shared<Fake>();
@@ -753,6 +859,10 @@ void cleanup_report_preserves_next_brake() {
 }
 int main(int argc, char** argv) {
     try {
+        acquisition_direction_change_retries();
+        if (argc == 2 && std::string_view(argv[1]) == "--acquisition-direction") {
+            std::cout << "取得控制期间换向与安全断点专项通过\n"; return 0;
+        }
         weapon_change_during_cycle_cleanup();
         if (argc == 2 && std::string_view(argv[1]) == "--weapon-cleanup") return 0;
         cleanup_report_preserves_next_brake();
