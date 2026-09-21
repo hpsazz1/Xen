@@ -1,8 +1,20 @@
 #include "runtime/aim_frame_internal.h"
+#include "weapon/weapon_internal.h"
 
 #include <cmath>
 #include <iostream>
 #include <opencv2/imgproc.hpp>
+
+namespace {
+std::string weapon_payload(const char* state, int ammo, const char* name = "weapon_ak47", int health = 100,
+        const char* player_id = "76561198000000000", std::uint64_t timestamp = 1700000000) {
+    return std::string(R"({"provider":{"appid":730,"steamid":"76561198000000000","timestamp":)") +
+        std::to_string(timestamp) + R"(},"player":{"steamid":")" + player_id +
+        R"(","activity":"playing","state":{"health":)" + std::to_string(health) +
+        R"(},"weapons":{"weapon_0":{"name":")" + name + R"(","state":")" + state +
+        R"(","ammo_clip":)" + std::to_string(ammo) + R"(,"ammo_clip_max":30,"ammo_reserve":90}}}})";
+}
+}
 
 int main() {
     int failures = 0;
@@ -57,6 +69,124 @@ int main() {
         }
     }
     estimator.reset();
+    {
+        weapon::GsiConfig gsi_config;
+        gsi_config.enabled = true;
+        weapon::detail::GsiState gsi;
+        AimConfig session_config;
+        session_config.min_confirmed_hits = 1;
+        session_config.deadzone_pixels = 0;
+        Aim session_aim(session_config);
+        runtime::detail::AimWeaponSessionGate session_gate;
+        const source_context::SourceContextSnapshot focus{true, true, 1, 1, 0};
+        for (int step = 0; step != 6; ++step) {
+            const auto now = start + std::chrono::milliseconds(step * 4);
+            gsi.ingest(weapon_payload(step == 1 ? "reloading" : "active", step == 2 ? 0 : 30 - step,
+                step >= 4 ? "weapon_deagle" : "weapon_ak47"),
+                gsi_config, now, 1700000000000);
+            const auto weapon = gsi.snapshot(now);
+            expect(weapon.status == (step == 1 ? weapon::Status::RELOADING :
+                step == 2 ? weapon::Status::EMPTY : weapon::Status::READY),
+                "生产 GSI 正确发布 READY、RELOADING 和 EMPTY");
+            const auto session = session_gate.update(weapon, true, focus, true, true, now);
+            if (session.reset_aim) session_aim.reset();
+            if (step == 1 || step == 3 || step == 4)
+                expect(session.reset_aim, "普通暂停、恢复及主动切枪必须重选目标和清理控制历史");
+            AimFrame frame;
+            frame.sequence = step + 1;
+            frame.roi_width = frame.roi_height = 320;
+            frame.control_center_x = frame.control_center_y = 160;
+            frame.captured_at = now;
+            frame.control_at = now + std::chrono::milliseconds(1);
+            frame.lock_active = session.allowed;
+            if (step != 4) frame.detections = {{180, 120, 220, 200, 0.95f, 0}};
+            const auto result = session_aim.process(frame);
+            const auto current_session = session_gate.update(gsi.snapshot(now), true, focus, true, true, now);
+            const bool dispatched = runtime::detail::aim_frame_dispatch_allowed(frame, true, session, current_session);
+            if (step == 4) {
+                expect(!result.has_target && !result.has_command,
+                    "步枪切到手枪时空的新观测不能继承旧枪滑行目标或命令");
+                expect(dispatched, "正常切枪保留持键恢复资格，但仍须新目标才能生成命令");
+                continue;
+            }
+            expect(result.has_command, "生产 GSI 回归经实际 Aim 生成命令");
+            expect(dispatched == (step == 0 || step >= 3),
+                "持续持键时换弹和空弹暂停 Aim，恢复 READY 后自动恢复");
+            expect(session_aim.record_backend_completed_command(result.command.sequence, frame.control_at,
+                dispatched ? result.command.dx_counts : 0, dispatched ? result.command.dy_counts : 0),
+                "武器暂停发送零反馈，不遗留预计算命令库存");
+        }
+    }
+    {
+        weapon::GsiConfig gsi_config;
+        gsi_config.enabled = true;
+        weapon::detail::GsiState gsi;
+        runtime::detail::AimWeaponSessionGate gate;
+        const source_context::SourceContextSnapshot focus{true, true, 1, 1, 0};
+        gsi.ingest(weapon_payload("active", 30), gsi_config, start, 1700000000000);
+        const auto prepared = gate.update(gsi.snapshot(start), true, focus, true, true, start);
+        AimConfig delayed_config;
+        delayed_config.min_confirmed_hits = 1;
+        delayed_config.deadzone_pixels = 0;
+        Aim delayed_aim(delayed_config);
+        AimFrame frame;
+        frame.sequence = 1; frame.roi_width = frame.roi_height = 320;
+        frame.control_center_x = frame.control_center_y = 160;
+        frame.captured_at = start; frame.control_at = start + std::chrono::milliseconds(1);
+        frame.lock_active = prepared.allowed;
+        frame.detections = {{180, 120, 220, 200, 0.95f, 0}};
+        const auto result = delayed_aim.process(frame);
+        expect(result.has_command, "发送前切枪回归先计算真实 Aim 命令");
+        gsi.ingest(weapon_payload("active", 7, "weapon_deagle"), gsi_config, frame.control_at, 1700000000000);
+        // 消费者跳过中间手枪状态，回到步枪仍必须撤销已计算的旧会话命令。
+        gsi.ingest(weapon_payload("active", 29), gsi_config, frame.control_at, 1700000000000);
+        const auto current = gate.update(gsi.snapshot(frame.control_at), true, focus, true, true, frame.control_at);
+        expect(current.allowed && current.reset_aim &&
+            !runtime::detail::aim_frame_dispatch_allowed(frame, true, prepared, current),
+            "发送前 A→B→A 也须拒绝旧命令，但不要求正常切枪松键");
+        expect(delayed_aim.record_backend_completed_command(result.command.sequence, frame.control_at, 0, 0),
+            "发送前会话撤销先完成零反馈再 reset，不制造未知历史");
+        delayed_aim.reset();
+        ++frame.sequence; frame.captured_at += std::chrono::milliseconds(4);
+        frame.control_at += std::chrono::milliseconds(4); frame.detections.clear();
+        expect(!delayed_aim.process(frame).has_target, "切枪后的新帧不得继承被撤销命令对应目标");
+    }
+    for (int failure = 0; failure != 7; ++failure) {
+        weapon::GsiConfig gsi_config;
+        gsi_config.enabled = true;
+        weapon::detail::GsiState gsi;
+        runtime::detail::AimWeaponSessionGate gate;
+        source_context::SourceContextSnapshot focus{true, true, 1, 1, 0};
+        gsi.ingest(weapon_payload("active", 30), gsi_config, start, 1700000000000);
+        expect(gate.update(gsi.snapshot(start), true, focus, true, true, start).allowed,
+            "安全负例先建立健康武器会话");
+        auto now = start + std::chrono::milliseconds(1);
+        if (failure == 0) now = start + std::chrono::seconds(3);
+        if (failure == 1) gsi.ingest(weapon_payload("active", 29, "weapon_ak47", 100, "76561198000000001"),
+            gsi_config, now, 1700000000000);
+        if (failure == 2) gsi.ingest(weapon_payload("active", 29, "weapon_unknown"), gsi_config, now, 1700000000000);
+        if (failure == 3 || failure == 6)
+            gsi.ingest(weapon_payload("active", 29, "weapon_ak47", 0), gsi_config, now, 1700000000000);
+        if (failure == 4) focus.focused = false;
+        if (failure == 5) focus.session_id = 2;
+        if (failure != 6) expect(!gate.update(gsi.snapshot(now), true, focus, true, true, now).allowed,
+            "过期、身份异常、未知武器、死亡、失焦和来源会话变化均撤销 Aim 许可");
+        // 新报文恢复健康；case 6 的消费者完全未看到中间死亡快照。
+        now += std::chrono::milliseconds(1);
+        gsi.ingest(weapon_payload("active", 28, "weapon_ak47", 100, "76561198000000000", 1700000004),
+            gsi_config, now, 1700000004000);
+        focus.focused = true;
+        expect(!gate.update(gsi.snapshot(now), true, focus, true, true, now).allowed,
+            "信任中断恢复后持续持键仍不得自启动，跳过死亡也由持久代际保护");
+        gate.update(gsi.snapshot(now), true, focus, true, false, now);
+        expect(gate.update(gsi.snapshot(now), true, focus, true, true, now).allowed,
+            "健康时真实松键后允许新 Aim 会话");
+    }
+    {
+        runtime::detail::AimWeaponSessionGate gate;
+        expect(gate.update({}, false, {}, false, true, start).allowed,
+            "未启用 GSI 和源焦点的纯视觉配置保留现有许可路径");
+    }
     {
         AimFrame delayed;
         delayed.captured_at = start;

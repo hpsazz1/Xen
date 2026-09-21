@@ -675,7 +675,9 @@ int main() {
         auto catalog = weapon::default_timing_catalog();
         weapon::WeaponSnapshot current;
         const auto now = weapon::Clock::now();
-        current.valid = current.identity_match = true; current.source_epoch = 7;
+        current.valid = current.identity_match = current.player_playing = true; current.source_epoch = 7;
+        current.player_health = 100; current.status = weapon::Status::READY;
+        current.control_safety_epoch = 3; current.received_at = now;
         current.state = weapon::WeaponState::ACTIVE; current.ammo_clip = 10;
         current.valid_until = now + std::chrono::seconds(1);
         current.canonical_id = "ak47";

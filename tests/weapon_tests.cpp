@@ -99,15 +99,20 @@ int main() {
     recoil_continuity.reset();
     recoil_continuity.ingest(full.dump(), config, start, utc);
     const auto trusted = recoil_continuity.snapshot(start).recoil_safety_epoch;
+    const auto control_trusted = recoil_continuity.snapshot(start).control_safety_epoch;
     auto ordinary = full;
     ordinary["player"]["weapons"]["weapon_0"]["state"] = "reloading";
     recoil_continuity.ingest(ordinary.dump(), config, start + 1ms, utc + 1);
     expect(recoil_continuity.snapshot(start + 1ms).recoil_safety_epoch == trusted,
            "普通换弹不撤销压枪可信代际");
+    expect(recoil_continuity.snapshot(start + 1ms).control_safety_epoch == control_trusted,
+           "正常换弹保留控制持键会话");
     ordinary = full; ordinary["player"]["state"]["health"] = 0;
     recoil_continuity.ingest(ordinary.dump(), config, start + 2ms, utc + 2);
     expect(recoil_continuity.snapshot(start + 2ms).recoil_safety_epoch == trusted,
            "确认死亡是普通武器停止原因");
+    expect(recoil_continuity.snapshot(start + 2ms).control_safety_epoch != control_trusted,
+           "确认死亡撤销Aim和扳机持键会话，保持压枪既有独立语义");
     ordinary["player"]["state"].erase("health");
     recoil_continuity.ingest(ordinary.dump(), config, start + 3ms, utc + 3);
     expect(recoil_continuity.snapshot(start + 3ms).recoil_safety_epoch != trusted,

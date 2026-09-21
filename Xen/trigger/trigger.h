@@ -67,6 +67,9 @@ struct TriggerContext {
     // 运行期间不可变；武器名仅引用共享目录的静态ID，不持有临时字符串。
     std::uint64_t timing_catalog_revision = 0;
     std::string_view timing_weapon_id;
+    // 0/false保留未提供可信分类的旧调用方保守语义。
+    std::uint64_t trust_generation = 0;
+    bool session_trusted = false;
 };
 
 struct TriggerPermit {

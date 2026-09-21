@@ -189,6 +189,7 @@ public:
             receipt.action = decision.button_action;
             receipt.status = TriggerReceiptStatus::NOT_SENT;
             bool context_changed = false;
+            std::optional<TriggerPermit> rejected_permit;
             event.rejection_reason = "arbiter_unavailable";
             if (rejection == OutputArbiterRejection::LOCK_BUSY) event.rejection_reason = "arbiter_lock_busy";
             else if (rejection == OutputArbiterRejection::AUXILIARY_PENDING) event.rejection_reason = "arbiter_auxiliary_pending";
@@ -209,8 +210,12 @@ public:
                     const bool context_valid = fresh.context.required == decided_context.required &&
                         timing_valid &&
                         (!fresh.context.required || (fresh.context.valid && decided_context.valid &&
-                            fresh.context.generation != 0 && fresh.context.generation == decided_context.generation));
+                            fresh.context.generation != 0 && fresh.context.generation == decided_context.generation &&
+                            fresh.context.trust_generation == decided_context.trust_generation &&
+                            fresh.context.session_trusted == decided_context.session_trusted));
                     context_changed = !context_valid;
+                    if (context_changed || !fresh.enabled || !fresh.healthy || !fresh.armed ||
+                        !fresh.focused || fresh.physical_left_down || !fresh.held) rejected_permit = fresh;
                     const bool stop_valid = !config.require_stop || (config.allow_estimated_stop ?
                         (decision.snapshot.stop_not_needed ? fresh.stop_not_needed :
                          (fresh.stop_estimated_qualified && fresh.estimated_stop_request_id != 0 &&
@@ -272,9 +277,10 @@ public:
                     timing.timing_required ? timing.fire_interval_ms : config.shot_interval_ms);
             }
             decision = controller.acknowledge(receipt, event.observed_at);
-            if (context_changed) {
+            if (rejected_permit) {
                 reserved_stop_id = 0;
-                auto cancellation = controller.cancel(TriggerReason::CONTEXT_CHANGED, event.observed_at);
+                // 使用造成拒绝的那份快照，短暂信任断点不能被二次采样吞掉。
+                auto cancellation = controller.tick(*rejected_permit, event.observed_at);
                 // NOT_SENT 已清按钮责任，但其返回的急停 CANCEL 仍须执行，不能被新取消覆盖。
                 if (cancellation.stop_action == TriggerStopAction::NONE) {
                     cancellation.stop_action = decision.stop_action;

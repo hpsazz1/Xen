@@ -63,6 +63,9 @@ struct AutoStopWeaponContext {
     bool required = false, valid = false;
     std::uint64_t generation = 0;
     std::string_view canonical_id;
+    // 普通武器暂停只在同一可信来源代际内恢复；默认保持旧提供方保守语义。
+    std::uint64_t trust_generation = 0;
+    bool session_trusted = false;
 };
 
 struct AutoStopSnapshot {
@@ -145,6 +148,8 @@ public:
     // 调用方须证明完整屏蔽、正常释放与清理ACK，并保持真实监听连续；
     // 此接口只承接估计模型，不创建物理释放事件或停稳证据。
     bool resume_after_masked_hold(const WasdMotionIntent& intent, std::int64_t released_at_ns) noexcept;
+    // 仅固定反向时序：清理ACK且真实监听连续后建立新计划，不承接旧运动模型。
+    bool restart_after_cleanup(const WasdMotionIntent& intent, std::int64_t cleanup_ns) noexcept;
     AutoStopDecision acknowledge(std::uint64_t request_id, std::uint64_t command_id,
         std::uint8_t applied_mask, std::int64_t ack_ns) noexcept;
     AutoStopDecision decision() const noexcept { return decision_; }

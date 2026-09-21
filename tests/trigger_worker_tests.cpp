@@ -106,6 +106,8 @@ struct Fixture {
     std::function<void()> focus_hook;
     std::atomic<std::uint64_t> context_generation{0};
     std::atomic<bool> context_required{false}, context_valid{false};
+    std::atomic<std::uint64_t> trust_generation{0};
+    std::atomic<bool> session_trusted{false};
     std::atomic<bool> timing_required{false}, timing_valid{false};
     std::atomic<int> shot_hold_ms{60}, fire_interval_ms{600};
     std::atomic<std::uint64_t> estimated_id{0};
@@ -119,7 +121,8 @@ struct Fixture {
         [&](std::uint64_t) { ++cancellations; }, [&] {
             if (context_hook) context_hook();
             return TriggerContext{context_generation.load(), context_required.load(), context_valid.load(),
-                timing_required.load(), timing_valid.load(), shot_hold_ms.load(), fire_interval_ms.load()};
+                timing_required.load(), timing_valid.load(), shot_hold_ms.load(), fire_interval_ms.load(),
+                0, {}, trust_generation.load(), session_trusted.load()};
         }, [&] { if (estimated_hook) estimated_hook(); return estimated_id.load(); }, {}, {},
         [&](const InputSnapshot&) { if (idle_hook) idle_hook(); return stop_idle.load(); }};
     bool start(bool stop=false, int age=50, int cleanup_budget_ms=1000, int press_ms=10, bool fire_enabled=true,
@@ -488,6 +491,38 @@ void context_change_at_down_revalidation() {
         f.worker.stop();
     }
 }
+void ordinary_context_change_at_dispatch() {
+    for (const bool trust_break : {false, true}) {
+        Fixture f;
+        f.context_required = f.context_valid = f.session_trusted = true;
+        f.context_generation = f.trust_generation = 1;
+        std::atomic<bool> change{true};
+        f.context_hook = [&] {
+            if (f.arbiter->snapshot().sources[static_cast<std::size_t>(OutputArbiterSource::TRIGGER)].acquired &&
+                change.exchange(false)) {
+                f.context_generation = 2;
+                if (trust_break) f.trust_generation = 2;
+            }
+        };
+        expect(f.start(false, 300), "可信上下文发送前回归启动"); f.fire();
+        expect(until([&] {
+            for (const auto& e : f.worker.execution_log().events)
+                if (e.button_action == TriggerButtonAction::DOWN && !e.backend_called &&
+                    std::string_view(e.rejection_reason) == "context_changed") return true;
+            return false;
+        }), "发送前切枪拒绝旧DOWN");
+        expect(f.mouse->count(true) == 0 && f.mouse->count(false) == 0, "未发送旧DOWN不产生按钮债务");
+        std::uint64_t seq = 1;
+        if (trust_break) {
+            expect(until([&] { f.worker.publish(observation(++seq));
+                return f.worker.snapshot().reason == TriggerReason::WAIT_RELEASE; }), "信任变代不能持键恢复");
+        } else {
+            expect(until([&] { f.worker.publish(observation(++seq)); return f.mouse->count(true) == 1; }),
+                "普通切枪发送前拒绝不撤销持键许可，新观测可恢复");
+        }
+        f.worker.stop();
+    }
+}
 void context_change_releases_held_button() {
     Fixture f;
     f.context_required = f.context_valid = true; f.context_generation = 1;
@@ -787,7 +822,7 @@ int main() {
     estimated_stop_callback_and_revalidation(); timing_change_at_down_revalidation();
     fire_disabled_no_output_or_receipt();
     autonomous_cleanup(); unknown_and_late_ack(); final_revalidation(); unverified_stop_and_contention();
-    context_change_at_down_revalidation(); context_change_releases_held_button();
+    context_change_at_down_revalidation(); ordinary_context_change_at_dispatch(); context_change_releases_held_button();
     not_sent_up_receipt_regression();
     running_cleanup_contention(); receipt_time_and_event_history(); event_ring_is_bounded();
     exception_uses_bounded_cleanup();

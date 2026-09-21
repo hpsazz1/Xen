@@ -1,6 +1,9 @@
 #include "auto_stop/auto_stop_worker.h"
 #include "trigger/trigger_worker.h"
 #include "weapon/weapon_timing.h"
+#include "weapon/weapon_internal.h"
+#include "runtime/weapon_context_internal.h"
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -128,6 +131,139 @@ std::shared_ptr<TriggerObservation> fresh_observation(std::uint64_t sequence) {
     result->epoch = 1; result->sequence = sequence;
     result->observed_at = Clock::now(); result->valid = result->timing_valid = true;
     return result;
+}
+void gsi_trust_breaks_require_release() {
+    const auto catalog = weapon::default_timing_catalog();
+    for (const std::string_view failure : {"identity", "death", "invalid", "timeout", "focus", "input", "manual", "emergency"}) {
+        weapon::GsiConfig gc; gc.enabled = true;
+        weapon::detail::GsiState gsi;
+        runtime::detail::TriggerWeaponContext adapter;
+        TriggerController controller;
+        TriggerConfig config; config.enabled = true; config.hold_virtual_key = 5; config.fire_delay_ms = 0;
+        require(controller.configure(config), "GSI安全回归配置");
+        auto now = Clock::now();
+        std::uint64_t ts = 1700000000;
+        nlohmann::json data = {{"provider", {{"appid", 730}, {"steamid", "123"}, {"timestamp", ts}}},
+            {"player", {{"steamid", "123"}, {"activity", "playing"}, {"state", {{"health", 100}}},
+                {"weapons", {{"weapon_0", {{"name", "weapon_ak47"}, {"state", "active"},
+                    {"ammo_clip", 30}, {"ammo_clip_max", 30}, {"ammo_reserve", 90}}}}}}}};
+        auto ingest = [&] {
+            data["provider"]["timestamp"] = ++ts;
+            gsi.ingest(data.dump(), gc, now, ts * 1000);
+        };
+        auto permit = [&](bool held = true) {
+            TriggerPermit p; p.enabled = p.healthy = p.focused = p.armed = true; p.held = held;
+            p.context = adapter.update(gsi.snapshot(now), catalog, now); return p;
+        };
+        ingest(); controller.tick(permit(false), now);
+        now += 1ms;
+        // 未产生旧按钮债务；健康上下文下已建立许可，随后只施加一个安全断点。
+        controller.tick(permit(), now);
+        if (failure == "identity" || failure == "death" || failure == "invalid" || failure == "timeout") {
+            if (failure == "timeout") now += 3s;
+            else {
+                if (failure == "identity") data["provider"]["steamid"] = data["player"]["steamid"] = "456";
+                if (failure == "death") data["player"]["state"]["health"] = 0;
+                if (failure == "invalid") data["player"].erase("weapons");
+                ingest();
+                // 故意不让controller读失败快照，信任断点必须由发布端持久保存。
+            }
+            data["provider"]["steamid"] = data["player"]["steamid"] = "123";
+            data["player"]["state"]["health"] = 100;
+            data["player"]["weapons"] = {{"weapon_0", {{"name", "weapon_ak47"}, {"state", "active"},
+                {"ammo_clip", 30}, {"ammo_clip_max", 30}, {"ammo_reserve", 90}}}};
+            now += 1ms; ingest(); controller.tick(permit(), now);
+        } else {
+            data["player"]["weapons"]["weapon_0"]["state"] = "reloading";
+            now += 1ms; ingest(); controller.tick(permit(), now);
+            auto broken = permit();
+            if (failure == "focus") broken.focused = false;
+            if (failure == "input") broken.healthy = false;
+            if (failure == "manual") broken.physical_left_down = true;
+            if (failure == "emergency") broken.armed = false;
+            now += 1ms; controller.tick(broken, now);
+            data["player"]["weapons"]["weapon_0"]["state"] = "active";
+            now += 1ms; ingest(); controller.tick(permit(), now);
+        }
+        now += 1ms;
+        require(controller.tick(permit(), now).snapshot.reason == TriggerReason::WAIT_RELEASE,
+            "信任/安全中断即使被普通换弹遮盖或消费者跳过，也必须要求松键重新武装");
+        controller.tick(permit(false), now);
+        now += 1ms;
+        auto observation = fresh_observation(1); observation->observed_at = now;
+        require(controller.observe(*observation, permit(), now).button_action == TriggerButtonAction::DOWN,
+            "健康状态松键后才可建立新的GSI会话");
+    }
+}
+
+// 走生产解析/连续性/Runtime转换，再驱动两个生产worker；许可始终来自FakeMouse。
+void gsi_session_recovery(const char* transition) {
+    const auto catalog = weapon::default_timing_catalog();
+    weapon::GsiConfig gsi_config; gsi_config.enabled = true;
+    weapon::detail::GsiState gsi;
+    std::mutex gsi_mutex;
+    runtime::detail::TriggerWeaponContext trigger_context;
+    std::uint64_t timestamp = 1700000000;
+    auto ingest = [&](const char* name, const char* state, int ammo) {
+        nlohmann::json payload = {
+            {"provider", {{"appid", 730}, {"steamid", "76561198000000000"}, {"timestamp", ++timestamp}}},
+            {"player", {{"steamid", "76561198000000000"}, {"activity", "playing"}, {"state", {{"health", 100}}},
+                {"weapons", {{"weapon_0", {{"name", name}, {"state", state}, {"ammo_clip", ammo},
+                    {"ammo_clip_max", 30}, {"ammo_reserve", 90}}}}}}}};
+        std::lock_guard lock(gsi_mutex);
+        gsi.ingest(payload.dump(), gsi_config, Clock::now(), timestamp * 1000);
+    };
+    auto snapshot = [&] { std::lock_guard lock(gsi_mutex); return gsi.snapshot(Clock::now()); };
+    ingest("weapon_ak47", "active", 30);
+    auto mouse = std::make_shared<FakeMouse>();
+    auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+    std::atomic<std::uint64_t> next_id{0};
+    AutoStopWorker stop(mouse, arbiter, [] { return true; }, [&] { return ++next_id; }, [] { return true; },
+        [&] { return runtime::detail::auto_stop_weapon_context(snapshot(), true, &catalog, Clock::now()); });
+    TriggerWorker trigger(mouse, arbiter, [] { return true; }, [] { return true; }, [&] { return ++next_id; },
+        [&](std::uint64_t id) { return stop.request(id); }, [&](std::uint64_t id) { stop.cancel(id); },
+        [&] { return trigger_context.update(snapshot(), catalog, Clock::now()); },
+        [&] { return stop.estimated_completion_id(); },
+        [&](std::uint64_t id, TriggerTime deadline) { stop.resume_movement(id, deadline - 58ms); });
+    AutoStopConfig sc{true, 5}; sc.cycle_enabled = true; sc.counter_hold_ms = 40; sc.shot_after_release_ms = 18;
+    TriggerConfig tc; tc.enabled = true; tc.hold_virtual_key = 5; tc.fire_delay_ms = 0;
+    tc.require_stop = tc.allow_estimated_stop = true; tc.max_observation_age_ms = 300;
+    mouse->physical(0, false);
+    require(stop.start(sc) && trigger.start(tc), "GSI组合worker启动");
+    until([&] { return mouse->drained() && trigger.snapshot().reason == TriggerReason::RELEASED; });
+    mouse->physical(2, true);
+    std::uint64_t sequence = 0;
+    auto publish = [&] { stop.publish_target(Clock::now() + 300ms); trigger.publish(fresh_observation(++sequence)); };
+    until([&] { publish(); return trigger.firing_signal().confirmed_down; });
+    const auto old_stop = trigger.snapshot().estimated_stop_request_id;
+    const auto before = mouse->downs.load();
+    if (std::string_view(transition) == "switch") ingest("weapon_deagle", "active", 7);
+    else ingest("weapon_ak47", transition, 0);
+    until([&] { return !trigger.snapshot().button_may_be_down && stop.estimated_completion_id() == 0; });
+    if (std::string_view(transition) != "switch") {
+        const auto end = Clock::now() + 25ms;
+        while (Clock::now() < end) { publish(); std::this_thread::sleep_for(1ms); }
+        require(mouse->downs == before, "普通不可用期间不得发送DOWN");
+        ingest("weapon_ak47", "active", 30);
+    }
+    bool recovered = false;
+    const auto end = Clock::now() + 1200ms;
+    while (Clock::now() < end) {
+        publish();
+        if (mouse->downs > before && trigger.snapshot().estimated_stop_request_id != 0 &&
+            trigger.snapshot().estimated_stop_request_id != old_stop && trigger.firing_signal().confirmed_down) { recovered = true; break; }
+        std::this_thread::sleep_for(1ms);
+    }
+    const auto state = trigger.snapshot();
+    const bool stop_latched = stop.snapshot().release_required;
+    trigger.stop(); stop.stop();
+    if (!recovered) std::cerr << "transition=" << transition << " trigger=" << static_cast<int>(state.reason)
+        << " stop_release_required=" << stop_latched << '\n';
+    require(recovered, "持续持键的正常GSI武器过渡必须恢复，不要求松键");
+    require(state.estimated_stop_request_id != old_stop && state.estimated_stop_request_id != 0,
+        "恢复不得继承旧武器急停编号");
+    require(state.firing_context.timing_weapon_id == (std::string_view(transition) == "switch" ? "deagle" : "ak47"),
+        "恢复必须使用当前武器时序");
 }
 void run_weapon(const char* weapon_id, bool cycle = false, bool lose_candidate = false, bool lose_target = false,
                 bool leave_trigger_region = false) {
@@ -292,6 +428,8 @@ void stationary_owner_does_not_interrupt_shot() {
 } // namespace
 int main() {
     try {
+        gsi_trust_breaks_require_release();
+        for (const char* transition : {"reloading", "active", "switch"}) gsi_session_recovery(transition);
         stationary_owner_does_not_interrupt_shot();
         for (const char* id : {"deagle", "ak47", "awp"}) { run_weapon(id); run_weapon(id, true); }
         run_weapon("ak47", true, true);

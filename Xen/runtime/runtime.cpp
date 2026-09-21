@@ -2,6 +2,7 @@
 
 #include "log/log.h"
 #include "runtime/runtime_internal.h"
+#include "runtime/weapon_context_internal.h"
 #include "runtime/aim_frame_internal.h"
 #include "runtime/input_training_internal.h"
 #include "auto_stop/auto_stop_worker.h"
@@ -353,7 +354,7 @@ struct Runtime::Impl {
             }
             LOG_INFO("auto_stop", "自动急停支持人工松方向键反向轻点，以及允许键与人物范围触发；共用键盘所有者，要求源机焦点");
         }
-        if ((config.auto_stop.enabled || config.trigger.enabled || config.recoil.enabled) && config.source_context.enabled) {
+        if (config.source_context.enabled) {
                 auto context_config = config.source_context;
                 char* token = nullptr; std::size_t token_size = 0;
                 if (_dupenv_s(&token, &token_size, "XEN_SOURCE_CONTEXT_TOKEN") == 0 && token) {
@@ -405,38 +406,8 @@ struct Runtime::Impl {
                     return stop && stop->request(id);
                 },
                 [this](std::uint64_t id) { if (auto stop = auto_stop_worker.load()) stop->cancel(id); },
-                [this, timing_catalog, selected = static_cast<const weapon::TimingProfile*>(nullptr),
-                    previous_weapon = std::string{}, previous_epoch = std::uint64_t{0},
-                    generation = std::uint64_t{0}, previous_valid = false, exhausted = false]() mutable {
-                    if (exhausted) return TriggerContext{generation, true, false};
-                    const auto weapon = gsi_receiver.snapshot();
-                    const std::string_view id = weapon.canonical_id;
-                    const bool valid = weapon.valid && weapon.identity_match && !id.empty() &&
-                        weapon.source_epoch != 0 && weapon.state == weapon::WeaponState::ACTIVE &&
-                        weapon.ammo_clip && *weapon.ammo_clip > 0 && weapon.valid_until > TriggerClock::now();
-                    // revision/timestamp 的正常心跳不改变会话；身份、连续性或有效性变化持续增代。
-                    if (generation == 0 || id != previous_weapon ||
-                        weapon.source_epoch != previous_epoch || valid != previous_valid) {
-                        if (generation == std::numeric_limits<std::uint64_t>::max()) {
-                            exhausted = true;
-                            return TriggerContext{generation, true, false};
-                        }
-                        previous_weapon = id;
-                        selected = weapon::find_timing(*timing_catalog, id);
-                        previous_epoch = weapon.source_epoch;
-                        previous_valid = valid;
-                        ++generation;
-                    }
-                    TriggerContext result{generation, true, valid};
-                    result.timing_required = true;
-                    result.timing_catalog_revision = timing_catalog->revision;
-                    result.timing_weapon_id = selected ? selected->canonical_id : std::string_view{};
-                    result.timing_valid = selected && selected->enabled;
-                    if (result.timing_valid) {
-                        result.shot_hold_ms = selected->shot_hold_ms;
-                        result.fire_interval_ms = selected->fire_interval_ms;
-                    }
-                    return result;
+                [this, timing_catalog, context = runtime::detail::TriggerWeaponContext{}]() mutable {
+                    return context.update(gsi_receiver.snapshot(), *timing_catalog, TriggerClock::now());
                 },
                 [this] { auto stop = auto_stop_worker.load(); return stop ? stop->estimated_completion_id() : 0; },
                 std::move(resume_movement), [this](std::uint64_t id) {
@@ -814,6 +785,13 @@ struct Runtime::Impl {
         std::uint64_t last_sequence = 0;
         runtime::detail::RuntimeObservationClock observation_clock;
         runtime::detail::CameraMotionEstimator camera_motion;
+        runtime::detail::AimWeaponSessionGate aim_weapon_session;
+        const auto sample_aim_weapon_session = [this, &aim_weapon_session] {
+            return aim_weapon_session.update(config.gsi.enabled ? gsi_receiver.snapshot() : weapon::WeaponSnapshot{},
+                config.gsi.enabled, config.source_context.enabled ? source_context_client.snapshot() :
+                    source_context::SourceContextSnapshot{}, config.source_context.enabled,
+                safety_gate.hold_active(), weapon::Clock::now());
+        };
         const bool probes_enabled = config.runtime.enable_performance_probes;
         while (!stop_requested.load(std::memory_order_acquire)) {
             std::uint64_t overwritten_frames_at_consume = 0;
@@ -889,10 +867,11 @@ struct Runtime::Impl {
                 // WARMING→VALID 会从辅机 frame-ready 切到更早的 NDI
                 // submission 时刻；source session 重启或拟合更新也可能让
                 // 映射跳回。跨时间基准的旧轨迹不能混算 dt，先重置再消费。
+                const auto frame_weapon_session = sample_aim_weapon_session();
                 auto prepared = runtime::detail::prepare_aim_frame(
                     *frame, std::move(detections), observation_clock,
-                    camera_motion, safety_gate.can_dispatch());
-                if (prepared.reset_aim) {
+                    camera_motion, safety_gate.can_dispatch() && frame_weapon_session.allowed);
+                if (prepared.reset_aim || frame_weapon_session.reset_aim) {
                     if (auto stop = auto_stop_worker.load()) {
                         stop->publish_target({}); stop->publish_tracking_target({});
                     }
@@ -950,7 +929,10 @@ struct Runtime::Impl {
                             aim_frame.sequence, static_cast<int>(rejection));
                     }
                 }
-                aim_frame.lock_active = runtime::detail::aim_frame_dispatch_allowed(aim_frame, safety_gate.can_dispatch());
+                const auto control_weapon_session = sample_aim_weapon_session();
+                if (control_weapon_session.reset_aim) aim_reset_requested.store(true, std::memory_order_release);
+                aim_frame.lock_active = runtime::detail::aim_frame_dispatch_allowed(aim_frame, safety_gate.can_dispatch(),
+                    frame_weapon_session, control_weapon_session);
                 aim_frame.control_at = std::chrono::steady_clock::now();
                 profile.control_timing_valid = true;
                 profile.capture_to_control_ms = std::chrono::duration<double, std::milli>(
@@ -970,8 +952,11 @@ struct Runtime::Impl {
                     const MouseMoveCommand command{
                         aim_result.command.dx_counts,
                         aim_result.command.dy_counts};
+                    const auto dispatch_weapon_session = sample_aim_weapon_session();
+                    if (dispatch_weapon_session.reset_aim) aim_reset_requested.store(true, std::memory_order_release);
                     bool dispatch_allowed = runtime::detail::aim_frame_dispatch_allowed(
-                        aim_frame, safety_gate.can_dispatch()) && (!config.recoil.enabled || config.recoil.mixed_aim);
+                        aim_frame, safety_gate.can_dispatch(), frame_weapon_session, dispatch_weapon_session) &&
+                        (!config.recoil.enabled || config.recoil.mixed_aim);
                     if (output_arbiter) dispatch_allowed = dispatch_allowed && output_guard.owns_lock() &&
                         aim_frame.recoil_y_owned == output_arbiter->recoil_y_owned();
                     if (dispatch_allowed && config.recoil.enabled) {

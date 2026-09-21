@@ -163,14 +163,20 @@ std::optional<TriggerDecision> TriggerController::check_context(const TriggerPer
         (timing_required && (previous.generation != permit.context.generation ||
             previous.timing_valid != permit.context.timing_valid || previous.shot_hold_ms != permit.context.shot_hold_ms ||
             previous.fire_interval_ms != permit.context.fire_interval_ms)));
-    const bool changed = timing_changed || previous.required != permit.context.required ||
+    const bool trust_changed = previous.trust_generation != permit.context.trust_generation ||
+        previous.session_trusted != permit.context.session_trusted;
+    const bool changed = trust_changed || timing_changed || previous.required != permit.context.required ||
         (permit.context.required && (previous.generation != permit.context.generation || previous.valid != permit.context.valid));
     const bool available = (!permit.context.required || (permit.context.valid && permit.context.generation != 0)) &&
         (!timing_required || (permit.context.timing_valid && permit.context.generation != 0 &&
             permit.context.shot_hold_ms >= 1 && permit.context.shot_hold_ms <= 500 &&
             permit.context.fire_interval_ms >= permit.context.shot_hold_ms && permit.context.fire_interval_ms <= 2000));
     if (!changed && available) return std::nullopt;
-    auto decision = cancel(available ? TriggerReason::CONTEXT_CHANGED : TriggerReason::CONTEXT_UNAVAILABLE, now);
+    // 正常武器变更仍退出旧候选/旧按钮事务，只保留已观察过的健康持键许可。
+    const bool ordinary = previous.required && permit.context.required && previous.session_trusted &&
+        permit.context.session_trusted && previous.trust_generation != 0 && !trust_changed;
+    const auto reason = available ? TriggerReason::CONTEXT_CHANGED : TriggerReason::CONTEXT_UNAVAILABLE;
+    auto decision = ordinary ? release(reason, now) : cancel(reason, now);
     // 变化当次已观察到健康释放时可作为新边沿起点；失效期间的释放不能武装恢复后的上下文。
     if (available && permit.enabled && permit.healthy && permit.focused && permit.armed &&
         !permit.physical_left_down && !permit.held) release_seen_ = true;
@@ -246,9 +252,9 @@ bool TriggerController::select_candidate(const TriggerObservation& observation, 
 TriggerDecision TriggerController::observe(const TriggerObservation& observation, const TriggerPermit& permit, TriggerTime now) noexcept {
     if (now < last_now_) return cancel(TriggerReason::INVALID_OBSERVATION, last_now_);
     last_now_ = now;
-    if (const auto canceled = check_context(permit, now)) return *canceled;
-    // 新帧与定时轮询使用相同的前置许可优先级，持续阻断不会逐帧换成图像错误。
+    // 暂停期间仍观察安全许可，不能让武器不可用遮蔽失焦或人工接管。
     if (const auto canceled = check_permission(permit, now)) return *canceled;
+    if (const auto canceled = check_context(permit, now)) return *canceled;
     const auto reject_observation = [&](TriggerReason reason) {
         observation_failure_ = reason;
         return release(reason, now);
@@ -299,8 +305,8 @@ std::optional<TriggerDecision> TriggerController::check_permission(const Trigger
 TriggerDecision TriggerController::tick(const TriggerPermit& permit, TriggerTime now) noexcept {
     if (now < last_now_) return cancel(TriggerReason::INVALID_OBSERVATION, last_now_);
     last_now_ = now;
-    if (const auto canceled = check_context(permit, now)) return *canceled;
     if (const auto canceled = check_permission(permit, now)) return *canceled;
+    if (const auto canceled = check_context(permit, now)) return *canceled;
     if (!permit.held) {
         release_seen_ = true;
         return release(TriggerReason::RELEASED, now);

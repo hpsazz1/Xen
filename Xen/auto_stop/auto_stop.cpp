@@ -170,6 +170,22 @@ bool AutoStopController::resume_after_masked_hold(
     decision_.axis_deadline_ns = {};
     return true;
 }
+bool AutoStopController::restart_after_cleanup(const WasdMotionIntent& intent, std::int64_t cleanup_ns) noexcept {
+    if (!counterpulse_ || !timing_valid_ || !intent.input_continuous || !intent.history_valid ||
+        intent.conflicting || intent.epoch == 0 || intent.sequence == 0 || intent.received_at_ns <= 0 ||
+        cleanup_ns < intent.received_at_ns || intent.held_mask > 15 ||
+        (intent.held_mask & 5) == 5 || (intent.held_mask & 10) == 10 ||
+        intent.longitudinal != int(bool(intent.held_mask & 1)) - int(bool(intent.held_mask & 4)) ||
+        intent.horizontal != int(bool(intent.held_mask & 8)) - int(bool(intent.held_mask & 2))) return false;
+    for (unsigned key = 0; key < 4; ++key) {
+        const auto edge = intent.held_since_ns[key];
+        if ((intent.held_mask & (1U << key)) ? edge <= 0 || edge > intent.received_at_ns : edge != 0) return false;
+    }
+    decision_ = {}; input_ = intent; state_ = {}; time_ns_ = cleanup_ns;
+    applied_mask_ = 0; synchronized_ = true; output_started_ = false;
+    masked_hold_model_valid_ = false; initial_zero_ = false; counter_mask_ = 0;
+    return true;
+}
 void AutoStopController::invalidate() noexcept {
     masked_hold_model_valid_ = false;
     synchronized_ = false;

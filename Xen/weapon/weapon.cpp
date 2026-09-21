@@ -189,6 +189,7 @@ void GsiState::reset() noexcept {
     current_ = {}; timestamp_ = 0; last_now_ = {}; timestamp_deadline_ = {}; seen_states_.clear();
     if (epoch_ != std::numeric_limits<std::uint64_t>::max()) ++epoch_;
     if (recoil_safety_epoch_ != std::numeric_limits<std::uint64_t>::max()) ++recoil_safety_epoch_;
+    if (control_safety_epoch_ != std::numeric_limits<std::uint64_t>::max()) ++control_safety_epoch_;
 }
 Status GsiState::ingest(std::string_view body, const GsiConfig& config,
                       Clock::time_point now, std::int64_t local_utc_ms) noexcept {
@@ -196,7 +197,9 @@ Status GsiState::ingest(std::string_view body, const GsiConfig& config,
         auto incoming = parse_payload(body, config, local_utc_ms);
         if (epoch_ == 0) epoch_ = 1;
         if (recoil_safety_epoch_ == 0) recoil_safety_epoch_ = 1;
+        if (control_safety_epoch_ == 0) control_safety_epoch_ = 1;
         if (now < last_now_ || epoch_ == std::numeric_limits<std::uint64_t>::max() ||
+            control_safety_epoch_ == std::numeric_limits<std::uint64_t>::max() ||
             recoil_safety_epoch_ == std::numeric_limits<std::uint64_t>::max() || revision_ == std::numeric_limits<std::uint64_t>::max()) {
             current_.valid = false; current_.status = Status::COUNTER_EXHAUSTED; return current_.status;
         }
@@ -231,8 +234,14 @@ Status GsiState::ingest(std::string_view body, const GsiConfig& config,
             }
             ++recoil_safety_epoch_;
         }
+        const bool control_break = trust_break || !incoming.player_health || *incoming.player_health == 0 ||
+            (current_.revision && (!current_.player_health || *current_.player_health == 0));
+        if (control_break) ++control_safety_epoch_;
+        incoming.control_safety_epoch = control_safety_epoch_;
         incoming.recoil_safety_epoch = recoil_safety_epoch_;
-        if (current_.valid && (!incoming.valid || now >= current_.valid_until || current_.player_id != incoming.player_id)) ++epoch_;
+        // 武器切换也持久撤销旧工作，即使消费者跳过中间武器快照。
+        if ((current_.valid && (!incoming.valid || now >= current_.valid_until || current_.player_id != incoming.player_id)) ||
+            (current_.revision && current_.canonical_id != incoming.canonical_id)) ++epoch_;
         incoming.source_epoch = epoch_;
         incoming.revision = ++revision_;
         incoming.received_at = now;

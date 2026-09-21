@@ -44,6 +44,8 @@ struct WeaponSnapshot {
     std::uint64_t source_epoch = 0;
     // 不可信间断的持久代际；普通死亡、换弹、空弹不改变它。
     std::uint64_t recoil_safety_epoch = 0;
+    // Aim/Trigger/AutoStop仅允许健康玩家的普通武器过渡，死亡也撤销持键会话。
+    std::uint64_t control_safety_epoch = 0;
     std::uint64_t revision = 0;
     Clock::time_point received_at{}, valid_until{};
     // 原生GSI没有逐包序号；同秒完整变化可采纳，但无法证明源端严格顺序。

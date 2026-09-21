@@ -18,7 +18,7 @@ public:
 private:
     WeaponSnapshot current_;
     std::uint64_t epoch_ = 0, revision_ = 0, timestamp_ = 0;
-    std::uint64_t recoil_safety_epoch_ = 0;
+    std::uint64_t recoil_safety_epoch_ = 0, control_safety_epoch_ = 0;
     Clock::time_point last_now_{}, timestamp_deadline_{};
     std::vector<std::string> seen_states_;
 };

@@ -1613,7 +1613,7 @@ if(BUILD_TESTING)
         tests/runtime_aim_frame_tests.cpp Xen/runtime/camera_motion.cpp)
     target_include_directories(runtime_aim_frame_tests PRIVATE
         ${PROJECT_SOURCE_DIR}/Xen ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(runtime_aim_frame_tests PRIVATE aim ${OpenCV_LIBS})
+    target_link_libraries(runtime_aim_frame_tests PRIVATE aim weapon ${OpenCV_LIBS})
     xen_deploy_runtime_dlls(runtime_aim_frame_tests OPENCV)
     add_test(NAME runtime_aim_frame_tests COMMAND runtime_aim_frame_tests)
 

@@ -569,8 +569,58 @@ void trigger_idle_contracts() {
     require(!worker.idle_for_trigger(input), "停止owner不再发布空闲事实");
 }
 
+void weapon_session_recovery_contracts() {
+    for (int scenario = 0; scenario < 9; ++scenario) {
+        auto fake = std::make_shared<Fake>();
+        std::atomic<std::uint64_t> id{0};
+        std::atomic<int> stage{0};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [&] { return ++id; }, [] { return true; }, [&] {
+                const auto step = stage.load();
+                return AutoStopWeaponContext{true, step != 1 || scenario == 1,
+                    static_cast<std::uint64_t>(step + 1), step != 0 && scenario == 1 ? "deagle" : "ak47",
+                    step != 0 && scenario == 2 ? 2u : 1u, !(step != 0 && scenario == 3)};
+            });
+        AutoStopConfig config{true, 5}; config.cycle_enabled = true;
+        require(worker.start(config), "可信武器暂停恢复回归启动");
+        ready(worker, fake);
+        worker.publish_target(Clock::now() + std::chrono::seconds(2));
+        if (scenario == 6) wait_for([&] { return fake->has_software(); });
+        else wait_for([&] { return worker.estimated_completion_id() != 0; });
+        const auto old_id = worker.estimated_completion_id();
+        if (scenario == 4) { std::lock_guard<std::mutex> lock(fake->mutex); fake->cleanup_fails = true; }
+        if (scenario == 7) { std::lock_guard<std::mutex> lock(fake->mutex); fake->cleanup_report_mode = 2; }
+        if (scenario == 8) {
+            worker.publish_tracking_target(Clock::now() + std::chrono::seconds(2));
+            { std::lock_guard<std::mutex> lock(fake->mutex); fake->extra_keys[1] = true; }
+            require(worker.retain_for_manual_fire(old_id), "先建立人工接管再验证武器变化保护");
+        }
+        if (scenario == 5) { std::lock_guard<std::mutex> lock(fake->mutex); fake->extra_keys[0x32] = true; }
+        else stage = 1;
+        wait_for([&] { return worker.snapshot().canceled != 0; });
+        require(worker.estimated_completion_id() == 0, "正常武器暂停同样撤销旧完成资格");
+        require(!worker.resume_movement(old_id, Clock::now()), "不能归还跨武器旧完成编号");
+        if ((scenario >= 2 && scenario <= 4) || scenario >= 7) {
+            require(worker.snapshot().release_required || worker.snapshot().cleanup_unknown,
+                "信任换代、中断及未知清理不能自动恢复");
+        } else {
+            require(!worker.snapshot().release_required, "可信换弹空弹或切枪不能要求松键重新武装");
+            require(worker.snapshot().requests == 1, "新武器不能继承旧目标资格");
+            if (scenario == 5) { std::lock_guard<std::mutex> lock(fake->mutex); fake->extra_keys[0x32] = false; }
+            stage = 2;
+            wait_for([&] { return worker.snapshot().weapon_context.generation == 3; });
+            require(worker.snapshot().requests == 1, "武器恢复仍需重新发布目标");
+            worker.publish_target(Clock::now() + std::chrono::seconds(2));
+            wait_for([&] { return worker.estimated_completion_id() > old_id; });
+            require(!worker.snapshot().release_required, "持续按键重新完成新一轮急停");
+        }
+        worker.stop();
+    }
+}
+
 int main(int argc, char** argv) {
     try {
+        weapon_session_recovery_contracts();
         trigger_idle_contracts();
         if (argc == 2 && std::string_view(argv[1]) == "--manual-fire") {
             manual_fire_retains_stop_contracts();
@@ -654,6 +704,7 @@ int main(int argc, char** argv) {
             require(worker.snapshot().requests == 1, "GSI恢复不能在持续按键下再次接管");
             { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
             wait_for([&] { return !worker.snapshot().release_required; });
+            worker.publish_target(Clock::now() + std::chrono::seconds(2));
             { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = true; }
             wait_for([&] { return worker.snapshot().requests == 2; });
             worker.stop();
