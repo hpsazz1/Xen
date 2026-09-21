@@ -78,6 +78,8 @@ struct TriggerPermit {
     std::uint64_t stop_request_id = 0, stop_observation_epoch = 0;
     bool stop_observed_qualified = false;
     bool stop_estimated_qualified = false;
+    // 无移动键且急停所有者空闲；只免除联动等待，不声明游戏内已停稳。
+    bool stop_not_needed = false;
     std::uint64_t estimated_stop_request_id = 0;
     TriggerTime stop_expires_at{};
     // Runtime 已预留清理预算的期限；并非物理硬实时归还保证。
@@ -85,6 +87,7 @@ struct TriggerPermit {
 };
 
 struct TriggerSnapshot {
+    bool stop_not_needed = false;
     TriggerPhase phase = TriggerPhase::DISABLED;
     TriggerReason reason = TriggerReason::DISABLED;
     TriggerPermissionBlock permission_block = TriggerPermissionBlock::NONE;

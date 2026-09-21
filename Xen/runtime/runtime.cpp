@@ -373,6 +373,8 @@ struct Runtime::Impl {
             Log::register_module("trigger", LogLevel::INFO);
             if (timing_catalog) LOG_INFO("trigger", "点射使用共享武器资料r{}，启动后固定版本", timing_catalog->revision);
             auto trigger_config = config.trigger;
+            // 生产只有制动完成联动，没有独立观察停稳的数据生产者。
+            if (trigger_config.require_stop) trigger_config.allow_estimated_stop = true;
             trigger_config.person_class_ids = config.aim.person_class_ids;
             trigger_config.head_class_ids = config.aim.head_class_ids;
             std::function<void(std::uint64_t, TriggerTime)> resume_movement;
@@ -440,6 +442,9 @@ struct Runtime::Impl {
                 std::move(resume_movement), [this](std::uint64_t id) {
                     auto stop = auto_stop_worker.load();
                     return stop && stop->retain_for_manual_fire(id);
+                }, [this](const InputSnapshot& input) {
+                    auto stop = auto_stop_worker.load();
+                    return stop && stop->idle_for_trigger(input);
                 });
             if (!worker->start(trigger_config)) { set_error("自动扳机启动失败或设备不支持左键"); return false; }
             trigger_worker.store(std::move(worker));

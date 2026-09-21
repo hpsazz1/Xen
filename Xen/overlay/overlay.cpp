@@ -3083,16 +3083,16 @@ struct Overlay::Impl {
                 "可以与瞄准键或自动急停快捷键共用；禁止左键、WASD、安全急停和运行启停键。恢复或重新启动后须先松开再按下。Esc 清空。",
                 HotkeyBindingTarget::TRIGGER,
                 trigger.hold_virtual_key == 0 ? std::vector<int>{} : std::vector<int>{trigger.hold_virtual_key}, key_active);
-            form_row("要求急停联动", "开启后等待所选急停完成策略；关闭仅做几何扳机，不保证角色已停稳。");
-            toggle_switch("##trigger_require_stop", &trigger.require_stop);
+            form_row("移动急停联动", "按住移动键或存在制动事务时等待急停完成；无WASD且无制动事务时直接按目标范围判断，不等待停稳资格。");
+            if (toggle_switch("##trigger_require_stop", &trigger.require_stop) && trigger.require_stop)
+                trigger.allow_estimated_stop = true;
             form_row("触发范围 / %", "以检测框中心等比缩小宽高，100%为完整目标框；1%到100%，只允许框内触发。到达范围不追加首发等待，急停联动与有效输入条件仍须满足。停止运行后修改生效。");
             slider_float_control("trigger_range", &trigger.range_percent, 1.0f, 100.0f, "%.0f");
             ImGui::EndTable();
         }
         ImGui::EndDisabled();
-        if (trigger.require_stop) ImGui::TextWrapped(trigger.allow_estimated_stop ?
-            "估计完成联动：需要持续按住急停允许键；并非观察确认停稳，组合效果需前台复测。" :
-            "严格观察联动：预计完成不放行开火，等待观察停稳证据。");
+        if (trigger.require_stop) ImGui::TextWrapped(
+            "移动急停联动：移动或制动期间等待急停完成；无WASD且无制动事务时不等待停稳资格。急停完成是时序估计，组合效果需前台复测。");
         if (!trigger.fire_enabled) ImGui::TextWrapped("开枪已关闭：仅调试检测与联动，不发送自动扳机按下。");
         const char* reason = "待命";
         switch (snapshot.trigger.reason) {
@@ -3121,7 +3121,7 @@ struct Overlay::Impl {
             case TriggerReason::DELAY: reason = "等待连续命中时间"; break;
             case TriggerReason::COOLDOWN: reason = "等待再次按下间隔"; break;
             case TriggerReason::WAIT_NEW_FRAME: reason = "等待新图像"; break;
-            case TriggerReason::STOP_UNVERIFIED: reason = "停稳证据未就绪"; break;
+            case TriggerReason::STOP_UNVERIFIED: reason = "等待移动急停完成"; break;
             case TriggerReason::STOP_EXPIRED: reason = "停稳资格或制动期限已失效"; break;
             case TriggerReason::COMMAND_PENDING: reason = "等待设备回执"; break;
             case TriggerReason::RELEASED: reason = "已发起释放或等待按下"; break;
@@ -3173,8 +3173,6 @@ struct Overlay::Impl {
             slider_float_control("trigger_confidence", &trigger.min_confidence, 0.0f, 1.0f, "%.2f");
             form_row("图像有效期 / ms", "源图像年龄加时钟不确定性必须小于此值；无图也按原期限释放，重复读取旧帧不会续期。");
             slider_int_control("trigger_age", &trigger.max_observation_age_ms, 1, 5000);
-            form_row("使用估计完成联动", "仅要求急停联动时生效：复用独立急停持续四键接管的估计完成状态，与点射冷却并行；不代表真实移速观察。关闭保留严格观察模式。");
-            toggle_switch("##trigger_estimated_stop", &trigger.allow_estimated_stop);
             ImGui::EndTable();
         }
         ImGui::EndDisabled();

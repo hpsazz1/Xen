@@ -64,6 +64,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex); subscribed = value; ++subscriptions; return true;
     }
     bool read_wasd_events(WasdEventCursor& cursor, WasdEventBatch& batch) noexcept override {
+        if (before_wasd_read) before_wasd_read();
         std::lock_guard<std::mutex> lock(mutex); batch = {}; batch.subscribed = subscribed; batch.gap = gap;
         // 与生产环形历史一致：读取只推进调用方游标，不破坏其它游标的事件。
         cursor.epoch = 1;
@@ -167,6 +168,7 @@ public:
     int physical_during_cleanup = -1;
     int cleanup_report_mode = 0;
     std::function<void()> after_first_software;
+    std::function<void()> before_wasd_read;
     std::function<void(std::size_t)> after_mask;
     std::atomic<int> closes{0};
     Clock::time_point cleanup_at{};
@@ -518,8 +520,58 @@ void manual_fire_retains_stop_contracts() {
     }
 }
 
+void trigger_idle_contracts() {
+    auto fake = std::make_shared<Fake>();
+    std::atomic<std::uint64_t> id{0};
+    const auto test_thread = std::this_thread::get_id();
+    std::atomic<int> inject{0};
+    fake->before_wasd_read = [&] {
+        if (std::this_thread::get_id() != test_thread) return;
+        const int mode = inject.exchange(0);
+        if (mode == 1) fake->physical(0);
+        if (mode == 2) fake->physical_batch({2, 0});
+    };
+    AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+        [&] { return ++id; }, [] { return true; });
+    AutoStopConfig config{true, 5};
+    require(worker.start(config), "扳机空闲消费屏障回归启动");
+    fake->physical(0);
+    InputSnapshot input;
+    wait_for([&] { fake->poll_input(input); return worker.idle_for_trigger(input); });
+    // 鼠标全量序号与WASD游标不是同一时间线，不能要求两者逐报告相等。
+    input.sequence += 100000;
+    wait_for([&] { return worker.idle_for_trigger(input); });
+    inject = 1;
+    wait_for([&] { return worker.idle_for_trigger(input); });
+    require(inject == 0, "重复零报告须经副游标验证且不永久阻塞原地扳机");
+    inject = 2;
+    bool accepted_unprocessed = false;
+    wait_for([&] {
+        const bool accepted = worker.idle_for_trigger(input);
+        if (inject == 0) { accepted_unprocessed = accepted; return true; }
+        return false;
+    });
+    require(!accepted_unprocessed, "新按下再松开不能被最终零键洗掉未消费事件");
+    wait_for([&] { return worker.snapshot().requests == 1 && fake->released() &&
+        worker.snapshot().status != AutoStopStatus::BRAKING; });
+    wait_for([&] { fake->poll_input(input); return worker.idle_for_trigger(input); });
+    require(worker.estimated_completion_id() == 0 && !worker.snapshot().cleanup_unknown,
+        "人工松键制动及清理完成即恢复空闲，不要求独立急停完成ID");
+    input.virtual_keys[0x23] = true;
+    require(!worker.idle_for_trigger(input), "原地不能绕过End急停");
+    input.virtual_keys[0x23] = false;
+    input.virtual_keys[0x51] = true;
+    require(!worker.idle_for_trigger(input), "原地不能绕过救援按键");
+    input.virtual_keys[0x51] = false;
+    worker.set_paused(true);
+    require(!worker.idle_for_trigger(input), "原地不能绕过暂停");
+    worker.stop();
+    require(!worker.idle_for_trigger(input), "停止owner不再发布空闲事实");
+}
+
 int main(int argc, char** argv) {
     try {
+        trigger_idle_contracts();
         if (argc == 2 && std::string_view(argv[1]) == "--manual-fire") {
             manual_fire_retains_stop_contracts();
             std::cout << "人工开火保持急停专项通过\n";
@@ -705,12 +757,12 @@ int main(int argc, char** argv) {
             require(!masked_reports.empty() && std::all_of(masked_reports.begin(), masked_reports.end(),
                 [](int mask) { return mask == 0; }), "模型不可用时只能发送零软件报告");
             worker.publish_target({});
-            for (const auto mask : {10, 8, 10, 2, 0, 8, 10, 2, 10, 8}) {
+            for (const auto mask : {10, 8, 10, 2, 8, 10, 2, 10, 8}) {
                 fake->physical(static_cast<std::uint8_t>(mask));
                 wait_for([&] { return fake->drained(); });
                 std::lock_guard<std::mutex> lock(fake->mutex);
                 require(fake->installed_masks == 15 && fake->current_software == 0 && fake->cleanups == 0,
-                    "仅屏蔽后持续乱按AD、重叠及全松均不能解除四键屏蔽");
+                    "仅屏蔽后持续乱按AD及重叠不能解除四键屏蔽");
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(520));
             require(worker.snapshot().status == AutoStopStatus::MASKED && worker.snapshot().requests == 1 &&
@@ -726,6 +778,19 @@ int main(int argc, char** argv) {
             require(std::all_of(repeated_reports.begin(), repeated_reports.end(), [](int mask) { return mask == 0; }) &&
                 worker.snapshot().completed == 0 && !worker.snapshot().fire_permitted,
                 "持键重入仅屏蔽不得伪造模型历史或发非零报告");
+            fake->physical(0);
+            wait_for([&] { return fake->released() && worker.snapshot().canceled == 2; });
+            wait_for([&] { return worker.snapshot().status == AutoStopStatus::READY; });
+            require(worker.estimated_completion_id() == 0 && worker.snapshot().completed == 0 &&
+                !worker.snapshot().cleanup_unknown && !worker.snapshot().fire_permitted,
+                "仅屏蔽全松清理后回空闲，不伪造估计完成或停稳资格");
+            fake->physical(0);
+            wait_for([&] { return fake->drained(); });
+            require(fake->reports() == repeated_reports && worker.snapshot().requests == 2,
+                "持续按许可键全松后不得补发反向或重新申请屏蔽");
+            { std::lock_guard<std::mutex> lock(fake->mutex);
+              require(fake->activation && fake->installed_masks == 0 && fake->current_software == 0,
+                  "许可键持续按住时全松仍归还四键屏蔽"); }
             worker.stop();
             require(fake->released(), "停止仅屏蔽必须归还全部键盘债务");
         }

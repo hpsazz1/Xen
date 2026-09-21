@@ -142,6 +142,9 @@ public:
     std::uint64_t estimated_id = 0, estimated_generation = 0;
     std::uint64_t resume_id = 0, resume_generation = 0;
     Clock::time_point resume_not_before{}, movement_not_before{};
+    bool trigger_idle = false;
+    WasdEventCursor trigger_idle_cursor;
+    std::uint64_t trigger_idle_generation = 0;
 
     void publish(AutoStopStatus status) {
         std::lock_guard<std::mutex> lock(mutex);
@@ -644,6 +647,13 @@ public:
                         active_generation != cancel_generation.load() ? "caller_canceled" : "lease_expired";
                     cancel_active(false, reason, normal_release);
                 }
+                // 仅屏蔽没有制动完成资格；真实方向键全松后清理屏蔽，交回原地几何扳机。
+                // 已完成反向制动或人工接管仍沿用原保持契约，不补发接管期间的松键反向。
+                if (active_id && independent && masked_hold && manual_fire_id.load() == 0 &&
+                    input_ok && events_ok && intent.input_continuous && intent.epoch == active_input_epoch &&
+                    intent.held_mask == 0 && held_wasd(input) == 0) {
+                    cancel_active(false, "masked_directions_released", true);
+                }
                 if (latched_fault) {
                     report_block();
                     std::unique_lock<std::mutex> lock(mutex);
@@ -820,6 +830,11 @@ public:
                 release_reservation();
                 report_block();
                 std::unique_lock<std::mutex> lock(mutex);
+                const bool idle = input_ok && events_ok && intent.input_continuous && intent.held_mask == 0 &&
+                    held_wasd(input) == 0 && !active_id && !pending_id && !debt && !fault && !state.cleanup_unknown;
+                if (trigger_idle != idle) ++trigger_idle_generation;
+                trigger_idle = idle;
+                if (trigger_idle) trigger_idle_cursor = cursor;
                 wake.wait_for(lock, std::chrono::milliseconds(1));
             }
             if (active_id || debt) cancel_active(false, "worker_stopped");
@@ -874,6 +889,9 @@ bool AutoStopWorker::start(const AutoStopConfig& config, int command_timeout_ms)
         if (impl_->running || impl_->thread.joinable() || impl_->fault) return false;
         impl_->config = config;
         impl_->state = {};
+        impl_->trigger_idle = false;
+        impl_->trigger_idle_cursor = {};
+        ++impl_->trigger_idle_generation;
         impl_->weapon_context_seen = false;
         impl_->resume_id = 0;
         impl_->manual_fire_id = 0;
@@ -1018,6 +1036,43 @@ AutoStopSnapshot AutoStopWorker::snapshot() const noexcept {
         if (impl_->arbiter) result.aim_skips = impl_->arbiter->aim_skips();
         return result;
     } catch (...) { return {}; }
+}
+
+bool AutoStopWorker::idle_for_trigger(const InputSnapshot& input) const noexcept {
+    if (!impl_ || !input.state_valid || input.status != InputMonitorStatus::READY || held_wasd(input) != 0 ||
+        input.virtual_keys[0x23] || impl_->release_key_held(input)) return false;
+    try {
+        WasdEventCursor cursor;
+        std::uint64_t generation = 0;
+        {
+            std::lock_guard<std::mutex> lock(impl_->mutex);
+            if (!impl_->running || !impl_->trigger_idle || impl_->pending_id || impl_->fault ||
+                impl_->state.status == AutoStopStatus::BRAKING || impl_->state.status == AutoStopStatus::ESTIMATED ||
+                impl_->state.status == AutoStopStatus::MASKED || impl_->state.status == AutoStopStatus::FAULT ||
+                impl_->state.cleanup_unknown || impl_->state.release_required || impl_->paused.load() ||
+                impl_->stopping.load()) return false;
+            cursor = impl_->trigger_idle_cursor;
+            generation = impl_->trigger_idle_generation;
+        }
+        const auto previous = cursor;
+        WasdEventBatch tail;
+        if (!impl_->mouse->read_wasd_events(cursor, tail) || !tail.subscribed || tail.gap ||
+            cursor.epoch != previous.epoch || tail.count == tail.events.size()) return false;
+        auto sequence = previous.sequence;
+        for (std::size_t i = 0; i < tail.count; ++i) {
+            const auto& event = tail.events[i];
+            if (!event.state_valid || event.epoch != previous.epoch || event.held_mask != 0 ||
+                event.sequence <= sequence || event.sequence - sequence != 1) return false;
+            sequence = event.sequence;
+        }
+        if (cursor.sequence != sequence) return false;
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        return impl_->running && impl_->trigger_idle && impl_->trigger_idle_generation == generation &&
+            !impl_->pending_id && !impl_->fault && !impl_->state.cleanup_unknown && !impl_->state.release_required &&
+            !impl_->paused.load() && !impl_->stopping.load() &&
+            impl_->state.status != AutoStopStatus::BRAKING && impl_->state.status != AutoStopStatus::ESTIMATED &&
+            impl_->state.status != AutoStopStatus::MASKED && impl_->state.status != AutoStopStatus::FAULT;
+    } catch (...) { return false; }
 }
 
 std::uint64_t AutoStopWorker::estimated_completion_id() const noexcept {

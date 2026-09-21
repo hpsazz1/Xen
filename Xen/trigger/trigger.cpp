@@ -122,6 +122,7 @@ TriggerDecision TriggerController::release(TriggerReason reason, TriggerTime now
     candidate_valid_ = false;
     state_.region = TriggerRegion::NONE;
     state_.estimated_stop_request_id = 0;
+    state_.stop_not_needed = false;
     state_.reason = reason;
     TriggerDecision decision;
     if (state_.button_may_be_down && pending_ != TriggerButtonAction::UP) {
@@ -298,10 +299,14 @@ TriggerDecision TriggerController::tick(const TriggerPermit& permit, TriggerTime
     if (now >= observation_expires_) return release(TriggerReason::STALE, now);
     if (config_.require_stop && config_.allow_estimated_stop && pending_ != TriggerButtonAction::UP) {
         const bool qualified = permit.stop_estimated_qualified && permit.estimated_stop_request_id != 0;
-        if (state_.button_may_be_down && (!qualified ||
-            state_.estimated_stop_request_id != permit.estimated_stop_request_id))
+        const bool same_stop = state_.stop_not_needed ? permit.stop_not_needed :
+            (qualified && state_.estimated_stop_request_id == permit.estimated_stop_request_id);
+        if (state_.button_may_be_down && !same_stop)
             return release(TriggerReason::STOP_EXPIRED, now);
-        state_.estimated_stop_request_id = qualified ? permit.estimated_stop_request_id : 0;
+        if (!state_.button_may_be_down) {
+            state_.stop_not_needed = permit.stop_not_needed;
+            state_.estimated_stop_request_id = qualified && !permit.stop_not_needed ? permit.estimated_stop_request_id : 0;
+        }
     }
     if (config_.require_stop && !config_.allow_estimated_stop && state_.stop_request_id) {
         stop_expires_ = permit.stop_expires_at;
@@ -341,7 +346,7 @@ TriggerDecision TriggerController::tick(const TriggerPermit& permit, TriggerTime
         state_.phase = TriggerPhase::QUALIFYING; state_.reason = TriggerReason::DELAY; return result(now);
     }
     const bool stop_qualified = config_.allow_estimated_stop ?
-        (permit.stop_estimated_qualified && permit.estimated_stop_request_id != 0) :
+        (permit.stop_not_needed || (permit.stop_estimated_qualified && permit.estimated_stop_request_id != 0)) :
         (permit.stop_observed_qualified && permit.stop_request_id == state_.stop_request_id &&
             permit.stop_observation_epoch == state_.observation_epoch && permit.stop_expires_at > now && permit.stop_release_deadline > now);
     if (config_.require_stop && !stop_qualified) {

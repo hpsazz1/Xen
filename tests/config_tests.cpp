@@ -1359,6 +1359,21 @@ void test_shared_weapon_timing_config() {
     expect(load_app_config(path.string(), loaded, error), "废弃共享开关不再参与校验");
     { std::ofstream out(path); out << "[trigger]\nallow_estimated_stop=perhaps\n"; }
     expect(!load_app_config(path.string(), loaded, error), "估计策略严格布尔校验");
+    for (const auto* legacy : {"", "allow_estimated_stop=false\n", "allow_estimated_stop=true\n"}) {
+        { std::ofstream out(path);
+          out << "[trigger]\nenabled=true\nrequire_stop=true\nhold_virtual_key=5\n" << legacy
+              << "[auto_stop]\nenabled=true\nactivation_virtual_key=5\n"
+              << "[mouse]\nbackend=kmbox_net\n[gsi]\nenabled=true\n"; }
+        expect(load_app_config(path.string(), loaded, error) && loaded.trigger.require_stop &&
+            loaded.trigger.allow_estimated_stop && loaded.trigger.enabled &&
+            loaded.trigger.hold_virtual_key == 5 && loaded.auto_stop.enabled,
+            "旧严格观察联动迁移到移动急停策略，保留启用状态与许可键: " + error);
+        expect(save_app_config(path.string(), loaded, error) && load_app_config(path.string(), loaded, error) &&
+            loaded.trigger.require_stop && loaded.trigger.allow_estimated_stop,
+            "移动急停策略迁移后保存重读保持一致: " + error);
+    }
+    { std::ofstream out(path); out << "[trigger]\nrequire_stop=true\nallow_estimated_stop=perhaps\n"; }
+    expect(!load_app_config(path.string(), loaded, error), "联动迁移不得掩盖旧估计策略非法布尔值");
     { std::ofstream out(path); out << "[auto_stop]\nuse_counterpulse_timing=perhaps\n"; }
     expect(!load_app_config(path.string(), loaded, error), "H40策略严格布尔校验");
     { std::ofstream out(path); out << "[auto_stop]\ncounter_hold_ms=40.5\n"; }

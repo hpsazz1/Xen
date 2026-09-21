@@ -33,6 +33,7 @@ public:
         out.state_valid = healthy;
         out.virtual_keys[5] = held;
         out.virtual_keys[1] = physical_left;
+        out.virtual_keys['W'] = moving;
         out.sequence = ++sequence;
         return true;
     }
@@ -78,6 +79,7 @@ public:
         std::size_t total=0; for (bool value : commands) if (value == down) ++total; return total;
     }
     std::atomic<bool> held{false}, healthy{true}, physical_left{false}, fault{false}, dirty{false};
+    std::atomic<bool> moving{false};
     std::atomic<bool> unknown_down{false}, unknown_up{false};
     std::atomic<bool> block_down{false}, release_down{false}, down_entered{false};
     std::atomic<int> timing_mode{0}, return_delay_ms{0};
@@ -109,6 +111,8 @@ struct Fixture {
     std::atomic<std::uint64_t> estimated_id{0};
     std::function<void()> context_hook;
     std::function<void()> estimated_hook;
+    std::atomic<bool> stop_idle{false};
+    std::function<void()> idle_hook;
     TriggerWorker worker{mouse, arbiter, [&] { return permitted.load(); }, [&] {
         if (focus_hook) focus_hook(); return focused.load();
     }, [&] { return std::uint64_t(++ids); }, [&](std::uint64_t) { ++requests; return true; },
@@ -116,7 +120,8 @@ struct Fixture {
             if (context_hook) context_hook();
             return TriggerContext{context_generation.load(), context_required.load(), context_valid.load(),
                 timing_required.load(), timing_valid.load(), shot_hold_ms.load(), fire_interval_ms.load()};
-        }, [&] { if (estimated_hook) estimated_hook(); return estimated_id.load(); }};
+        }, [&] { if (estimated_hook) estimated_hook(); return estimated_id.load(); }, {}, {},
+        [&](const InputSnapshot&) { if (idle_hook) idle_hook(); return stop_idle.load(); }};
     bool start(bool stop=false, int age=50, int cleanup_budget_ms=1000, int press_ms=10, bool fire_enabled=true,
         bool estimated=false) {
         TriggerConfig cfg;
@@ -383,6 +388,50 @@ void estimated_stop_callback_and_revalidation() {
     expect(rejected.mouse->count(true) == 0 && rejected.mouse->count(false) == 0,
         "二检撤销不发送DOWN也不伪造UP");
 }
+void stationary_stop_bypass_and_revalidation() {
+    Fixture f;
+    f.stop_idle = true;
+    expect(f.start(true, 1000, 1000, 100, true, true), "原地联动启动");
+    f.fire();
+    expect(until([&] { return f.worker.firing_signal().confirmed_down; }), "原地无急停编号可触发");
+    expect(f.worker.snapshot().stop_not_needed && f.worker.snapshot().estimated_stop_request_id == 0 && f.requests == 0,
+        "原地资格单独记录且不伪造急停事务");
+    f.mouse->moving = true;
+    expect(until([&] { return f.mouse->count(false) == 1 && !f.mouse->dirty; }), "重新移动立即释放");
+    f.worker.publish(observation(2));
+    expect(until([&] { return f.worker.snapshot().reason == TriggerReason::STOP_UNVERIFIED; }),
+        "移动时即使owner曾空闲也必须等待制动");
+    f.estimated_id = 31;
+    expect(until([&] { return f.mouse->count(true) == 2; }), "制动完成不额外索要观察停稳证明");
+    f.worker.stop();
+
+    Fixture braking;
+    expect(braking.start(true, 1000, 1000, 100, true, true), "松键制动等待启动");
+    braking.fire();
+    expect(until([&] { return braking.worker.snapshot().reason == TriggerReason::STOP_UNVERIFIED; }),
+        "WASD全松但owner仍制动时不能抢先开火");
+    braking.stop_idle = true;
+    expect(until([&] { return braking.worker.firing_signal().confirmed_down; }),
+        "清理完成即恢复原地触发，无需松开许可键重按");
+    braking.worker.stop();
+
+    Fixture rejected;
+    rejected.stop_idle = true;
+    rejected.idle_hook = [&] {
+        if (rejected.arbiter->snapshot().sources[static_cast<std::size_t>(OutputArbiterSource::TRIGGER)].acquired)
+            rejected.stop_idle = false;
+    };
+    expect(rejected.start(true, 1000, 1000, 100, true, true), "原地资格二检启动");
+    rejected.fire();
+    expect(until([&] {
+        for (const auto& event : rejected.worker.execution_log().events)
+            if (event.button_action == TriggerButtonAction::DOWN && !event.backend_called &&
+                std::string_view(event.rejection_reason) == "stop_unverified") return true;
+        return false;
+    }), "发送前owner不再空闲必须拒绝旧原地决策");
+    rejected.worker.stop();
+    expect(rejected.mouse->count(true) == 0, "二检失败无DOWN");
+}
 void timing_change_at_down_revalidation() {
     Fixture f;
     f.context_generation = 1; f.timing_required = f.timing_valid = true;
@@ -644,6 +693,7 @@ void exception_uses_bounded_cleanup() {
 
 }
 int main() {
+    stationary_stop_bypass_and_revalidation();
     cycle_resume_after_safe_up();
     physical_left_takes_over_until_trigger_rearmed();
     rejected_manual_takeover_preserves_held_stop();

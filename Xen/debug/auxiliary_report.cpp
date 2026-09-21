@@ -55,6 +55,7 @@ std::string trigger_execution_json(const RuntimeSnapshot& snapshot) {
             {"observation_sequence",identity(state.observation_sequence)}, {"stop_request_id",identity(event.stop_request_id)},
             {"active_stop_request_id",identity(state.stop_request_id)},
             {"estimated_stop_request_id",identity(state.estimated_stop_request_id)},
+            {"stop_not_needed",state.stop_not_needed},
             // strict请求身份不证明图像观察通过；当前快照没有独立的观察合格证据。
             {"stop_evidence_kind",state.estimated_stop_request_id ? "ESTIMATED" :
                 (state.stop_request_id || event.stop_request_id) ? "STRICT_REQUESTED" : "none"},

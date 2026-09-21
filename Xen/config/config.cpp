@@ -1129,6 +1129,8 @@ bool load_app_config(const std::string& path,
         candidate.trigger.fire_enabled = ini.GetBoolValue("trigger", "fire_enabled", true);
         candidate.trigger.require_stop = ini.GetBoolValue("trigger", "require_stop", false);
         candidate.trigger.allow_estimated_stop = ini.GetBoolValue("trigger", "allow_estimated_stop", false);
+        // 生产没有严格停稳观察来源；旧联动配置统一使用移动急停完成策略。
+        if (candidate.trigger.require_stop) candidate.trigger.allow_estimated_stop = true;
         candidate.trigger.hold_virtual_key = static_cast<int>(ini.GetLongValue("trigger", "hold_virtual_key", candidate.trigger.hold_virtual_key));
         candidate.trigger.max_observation_age_ms = static_cast<int>(ini.GetLongValue("trigger", "max_observation_age_ms", candidate.trigger.max_observation_age_ms));
         candidate.trigger.general_width_percent = static_cast<float>(ini.GetDoubleValue("trigger", "general_width_percent", candidate.trigger.general_width_percent));

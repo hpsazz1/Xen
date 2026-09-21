@@ -17,6 +17,7 @@ public:
     std::function<void(std::uint64_t)> cancel_stop;
     std::function<TriggerContext()> context;
     std::function<std::uint64_t()> estimated_stop;
+    std::function<bool(const InputSnapshot&)> stop_idle;
     // 只在本次LEFT UP确认后通知键盘owner归还；绝不由扳机线程直接操作WASD。
     std::function<void(std::uint64_t, TriggerTime)> resume_movement;
     std::function<bool(std::uint64_t)> retain_manual_stop;
@@ -93,6 +94,10 @@ public:
             p.estimated_stop_request_id = estimated_stop();
             p.stop_estimated_qualified = p.estimated_stop_request_id != 0 &&
                 (!resume_movement || p.estimated_stop_request_id != consumed_cycle_stop_id);
+            // 原地无需独立急停编号；由键盘owner确认松键事实已消费且制动/清理均结束。
+            p.stop_not_needed = p.healthy && !input.virtual_keys['W'] && !input.virtual_keys['A'] &&
+                !input.virtual_keys['S'] && !input.virtual_keys['D'] &&
+                p.estimated_stop_request_id == 0 && stop_idle && stop_idle(input);
         }
         if (allocate_stop_id && config.require_stop && !config.allow_estimated_stop && current.region != TriggerRegion::NONE &&
             current.stop_request_id == 0 && reserved_stop_id == 0 && p.enabled && p.healthy &&
@@ -179,8 +184,9 @@ public:
                             fresh.context.generation != 0 && fresh.context.generation == decided_context.generation));
                     context_changed = !context_valid;
                     const bool stop_valid = !config.require_stop || (config.allow_estimated_stop ?
-                        (fresh.stop_estimated_qualified && fresh.estimated_stop_request_id != 0 &&
-                         fresh.estimated_stop_request_id == decision.snapshot.estimated_stop_request_id) :
+                        (decision.snapshot.stop_not_needed ? fresh.stop_not_needed :
+                         (fresh.stop_estimated_qualified && fresh.estimated_stop_request_id != 0 &&
+                          fresh.estimated_stop_request_id == decision.snapshot.estimated_stop_request_id)) :
                         (fresh.stop_observed_qualified &&
                         fresh.stop_request_id == decision.snapshot.stop_request_id &&
                         fresh.stop_observation_epoch == decision.snapshot.observation_epoch &&
@@ -392,7 +398,8 @@ TriggerWorker::TriggerWorker(std::shared_ptr<IMouseController> mouse,
     std::function<bool(std::uint64_t)> request_stop, std::function<void(std::uint64_t)> cancel_stop,
     std::function<TriggerContext()> context, std::function<std::uint64_t()> estimated_stop,
     std::function<void(std::uint64_t, TriggerTime)> resume_movement,
-    std::function<bool(std::uint64_t)> retain_manual_stop)
+    std::function<bool(std::uint64_t)> retain_manual_stop,
+    std::function<bool(const InputSnapshot&)> stop_idle)
     : impl_(std::make_unique<Impl>()) {
     impl_->mouse = std::move(mouse); impl_->arbiter = std::move(arbiter);
     impl_->permission = std::move(permission); impl_->focused = std::move(focused);
@@ -402,6 +409,7 @@ TriggerWorker::TriggerWorker(std::shared_ptr<IMouseController> mouse,
     impl_->estimated_stop = std::move(estimated_stop);
     impl_->resume_movement = std::move(resume_movement);
     impl_->retain_manual_stop = std::move(retain_manual_stop);
+    impl_->stop_idle = std::move(stop_idle);
 }
 TriggerWorker::~TriggerWorker() { stop(); }
 bool TriggerWorker::start(const TriggerConfig& config, int cleanup_budget_ms) noexcept {

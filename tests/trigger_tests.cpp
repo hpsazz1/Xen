@@ -446,6 +446,18 @@ void blocked_status_does_not_alternate_with_observations() {
 }
 
 int main() {
+    {
+        auto cfg = config(); cfg.require_stop = cfg.allow_estimated_stop = true; cfg.fire_delay_ms = 0;
+        TriggerController c; arm(c, cfg);
+        auto p = permit(); p.stop_not_needed = true;
+        auto down = c.observe(frame(1), p, at(1));
+        expect(down.button_action == TriggerButtonAction::DOWN && down.snapshot.estimated_stop_request_id == 0,
+            "原地无急停事务应直接触发且不伪造停稳编号");
+        ack(c, down, 2);
+        p.stop_not_needed = false;
+        expect(c.tick(p, at(3)).button_action == TriggerButtonAction::UP,
+            "原地射击期间重新移动必须释放并等待急停");
+    }
     blocked_status_does_not_alternate_with_observations();
     weapon_timing_submission_and_cleanup(); estimated_stop_is_explicit_and_parallel();
     fire_disabled_preserves_qualification_and_stop();

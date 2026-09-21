@@ -236,9 +236,44 @@ void run_weapon(const char* weapon_id, bool cycle = false, bool lose_candidate =
     require(mouse->released() && mouse->moves == 0, "松允许键清理必须归还键鼠且不得产生鼠标位移");
     std::cout << weapon_id << "：共享生产worker组合证据通过，未连接设备\n";
 }
+void stationary_owner_does_not_interrupt_shot() {
+    auto mouse = std::make_shared<FakeMouse>();
+    auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+    std::atomic<std::uint64_t> next_id{0};
+    AutoStopWorker stop(mouse, arbiter, [] { return true; }, [&] { return ++next_id; }, [] { return true; });
+    TriggerWorker trigger(mouse, arbiter, [] { return true; }, [] { return true; }, [&] { return ++next_id; },
+        [&](std::uint64_t id) { return stop.request(id); }, [&](std::uint64_t id) { stop.cancel(id); }, {},
+        [&] { return stop.estimated_completion_id(); }, {}, {},
+        [&](const InputSnapshot& input) { return stop.idle_for_trigger(input); });
+    TriggerConfig config;
+    config.enabled = config.require_stop = config.allow_estimated_stop = true;
+    config.hold_virtual_key = 5; config.fire_delay_ms = 0;
+    config.press_duration_ms = 150; config.shot_interval_ms = 500; config.max_observation_age_ms = 500;
+    mouse->physical(0, false);
+    require(stop.start(AutoStopConfig{true, 5}) && trigger.start(config), "原地双worker启动");
+    until([&] { return trigger.snapshot().reason == TriggerReason::RELEASED; });
+    mouse->physical(0, true);
+    std::uint64_t sequence = 0;
+    until([&] { trigger.publish(fresh_observation(++sequence)); return trigger.firing_signal().confirmed_down; });
+    const auto until_hold = Clock::now() + 100ms;
+    while (Clock::now() < until_hold) {
+        mouse->physical(0, true);
+        trigger.publish(fresh_observation(++sequence));
+        require(mouse->ups == 0, "owner轮询或重复零报告不得撤销健康原地射击");
+        std::this_thread::sleep_for(1ms);
+    }
+    until([&] { return mouse->ups == 1; });
+    const auto log = trigger.execution_log();
+    for (const auto& event : log.events)
+        if (event.button_action == TriggerButtonAction::UP && event.backend_called)
+            require(event.snapshot.reason == TriggerReason::RELEASED, "原地点射仅正常结束，不因假停稳失效提前抬键");
+    require(stop.snapshot().requests == 0, "原地无需制造急停请求");
+    trigger.stop(); stop.stop();
+}
 } // namespace
 int main() {
     try {
+        stationary_owner_does_not_interrupt_shot();
         for (const char* id : {"deagle", "ak47", "awp"}) { run_weapon(id); run_weapon(id, true); }
         run_weapon("ak47", true, true);
         run_weapon("ak47", true, true, true);

@@ -81,6 +81,8 @@ public:
     AutoStopSnapshot snapshot() const noexcept;
     // 只返回独立四键接管仍有效的估计完成id，不是观察停稳证明。
     std::uint64_t estimated_completion_id() const noexcept;
+    // 只证明无制动事务且新WASD事件没有未处理移动；不把零键态解释为实测停稳。
+    bool idle_for_trigger(const InputSnapshot& input) const noexcept;
     // 点射UP确认后投递归还请求；只在worker线程操作设备，not_before前保持真实移动。
     bool resume_movement(std::uint64_t request_id, std::chrono::steady_clock::time_point not_before) noexcept;
     // 人工左键接管当前独立估计完成请求；确认后锁存四键保持，不再依赖激活键或左键。
