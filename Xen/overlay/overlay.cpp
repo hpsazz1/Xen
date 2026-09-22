@@ -1541,7 +1541,7 @@ struct Overlay::Impl {
             "检查素材、生成预标注、外部审核、导出数据集、离线训练和评估候选模型。");
         nav_item(
             "调试", WorkspacePage::DEBUG,
-            "急停HUD、人工录制与离线重评、独立射击节奏、弹道工具及运行诊断；进入页面不启动设备。");
+            "固定时长急停实验、输入回看、射击节奏、扳机调试、弹道工具及运行诊断；生产辅助功能在辅助页配置。");
         nav_item(
             "设置", WorkspacePage::SETTINGS,
             "配置键鼠后端、按键绑定、物理输出安全门、日志、统计和窗口偏好。");
@@ -3108,8 +3108,8 @@ struct Overlay::Impl {
             case TriggerReason::UNKNOWN_RECEIPT: reason = "设备结果未知，检查释放状态"; break;
             case TriggerReason::CANCELED: reason = "已取消"; break;
             case TriggerReason::COUNTER_EXHAUSTED: reason = "会话序号耗尽，需重新启动"; break;
-            case TriggerReason::CONTEXT_CHANGED: reason = "武器上下文已改变，请松开许可键再按下"; break;
-            case TriggerReason::CONTEXT_UNAVAILABLE: reason = "武器上下文无效，等待恢复后松键再按下"; break;
+            case TriggerReason::CONTEXT_CHANGED: reason = "武器上下文已改变，重新核验会话；安全中断后须松键再按下"; break;
+            case TriggerReason::CONTEXT_UNAVAILABLE: reason = "等待有效武器上下文；正常换弹或切枪可在持键下恢复，安全中断后须松键再按下"; break;
         }
         ImGui::TextWrapped("扳机会话：%s",
             overlay::detail::trigger_session_status(snapshot.trigger, reason));
@@ -3126,6 +3126,8 @@ struct Overlay::Impl {
 
     void render_trigger_debug(AppConfig& app_config, bool can_edit) {
         auto& trigger = app_config.trigger;
+        ImGui::TextWrapped("生产扳机的启用、许可键、触发范围与移动急停联动在辅助页设置；此处调整诊断开关和筛选条件，停止 Runtime 后修改并保存，下次启动生效。");
+        ImGui::TextWrapped("定位顺序：查看辅助页实时阻断原因 → 检查源端焦点、GSI 武器状态与目标范围 → 必要时关闭“允许开枪”观察检测及急停联动。关闭开枪仍可能执行已启用的急停。");
         ImGui::BeginDisabled(!can_edit);
         if (begin_form("trigger_debug_form", 150.0f)) {
             form_row("允许开枪", "关闭后保留目标检测、资格判断和急停联动调试，不发送自动扳机左键按下；不会阻止你手动开枪。停止运行后修改，下次启动生效。");
@@ -3173,7 +3175,9 @@ struct Overlay::Impl {
             ImGui::EndTable();
         }
         ImGui::EndDisabled();
-        ImGui::TextWrapped("开启后，每次按键允许执行最近一次已准备的物理测试；每次独立一组，无自动循环。离开本页不会清除模板；编辑实验或切换实验类型需重新准备。");
+        ImGui::TextWrapped("先停止 Runtime 并准备测试，再由你点击启动或回游戏按测试键；每次一组。");
+        ImGui::TextDisabled("准备与重复测试说明");
+        show_help_tooltip("标定与采集新弹道每组都需重新准备；已有弹道验证、急停和射击节奏可按模板重复，无自动循环。离开本页保留模板；编辑实验、切换类型或设备、启动 Runtime 或急停后需重新准备。生产组合效果在辅助页配置后单独验收。");
         if (!hotkey_capture_message.empty()) ImGui::TextWrapped("%s",hotkey_capture_message.c_str());
         debug_panel.render_status(debug_snapshot, actions);
         if (!ImGui::BeginTabBar("debug_tabs")) return;
@@ -3199,6 +3203,10 @@ struct Overlay::Impl {
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("运行诊断")) {
+            ImGui::TextWrapped("以下急停与压枪状态来自当前 Runtime；最近调试任务报告另列。先核对实际运行策略和阻断原因，再结合本次报告及人工观察判断。");
+            ImGui::Text("Runtime 急停策略：%s", snapshot.state == RuntimeState::RUNNING ?
+                (snapshot.auto_stop.experimental_hud_model ? "HUD 动态制动（输入模型估计）" : "固定时长制动（时序估计）") : "Runtime 未运行");
+            ImGui::TextWrapped("预计完成和释放回执只表示软件执行状态；HUD 模型阈内也不等于游戏实际停稳。");
             ImGui::Text("请求 %llu | 预计完成 %llu | 取消 %llu",
                 static_cast<unsigned long long>(snapshot.auto_stop.requests),
                 static_cast<unsigned long long>(snapshot.auto_stop.completed),

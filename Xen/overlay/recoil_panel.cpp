@@ -770,13 +770,13 @@ struct RecoilPanel::Impl {
             workflow_after_calibration.reset(); workflow_prepare_next.reset();
             refresh_workflow_selection(config.recoil); return;
         }
-        ImGui::TextWrapped("流程：设置准星 → 重新标定 → 采集最多5发 → 核对轨迹、保存并实测。每次按键只执行一组，不会一直采集。");
-        ImGui::TextWrapped("对准固定靶点，准备后回游戏按顶部测试键。标定只移动，采集和测试会自动射击。");
+        ImGui::TextWrapped("已有曲线：选择武器和测试曲线 → 验证已有弹道。只看效果可关闭记录优化数据，无需先采集或重新标定。");
+        ImGui::TextWrapped("新曲线：采集新弹道 → 按需画面标定 → 核对并保存候选 → 验证。准备后回游戏按测试键，每次一组；标定只移动，采集和验证会射击。");
         bool changed = false;
         if(ImGui::Checkbox("跟随后坐力准星采集", &workflow_follow_crosshair)){
             workflow_calibration_path.clear();changed=true;
         }
-        help("开启后同时记录洋红准星与背景位移；需要重新标定。不使用弹孔。关闭可读取原背景采集流程。");
+        help("仅选择采集方式，不是已有曲线验证的前提。开启记录洋红准星与背景位移；切换方式会清除当前标定。关闭使用背景位移采集，不使用弹孔。");
         if(workflow_follow_crosshair)
             ImGui::TextWrapped("游戏内开启跟随后坐力；准星自定义RGB 255/0/255、不透明、关闭轮廓，仅保留实心中心点（画面中2–5像素）。选择有清晰纹理、没有其他洋红标记的墙面。首次新采集最多5发；GSI超发时本组作废。");
         if (ImGui::BeginCombo("武器", weapon::display_name(workflow_weapon).data())) {
@@ -895,7 +895,8 @@ struct RecoilPanel::Impl {
             ImGui::TextWrapped("本组状态：%s",debug->message.c_str());
         if (debug && debug->repeat_ready && !candidate_pending && workflow_samples.size() < 5)
             ImGui::TextWrapped("已准备：回游戏对准靶点，按一下测试键后松开，等待本组完成。修改参数后请重新准备。");
-        ImGui::TextWrapped("采集的是准星相对墙面的轨迹候选，效果仍需人工实测。固定位置和姿态，不要手动压枪；程序自动停枪，无需人为控制五发。");
+        ImGui::TextWrapped("优化或追加：开启记录优化数据，逐组核对后加入；三组训练、两组独立验证齐备后优化本阶段。追加时沿用满意的短曲线并锁定前段，载入历史记录不会自动生成新曲线。");
+        ImGui::TextWrapped("保持固定位置和姿态，不要手动压枪；程序按本组目标发数停止。候选仍需人工验证，次数与实际发数不一致时不能加入优化。");
         workflow_results(config, actions, debug);
         if (workflow_settings_dirty && !ImGui::IsAnyItemActive() && actions.debug_action == debug_session::Action::NONE && !pending_action) {
             workflow_settings_dirty = false;

@@ -848,7 +848,7 @@ int wmain(int argc, wchar_t** argv) {
             config.mouse.backend = MouseBackend::KMBOX_NET;
             config.auto_stop.enabled = config.auto_stop.cycle_enabled = config.gsi.enabled = true;
             config.auto_stop.activation_virtual_key = 5;
-            runtime.weapon_snapshot.canonical_id = "m4a1_s";
+            runtime.weapon_snapshot.canonical_id = "weapon_m4a1_silencer";
             runtime.weapon_snapshot.status = weapon::Status::READY;
             runtime.weapon_snapshot.valid = true;
             runtime.auto_stop.status = AutoStopStatus::READY;
@@ -888,6 +888,7 @@ int wmain(int argc, wchar_t** argv) {
         const auto capture_hook_id = ImGui::AddContextHook(ImGui::GetCurrentContext(), &capture_hook);
         ImGui::GetIO().ConfigInputTrickleEventQueue = false;
         int frames = 0;
+        bool reading_recoil_catalog = false;
         std::vector<double> frame_ms;
         frame_ms.reserve(180);
         auto frame = [&] {
@@ -901,7 +902,7 @@ int wmain(int argc, wchar_t** argv) {
                 !actions.training_start_requested && !actions.training_stop_requested && !actions.training_load_requested &&
                 !actions.reload_detector_requested && !actions.save_config_requested && !actions.refresh_models_requested &&
                 actions.runtime_intents.empty() && actions.workspace_action == model_workspace::Action::NONE &&
-                !config.mouse.allow_send_input && (auxiliary || !overlay.background_busy()), "预览触发了业务动作或后台作业");
+                !config.mouse.allow_send_input && (auxiliary || reading_recoil_catalog || !overlay.background_busy()), "预览触发了业务动作或后台作业");
             frame_ms.push_back(std::chrono::duration<double,std::milli>(
                 std::chrono::steady_clock::now() - started).count());
         };
@@ -913,8 +914,8 @@ int wmain(int argc, wchar_t** argv) {
         if (auxiliary) {
             input.position = {400,40}; frame();
             require_page_table("auto_stop_form");
-            require(capture.text.find("GSI武器：M4A1-S") != std::string::npos, "辅助页未显示统一GSI名称");
-            require(capture.text.find("已归还移动 3 次") != std::string::npos, "辅助页未显示合成循环状态");
+            require(capture.text.find("武器：M4A1-S") != std::string::npos, "辅助页未显示统一GSI名称");
+            require(capture.text.find("会话：移动中，等待下一轮") != std::string::npos, "辅助页未显示合成循环状态");
             save_window(capture, output / "auxiliary-top.png");
             auto* panel = preview_window("auto_stop_panel");
             // 向当前子窗口注入滚轮，验证与真实浏览相同的滚动路径。
@@ -980,8 +981,9 @@ int wmain(int argc, wchar_t** argv) {
                 "扳机调试表未在当前标签真实绘制");
             ImGui::SetScrollY(content, content->ScrollMax.y); frame(); frame();
             require(capture.text.find("图像有效期 / ms") != std::string::npos &&
-                capture.text.find("使用估计完成联动") != std::string::npos,
-                "扳机调试缺少有效性与联动控制");
+                capture.text.find("允许开枪") != std::string::npos &&
+                capture.text.find("使用估计完成联动") == std::string::npos,
+                "扳机调试须保留有效性和开枪控制，不得恢复已移除的估计联动开关");
             save_window(capture, output / "trigger-debug-bottom.png");
             select_debug_tab("弹道工具", "采集新弹道", "recoil-tools.png");
             ImGui::SetScrollY(content,350); frame(); frame();
@@ -1058,20 +1060,28 @@ int wmain(int argc, wchar_t** argv) {
         require(bar->BarRect.Min.x >= 0 && bar->BarRect.Max.x <= ImGui::GetIO().DisplaySize.x,
             "最小窗口下标签栏超出右边界");
         const char* file_names[]{"counterpulse.png","manual.png","fire.png","trigger-debug.png","recoil.png","diagnostics.png"};
-        const char* expected[]{"实验草稿独立于生产急停", "原生人工模型录制", "独立原地测试", "允许开枪", "弹道工具与射击归档", "请求"};
+        const char* expected[]{"此页测试固定反向时长", "高级：人工输入模型录制", "独立原地测试", "允许开枪", "弹道工具与射击归档", "Runtime 急停策略"};
         for (int tab_index = 0; tab_index < 6; ++tab_index) {
             debug.plan["baseline"] = tab_index == 2 ? "stationary" : "counter";
             ImGui::SetScrollY(content,0); frame(); frame();
             bar = ImGui::GetCurrentContext()->TabBars.GetByKey(content->GetID("debug_tabs"));
             const auto tab = bar->Tabs[tab_index];
             if (tab_index == 4) {
-                // 旧版全导航模式不需要资料读取；专项辅助模式另外覆盖只读编辑器。
+                // 弹道首页会异步列举曲线；只在此页进入时允许读取本预览独立目录。
+                // Runtime/Session均未创建，所有输出及业务动作断言仍逐帧生效。
+                reading_recoil_catalog = true;
                 content->StateStorage.SetInt(ImHashStr("武器点射资料", 0, tab.ID), 0);
                 content->StateStorage.SetInt(content->GetID("武器点射资料"), 0);
             }
             input.position = {bar->BarRect.Min.x + tab.Offset + tab.Width * .5f, bar->BarRect.GetCenter().y};
             require(content->ClipRect.Contains(input.position), "最小窗口中调试标签不可点击");
             input.down = false; frame(); input.down = true; frame(); input.down = false; frame(); frame();
+            if (tab_index == 4) {
+                for (int i = 0; i < 30 && overlay.background_busy(); ++i) frame();
+                require(!overlay.background_busy(), "弹道曲线列表读取未在帧预算内结束");
+                reading_recoil_catalog = false;
+                frame();
+            }
             require(bar->SelectedTabId == tab.ID, "未进入目标调试标签");
             require(capture.text.find(expected[tab_index]) != std::string::npos, "调试页没有呈现预期内容");
             input.position = {400,40}; frame();

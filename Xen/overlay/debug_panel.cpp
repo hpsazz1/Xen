@@ -195,7 +195,7 @@ struct DebugPanel::Impl {
         request.plan_text = plan.dump(2);
     }
     void weapon_timing(const AppConfig& config, const Snapshot* s, OverlayActions& actions, bool counter_page) {
-        if (button("读取共享武器资料", "后台读取辅助页管理的唯一共享目录。只刷新资料，不覆盖草稿；选择或点击带入才复制两字段。")) {
+        if (button("读取共享武器资料", "后台读取共享武器资料；编辑入口在调试 / 弹道工具 / 高级：射击节奏。只刷新资料，不覆盖草稿；选择或点击带入才复制两字段。")) {
             request.load_path = config.weapon_timing_file; changed(); send(Action::LOAD_WEAPON_TIMING, actions);
         }
         if (!s || !s->timing_catalog_valid) return;
@@ -267,7 +267,7 @@ void DebugPanel::render_status(const Snapshot* s, OverlayActions& actions) noexc
         impl_->sync(s);
         ImGui::Text("当前任务：%s", s ? state_label(s->state) : "空闲");
         if (s && !s->message.empty()) ImGui::TextWrapped("%s", s->message.c_str());
-        if (s) ImGui::TextDisabled(s->repeat_ready ? "快捷键模板已准备；独立开关启用后每按一次执行一组。" : "快捷键模板未就绪；先检查参数并重新准备。");
+        if (s) ImGui::TextDisabled(s->repeat_ready ? "快捷键模板已准备；启用并保存测试键后，由用户按键执行本组。" : "快捷键模板未就绪；先检查参数并重新准备。");
         if (button("停止当前调试任务", "直接请求取消；停止中仍等待设备清理，取消不等于释放确认。", s && s->busy))
             impl_->send(Action::CANCEL, actions);
         ImGui::SameLine();
@@ -282,7 +282,11 @@ void DebugPanel::render_counterpulse(const AppConfig& config, const Snapshot* s,
     Impl::PublishDraftChange publish{*impl_,actions};
     try {
         auto& d = *impl_; d.mode(Mode::COUNTERPULSE);
-        ImGui::TextWrapped("实验草稿独立于生产急停。动作顺序：移动 → 释放 → 反向 → 释放后等待 → 按住左键；由既有严格计划校验约束。");
+        ImGui::TextWrapped("此页测试固定反向时长的动作计划，用于节奏对照；生产急停在辅助页配置。此处的模型评价不会启用生产 HUD 动态制动。");
+        ImGui::TextWrapped(config.auto_stop.experimental_hud_model ?
+            "当前配置选择：HUD 动态制动。生产按输入模型逐轴计算制动时长，本页仍执行草稿中的固定时长。" :
+            "当前配置选择：固定时长制动。HUD 动态制动尚未设为默认；本页测试不改变生产策略。");
+        ImGui::TextWrapped("流程：选择对照动作和武器参数 → 校验并准备 → 用户前台启动 → 查看本组报告。反向制动顺序为移动 → 释放 → 反向 → 释放后等待 → 按住左键。");
         ImGui::TextWrapped("首发为基准射击，后续执行移动和所选制动动作；DOWN提交间隔只是下限，不是移动保持时长。");
         ImGui::BeginDisabled(s && s->busy);
         Json edits = Json::object();
@@ -316,7 +320,7 @@ void DebugPanel::render_counterpulse(const AppConfig& config, const Snapshot* s,
         edit_integer("释放后等待 / ms",d.release,0,20,"反向UP协议ACK之后等待；这是模型计划参数，不是停稳观测。","shot_after_release_ms");
         edit_integer("左键按住 / ms",d.hold,1,2000,"从DOWN协议ACK至UP提交的计划时长。","shot_hold_ms");
         edit_integer("DOWN提交最小间隔 / ms",d.interval,1,5000,"下一次DOWN的提交下限；动态模式在这个间隔内分配移动预算。","fire_interval_ms");
-        if (button("从当前急停参数带入草稿", "复制当前配置的保持及释放等待；不回写生产配置，不修改其他动作。")) {
+        if (button("从当前急停参数带入草稿", "仅复制配置中的固定反向保持和释放等待；HUD 动态制动不使用该固定保持值，此处不导入 HUD 模型或实际逐轴制动时长。")) {
             d.counter = config.auto_stop.counter_hold_ms; d.release = config.auto_stop.shot_after_release_ms;
             edits["counter_hold_ms"] = d.counter; edits["shot_after_release_ms"] = d.release;
         }
@@ -364,7 +368,8 @@ void DebugPanel::render_manual(const Snapshot* s, OverlayActions& actions) noexc
     Impl::PublishDraftChange publish{*impl_,actions};
     try {
         auto& d = *impl_;
-        ImGui::SeparatorText("原生人工模型录制与离线工作流");
+        ImGui::SeparatorText("高级：人工输入模型录制与离线重评");
+        ImGui::TextWrapped("日常输入记录使用上方“开始输入记录”和“读取离线记录”；下方用于独立模型记录、重评及实验计划派生，不能代替生产组合验收。");
         ImGui::TextWrapped("上方输入记录保留原始接收域评分；此处录制与模型评价独立标注，均不代表实测停稳。");
         ImGui::BeginDisabled(s && s->busy);
         if (input("原始记录 / 报告路径", d.request.input_path, "离线分析不连接设备；重评使用新目录，保留原始证据。")) d.changed();
@@ -394,7 +399,7 @@ void DebugPanel::render_manual(const Snapshot* s, OverlayActions& actions) noexc
 void DebugPanel::render_results(const Snapshot* s) noexcept {
     try {
         if (!s) return;
-        if (!s->report_directory.empty()) ImGui::TextWrapped("报告目录：%s", s->report_directory.c_str());
+        if (!s->report_directory.empty()) ImGui::TextWrapped("最近调试任务报告（独立于当前 Runtime）：%s", s->report_directory.c_str());
         const Json* result = s->result.get();
         if (s->live && (s->busy || !result)) result = s->live.get();
         if (!result || !result->is_object()) return;
