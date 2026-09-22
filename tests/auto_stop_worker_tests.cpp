@@ -68,7 +68,7 @@ public:
         if (before_wasd_read) before_wasd_read();
         std::lock_guard<std::mutex> lock(mutex); batch = {}; batch.subscribed = subscribed; batch.gap = gap;
         // 与生产环形历史一致：读取只推进调用方游标，不破坏其它游标的事件。
-        cursor.epoch = 1;
+        cursor.epoch = input_epoch;
         for (const auto& event : events) if (event.sequence > cursor.sequence && batch.count < batch.events.size()) {
             batch.events[batch.count++] = event; cursor.sequence = event.sequence;
         }
@@ -140,13 +140,13 @@ public:
     std::string last_error() const override { return {}; }
     void physical(std::uint8_t mask) {
         std::lock_guard<std::mutex> lock(mutex); held = mask;
-        events.push_back({mask, true, 1, ++sequence, clock_ns()});
+        events.push_back({mask, true, input_epoch, ++sequence, clock_ns()});
     }
     void physical_batch(std::initializer_list<std::uint8_t> masks) {
         std::lock_guard<std::mutex> lock(mutex);
         for (const auto mask : masks) {
             held = mask;
-            events.push_back({mask, true, 1, ++sequence, clock_ns()});
+            events.push_back({mask, true, input_epoch, ++sequence, clock_ns()});
         }
     }
     bool drained() { std::lock_guard<std::mutex> lock(mutex); return delivered_sequence == sequence; }
@@ -165,7 +165,7 @@ public:
     std::vector<Clock::time_point> cleanup_started;
     int reverse_ack_delay_ms = 0;
     std::array<bool, 256> extra_keys{};
-    std::uint64_t sequence = 0, delivered_sequence = 0;
+    std::uint64_t sequence = 0, delivered_sequence = 0, input_epoch = 1;
     std::uint8_t held = 0, installed_masks = 0, current_software = 0;
     bool healthy = true, subscribed = false, gap = false, cleanup_fails = false, end = false, activation = true;
     std::size_t software_fail_at = 0, mask_fail_at = 0;
@@ -618,7 +618,7 @@ void target_loss_releases_hold(bool hud_reference = false) {
             (mode == 2 ? worker.snapshot().cleanup_unknown : fake->released()),
             "持续许可键下目标消失或跟踪过期必须撤销急停并尝试归还方向键");
         if (mode != 2) {
-            require(!worker.snapshot().release_required, "正常目标消失清理ACK后不要求松许可键");
+            require(!worker.snapshot().recovery_pending, "正常目标消失清理ACK后不要求松许可键");
             worker.publish_tracking_target(Clock::now() + 1s);
             publish_present_target(worker, Clock::now() + 1s);
             wait_for([&] { return worker.estimated_completion_id() > previous_id; });
@@ -715,10 +715,10 @@ void weapon_session_recovery_contracts(bool hud_reference = false) {
         require(worker.estimated_completion_id() == 0, "正常武器暂停同样撤销旧完成资格");
         require(!worker.resume_movement(old_id, Clock::now()), "不能归还跨武器旧完成编号");
         if ((scenario >= 2 && scenario <= 4) || scenario >= 7) {
-            require(worker.snapshot().release_required || worker.snapshot().cleanup_unknown,
+            require(worker.snapshot().recovery_pending || worker.snapshot().cleanup_unknown,
                 "信任换代、中断及未知清理不能自动恢复");
         } else {
-            require(!worker.snapshot().release_required, (std::string("可信武器恢复锁存，scenario=") + std::to_string(scenario)).c_str());
+            require(!worker.snapshot().recovery_pending, (std::string("可信武器恢复锁存，scenario=") + std::to_string(scenario)).c_str());
             require(worker.snapshot().requests == 1, "新武器不能继承旧目标资格");
             if (scenario == 5) { std::lock_guard<std::mutex> lock(fake->mutex); fake->extra_keys[0x32] = false; }
             stage = 2;
@@ -726,7 +726,7 @@ void weapon_session_recovery_contracts(bool hud_reference = false) {
             require(worker.snapshot().requests == 1, "武器恢复仍需重新发布目标");
             publish_present_target(worker, Clock::now() + std::chrono::seconds(2));
             wait_for([&] { return worker.estimated_completion_id() > old_id; });
-            require(!worker.snapshot().release_required, "持续按键重新完成新一轮急停");
+            require(!worker.snapshot().recovery_pending, "持续按键重新完成新一轮急停");
         }
         worker.stop();
     }
@@ -768,7 +768,7 @@ void held_direction_after_overlap_brakes() {
         wait_for([&] { return worker.snapshot().cycle_count == 1; });
         wait_for([&] { return worker.estimated_completion_id() > first; });
         expected.insert(expected.end(), {0, inverse, 0});
-        require(fake->reports() == expected && !worker.snapshot().release_required,
+        require(fake->reports() == expected && !worker.snapshot().recovery_pending,
             "持续同方向的第二轮仍完整制动，不在点射清理后重新锁许可或丢失资格");
         worker.stop();
     }
@@ -868,12 +868,12 @@ void acquisition_direction_change_retries() {
         publish_present_target(worker, Clock::now() + 2s);
         wait_for([&] { return injected.load() && worker.snapshot().canceled >= 1 && (scenario == 12 ? worker.snapshot().cleanup_unknown : fake->released()); });
         if ((scenario >= 1 && scenario <= 4) || (scenario >= 7 && scenario <= 12) || scenario == 14 || scenario == 15) {
-            require(scenario == 7 || worker.snapshot().release_required || worker.snapshot().cleanup_unknown,
+            require(scenario == 7 || scenario == 11 || worker.snapshot().recovery_pending || worker.snapshot().cleanup_unknown,
                 "取得或清理期间真实事件缺口、换代、输入失信、失焦、救援及未知ACK不能普通恢复");
             require(worker.estimated_completion_id() == 0 && worker.snapshot().requests == 1,
                 "许可松开或安全断点后不得建立新制动资格");
         } else {
-            require(!worker.snapshot().release_required,
+            require(!worker.snapshot().recovery_pending,
                 "取得控制期间连续真实A松开再按D不能锁存许可松键");
             require(worker.estimated_completion_id() == 0 && worker.snapshot().requests == 1,
                 "正常换向撤销旧方向完成资格，重选目标前不复用旧请求");
@@ -931,7 +931,7 @@ void weapon_hotkey_nonfireable_context(bool hud_reference = false) {
         wait_for([&] { return fake->drained(); });
         { std::lock_guard lock(fake->mutex); fake->extra_keys[51] = true; }
         wait_for([&] { return worker.snapshot().rescue_succeeded == 1; });
-        require(!worker.snapshot().release_required, "可信上下文首个切枪边沿普通归还不锁许可");
+        require(!worker.snapshot().recovery_pending, "可信上下文首个切枪边沿普通归还不锁许可");
         { std::lock_guard lock(fake->mutex); fake->extra_keys[51] = false; }
         fake->physical(1);
         wait_for([&] { return fake->drained(); });
@@ -939,7 +939,7 @@ void weapon_hotkey_nonfireable_context(bool hud_reference = false) {
         wait_for([&] { return worker.snapshot().weapon_context.generation == 2; });
         { std::lock_guard lock(fake->mutex); fake->extra_keys[81] = true; }
         wait_for([&] { return worker.snapshot().rescue_succeeded == 2; });
-        require(worker.snapshot().release_required == !trusted_nonfireable,
+        require(worker.snapshot().recovery_pending == !trusted_nonfireable,
             "可开火资格与会话信任分离：可信非枪不锁许可，真实失信仍要求重武装");
         { std::lock_guard lock(fake->mutex); fake->extra_keys[81] = false; fake->activation = false; }
         publish_present_target(worker, Clock::now() + 2s);
@@ -949,15 +949,8 @@ void weapon_hotkey_nonfireable_context(bool hud_reference = false) {
             "非可开火上下文无论功能键如何操作均不能生成急停输出或完成资格");
         stage = 2;
         wait_for([&] { return worker.snapshot().weapon_context.generation == 3; });
-        publish_present_target(worker, Clock::now() + 2s);
-        if (!trusted_nonfireable) {
-            std::this_thread::sleep_for(20ms);
-            require(worker.snapshot().release_required && fake->reports().empty(),
-                "真实失信恢复后不自动重新武装，非枪期间松按不能冒充READY期间重武装");
-            { std::lock_guard lock(fake->mutex); fake->activation = false; }
-            wait_for([&] { return !worker.snapshot().release_required; });
-            { std::lock_guard lock(fake->mutex); fake->activation = true; }
-        }
+        wait_for([&] { return !worker.snapshot().recovery_pending; });
+        require(fake->reports().empty(), "武器恢复仅重新核验，不能继承旧目标直接输出");
         fake->physical(1);
         wait_for([&] { return fake->drained(); });
         publish_present_target(worker, Clock::now() + 2s);
@@ -971,6 +964,7 @@ void weapon_hotkey_nonfireable_context(bool hud_reference = false) {
 void rescue_rearm_preserves_real_input() {
     using namespace std::chrono_literals;
     for (int failure = 0; failure < 10; ++failure) {
+    std::cerr << "救援自动核验场景=" << failure << '\n';
     auto fake = std::make_shared<Fake>();
     std::atomic<std::uint64_t> id{0};
     std::atomic<bool> focused{true}, trusted{true};
@@ -980,7 +974,7 @@ void rescue_rearm_preserves_real_input() {
         });
     AutoStopConfig config{true, 5}; config.cycle_enabled = true;
     config.release_virtual_keys = {0x52};
-    require(worker.start(config), "无活动请求救援后仅重按许可回归启动");
+    require(worker.start(config), "救援后持续持许可自动核验回归启动");
     ready(worker, fake);
     if (failure && failure != 9) {
         publish_present_target(worker, Clock::now() + 2s);
@@ -1003,8 +997,8 @@ void rescue_rearm_preserves_real_input() {
     }
     { std::lock_guard lock(fake->mutex); fake->extra_keys[0x52] = true; }
     wait_for([&] { return worker.snapshot().rescue_succeeded + worker.snapshot().rescue_failed == 1; });
-    require(worker.snapshot().release_required && worker.estimated_completion_id() == 0,
-        "真实救援仍撤销资格且要求许可重新武装");
+    require(worker.snapshot().recovery_pending && worker.estimated_completion_id() == 0,
+        "真实救援撤销资格，救援键仍按住时不得自动恢复");
     if (failure == 8) {
         require(worker.snapshot().cleanup_unknown && worker.snapshot().status == AutoStopStatus::FAULT,
             "未知清理ACK保持FAULT且不能复活旧完成编号");
@@ -1012,37 +1006,31 @@ void rescue_rearm_preserves_real_input() {
     }
     const auto reports_before_rearm = fake->reports();
     { std::lock_guard lock(fake->mutex); fake->extra_keys[0x52] = false; }
-    if (failure == 6 || failure == 7 || failure == 9) {
+    if (failure == 6 || failure == 9) {
         publish_present_target(worker, Clock::now() + 2s);
         fake->physical(1);
         wait_for([&] { return fake->drained(); });
         std::this_thread::sleep_for(20ms);
-        require(worker.snapshot().release_required && worker.estimated_completion_id() == 0 &&
+        require(worker.snapshot().recovery_pending && worker.estimated_completion_id() == 0 &&
             fake->reports() == reports_before_rearm,
-            "GSI失信或未知取消期间保留输入不等于恢复输出许可");
-        trusted = true;
-        wait_for([&] { return worker.snapshot().weapon_context.session_trusted; });
-        publish_present_target(worker, Clock::now() + 2s);
-        std::this_thread::sleep_for(20ms);
-        require(worker.snapshot().release_required && worker.estimated_completion_id() == 0 &&
-            fake->reports() == reports_before_rearm,
-            "GSI恢复但许可持续按住时不能自动重武装或发送新输出");
+            "GSI失信期间保留输入不等于恢复输出许可");
     }
     focused = true; trusted = true;
-    { std::lock_guard lock(fake->mutex); fake->extra_keys[0x52] = false; fake->activation = false; }
-    wait_for([&] { return !worker.snapshot().release_required; });
-    { std::lock_guard lock(fake->mutex); fake->activation = true; }
+    if (failure == 2) { std::lock_guard lock(fake->mutex); fake->input_epoch = 2; }
     fake->physical(1); // 同一真实按键重复报告，不插入WASD全松。
     wait_for([&] { return fake->drained(); });
+    if (failure >= 1 && failure <= 4) {
+        std::this_thread::sleep_for(20ms);
+        require(worker.snapshot().recovery_pending && worker.estimated_completion_id() == 0 &&
+            fake->reports() == reports_before_rearm, "真实输入断点未重新取得可信流前必须继续阻断");
+        fake->physical_batch({0, 1});
+    }
+    wait_for([&] { return !worker.snapshot().recovery_pending; });
     publish_present_target(worker, Clock::now() + 2s);
-    const auto limit = Clock::now() + 300ms;
-    while (!worker.estimated_completion_id() && Clock::now() < limit) std::this_thread::sleep_for(1ms);
-    require((worker.estimated_completion_id() != 0) == (failure == 0 || failure == 6 || failure == 7 || failure == 9),
-        "救援ACK后仅许可重新武装不得把连续真实持键伪造成输入断流并等待WASD全松");
+    wait_for([&] { return worker.estimated_completion_id() != 0; });
     auto expected_reports = reports_before_rearm;
-    if (failure == 0 || failure == 6 || failure == 7 || failure == 9)
-        expected_reports.insert(expected_reports.end(), {0, 4, 0});
-    require(fake->reports() == expected_reports, "重新武装仍须完整制动ACK链，真实输入断点不能放行");
+    expected_reports.insert(expected_reports.end(), {0, 4, 0});
+    require(fake->reports() == expected_reports, "自动重新核验后仍须完整制动ACK链，允许键全程无需松开");
     worker.stop();
     }
 }
@@ -1078,13 +1066,13 @@ void weapon_change_during_cycle_cleanup() {
     wait_for([&] { return injected.load() && fake->released() &&
         (worker.snapshot().canceled != 0 || worker.snapshot().cycle_count != 0); });
     require(worker.estimated_completion_id() == 0, "归还期间空弹撤销旧完成编号");
-    require(!worker.snapshot().release_required,
+    require(!worker.snapshot().recovery_pending,
         "清理ACK期间发生可信空弹不得误锁存许可松键");
     stage = 2;
     wait_for([&] { return worker.snapshot().weapon_context.generation == 3; });
     publish_present_target(worker, Clock::now() + 2s);
     wait_for([&] { return worker.estimated_completion_id() > first_id; });
-    require(!worker.snapshot().release_required, "武器就绪后持续持键必须重新完成新一轮急停");
+    require(!worker.snapshot().recovery_pending, "武器就绪后持续持键必须重新完成新一轮急停");
     { std::lock_guard lock(fake->mutex);
         require(fake->software.size() == 6, "恢复后必须重新完成完整zero反向zero，不能继承旧制动");
     }
@@ -1118,6 +1106,165 @@ void cleanup_report_preserves_next_brake(bool hud_reference = false) {
         { std::lock_guard lock(fake->mutex);
             require(fake->software.size() == 6, "两轮均须完整zero、反向、zero，不能只安装屏蔽");
         }
+        worker.stop();
+    }
+}
+void automatic_recovery_contracts(bool hud_reference) {
+    using namespace std::chrono_literals;
+    for (int scenario = 0; scenario < 6; ++scenario) {
+        std::cerr << "自动恢复场景=" << scenario << "，HUD=" << hud_reference << '\n';
+        auto fake = std::make_shared<Fake>();
+        std::atomic<std::uint64_t> id{0};
+        std::atomic<bool> focused{true}, allowed{true}, weapon_ready{true};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [&] { return allowed.load(); },
+            [&] { return ++id; }, [&] { return focused.load(); }, [&] {
+                return AutoStopWeaponContext{true, weapon_ready.load(), 1, "ak47"};
+            });
+        AutoStopConfig config{true, 5}; config.cycle_enabled = true;
+        config.experimental_hud_model = hud_reference;
+        config.release_virtual_keys = {0x52};
+        require(worker.start(config), "持续许可自动恢复回归启动");
+        ready(worker, fake);
+        publish_present_target(worker, Clock::now() + 2s);
+        wait_for([&] { return worker.estimated_completion_id() != 0; });
+        const auto first_id = worker.estimated_completion_id();
+        if (scenario == 0) { std::lock_guard lock(fake->mutex); fake->extra_keys[0x52] = true; }
+        if (scenario == 1) focused = false;
+        if (scenario == 2) weapon_ready = false;
+        if (scenario == 3) allowed = false;
+        if (scenario == 4) worker.set_paused(true);
+        if (scenario == 5) { std::lock_guard lock(fake->mutex); fake->gap = true; }
+        wait_for([&] { return worker.snapshot().canceled != 0 && fake->released(); });
+        const auto stopped_reports = fake->reports();
+        publish_present_target(worker, Clock::now() + 2s);
+        std::this_thread::sleep_for(30ms);
+        require(worker.estimated_completion_id() == 0 && fake->reports() == stopped_reports,
+            "救援、焦点、武器、许可、暂停或断流未恢复时不得输出或沿用旧资格");
+        if (scenario == 0) { std::lock_guard lock(fake->mutex); fake->extra_keys[0x52] = false; }
+        focused = true; allowed = true; weapon_ready = true;
+        worker.set_paused(false);
+        if (scenario == 5) {
+            { std::lock_guard lock(fake->mutex); fake->gap = false; }
+            fake->physical(1);
+            wait_for([&] { return fake->drained(); });
+            std::this_thread::sleep_for(20ms);
+            require(fake->reports() == stopped_reports && worker.estimated_completion_id() == 0,
+                "连接恢复但未重新取得可信WASD事件流不得输出");
+            fake->physical_batch({0, 1});
+        }
+        wait_for([&] { return !worker.snapshot().recovery_pending; });
+        publish_present_target(worker, Clock::now() + 2s);
+        wait_for([&] { return worker.estimated_completion_id() > first_id; });
+        const auto reports = fake->reports();
+        require(reports.size() == stopped_reports.size() + 3 && reports[reports.size() - 3] == 0 &&
+            reports[reports.size() - 2] == 4 && reports.back() == 0,
+            "允许键始终按住时必须自动重新核验并完整制动");
+        const auto recovered_id = worker.estimated_completion_id();
+        require(!worker.resume_movement(first_id, Clock::now()), "迟到旧完成编号不得归还恢复后的新请求");
+        worker.cancel(first_id);
+        std::this_thread::sleep_for(5ms);
+        require(worker.estimated_completion_id() == recovered_id && fake->reports() == reports,
+            "迟到旧请求取消不得撤销恢复后的新完成资格");
+        worker.stop();
+    }
+    {
+        auto fake = std::make_shared<Fake>();
+        std::atomic<std::uint64_t> id{0};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [&] { return ++id; }, [] { return true; });
+        AutoStopConfig config{true, 5}; config.cycle_enabled = true;
+        config.experimental_hud_model = hud_reference;
+        require(worker.start(config), "归还ACK期间取消的自动恢复回归启动");
+        ready(worker, fake);
+        publish_present_target(worker, Clock::now() + 2s);
+        wait_for([&] { return worker.estimated_completion_id() != 0; });
+        const auto first_id = worker.estimated_completion_id();
+        { std::lock_guard lock(fake->mutex); fake->before_cleanup = [&] { worker.cancel(); }; }
+        require(worker.resume_movement(first_id, Clock::now() + 20ms), "归还ACK前成功登记当前请求");
+        wait_for([&] { return worker.snapshot().canceled != 0 && fake->released(); });
+        wait_for([&] { return !worker.snapshot().recovery_pending; });
+        require(worker.estimated_completion_id() == 0 && worker.snapshot().requests == 1,
+            "归还期间代际取消后自动核验不能复活旧资格或旧目标");
+        publish_present_target(worker, Clock::now() + 2s);
+        wait_for([&] { return worker.estimated_completion_id() > first_id; });
+        const auto recovered_id = worker.estimated_completion_id();
+        require(!worker.resume_movement(first_id, Clock::now()), "归还期间已撤销的旧请求不得迟到归还");
+        worker.cancel(first_id);
+        std::this_thread::sleep_for(5ms);
+        require(worker.estimated_completion_id() == recovered_id && fake->reports().size() == 6,
+            "旧取消与归还均不能干扰完整新制动后的资格");
+        worker.stop();
+    }
+}
+void cycle_cleanup_direction_contracts(bool hud_reference) {
+    using namespace std::chrono_literals;
+    // 健康改向与真实断流分开：方向变化不能等同于输入失联。
+    for (int scenario = 0; scenario < 4; ++scenario) {
+        auto fake = std::make_shared<Fake>();
+        std::atomic<std::uint64_t> id{0};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [&] { return ++id; }, [] { return true; });
+        AutoStopConfig config{true, 5}; config.cycle_enabled = true;
+        config.experimental_hud_model = hud_reference;
+        require(worker.start(config), "循环归还健康换向回归启动");
+        ready(worker, fake);
+        publish_present_target(worker, Clock::now() + 2s);
+        wait_for([&] { return worker.estimated_completion_id() != 0; });
+        const auto first_id = worker.estimated_completion_id();
+        {
+            std::lock_guard lock(fake->mutex);
+            if (scenario == 3) fake->before_cleanup = [fake] { fake->physical_batch({8, 1}); };
+            else fake->physical_during_cleanup = scenario == 0 ? 8 : scenario == 1 ? 0 : 5;
+        }
+        require(worker.resume_movement(first_id, Clock::now() + 40ms), "投递健康换向归还");
+        wait_for([&] { const auto state = worker.snapshot();
+            return state.cycle_count == 1 || state.recovery_pending; });
+        require(!worker.snapshot().recovery_pending,
+            "清理ACK窗口健康改向、全松或方向冲突不得要求松开许可键");
+        require(worker.estimated_completion_id() == 0, "归还后不得继承上一轮制动资格");
+        if (scenario == 1) {
+            std::this_thread::sleep_for(60ms);
+            require(fake->reports().size() == 3 && fake->released(), "全松归还后不得补发反向制动");
+            fake->physical(8);
+        } else if (scenario == 2) {
+            std::this_thread::sleep_for(60ms);
+            const auto conflict_reports = fake->reports();
+            require(std::all_of(conflict_reports.begin() + 3, conflict_reports.end(),
+                [](int mask) { return mask == 0; }) && worker.estimated_completion_id() == 0,
+                "冲突未解除前不得发反向或发布完成资格");
+            fake->physical(8);
+        }
+        publish_present_target(worker, Clock::now() + 2s);
+        wait_for([&] { return worker.estimated_completion_id() > first_id; });
+        const auto reports = fake->reports();
+        require(reports.size() >= 6 && (scenario == 2 || reports.size() == 6) &&
+            reports[reports.size() - 3] == 0 &&
+            reports[reports.size() - 2] == (scenario == 3 ? 4 : 2) && reports.back() == 0,
+            "许可键持续按住时必须按最新方向完成全UP、反向、全UP新一轮制动");
+        require(!worker.snapshot().recovery_pending, "正常循环不得残留恢复阻断");
+        worker.stop();
+    }
+    for (const int report_mode : {2, 3, 4, 5}) {
+        auto fake = std::make_shared<Fake>();
+        std::atomic<std::uint64_t> id{0};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [&] { return ++id; }, [] { return true; });
+        AutoStopConfig config{true, 5}; config.cycle_enabled = true;
+        config.experimental_hud_model = hud_reference;
+        require(worker.start(config), "循环归还断流反例启动");
+        ready(worker, fake);
+        publish_present_target(worker, Clock::now() + 2s);
+        wait_for([&] { return worker.estimated_completion_id() != 0; });
+        const auto first_id = worker.estimated_completion_id();
+        { std::lock_guard lock(fake->mutex); fake->cleanup_report_mode = report_mode; }
+        require(worker.resume_movement(first_id, Clock::now() + 20ms), "投递断流反例归还");
+        wait_for([&] { return worker.snapshot().recovery_pending; });
+        require(fake->released() && worker.snapshot().cycle_count == 0 &&
+            worker.estimated_completion_id() == 0, "缺序、无效报告、换代和时间倒退必须归还并等待可信输入");
+        publish_present_target(worker, Clock::now() + 2s);
+        std::this_thread::sleep_for(40ms);
+        require(worker.snapshot().requests == 1 && fake->reports().size() == 3 &&
+            worker.snapshot().recovery_pending, "持续按许可键和新目标不能洗掉真实断流锁存");
         worker.stop();
     }
 }
@@ -1169,14 +1316,28 @@ void hud_reference_output_contracts() {
 
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--automatic-recovery") {
+            automatic_recovery_contracts(false);
+            automatic_recovery_contracts(true);
+            std::cout << "H40与HUD持续许可自动恢复专项通过\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--cycle-cleanup-direction") {
+            cycle_cleanup_direction_contracts(false);
+            cycle_cleanup_direction_contracts(true);
+            std::cout << "H40与HUD循环清理方向变化及断流反例专项通过\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--hud-reference") {
+            automatic_recovery_contracts(true);
             hud_reference_output_contracts();
+            cycle_cleanup_direction_contracts(true);
             cleanup_report_preserves_next_brake(true);
             manual_release_contracts(true);
             target_loss_releases_hold(true);
             weapon_session_recovery_contracts(true);
             weapon_hotkey_nonfireable_context(true);
-            std::cout << "HUD实验worker专项通过：动态计划、ACK、目标消失、武器恢复与重新武装\n";
+            std::cout << "HUD实验worker专项通过：动态计划、ACK、目标消失、武器恢复与自动核验\n";
             return 0;
         }
         weapon_hotkey_nonfireable_context();
@@ -1193,6 +1354,8 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--weapon-cleanup") return 0;
         cleanup_report_preserves_next_brake();
         if (argc == 2 && std::string_view(argv[1]) == "--cleanup-report") return 0;
+        automatic_recovery_contracts(false);
+        cycle_cleanup_direction_contracts(false);
         target_loss_releases_hold();
         if (argc == 2 && std::string_view(argv[1]) == "--target-loss") return 0;
         weapon_session_recovery_contracts();
@@ -1214,7 +1377,7 @@ int main(int argc, char** argv) {
             legacy.use_counterpulse_timing = false;
             return legacy;
         }();
-        for (int cleanup_case = 0; cleanup_case < 7; ++cleanup_case) {
+        for (const int cleanup_case : {0, 1, 3, 4, 5, 6}) {
             auto fake = std::make_shared<Fake>();
             std::atomic<std::uint64_t> id{0};
             AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
@@ -1227,9 +1390,7 @@ int main(int argc, char** argv) {
             const auto completed_id = worker.estimated_completion_id();
             require(!worker.resume_movement(completed_id + 1, Clock::now() + std::chrono::seconds(1)),
                 "旧或错误请求不得归还其他周期");
-            if (cleanup_case == 2) {
-                std::lock_guard<std::mutex> lock(fake->mutex); fake->physical_during_cleanup = 8;
-            } else if (cleanup_case != 0) {
+            if (cleanup_case != 0) {
                 std::lock_guard<std::mutex> lock(fake->mutex);
                 fake->cleanup_report_mode = cleanup_case == 1 ? 1 : cleanup_case - 1;
             }
@@ -1237,8 +1398,8 @@ int main(int argc, char** argv) {
             require(worker.resume_movement(completed_id, deadline), "点射释放确认后可投递归还");
             wait_for([&] { return fake->released(); });
             if (cleanup_case >= 2) {
-                wait_for([&] { return worker.snapshot().release_required; });
-                require(worker.snapshot().cycle_count == 0, "清理期间变向、缺口、无效报告、换代或时间倒退不得伪造模型承接");
+                wait_for([&] { return worker.snapshot().recovery_pending; });
+                require(worker.snapshot().cycle_count == 0, "清理期间缺口、无效报告、换代或时间倒退不得伪造模型承接");
             } else {
                 wait_for([&] { return worker.snapshot().cycle_count == 1; });
                 require(worker.snapshot().cycle_moving, "归还成功显示真实移动阶段");
@@ -1246,7 +1407,7 @@ int main(int argc, char** argv) {
                 wait_for([&] { return worker.snapshot().requests == 2; });
                 wait_for([&] { return worker.estimated_completion_id() > completed_id; });
                 require(Clock::now() >= deadline, "按住方向与允许键时按期限发起下一次急停");
-                require(!worker.snapshot().release_required, "成功循环不要求松键重按");
+                require(!worker.snapshot().recovery_pending, "成功循环不要求松键重按");
             }
             worker.stop();
         }
@@ -1267,21 +1428,14 @@ int main(int argc, char** argv) {
             changed.store(true);
             wait_for([&] { return fake->released() && worker.snapshot().canceled == 1; });
             require(worker.estimated_completion_id() == 0, "武器失效或变化撤销估计资格");
-            require(worker.snapshot().release_required, "武器变化需松键重新触发");
             if (change == 0) {
                 wait_for([&] { return worker.snapshot().block_reason == AutoStopBlockReason::WEAPON_CONTEXT; });
+                require(worker.snapshot().recovery_pending, "武器失效期间等待自动重新核验");
                 changed.store(false);
             }
-            fake->physical(0);
-            wait_for([&] { return worker.snapshot().status == AutoStopStatus::READY; });
-            fake->physical(1);
-            wait_for([&] { return fake->drained(); });
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            require(worker.snapshot().requests == 1, "GSI恢复不能在持续按键下再次接管");
-            { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
-            wait_for([&] { return !worker.snapshot().release_required; });
+            wait_for([&] { return !worker.snapshot().recovery_pending; });
+            require(worker.snapshot().requests == 1, "GSI恢复不能复用旧目标再次接管");
             publish_present_target(worker, Clock::now() + std::chrono::seconds(2));
-            { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = true; }
             wait_for([&] { return worker.snapshot().requests == 2; });
             worker.stop();
         }
@@ -1664,18 +1818,15 @@ int main(int argc, char** argv) {
             const auto reports_before_rescue = fake->reports().size();
             { std::lock_guard<std::mutex> lock(fake->mutex); fake->extra_keys[rescue_key] = true; }
             wait_for([&] { return worker.snapshot().rescue_succeeded == 1; });
-            require(fake->released() && worker.snapshot().release_required &&
-                fake->reports().size() == reports_before_rescue, "数字行1至5及Q任意单键均只清理并锁存重触发");
+            require(fake->released() && worker.snapshot().recovery_pending &&
+                fake->reports().size() == reports_before_rescue, "数字行1至5及Q按住期间均只清理并等待自动核验");
             { std::lock_guard<std::mutex> lock(fake->mutex); fake->extra_keys[rescue_key] = false; }
             fake->physical(0);
             wait_for([&] { return worker.snapshot().status == AutoStopStatus::READY; });
-            require(worker.snapshot().release_required, "救援后仍按住activation不得清重触发锁存");
-            { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
-            wait_for([&] { return !worker.snapshot().release_required; });
-            { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = true; }
+            wait_for([&] { return !worker.snapshot().recovery_pending; });
             fake->physical(1);
             wait_for([&] { return fake->drained(); });
-            require(worker.request(2), "显式模式救援后松开重新按下可接收新请求");
+            require(worker.request(2), "显式模式救援后持续持许可自动重新核验并接收新请求");
             wait_for([&] { return fake->reports().size() > reports_before_rescue; });
             worker.stop();
         }
@@ -1695,7 +1846,7 @@ int main(int argc, char** argv) {
             std::atomic<std::uint64_t> id{0};
             AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
                 [&] { return ++id; }, [&] { return focused.load(); });
-            require(worker.start(config), "焦点恢复重新按键回归启动");
+            require(worker.start(config), "焦点恢复持续许可自动核验回归启动");
             ready(worker, fake);
             publish_present_target(worker, Clock::now() + std::chrono::seconds(2));
             wait_for([&] { return fake->has_software(); });
@@ -1704,13 +1855,12 @@ int main(int argc, char** argv) {
             fake->physical(0);
             wait_for([&] { return worker.snapshot().status == AutoStopStatus::READY; });
             focused.store(true);
+            wait_for([&] { return !worker.snapshot().recovery_pending; });
             fake->physical(1);
             wait_for([&] { return fake->drained(); });
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            require(worker.snapshot().requests == 1, "切回仍按住侧键不得自动再次接管键盘");
-            { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = false; }
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            { std::lock_guard<std::mutex> lock(fake->mutex); fake->activation = true; }
+            require(worker.snapshot().requests == 1, "焦点恢复不得复用旧目标再次接管键盘");
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(2));
             wait_for([&] { return worker.snapshot().requests == 2; });
             worker.stop();
         }

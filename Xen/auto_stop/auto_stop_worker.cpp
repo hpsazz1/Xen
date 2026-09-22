@@ -179,7 +179,7 @@ public:
             target_until = {}; tracking_target_until = {};
         }
         if ((changed && !trusted) || (incoming.required && !incoming.valid && !incoming.session_trusted))
-            state.release_required = true;
+            state.recovery_pending = true;
         state.weapon_context = incoming;
         weapon_context_seen = true;
         return !incoming.required || incoming.valid;
@@ -187,7 +187,7 @@ public:
     bool permission(const InputSnapshot& input) noexcept {
         try {
             if (!weapon_permission()) return false;
-            { std::lock_guard<std::mutex> lock(mutex); if (state.release_required) return false; }
+            { std::lock_guard<std::mutex> lock(mutex); if (state.recovery_pending) return false; }
             return allowed && allowed() && !arbiter->faulted_.load(std::memory_order_acquire) &&
                 input.state_valid && input.status == InputMonitorStatus::READY &&
                 !release_key_held(input) &&
@@ -199,7 +199,7 @@ public:
     }
     bool manual_permission(const InputSnapshot& input) noexcept {
         try {
-            // release_required属于快捷键循环的重新武装条件，不能使人工松键依赖快捷键松开。
+            // 自动恢复只阻断目标循环；人工松键仍独立核验输入和安全许可。
             return config.use_counterpulse_timing && allocate_request && focused && focused() &&
                 weapon_permission() && allowed && allowed() && !arbiter->faulted_.load() &&
                 input.state_valid && input.status == InputMonitorStatus::READY &&
@@ -212,7 +212,7 @@ public:
             (state.status != AutoStopStatus::BRAKING && state.status != AutoStopStatus::ESTIMATED &&
              state.status != AutoStopStatus::MASKED) || submitted_generation != cancel_generation.load()) return;
         const auto generation = cancel_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
-        normal_target_generation = manual_fire_id.load() == 0 && !state.release_required ? generation : 0;
+        normal_target_generation = manual_fire_id.load() == 0 && !state.recovery_pending ? generation : 0;
         estimated_id = 0;
         trigger_idle = false; ++trigger_idle_generation;
     }
@@ -221,11 +221,11 @@ public:
             const bool source_focused = focused && focused();
             std::lock_guard<std::mutex> lock(mutex);
             state.source_focused = source_focused;
-            if (!source_focused) state.release_required = true;
+            if (!source_focused) state.recovery_pending = true;
             const auto now = Clock::now();
             invalidate_tracking_locked(now);
             state.target_available = now < target_until;
-            return source_focused && !state.release_required &&
+            return source_focused && !state.recovery_pending &&
                 now < tracking_target_until && (manual_fire_id.load() != 0 || !require_target || state.target_available);
         } catch (...) { return false; }
     }
@@ -338,7 +338,7 @@ public:
                     active_generation != cancel_generation.load() &&
                     (normal_target_generation == cancel_generation.load() ||
                      (!target_only && normal_weapon_generation == cancel_generation.load() && state.weapon_context.session_trusted)) &&
-                    !state.release_required && !fault;
+                    !state.recovery_pending && !fault;
             }
             InputSnapshot fresh;
             return normal_change && mouse->poll_input(fresh) && fresh.state_valid && fresh.status == InputMonitorStatus::READY &&
@@ -349,6 +349,8 @@ public:
         auto cancel_active = [&](bool force_fault, const char* reason, bool normal_activation_release = false,
                                  bool cycle_resume = false, bool manual_finished = false, bool ordinary_transition = false,
                                  bool direction_transition = false, bool rescue_input = false) {
+            // 定时制动归还期间也可能正常改向；逐条验证新输入并重建计划，不继承旧完成资格。
+            direction_transition = direction_transition || (cycle_resume && config.use_counterpulse_timing && !force_fault);
             ordinary_transition = ordinary_transition || direction_transition;
             const bool session_transition = !force_fault && normal_cancellation();
             if (session_transition && mouse->left_button_cleanup_required()) {
@@ -417,12 +419,12 @@ public:
                 }
                 if (rescue_input) {
                     weapon_permission();
-                    // GSI或调用方撤销只影响重新武装；不能把健康物理事件流改写为断流。
+                    // GSI或调用方撤销只影响输出准入；不能把健康物理事件流改写为断流。
                     rescue_continuous = continuous && intent.input_continuous &&
                         allowed && allowed() && focused && focused() &&
                         !after_cleanup.virtual_keys[0x23] && !paused.load() && !stopping.load() && !arbiter->faulted_.load();
                     if (rescue_continuous) {
-                        // 救援仍锁重新武装；只保存逐事件验证的物理流，不承接旧制动资格。
+                        // 救援后自动核验仍待条件恢复；只保存真实物理流，不承接旧制动资格。
                         history = checked_history; intent = checked_intent; cursor = after_cursor; input = after_cleanup;
                         controller = detail::StopDriver(config);
                         if (config.experimental_hud_model) controller.restart_after_cleanup(intent, released_at);
@@ -446,7 +448,7 @@ public:
                     }
                     if (!resumed) {
                         std::lock_guard<std::mutex> lock(mutex);
-                        state.release_required = true;
+                        state.recovery_pending = true;
                     }
                 } else if (continuous && (cycle_resume ? cleanup_permission : !after_cleanup.virtual_keys[config.activation_virtual_key]) &&
                     !after_cleanup.virtual_keys[0x23] && !release_key_held(after_cleanup) && allowed && allowed() &&
@@ -463,9 +465,10 @@ public:
                 controller.observe(intent, now_ns());
             if (resumed) LOG_INFO("auto_stop", "键盘归还已确认；保留连续输入以支持再次急停");
             // 正常归还不破坏真实事件连续性；无法承接模型时，下次仅屏蔽，不伪造运动历史。
-            // 清理期间的事件留给正式游标，下一轮先验证再准入。
-            const bool retain_input = ((normal_activation_release || manual_release || ordinary_transition) && clean_ok &&
-                !force_fault && intent.input_continuous) || rescue_continuous;
+            // 未由方向过渡消费的清理期间事件留给正式游标，下一轮先验证再准入。
+            // 撤销输出许可不等于真实输入断流；保留事实历史供归还后的自动核验。
+            // 清理期间的新事件仍须由正式游标逐条验证，不能凭健康快照恢复连续性。
+            const bool retain_input = (clean_ok && !force_fault && intent.input_continuous) || rescue_continuous;
             if (manual_release && !ordinary_transition) {
                 // 松键动作结束后仅用真实当前输入建立下一计划，不承接软件反向期间的运动估算。
                 if (config.experimental_hud_model && clean_ok && !force_fault)
@@ -478,7 +481,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex);
             if (active_id && !(cycle_resume && resumed) && !manual_finished) ++state.canceled;
             if (!manual_release && !ordinary_transition && ((cycle_resume && !resumed) || (config.cycle_enabled && !normal_activation_release && !cycle_resume)))
-                state.release_required = true;
+                state.recovery_pending = true;
             if (cycle_resume && resumed) ++state.cycle_count;
             state.cycle_moving = cycle_resume && resumed;
             if (fault || force_fault || !clean_ok) { fault = true; state.status = AutoStopStatus::FAULT; }
@@ -557,26 +560,26 @@ public:
                         std::lock_guard<std::mutex> lock(mutex);
                         normal_switch = only_weapon_keys && state.weapon_context.required &&
                             state.weapon_context.session_trusted && state.weapon_context.trust_generation != 0 &&
-                            !state.release_required && !fault && manual_fire_id.load() == 0;
+                            !state.recovery_pending && !fault && manual_fire_id.load() == 0;
                     }
                     normal_switch = normal_switch && input_ok && events_ok && intent.input_continuous &&
                         allowed && allowed() && focused && focused() && !input.virtual_keys[0x23] &&
                         !paused.load() && !arbiter->faulted_.load();
                     {
                         std::lock_guard lock(mutex);
-                        LOG_INFO("auto_stop", "监听报告救援边沿：vk={}，snapshot_seq={}，wasd_epoch={}，wasd_seq={}，held={}，continuous={}，trusted={}，trust_generation={}，release_required={}，only_weapon_keys={}，input_ok={}，events_ok={}，focused={}，allowed={}，fault={}，manual={}，normal_switch={}",
+                        LOG_INFO("auto_stop", "监听报告救援边沿：vk={}，snapshot_seq={}，wasd_epoch={}，wasd_seq={}，held={}，continuous={}，trusted={}，trust_generation={}，recovery_pending={}，only_weapon_keys={}，input_ok={}，events_ok={}，focused={}，allowed={}，fault={}，manual={}，normal_switch={}",
                             reported_release_keys, input.sequence, intent.epoch, intent.sequence, unsigned(intent.held_mask),
                             intent.input_continuous, state.weapon_context.session_trusted, state.weapon_context.trust_generation,
-                            state.release_required, only_weapon_keys, input_ok, events_ok, state.source_focused,
+                            state.recovery_pending, only_weapon_keys, input_ok, events_ok, state.source_focused,
                             allowed && allowed(), fault || arbiter->faulted_.load(), manual_fire_id.load() != 0, normal_switch);
                     }
                     cancel_generation.fetch_add(1, std::memory_order_acq_rel);
                     {
                         std::lock_guard<std::mutex> lock(mutex);
                         pending_id = 0;
-                        if (!normal_switch) state.release_required = true;
+                        if (!normal_switch) state.recovery_pending = true;
                         target_until = {}; tracking_target_until = {};
-                        state.block_reason = AutoStopBlockReason::RELEASE_REQUIRED;
+                        state.block_reason = AutoStopBlockReason::RECOVERY_PENDING;
                         ++state.rescue_attempts;
                     }
                     // 即使普通许可/焦点/暂停/FAULT已阻断，也只走键盘债务清理，不发新DOWN。
@@ -595,7 +598,7 @@ public:
                     LOG_INFO("auto_stop", "按键归还：急停键盘债务={}，共享故障锁存={}，恢复方式={}",
                         acknowledged ? "归还已确认" : "清理未确认，释放救援键再按可重试",
                         fault_remains ? "保留，需重启" : "未由本模块锁存",
-                        normal_switch && acknowledged && !fault_remains ? "切枪键释放后重新核验" : "松开允许键后重新触发");
+                        acknowledged && !fault_remains ? "安全条件恢复后自动重新核验" : "保持故障阻断");
                     report_block();
                     std::unique_lock<std::mutex> lock(mutex);
                     wake.wait_for(lock, std::chrono::milliseconds(1));
@@ -611,16 +614,38 @@ public:
                 }
                 const bool weapon_ready = weapon_permission();
                 const bool session_ready = allocate_request && session_permission(!independent);
-                bool release_required = false;
+                const auto recovery_generation = cancel_generation.load();
+                const bool recovery_ready = !active_id && !debt && !latched_fault &&
+                    manual_fire_id.load() == 0 && input_ok && events_ok && intent.input_continuous &&
+                    !intent.conflicting && intent.epoch == cursor.epoch && intent.sequence == cursor.sequence &&
+                    intent.held_mask == held_wasd(input) && weapon_ready &&
+                    (!allocate_request || (focused && focused())) && allowed && allowed() &&
+                    !release_key_held(input) && !input.virtual_keys[0x23] &&
+                    !paused.load() && !stopping.load() && !arbiter->faulted_.load() &&
+                    !mouse->left_button_cleanup_required();
+                bool recovery_pending = false;
                 {
                     std::lock_guard<std::mutex> lock(mutex);
-                    if (weapon_ready && (!allocate_request || state.source_focused) && input_ok && !release_key_held(input) &&
-                        (config.activation_virtual_key <= 0 || config.activation_virtual_key >= 256 ||
-                        !input.virtual_keys[config.activation_virtual_key]))
-                        state.release_required = false;
-                    release_required = state.release_required;
+                    if (state.recovery_pending && recovery_ready && !state.cleanup_unknown && !fault &&
+                        recovery_generation == cancel_generation.load()) {
+                        // 必须完成旧责任归还；恢复只接纳后续新目标、新请求，不复活旧资格或旧释放边沿。
+                        cancel_generation.fetch_add(1, std::memory_order_acq_rel);
+                        pending_id = estimated_id = resume_id = 0;
+                        normal_weapon_generation = normal_target_generation = tracked_request_id = 0;
+                        target_until = {}; tracking_target_until = {};
+                        state.target_available = false;
+                        trigger_idle = false; ++trigger_idle_generation;
+                        target_consumed = false; released_axes = release_armed_mask = 0;
+                        controller = detail::StopDriver(config);
+                        if (config.use_counterpulse_timing) controller.restart_after_cleanup(intent, now_ns());
+                        else controller.observe(intent, now_ns());
+                        state.recovery_pending = false;
+                        LOG_INFO("auto_stop", "自动重新核验通过：epoch={}，sequence={}，held={}，generation={}；等待新目标完整制动",
+                            intent.epoch, intent.sequence, unsigned(intent.held_mask), cancel_generation.load());
+                    }
+                    recovery_pending = state.recovery_pending;
                 }
-                const bool request_eligible = session_ready && !release_required && input_ok && permission(input) &&
+                const bool request_eligible = session_ready && !recovery_pending && input_ok && permission(input) &&
                     Clock::now() >= movement_not_before;
                 if (!request_eligible) target_consumed = false;
                 // 松键制动与快捷键制动共享active_id和软件键盘债务，不能同时拥有输出。
@@ -731,14 +756,14 @@ public:
                 }
                 {
                     std::lock_guard<std::mutex> lock(mutex);
-                    if (latched_fault || !weapon_ready || release_required || !input_ok || !events_ok ||
+                    if (latched_fault || !weapon_ready || recovery_pending || !input_ok || !events_ok ||
                         paused.load() || config.activation_virtual_key <= 0 || config.activation_virtual_key >= 256 ||
                         !input.virtual_keys[config.activation_virtual_key] ||
                         !state.source_focused || !allowed || !allowed()) state.cycle_moving = false;
                     state.block_reason = latched_fault ? AutoStopBlockReason::OUTPUT_FAULT :
                         allocate_request && !state.source_focused ? AutoStopBlockReason::SOURCE_FOCUS :
                         !weapon_ready ? AutoStopBlockReason::WEAPON_CONTEXT :
-                        release_required ? AutoStopBlockReason::RELEASE_REQUIRED :
+                        recovery_pending ? AutoStopBlockReason::RECOVERY_PENDING :
                         !input_ok ? AutoStopBlockReason::INPUT_UNAVAILABLE :
                         !events_ok || (allocate_request ? !intent.input_continuous : !intent.history_valid) ? AutoStopBlockReason::INPUT_HISTORY :
                         paused.load() ? AutoStopBlockReason::PAUSED :
@@ -755,7 +780,7 @@ public:
                 {
                     std::lock_guard<std::mutex> lock(mutex);
                     normal_weapon_change = active_id && manual_fire_id.load() == 0 && active_generation != cancel_generation.load() &&
-                        normal_weapon_generation == cancel_generation.load() && !state.release_required &&
+                        normal_weapon_generation == cancel_generation.load() && !state.recovery_pending &&
                         state.weapon_context.session_trusted;
                 }
                 if (normal_weapon_change && input_ok && events_ok && intent.input_continuous &&
@@ -800,7 +825,7 @@ public:
                     } else if (!resumed && !active_id) {
                         // active_id仍在表示等待Trigger确认UP，不是清理失败。
                         std::lock_guard<std::mutex> lock(mutex);
-                        state.release_required = true;
+                        state.recovery_pending = true;
                     }
                     // 本轮准入条件在归还前取得，下一轮重新读取输入和期限。
                     continue;
@@ -815,7 +840,7 @@ public:
                         !input.virtual_keys[config.activation_virtual_key] && !input.virtual_keys[0x23] &&
                         !release_key_held(input) && !paused.load() && !stopping.load() &&
                         active_generation == cancel_generation.load() && allowed && allowed() &&
-                        !release_required && session_permission(false);
+                        !recovery_pending && session_permission(false);
                     const char* reason = !input_ok ? "input_invalid" : !events_ok ? "input_gap" :
                         independent && (!intent.input_continuous || intent.epoch != active_input_epoch) ? "input_history_discontinuous" :
                         !independent_acquired && !mask_only && !intent.history_valid ? "history_invalid" : paused.load() ? "paused" :
@@ -1199,7 +1224,7 @@ bool AutoStopWorker::retain_for_manual_fire(std::uint64_t request_id) noexcept {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         if (!impl_->running || !impl_->allocate_request || impl_->fault || impl_->state.cleanup_unknown ||
             impl_->paused.load() || impl_->stopping.load() || impl_->arbiter->faulted_.load() ||
-            impl_->state.release_required || !impl_->state.source_focused ||
+            impl_->state.recovery_pending || !impl_->state.source_focused ||
             impl_->state.status != AutoStopStatus::ESTIMATED || impl_->estimated_id != request_id ||
             impl_->estimated_generation != impl_->cancel_generation.load() ||
             Clock::now() >= impl_->tracking_target_until ||
@@ -1217,7 +1242,7 @@ bool AutoStopWorker::resume_movement(std::uint64_t request_id, Clock::time_point
         const auto now = Clock::now();
         if (!impl_->running || impl_->manual_fire_id.load() != 0 || !impl_->config.cycle_enabled || !impl_->allocate_request || impl_->fault ||
             impl_->paused.load() || impl_->stopping.load() || impl_->state.cleanup_unknown ||
-            impl_->state.release_required || impl_->state.status != AutoStopStatus::ESTIMATED ||
+            impl_->state.recovery_pending || impl_->state.status != AutoStopStatus::ESTIMATED ||
             impl_->estimated_id != request_id || impl_->resume_id != 0 ||
             impl_->estimated_generation != impl_->cancel_generation.load() ||
             not_before > now + std::chrono::seconds(10)) return false;
@@ -1275,7 +1300,7 @@ bool AutoStopWorker::idle_for_trigger(const InputSnapshot& input) const noexcept
             if (!impl_->running || !impl_->trigger_idle || impl_->pending_id || impl_->fault ||
                 impl_->state.status == AutoStopStatus::BRAKING || impl_->state.status == AutoStopStatus::ESTIMATED ||
                 impl_->state.status == AutoStopStatus::MASKED || impl_->state.status == AutoStopStatus::FAULT ||
-                impl_->state.cleanup_unknown || impl_->state.release_required || impl_->paused.load() ||
+                impl_->state.cleanup_unknown || impl_->state.recovery_pending || impl_->paused.load() ||
                 impl_->stopping.load()) return false;
             cursor = impl_->trigger_idle_cursor;
             generation = impl_->trigger_idle_generation;
@@ -1294,7 +1319,7 @@ bool AutoStopWorker::idle_for_trigger(const InputSnapshot& input) const noexcept
         if (cursor.sequence != sequence) return false;
         std::lock_guard<std::mutex> lock(impl_->mutex);
         return impl_->running && impl_->trigger_idle && impl_->trigger_idle_generation == generation &&
-            !impl_->pending_id && !impl_->fault && !impl_->state.cleanup_unknown && !impl_->state.release_required &&
+            !impl_->pending_id && !impl_->fault && !impl_->state.cleanup_unknown && !impl_->state.recovery_pending &&
             !impl_->paused.load() && !impl_->stopping.load() &&
             impl_->state.status != AutoStopStatus::BRAKING && impl_->state.status != AutoStopStatus::ESTIMATED &&
             impl_->state.status != AutoStopStatus::MASKED && impl_->state.status != AutoStopStatus::FAULT;

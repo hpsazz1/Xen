@@ -284,7 +284,7 @@ void gsi_session_recovery(const char* transition, bool hud_reference = false) {
             current.estimated_stop_request_id != old_stop) { recovered = true; break; }
         std::this_thread::sleep_for(1ms);
     }
-    const bool stop_latched = stop.snapshot().release_required;
+    const bool stop_latched = stop.snapshot().recovery_pending;
     if (!recovered) {
         // 失败时先收现场，再停止worker，避免清理覆盖真正阻断；不改变等待或断言。
         const auto stopped = stop.snapshot();
@@ -296,7 +296,7 @@ void gsi_session_recovery(const char* transition, bool hud_reference = false) {
             {"stop", {{"status", AutoStopStatusName(stopped.status)},
                 {"block", AutoStopBlockReasonName(stopped.block_reason)}, {"request_id", stopped.request_id},
                 {"requests", stopped.requests}, {"completed", stopped.completed}, {"canceled", stopped.canceled},
-                {"release_required", stopped.release_required}, {"cleanup_unknown", stopped.cleanup_unknown},
+                {"recovery_pending", stopped.recovery_pending}, {"cleanup_unknown", stopped.cleanup_unknown},
                 {"target_available", stopped.target_available}, {"focused", stopped.source_focused},
                 {"counter_release_ack_ns", stopped.counter_release_ack_ns}, {"completion_ready_ns", stopped.completion_ready_ns},
                 {"cleanup_attempts", stopped.cleanup_attempts}, {"cleanup_failures", stopped.cleanup_failures},
@@ -322,7 +322,7 @@ void gsi_session_recovery(const char* transition, bool hud_reference = false) {
     }
     trigger.stop(); stop.stop();
     if (!recovered) std::cerr << "transition=" << transition << " trigger=" << static_cast<int>(state.reason)
-        << " stop_release_required=" << stop_latched << '\n';
+        << " stop_recovery_pending=" << stop_latched << '\n';
     require(recovered, "持续持键的正常GSI武器过渡必须恢复，不要求松键");
     require(state.estimated_stop_request_id != old_stop && state.estimated_stop_request_id != 0,
         "恢复不得继承旧武器急停编号");
@@ -420,7 +420,7 @@ void run_weapon(const char* weapon_id, bool cycle = false, bool lose_candidate =
         until([&] { const auto current = stop.snapshot();
             return mouse->released() && (lose_target ? current.canceled + current.cycle_count >= 1 : current.cycle_count == 1); });
         expected_cycles = stop.snapshot().cycle_count + 1;
-        require(!stop.snapshot().release_required, "候选丢失后的已确认抬键不得要求松键重按");
+        require(!stop.snapshot().recovery_pending, "候选丢失后的已确认抬键不得要求松键重按");
         const auto waiting_until = Clock::now() + std::chrono::milliseconds(profile->fire_interval_ms) + 80ms;
         while (Clock::now() < waiting_until) {
             stop.publish_tracking_target(lose_target ? Clock::time_point{} : Clock::now() + 300ms);
@@ -536,7 +536,7 @@ void target_loss_lifecycle(bool already_down, bool hud_reference = false) {
     stop.publish_tracking_target({});
     until([&] { return mouse->released() && !trigger.snapshot().button_may_be_down &&
         stop.estimated_completion_id() == 0; });
-    require(!stop.snapshot().release_required, "真实人物消失只撤销本轮急停，不要求松许可键");
+    require(!stop.snapshot().recovery_pending, "真实人物消失只撤销本轮急停，不要求松许可键");
     require(!mouse->cleanup_during_shot.load(), "已DOWN后人物消失必须先LEFT UP ACK再归还键盘");
     const auto requests_after_loss = stop.snapshot().requests;
     const auto missing_until = Clock::now() + 70ms;
@@ -553,7 +553,7 @@ void target_loss_lifecycle(bool already_down, bool hud_reference = false) {
         return firing.confirmed_down && state.estimated_stop_request_id != 0 &&
             state.estimated_stop_request_id != previous_stop;
     }, 1500ms);
-    require(stop.snapshot().requests > requests_after_loss && !stop.snapshot().release_required,
+    require(stop.snapshot().requests > requests_after_loss && !stop.snapshot().recovery_pending,
         "持续许可下新人物必须重新急停并绑定新编号后才触发");
     trigger.stop(); stop.stop();
     require(mouse->released() && !mouse->cleanup_during_shot.load(), "组合关闭仍遵循先UP后键盘归还");

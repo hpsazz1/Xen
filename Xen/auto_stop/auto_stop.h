@@ -29,7 +29,7 @@ enum class AutoStopStatus {
 };
 
 enum class AutoStopBlockReason {
-    NONE, SOURCE_FOCUS, RELEASE_REQUIRED, INPUT_UNAVAILABLE, INPUT_HISTORY,
+    NONE, SOURCE_FOCUS, RECOVERY_PENDING, INPUT_UNAVAILABLE, INPUT_HISTORY,
     ACTIVATION_NOT_HELD, SAFETY_PERMISSION, PAUSED, MOTION_UNAVAILABLE,
     CONTINUOUS_REQUEST_CONSUMED, NO_TARGET, SOURCE_TIMING_INVALID,
     SOURCE_UNCERTAINTY, TARGET_STALE, OUTPUT_FAULT, CROSSHAIR_OUTSIDE_TARGET, WEAPON_CONTEXT
@@ -38,7 +38,7 @@ inline const char* AutoStopBlockReasonName(AutoStopBlockReason reason) noexcept 
     switch (reason) {
     case AutoStopBlockReason::NONE: return "条件满足";
     case AutoStopBlockReason::SOURCE_FOCUS: return "源程序未聚焦或桥接不可用";
-    case AutoStopBlockReason::RELEASE_REQUIRED: return "切回后请松开允许键再按下";
+    case AutoStopBlockReason::RECOVERY_PENDING: return "等待条件恢复，自动重新核验";
     case AutoStopBlockReason::INPUT_UNAVAILABLE: return "设备按键监听不可用";
     case AutoStopBlockReason::INPUT_HISTORY: return "等待WASD全部释放以同步历史";
     case AutoStopBlockReason::ACTIVATION_NOT_HELD: return "未按住允许键";
@@ -93,7 +93,7 @@ struct AutoStopSnapshot {
     bool target_available = false;
     bool source_focused = false;
     bool focus_required = false;
-    bool release_required = false;
+    bool recovery_pending = false;
     AutoStopBlockReason block_reason = AutoStopBlockReason::NONE;
     std::uint64_t rescue_attempts = 0, rescue_succeeded = 0, rescue_failed = 0;
     std::uint64_t acknowledged_commands = 0, cleanup_attempts = 0, cleanup_failures = 0, release_commands = 0;
