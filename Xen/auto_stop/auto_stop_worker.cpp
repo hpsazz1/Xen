@@ -496,6 +496,7 @@ public:
         };
         try {
             while (!stopping.load(std::memory_order_acquire)) {
+                bool hud_followup_ready = false;
                 bool input_ok = mouse->poll_input(input) && input.state_valid && input.status == InputMonitorStatus::READY;
                 std::uint8_t released_axes = 0;
                 std::int64_t release_event_ns = 0;
@@ -706,6 +707,8 @@ public:
                                 else {
                                     software_mask = decision.desired_mask;
                                     decision = controller.acknowledge(active_id, decision.command_id, software_mask, ack);
+                                    hud_followup_ready = config.experimental_hud_model && software_mask == 0 &&
+                                        decision.phase == AutoStopPhase::WAITING_ACK && decision.desired_mask != 0;
                                     report_hud();
                                     if (decision.completion_ready_ns) {
                                         std::lock_guard<std::mutex> lock(mutex);
@@ -723,7 +726,7 @@ public:
                     }
                     release_reservation();
                     std::unique_lock<std::mutex> lock(mutex);
-                    wake.wait_for(lock, std::chrono::milliseconds(1));
+                    if (!hud_followup_ready) wake.wait_for(lock, std::chrono::milliseconds(1));
                     continue;
                 }
                 {
@@ -1017,6 +1020,8 @@ public:
                                 software_mask = decision.desired_mask;
                                 const auto completed = controller.acknowledge(active_id, decision.command_id, software_mask,
                                     config.use_counterpulse_timing ? ack_time : returned);
+                                hud_followup_ready = config.experimental_hud_model && software_mask == 0 &&
+                                    completed.phase == AutoStopPhase::WAITING_ACK && completed.desired_mask != 0;
                                 report_hud();
                                 if (config.experimental_hud_model) {
                                     const auto model = controller.hud_telemetry();
@@ -1046,7 +1051,8 @@ public:
                 if (trigger_idle != idle) ++trigger_idle_generation;
                 trigger_idle = idle;
                 if (trigger_idle) trigger_idle_cursor = cursor;
-                wake.wait_for(lock, std::chrono::milliseconds(1));
+                // 初始零ACK生成反向命令后立即重进完整输入/许可检查；其余阶段保持原轮询，禁止自旋。
+                if (!hud_followup_ready) wake.wait_for(lock, std::chrono::milliseconds(1));
             }
             if (active_id || debt) cancel_active(false, "worker_stopped");
         } catch (...) {
