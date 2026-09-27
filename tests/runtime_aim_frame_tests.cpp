@@ -70,6 +70,43 @@ int main() {
     }
     estimator.reset();
     {
+        // r4形态：Runtime重置清历史，激活首帧仍在确认目标，下一帧才获目标。
+        // 必须经过真实组装入口，不能只在Aim内部保留上一帧lock掩盖reset。
+        AimConfig cfg; cfg.min_confirmed_hits = 2;
+        cfg.max_counts_per_frame = 14; cfg.soft_zone_radius_percent = 30;
+        Aim reset_aim(cfg);
+        runtime::detail::RuntimeObservationClock reset_clock;
+        runtime::detail::CameraMotionEstimator reset_estimator;
+        bool emitted = false;
+        bool emitted_after_reset = false;
+        for (int i = 0; i < 70; ++i) {
+            CapturedFrame captured;
+            captured.width = captured.height = captured.source_width = captured.source_height = 320;
+            captured.timing.sequence = 100 + i;
+            captured.timing.captured_at = start + std::chrono::milliseconds(100 + 4*i);
+            auto prepared = runtime::detail::prepare_aim_frame(captured,
+                {{210,140,250,240,.95f,0}}, reset_clock, reset_estimator, true, false);
+            prepared.frame.control_at = captured.timing.captured_at + std::chrono::milliseconds(2);
+            if (i == 0 || i == 36 || prepared.reset_aim) reset_aim.reset();
+            const auto result = reset_aim.process(prepared.frame);
+            expect(result.status == AimStatus::SUCCESS,"生产重置回归输入必须有效");
+            if (i == 0) expect(!result.has_target,"首个激活帧必须实际经过目标待确认");
+            if (i == 1) expect(result.has_target && !result.has_command,
+                "Runtime重置后首次确认也须从零额度接管，不能满幅冷启动");
+            if (i == 36) expect(!result.has_target,"运行中完整reset须清旧目标历史");
+            if (i == 37) expect(result.has_target && !result.has_command,
+                "已经输出后再次完整reset也不得绕过首次确认缓入");
+            const int active_steps = i < 36 ? i-1 : i-37;
+            if (active_steps > 0 && active_steps < 25) expect(std::hypot(result.control.shaped_x_counts,
+                result.command.dy_counts) <= 14.0f * active_steps*.004f/.1f + 1.0f,
+                "Runtime重置后的后续请求必须遵守整段有效时间额度");
+            if (i > 1) emitted |= result.has_command;
+            if (i > 62) emitted_after_reset |= result.has_command;
+        }
+        expect(emitted,"重置过渡后必须实际恢复输出，不能恒零通过");
+        expect(emitted_after_reset,"再次重置完整过渡后仍须恢复输出");
+    }
+    {
         weapon::GsiConfig gsi_config;
         gsi_config.enabled = true;
         weapon::detail::GsiState gsi;
@@ -289,11 +326,25 @@ int main() {
                 frame.control_at += std::chrono::milliseconds(4);
                 frame.lock_active = current_permission;
                 const auto next = feedback_aim.process(frame);
-                expect(next.has_command && runtime::detail::aim_frame_dispatch_allowed(frame, current_permission) &&
-                           feedback_aim.record_backend_completed_command(next.command.sequence,
-                               frame.control_at + std::chrono::microseconds(100),
-                               next.command.dx_counts, next.command.dy_counts),
-                       "按住许可保持时下一帧正常发送并确认，不应要求松键重按");
+                expect(next.has_target && !next.has_command &&
+                           runtime::detail::aim_frame_dispatch_allowed(frame, current_permission),
+                       "新按键许可生效但接管首步零额度，不追溯发送旧帧");
+                bool recovered = false;
+                for (int i=0;i<30;++i) {
+                    ++frame.sequence;
+                    frame.captured_at += std::chrono::milliseconds(4);
+                    frame.control_at += std::chrono::milliseconds(4);
+                    const auto continued = feedback_aim.process(frame);
+                    expect(continued.has_target && runtime::detail::aim_frame_dispatch_allowed(frame,current_permission),
+                           "持续按住保持许可和目标，不要求松键重按");
+                    if (continued.has_command) {
+                        recovered = true;
+                        expect(feedback_aim.record_backend_completed_command(continued.command.sequence,
+                            frame.control_at + std::chrono::microseconds(100),
+                            continued.command.dx_counts,continued.command.dy_counts),"接管后真实发送记录须可确认");
+                    }
+                }
+                expect(recovered,"持续按住须在过渡后恢复非零输出");
             }
         }
     }

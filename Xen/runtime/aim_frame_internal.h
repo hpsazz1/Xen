@@ -95,6 +95,7 @@ inline PreparedAimFrame prepare_aim_frame(
     frame.source_pixels_per_roi_pixel_y =
         static_cast<float>(captured.source_pixels_per_pixel_y);
     frame.lock_active = lock_active;
+    frame.ease_first_activation = true;
     frame.detections = std::move(detections);
     if (measure_background) {
         const auto measured = estimator.observe(captured, frame, result.reset_aim);

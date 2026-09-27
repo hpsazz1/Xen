@@ -5944,8 +5944,9 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
     const auto started = clock::now();
     try {
         const bool same_activation_epoch = impl_->held_control_epoch == frame.observation_epoch;
-        const bool activation_edge = same_activation_epoch && impl_->activation_frame_seen &&
-            !impl_->previous_frame_locked && frame.lock_active;
+        const bool activation_edge = frame.lock_active &&
+            ((same_activation_epoch && impl_->activation_frame_seen && !impl_->previous_frame_locked) ||
+             (frame.ease_first_activation && (!impl_->activation_frame_seen || !same_activation_epoch)));
         if (!frame.lock_active || impl_->held_control_epoch != frame.observation_epoch) {
             impl_->held_control_track_id = 0;
             impl_->target_transition_seconds = kTargetTransitionSeconds;
