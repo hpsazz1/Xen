@@ -321,12 +321,13 @@ void test_soft_zone() {
         }
         return sum;
     };
-    const auto baseline=run(0,.2f,12);
-    const auto softened=run(30,.2f,12);
+    const auto baseline=run(0,.2f,4);
+    const auto softened=run(30,.2f,4);
     std::cout<<"软区累计 baseline="<<baseline<<" softened="<<softened<<'\n';
     expect(baseline>0 && softened>0 && softened<baseline*.7,
            "近中心仍有少量跟随，持续输出须明显弱于关闭软区");
-    expect(run(30,1,12)==baseline,"保留强度1精确兼容原输出");
+    expect(run(30,1,4)==baseline,"保留强度1精确兼容原输出");
+    expect(run(30,.2f,12)==run(0,.2f,12),"准星在50%内窗外时不得提前弱化追赶");
     expect(run(30,.2f,80)==run(0,.2f,80),"软区外保持原输出");
 
     const auto soft_config=[](float radius,float strength) {
@@ -334,7 +335,7 @@ void test_soft_zone() {
         c.soft_zone_radius_percent=radius;
         c.soft_zone_min_strength=strength;
         c.deadzone_pixels=0;
-        c.body_aim_range_percent=1; // 最小合法框内范围，保持缩放对照几何一致。
+        c.body_aim_range_percent=100; // 宽内窗覆盖ROI软区边缘，独立检验原软区连续边界。
         c.enable_delay_compensation=false;
         return c;
     };
@@ -350,8 +351,8 @@ void test_soft_zone() {
         f.captured_at=std::chrono::steady_clock::time_point(std::chrono::seconds(300))+
             std::chrono::milliseconds(4*sequence);
         f.control_at=f.captured_at;
-        f.detections={{center+(x-16)*scale,center+(y-16)*scale,
-                       center+(x+16)*scale,center+(y+84)*scale,.9f,0}};
+        f.detections={{center+(x-64)*scale,center+(y-16)*scale,
+                       center+(x+64)*scale,center+(y+84)*scale,.9f,0}};
         return f;
     };
     const auto first_ratio=[&](int roi,float source_scale,float x,float y,bool vertical) {
@@ -378,7 +379,7 @@ void test_soft_zone() {
                std::fabs(first_ratio(320,2,12,0,false)-roi_weight)<.00001f,
            "相同ROI归一化几何的软化权重不随ROI分辨率或source比例改变");
     const float inside_weight=first_ratio(320,1,47.9f,0,false);
-    // 框内1%安全范围可能把基础点向中心移0.16 ROI像素；外侧样本跨过该余量。
+    // 宽内窗覆盖ROI软区外沿，仍单独验证原软区外缘连续性。
     const float edge_weight=first_ratio(320,1,48.2f,0,false);
     const float outside_weight=first_ratio(320,1,48.3f,0,false);
     expect(inside_weight<=edge_weight && std::fabs(inside_weight-edge_weight)<.0001f &&
@@ -405,6 +406,124 @@ void test_soft_zone() {
             f.sequence,f.control_at+std::chrono::microseconds(100),
             b.command.dx_counts,b.command.dy_counts),"strength1对照完成回执必须被接受");
     }
+}
+
+void test_soft_zone_requires_target_window() {
+    const auto sample = [](float offset, float radius, int roi, bool head_only) {
+        auto c = config(.475f);
+        c.soft_zone_radius_percent=radius; c.soft_zone_min_strength=.2f;
+        c.body_aim_range_percent=50; c.body_aim_height_ratio=.5f;
+        c.deadzone_pixels=0; c.enable_delay_compensation=false;
+        Aim aim(c); AimFrame f;
+        f.sequence=1; f.roi_width=f.roi_height=roi;
+        f.source_pixels_per_roi_pixel_x=f.source_pixels_per_roi_pixel_y=320.0f/roi;
+        f.control_center_x=f.control_center_y=roi*.5f; f.lock_active=true;
+        f.captured_at=std::chrono::steady_clock::time_point(std::chrono::seconds(600));
+        f.control_at=f.captured_at;
+        const float scale=roi/320.0f, x=f.control_center_x+offset*scale;
+        f.detections={{x-16*scale,f.control_center_y-16*scale,
+                       x+16*scale,f.control_center_y+16*scale,.95f,head_only?1:0}};
+        const auto r=aim.process(f);
+        expect(r.status==AimStatus::SUCCESS && r.has_target &&
+                   r.target.matched_observation_valid && r.control.evaluated,
+               "捕获内窗必须由实际matched目标及生产控制覆盖");
+        return r;
+    };
+    for(bool head_only:{false,true}) for(int roi:{320,640}) {
+        for(float offset:{-24.0f,-12.0f,-8.0f,8.0f,12.0f,24.0f}) {
+            const auto a=sample(offset,0,roi,head_only),b=sample(offset,30,roi,head_only);
+            expect(std::fabs(a.control.shaped_x_counts)>.001f &&
+                       a.control.shaped_x_counts==b.control.shaped_x_counts &&
+                       a.command.dx_counts==b.command.dx_counts,
+                   "matched身体或头部50%内窗外和边界不得因ROI软区提前削弱追赶");
+        }
+        const auto a=sample(4,0,roi,head_only),b=sample(4,30,roi,head_only);
+        expect(std::fabs(b.control.shaped_x_counts)>.001f &&
+                   std::fabs(b.control.shaped_x_counts)<std::fabs(a.control.shaped_x_counts),
+               "进入当前目标内窗后仍保留非零弱跟随");
+        const auto edge=sample(7.99f,30,roi,head_only),edge_off=sample(7.99f,0,roi,head_only);
+        expect(std::fabs(edge.control.shaped_x_counts-edge_off.control.shaped_x_counts)<.001f,
+               "从内窗内趋近边界必须连续恢复追赶而非硬开关");
+    }
+}
+
+void test_soft_zone_leaves_current_window_without_latching() {
+    auto c=config(.475f);
+    c.soft_zone_radius_percent=30; c.soft_zone_min_strength=.2f;
+    c.body_aim_height_ratio=.5f; c.body_aim_range_percent=50;
+    c.deadzone_pixels=0; c.enable_delay_compensation=false;
+    auto off_c=c; off_c.soft_zone_radius_percent=0;
+    Aim soft(c),off(off_c);
+    AimFrame f;
+    f.sequence=1; f.observation_epoch=82;
+    f.captured_at=std::chrono::steady_clock::time_point(std::chrono::seconds(650));
+    f.control_at=f.captured_at;
+    f.roi_width=f.roi_height=320; f.control_center_x=f.control_center_y=160;
+    f.lock_active=true; f.detections={{144,144,176,176,.95f,0}};
+    const auto inside=soft.process(f),inside_off=off.process(f);
+    expect(inside.has_target && inside_off.has_target &&
+               inside.target.matched_observation_valid && inside.control.evaluated &&
+               !inside.has_command && !inside_off.has_command &&
+               inside.control.shaped_x_counts==0 && inside_off.control.shaped_x_counts==0,
+           "出窗对照先在中心建立同轨迹零误差，避免历史控制状态造成假差异");
+    f.sequence=2; f.captured_at+=std::chrono::milliseconds(4); f.control_at=f.captured_at;
+    f.detections={{156,144,188,176,.95f,0}};
+    const auto outside=soft.process(f),outside_off=off.process(f);
+    const float current_left=outside.target.matched_observation_x1+
+        (outside.target.matched_observation_x2-outside.target.matched_observation_x1)*.25f;
+    expect(outside.has_target && outside_off.has_target &&
+               outside.target.track_id==inside.target.track_id &&
+               outside_off.target.track_id==inside_off.target.track_id &&
+               outside.target.matched_observation_valid &&
+               outside.target.matched_observation_x1==156 && current_left>160,
+           "次帧必须是同身份的当前matched内窗出界，不能靠新身份或旧框通过");
+    expect(std::fabs(outside_off.control.shaped_x_counts)>.001f &&
+               outside.control.shaped_x_counts==outside_off.control.shaped_x_counts &&
+               outside.command.dx_counts==outside_off.command.dx_counts,
+           "曾在窗内不能锁存弱化资格，当前matched出窗必须立即恢复完整追赶");
+}
+
+void test_soft_zone_missing_background_chase() {
+    auto c=config(.475f); c.soft_zone_radius_percent=30; c.soft_zone_min_strength=.2f;
+    c.body_aim_height_ratio=.5f; c.body_aim_range_percent=50;
+    Aim aim(c); double error=28;
+    int previous_command=0,outside=0,inside=0,moving_inside=0,sent=0,audits=0;
+    constexpr double plant=.2216375/.425;
+    for(int i=0;i<960;++i) {
+        // 无背景且源观测有周期扰动；相机只反馈本分支已完成命令。
+        if(i) error+=(i<600?.5:0)-plant*previous_command;
+        const double observed=error+.35*std::sin(i*.37);
+        AimFrame f; f.sequence=i+1; f.observation_epoch=81;
+        f.captured_at=std::chrono::steady_clock::time_point(std::chrono::seconds(700))+
+            std::chrono::microseconds(4167*i); f.control_at=f.captured_at;
+        f.roi_width=f.roi_height=320; f.control_center_x=f.control_center_y=160; f.lock_active=true;
+        f.detections={{static_cast<float>(144+observed),144,static_cast<float>(176+observed),176,.95f,0}};
+        const auto r=aim.process(f);
+        expect(r.status==AimStatus::SUCCESS && r.has_target &&
+                   r.control.background_motion_use_x!=AimBackgroundMotionUse::CONSUMED,
+               "扰动追赶明确覆盖缺BG，不能依赖维护豁免");
+        previous_command=r.has_command?r.command.dx_counts:0;
+        if(r.has_command) { ++sent; expect(aim.record_backend_completed_command(
+            f.sequence,f.control_at,previous_command,r.command.dy_counts),"缺BG反馈回执有效"); }
+        if(i<600 && std::fabs(observed)>8 && std::fabs(observed)<48) {
+            ++outside;
+            {
+                ++audits; auto off_c=c; off_c.soft_zone_radius_percent=0;
+                Aim off(off_c),soft(c); const auto a=off.process(f),b=soft.process(f);
+                expect(a.has_target && b.has_target && std::fabs(a.control.shaped_x_counts)>.001f &&
+                           a.control.shaped_x_counts==b.control.shaped_x_counts,
+                       "实际缺BG扰动反馈产生的框外追赶观测不得被大软区提前减力");
+            }
+        }
+        if(i<600 && std::fabs(observed)<8) ++moving_inside;
+        if(i>=600 && std::fabs(observed)<8) ++inside;
+    }
+    expect(outside>0 && inside>20 && sent>20 && audits>0,
+           "缺BG扰动追赶与停止后框内跟随均须非空覆盖");
+    expect(moving_inside>outside,
+           "缺BG有扰动时也须在持续移动阶段大部分时间追入安全窗，不能等目标停下才进入");
+    std::cout<<"缺BG扰动追赶 outside="<<outside<<" moving_inside="<<moving_inside
+             <<" inside="<<inside<<" sent="<<sent<<" audits="<<audits<<'\n';
 }
 
 struct SoftMotionSummary {
@@ -562,6 +681,9 @@ int main() {
     test_activation_gap();
     test_moving_activation_budget();
     test_soft_zone();
+    test_soft_zone_requires_target_window();
+    test_soft_zone_leaves_current_window_without_latching();
+    test_soft_zone_missing_background_chase();
     test_soft_zone_observed_motion();
     test_soft_zone_background_activation_budget();
     return failures ? 1 : 0;

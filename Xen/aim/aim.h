@@ -62,7 +62,7 @@ struct AimConfig {
     // 身体框内基础瞄点的横向安全范围百分比；50 表示身体框中间 50%。
     float body_aim_range_percent = 50.0f;
     float deadzone_pixels = 1.5f;
-    // 相对ROI短边半径的软化范围；0关闭。弱化纠偏，保留当前可信X运动维持。
+    // 相对ROI短边半径的软化范围；0关闭。X进入当前目标安全内窗后才弱化。
     float soft_zone_radius_percent = 0.0f;
     float soft_zone_min_strength = 0.2f;
     float smoothing = 0.35f;

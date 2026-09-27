@@ -5440,7 +5440,36 @@ struct Aim::Impl {
             return config.soft_zone_min_strength +
                 (1.0f - config.soft_zone_min_strength) * t * t * (3.0f - 2.0f * t);
         };
-        const float soft_x = zone_strength(feedback_target_x - frame.control_center_x);
+        float soft_x = zone_strength(feedback_target_x - frame.control_center_x);
+        if (soft_x < 1.0f) {
+            // ROI软区可能比目标宽，不能仅因靠近画面中心就提前削弱追赶。
+            // 只认当前匹配观测的横向安全内窗；预测点和历史框不提供捕获资格。
+            float capture_weight_x = 0.0f;
+            if (track.matched_observation_valid) {
+                const float center_x = 0.5f * (track.matched_observation_x1 +
+                    track.matched_observation_x2);
+                const float half_width = (track.matched_observation_x2 -
+                    track.matched_observation_x1) * config.body_aim_range_percent / 200.0f;
+                float safe_min_x = center_x - half_width;
+                float safe_max_x = center_x + half_width;
+                if (track.current_body_anchor && !track.matched_observation_head_only) {
+                    safe_min_x = std::max(safe_min_x, track.current_body_anchor->visible_min_x);
+                    safe_max_x = std::min(safe_max_x, track.current_body_anchor->visible_max_x);
+                }
+                if (std::isfinite(safe_min_x) && std::isfinite(safe_max_x) &&
+                    safe_max_x > safe_min_x) {
+                    const float safe_center = 0.5f * (safe_min_x + safe_max_x);
+                    const float safe_half_width = 0.5f * (safe_max_x - safe_min_x);
+                    const float depth = std::clamp(1.0f -
+                        std::fabs(frame.control_center_x - safe_center) / safe_half_width,
+                        0.0f, 1.0f);
+                    capture_weight_x = depth * depth * (3.0f - 2.0f * depth);
+                }
+            }
+            // 窗外和边界保持追赶，入窗才连续恢复原弱化；离开立即撤销，
+            // 不锁存“曾经追上”，也不把横向几何当Y命中或开火许可。
+            soft_x = 1.0f - capture_weight_x * (1.0f - soft_x);
+        }
         const float soft_y = zone_strength(feedback_target_y - frame.control_center_y);
         shaped_x *= soft_x;
         shaped_y *= soft_y;
