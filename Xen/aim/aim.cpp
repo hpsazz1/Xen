@@ -5297,6 +5297,7 @@ struct Aim::Impl {
         float applied_maintenance_request_x = target_motion_request_x;
         float motion_compensated_x =
             eligible_filtered_x + applied_maintenance_request_x;
+        float current_supported_maintenance_x = 0.0f;
         // 同源双边与observer支持的运动职责不随位置误差换侧而改变。
         // 非Reset时，双边共同方向与observer确认资格，当前中心位移决定幅度。
         // 同向双边取小还会每帧扣掉半宽变化的绝对值，宽度往返也持续少付；
@@ -5309,8 +5310,7 @@ struct Aim::Impl {
             const float world_common = common_edge_motion(
                 track.horizontal_raw_left_motion_x - frame.background_motion_x.dx_roi_pixels,
                 track.horizontal_raw_right_motion_x - frame.background_motion_x.dx_roi_pixels);
-            if (world_common * error_x != 0.0f &&
-                world_common * tracking_target_velocity_counts_per_second_x > 0.0f) {
+            if (world_common * tracking_target_velocity_counts_per_second_x > 0.0f) {
                 const float observation_dt = std::chrono::duration<float>(
                     frame.background_motion_x.captured_at -
                     frame.background_motion_x.previous_captured_at).count();
@@ -5323,14 +5323,17 @@ struct Aim::Impl {
                 const float supported_maintenance = std::copysign(
                     current_supported_motion, world_common);
                 if (std::isfinite(current_supported_motion)) {
-                    const float maintenance_direction = std::copysign(1.0f, supported_maintenance);
-                    const float integral_credit = std::min(
-                        std::max(0.0f, maintenance_direction * tracking_filtered_integral_x),
-                        std::max(0.0f, maintenance_direction * eligible_filtered_x));
-                    applied_maintenance_request_x = maintenance_direction * std::max(
-                        0.0f, std::fabs(supported_maintenance) - integral_credit);
-                    motion_compensated_x = eligible_filtered_x + applied_maintenance_request_x;
-                    diagnostics.target_motion_maintenance_x_counts = supported_maintenance;
+                    current_supported_maintenance_x = supported_maintenance;
+                    if (world_common * error_x != 0.0f) {
+                        const float maintenance_direction = std::copysign(1.0f, supported_maintenance);
+                        const float integral_credit = std::min(
+                            std::max(0.0f, maintenance_direction * tracking_filtered_integral_x),
+                            std::max(0.0f, maintenance_direction * eligible_filtered_x));
+                        applied_maintenance_request_x = maintenance_direction * std::max(
+                            0.0f, std::fabs(supported_maintenance) - integral_credit);
+                        motion_compensated_x = eligible_filtered_x + applied_maintenance_request_x;
+                        diagnostics.target_motion_maintenance_x_counts = supported_maintenance;
+                    }
                 }
             }
         }
@@ -5427,8 +5430,8 @@ struct Aim::Impl {
         }
         const float transition_accept_x = before_transition_x != 0.0f
             ? shaped_x / before_transition_x : 1.0f;
-        // 在最终浮点预算上弱化全部Aim分量，避免维护量绕过软区。
-        // 按ROI几何分轴计算，不让另一轴误差抬高本轴强度；不改已发库存。
+        // 静态纠偏仍按ROI几何分轴弱化；当前背景支撑的运动维护在下方
+        // 单独分配，不让另一轴误差抬高本轴强度，也不改已发库存。
         const float zone_radius = std::min(frame.roi_width, frame.roi_height) *
             0.5f * config.soft_zone_radius_percent / 100.0f;
         const auto zone_strength = [&](float roi_error) {
@@ -5441,8 +5444,29 @@ struct Aim::Impl {
         const float soft_y = zone_strength(feedback_target_y - frame.control_center_y);
         shaped_x *= soft_x;
         shaped_y *= soft_y;
-        const float accepted_soft_maintenance = accepted_maintenance_after_cap_x *
+        float accepted_soft_maintenance = accepted_maintenance_after_cap_x *
             transition_accept_x * soft_x;
+        float soft_allocation_accept_x = 1.0f;
+        if (soft_x < 1.0f && residual_role && background_role &&
+                nominal_request != 0.0f && current_supported_maintenance_x != 0.0f) {
+            // 只归还本源区间双边世界位移所支撑的维护份额。背景可用本身
+            // 不证明目标仍在运动；停止、形变或缺测不能保住滤波历史尾量。
+            const float supported_fraction = static_cast<float>(std::clamp(
+                static_cast<double>(current_supported_maintenance_x) / nominal_request,
+                0.0, 1.0));
+            const float restored_maintenance = accepted_maintenance_after_cap_x *
+                transition_accept_x * supported_fraction * (1.0f - soft_x);
+            shaped_x += restored_maintenance;
+            accepted_soft_maintenance += restored_maintenance;
+            // PI与M可能反向抵消，改变分配后净请求可增大，必须再次守住
+            // 同一二维和接管额度；同步接受比例不能把新增M记成PI。
+            const float requested_soft_x = shaped_x;
+            const float allocation_limit = config.max_counts_per_frame * target_transition_weight;
+            clamp_tracking_vector_preserving_y(shaped_x, shaped_y, allocation_limit);
+            soft_allocation_accept_x = requested_soft_x != 0.0f
+                ? shaped_x / requested_soft_x : (allocation_limit > 0.0f ? 1.0f : 0.0f);
+            accepted_soft_maintenance *= soft_allocation_accept_x;
+        }
         if (!residual_role && shaped_x != before_transition_x) {
             feedforward_x = std::clamp(feedforward_x +
                 (shaped_x - before_transition_x) * anti_windup_alpha,
@@ -5472,7 +5496,8 @@ struct Aim::Impl {
         }
 
         model_residual_x.float_position_counts = representable_float(floating_position_after)
-            ? static_cast<float>(floating_position_after) * transition_accept_x * soft_x : 0.0f;
+            ? static_cast<float>(floating_position_after) * transition_accept_x * soft_x *
+                soft_allocation_accept_x : 0.0f;
         model_residual_x.previous_source_p = proportional_x;
         shaper_initialized = true;
         if (y_filter_update == FilterUpdate::Reset) {

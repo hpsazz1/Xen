@@ -3335,7 +3335,7 @@ struct Overlay::Impl {
                 0.0f, 100.0f, "%.1f%%");
             form_row(
                 "中心保留强度",
-                "软化区中心保留的 Aim 强度比例，范围 0～1；越小减弱越多，1 不减弱。向软化区边缘连续恢复原强度，只作用于 Aim，不添加随机晃动。范围为 0 时不生效，停止 Runtime 后修改。");
+                "软化区中心保留的位置纠偏比例，范围 0～1；越小减弱越多，1 不减弱。向边缘连续恢复原强度；有可靠当前运动依据时保留横向跟随，仍受最大步长和接管缓入约束。不添加随机晃动。范围为 0 时不生效，停止 Runtime 后修改。");
             slider_float_control(
                 "soft_zone_min_strength", &app_config.aim.soft_zone_min_strength,
                 0.0f, 1.0f, "%.2f");

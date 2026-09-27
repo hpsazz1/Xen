@@ -406,6 +406,152 @@ void test_soft_zone() {
             b.command.dx_counts,b.command.dy_counts),"strength1对照完成回执必须被接受");
     }
 }
+
+struct SoftMotionSummary {
+    double moving_error = 0, stopped_error = 0, turned_error = 0;
+    double moving_maintenance = 0, stopped_maintenance = 0;
+    int moving_samples = 0, stopped_samples = 0, turned_samples = 0;
+};
+
+SoftMotionSummary soft_motion_feedback(int direction, bool background_available,
+                                     bool world_stationary) {
+    auto c = config(.475f);
+    c.soft_zone_radius_percent = 30;
+    c.soft_zone_min_strength = .2f;
+    c.body_aim_height_ratio = 1.0f / 3.0f;
+    Aim aim(c);
+    constexpr std::int64_t interval_ns = 4166667;
+    constexpr double dt = interval_ns * 1e-9;
+    constexpr double plant = .2216375 / .425;
+    double error = direction * 8.0;
+    int previous_command = 0;
+    SoftMotionSummary summary;
+    // 沿用observed_feedback已知离散相机，仅验证软件职责，不拟合物理plant。
+    // 三阶段使用相同时间轴；相机反馈始终只来自当前分支已完成的真实请求。
+    for (int i = 0; i < 1440; ++i) {
+        const double background = i ? -plant * previous_command : 0.0;
+        const double world_delta = world_stationary ? 0.0 :
+            (i < 480 ? direction * 120.0 * dt : i < 960 ? 0.0 : -direction * 120.0 * dt);
+        if (i) error += background + world_delta;
+        AimFrame f;
+        f.sequence = 100 + i;
+        f.observation_epoch = 71;
+        f.captured_at = std::chrono::steady_clock::time_point(std::chrono::seconds(400)) +
+            std::chrono::nanoseconds(interval_ns * i);
+        f.control_at = f.captured_at;
+        f.roi_width = f.roi_height = 320;
+        f.control_center_x = f.control_center_y = 160;
+        f.lock_active = true;
+        f.detections = {{static_cast<float>(136 + error),120,
+                         static_cast<float>(184 + error),240,.95f,0}};
+        f.background_motion_x = {
+            background_available ? AimBackgroundMotionStatus::VALID : AimBackgroundMotionStatus::MISSING,
+            f.sequence - 1, f.sequence, f.captured_at - std::chrono::nanoseconds(interval_ns),
+            f.captured_at, f.observation_epoch, static_cast<float>(background), .9f, 0,
+            background_available ? 2 : 0};
+        const auto r = aim.process(f);
+        previous_command = r.has_command ? r.command.dx_counts : 0;
+        expect(r.status == AimStatus::SUCCESS && r.has_target &&
+                   std::abs(previous_command) <= 14 && r.command.dy_counts == 0,
+               "软区反馈各阶段保持目标、有限输出及原Y和向量上限");
+        if (r.has_command) expect(aim.record_backend_completed_command(
+            f.sequence, f.control_at, previous_command, 0),
+            "闭环只确认当前分支自身命令，不能复制另一分支输出");
+        if (i >= 360 && i < 480) {
+            summary.moving_error += std::fabs(error);
+            summary.moving_maintenance += std::fabs(r.control.modelled_response_x_counts);
+            ++summary.moving_samples;
+        }
+        if (i >= 840 && i < 960) {
+            summary.stopped_error += std::fabs(error);
+            summary.stopped_maintenance += std::fabs(r.control.modelled_response_x_counts);
+            ++summary.stopped_samples;
+        }
+        if (i >= 1320) { summary.turned_error += std::fabs(error); ++summary.turned_samples; }
+        if (!world_stationary && background_available && i >= 1320)
+            expect(r.control.modelled_response_x_counts * direction <= .001f,
+                   "反向连续真实观测后不得继续保留旧方向维护份额");
+    }
+    summary.moving_error /= summary.moving_samples;
+    summary.moving_maintenance /= summary.moving_samples;
+    summary.stopped_error /= summary.stopped_samples;
+    summary.stopped_maintenance /= summary.stopped_samples;
+    summary.turned_error /= summary.turned_samples;
+    return summary;
+}
+
+void test_soft_zone_observed_motion() {
+    for (int direction : {-1,1}) {
+        const auto motion = soft_motion_feedback(direction,true,false);
+        const auto missing = soft_motion_feedback(direction,false,false);
+        const auto stationary = soft_motion_feedback(direction,true,true);
+        std::cout << "软区观测闭环 direction=" << direction
+                  << " moving=" << motion.moving_error << " stopped=" << motion.stopped_error
+                  << " turned=" << motion.turned_error << " maintenance=" << motion.moving_maintenance
+                  << " stopped_maintenance=" << motion.stopped_maintenance
+                  << " missing=" << missing.moving_error << " static=" << stationary.moving_error << '\n';
+        expect(motion.moving_maintenance > .01,
+               "可信背景闭环须真正覆盖非零运动维护，不能靠空覆盖通过");
+        expect(motion.moving_error <= 1.5 && motion.turned_error <= 1.5,
+               "可信匹配的持续横移与转向在软区内也应回到既有死区，不能长期欠跟随");
+        expect(motion.stopped_error <= 1.5 && motion.stopped_maintenance < .05,
+               "目标停止后运动维护应退出，不能以持续拖动换取移动误差改善");
+        expect(stationary.moving_error <= 1.5 && stationary.moving_maintenance < .05,
+               "静态目标与背景同动不得被识别成独立运动维护");
+        expect(missing.stopped_error <= 1.5,
+               "缺失背景仍能完成静态位置收敛，不能将未知背景当真零外推");
+    }
+}
+
+void test_soft_zone_background_activation_budget() {
+    auto c = config(.475f);
+    c.soft_zone_radius_percent = 30;
+    c.soft_zone_min_strength = .2f;
+    c.body_aim_height_ratio = 1.0f / 3.0f;
+    Aim aim(c);
+    bool consumed_moving_background = false;
+    bool resumed_moving_background = false;
+    for (int i = 0; i < 32; ++i) {
+        AimFrame f;
+        f.sequence = i + 1;
+        f.observation_epoch = 72;
+        f.captured_at = std::chrono::steady_clock::time_point(std::chrono::seconds(500)) +
+            std::chrono::microseconds(4167 * i);
+        f.control_at = f.captured_at;
+        f.roi_width = f.roi_height = 320;
+        f.control_center_x = f.control_center_y = 160;
+        f.lock_active = i >= 12;
+        f.ease_first_activation = true;
+        const float x = 160 + .5f * i;
+        f.detections = {{x-24,120,x+24,240,.95f,0}};
+        // 激活时已有可信世界平移；中途短缺BG不能清掉或提前消费接管额度。
+        const bool available = i < 18 || i >= 22;
+        f.background_motion_x = {
+            available ? AimBackgroundMotionStatus::VALID : AimBackgroundMotionStatus::MISSING,
+            f.sequence-1,f.sequence,f.captured_at-std::chrono::microseconds(4167),
+            f.captured_at,f.observation_epoch,0,.9f,0,available ? 2 : 0};
+        const auto r = aim.process(f);
+        expect(r.status == AimStatus::SUCCESS && r.has_target,
+               "软区与背景接管夹具必须保持真实目标");
+        if (i >= 12) {
+            const float allowance = 14 * std::min(1.0f,(i-12)*.004167f/.1f);
+            expect(std::fabs(r.control.shaped_x_counts) <= allowance + .001f,
+                   "软区保护运动维护不能绕过激活额度，BG失效恢复也不得重置为满额");
+            if (i == 12) expect(!r.has_command && std::fabs(r.control.shaped_x_counts)<.001f,
+                                "已有BG运动支持的软区激活首帧仍为零预算");
+            if (r.control.background_motion_use_x == AimBackgroundMotionUse::CONSUMED &&
+                r.control.modelled_response_x_counts > .001f) {
+                consumed_moving_background |= i < 18;
+                resumed_moving_background |= i >= 22;
+            }
+        }
+        if (r.has_command) expect(aim.record_backend_completed_command(
+            f.sequence,f.control_at,f.lock_active?r.command.dx_counts:0,0),
+            "软区激活只回执许可后的本分支命令");
+    }
+    expect(consumed_moving_background && resumed_moving_background,
+           "接管额度回归必须在背景失效前后实际消费非零运动维护，不能以空覆盖通过");
+}
 }
 
 int main() {
@@ -416,5 +562,7 @@ int main() {
     test_activation_gap();
     test_moving_activation_budget();
     test_soft_zone();
+    test_soft_zone_observed_motion();
+    test_soft_zone_background_activation_budget();
     return failures ? 1 : 0;
 }
