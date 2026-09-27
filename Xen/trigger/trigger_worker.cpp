@@ -301,10 +301,11 @@ public:
                         const bool same_context = fresh.context.required == firing_context.required &&
                             (!fresh.context.required || (fresh.context.valid && firing_context.valid &&
                                 fresh.context.generation == firing_context.generation));
-                        // 候选丢失只中止本发：确认UP且会话仍安全后归还移动，下一发重新取得候选和急停资格。
+                        // 候选丢失或变化只中止本发：确认UP且会话仍安全后归还移动，下一发重新取得候选和急停资格。
                         // 显式取消、失焦和未知回执仍撤销；图像局部失效不越权归还独立急停。
                         const bool recoverable = event.snapshot.reason == TriggerReason::RELEASED ||
-                            event.snapshot.reason == TriggerReason::NO_CANDIDATE;
+                            event.snapshot.reason == TriggerReason::NO_CANDIDATE ||
+                            event.snapshot.reason == TriggerReason::TARGET_CHANGED;
                         const bool session_safe = fresh.enabled && fresh.healthy && fresh.armed &&
                             fresh.focused && same_context && !stopping.load() && !canceled.load() &&
                             !controller.snapshot().faulted;

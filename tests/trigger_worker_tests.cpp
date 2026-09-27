@@ -49,6 +49,9 @@ public:
             dirty = true;
             down_entered = true;
             while (block_down && !release_down) std::this_thread::sleep_for(1ms);
+        } else {
+            up_entered = true;
+            while (block_up && !release_up) std::this_thread::sleep_for(1ms);
         }
         ButtonReceipt receipt;
         receipt.datagram_sent = true;
@@ -82,6 +85,7 @@ public:
     std::atomic<bool> moving{false};
     std::atomic<bool> unknown_down{false}, unknown_up{false};
     std::atomic<bool> block_down{false}, release_down{false}, down_entered{false};
+    std::atomic<bool> block_up{false}, release_up{false}, up_entered{false};
     std::atomic<int> timing_mode{0}, return_delay_ms{0};
 private:
     std::atomic<std::uint64_t> sequence{0};
@@ -262,9 +266,10 @@ void observation_release_preserves_independent_stop() {
     for (int cause = 0; cause != 4; ++cause) {
         auto mouse = std::make_shared<Mouse>();
         std::atomic<unsigned> canceled{0}, resumed{0};
+        std::atomic<std::uint64_t> estimated_id{7};
         TriggerWorker worker(mouse, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
             [] { return true; }, [] { return std::uint64_t{8}; }, [](std::uint64_t) { return true; },
-            [&](std::uint64_t) { ++canceled; }, {}, [] { return std::uint64_t{7}; },
+            [&](std::uint64_t) { ++canceled; }, {}, [&] { return estimated_id.load(); },
             [&](std::uint64_t, TriggerTime) { ++resumed; });
         TriggerConfig config;
         config.enabled = config.require_stop = config.allow_estimated_stop = true;
@@ -283,10 +288,71 @@ void observation_release_preserves_independent_stop() {
         expect(until([&] { return mouse->count(false) == 1 && !worker.firing_signal().confirmed_down; }),
             "观测失效或候选变化必须清理软件LEFT");
         std::this_thread::sleep_for(10ms);
-        expect(canceled == 0 && resumed == 0, "扳机局部观测撤销不得归还或取消仍有效的独立急停");
+        expect(canceled == 0 && resumed == (cause == 3 ? 1u : 0u),
+            "候选变化确认UP后归还移动；其他局部观测失效保留独立急停");
         worker.publish(observation(3));
-        expect(until([&] { return mouse->count(true) == 2; }), "新有效帧与原急停资格可在冷却后恢复扳机");
+        if (cause == 3) {
+            std::this_thread::sleep_for(270ms);
+            expect(mouse->count(true) == 1, "候选变化后旧急停编号不能再次点射");
+            estimated_id = 9;
+            worker.publish(observation(4));
+        }
+        expect(until([&] { return mouse->count(true) == 2; }),
+            "新有效帧在冷却后恢复扳机；候选变化须提供新急停资格");
         worker.stop();
+    }
+}
+
+void target_change_up_revalidates_safety() {
+    // 在真实 worker 的 UP 后端边界改变许可，避免将换目标前的许可误当成归还许可。
+    for (int mode = 0; mode != 4; ++mode) {
+        auto mouse = std::make_shared<Mouse>();
+        auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+        std::atomic<bool> focused{true};
+        std::atomic<unsigned> resumed{0}, canceled{0}, retained{0};
+        TriggerWorker worker(mouse, arbiter, [] { return true; }, [&] { return focused.load(); },
+            [] { return std::uint64_t{8}; }, [](std::uint64_t) { return true; },
+            [&](std::uint64_t) { ++canceled; }, {}, [] { return std::uint64_t{7}; },
+            [&](std::uint64_t, TriggerTime) { ++resumed; },
+            [&](std::uint64_t) { ++retained; return mode == 0; });
+        TriggerConfig config;
+        config.enabled = config.require_stop = config.allow_estimated_stop = true;
+        config.hold_virtual_key = 5; config.fire_delay_ms = 0;
+        config.press_duration_ms = 500; config.shot_interval_ms = 600;
+        config.max_observation_age_ms = 1000;
+        expect(worker.start(config), "候选变化UP边界安全测试启动");
+        expect(until([&] { return worker.snapshot().reason == TriggerReason::RELEASED; }), "先观察许可释放");
+        mouse->held = true; worker.publish(observation());
+        expect(until([&] { return worker.firing_signal().confirmed_down; }), "候选变化前确认DOWN");
+        mouse->block_up = true;
+        auto changed = observation(2);
+        changed->detections = {{48, 48, 52, 52, 0.9f, 0}};
+        worker.publish(changed);
+        const bool entered = until([&] { return mouse->up_entered.load(); });
+        expect(entered && resumed == 0 && canceled == 0, "候选变化UP尚未返回时不得归还或取消急停");
+        if (mode < 2) mouse->physical_left = true;
+        if (mode == 2) mouse->unknown_up = true;
+        if (mode == 3) focused = false;
+        mouse->release_up = true;
+        expect(until([&] {
+            for (const auto& event : worker.execution_log().events)
+                if (event.snapshot.reason == TriggerReason::TARGET_CHANGED && event.backend_called)
+                    return true;
+            return false;
+        }), "确实经过候选变化UP回执路径");
+        if (mode < 2) {
+            expect(until([&] { return retained.load() > 0; }), "UP期间人工按下必须尝试人工接管");
+            std::this_thread::sleep_for(10ms);
+            expect(canceled == 0, "人工接管成功或被拒绝都不得误取消仍按住的独立急停");
+        } else if (mode == 2) {
+            expect(until([&] { return worker.snapshot().faulted; }), "候选变化UP未知必须锁故障");
+        } else {
+            expect(until([&] { return canceled.load() > 0; }), "UP期间失焦必须取消急停");
+        }
+        expect(resumed == 0 && mouse->count(true) == 1, "人工左键、未知UP或失焦不得归还移动或再发DOWN");
+        mouse->unknown_up = false;
+        worker.stop();
+        expect(resumed == 0, "停机清理确认不能补发正常归还");
     }
 }
 
@@ -825,6 +891,7 @@ int main() {
     physical_left_takes_over_until_trigger_rearmed();
     rejected_manual_takeover_preserves_held_stop();
     observation_release_preserves_independent_stop();
+    target_change_up_revalidates_safety();
     estimated_stop_callback_and_revalidation(); timing_change_at_down_revalidation();
     fire_disabled_no_output_or_receipt();
     autonomous_cleanup(); unknown_and_late_ack(); final_revalidation(); unverified_stop_and_contention();

@@ -88,6 +88,7 @@ public:
     }
     KeyboardReceipt cleanup_wasd_keyboard() noexcept override {
         const auto receipt = keyboard_ack();
+        ++cleanups;
         std::lock_guard lock(mutex);
         if (left_down.load()) cleanup_during_shot = true;
         masks = software = 0;
@@ -96,6 +97,11 @@ public:
         return receipt;
     }
     ButtonReceipt set_left_button(bool down) noexcept override {
+        if (!down && hold_up_ack.load()) {
+            up_waiting.store(true);
+            const auto deadline = Clock::now() + 500ms;
+            while (hold_up_ack.load() && Clock::now() < deadline) std::this_thread::sleep_for(1ms);
+        }
         ButtonReceipt result;
         result.datagram_sent = true; result.disposition = ButtonDisposition::ACKNOWLEDGED;
         result.protocol_ack_received_at = Clock::now();
@@ -116,7 +122,8 @@ public:
     void close() noexcept override {}
     MouseStatus status() const noexcept override { return MouseStatus::READY; }
     std::string last_error() const override { return {}; }
-    std::atomic<unsigned> downs{0}, ups{0}, moves{0};
+    std::atomic<unsigned> downs{0}, ups{0}, moves{0}, cleanups{0};
+    std::atomic<bool> hold_up_ack{false}, up_waiting{false};
     std::atomic<bool> cleanup_during_shot{false};
     bool same_key_cleanup_report = false;
 private:
@@ -634,6 +641,90 @@ void held_direction_after_overlap_requires_completed_brake(bool hud_reference = 
     trigger.stop(); stop.stop();
     require(mouse->released(), "方向重叠组合结束必须收齐UP和键盘归还");
 }
+// 生产双worker跨目标连续点射：旧LEFT清债后归还，再以新编号完整制动。
+void target_change_returns_before_next_brake(bool hud_reference = false) {
+    auto mouse = std::make_shared<FakeMouse>();
+    auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+    std::atomic<std::uint64_t> next_id{0};
+    AutoStopWorker stop(mouse, arbiter, [] { return true; }, [&] { return ++next_id; }, [] { return true; });
+    TriggerWorker trigger(mouse, arbiter, [] { return true; }, [] { return true; }, [&] { return ++next_id; },
+        [&](std::uint64_t id) { return stop.request(id); }, [&](std::uint64_t id) { stop.cancel(id); }, {},
+        [&] { return stop.estimated_completion_id(); },
+        [&](std::uint64_t id, TriggerTime deadline) {
+            if (!stop.resume_movement(id, deadline - (hud_reference ? 90ms : 58ms))) stop.cancel(id);
+        });
+    AutoStopConfig sc{true, 5}; sc.cycle_enabled = true; sc.experimental_hud_model = hud_reference;
+    TriggerConfig tc; tc.enabled = tc.require_stop = tc.allow_estimated_stop = true;
+    tc.hold_virtual_key = 5; tc.fire_delay_ms = 0;
+    tc.press_duration_ms = 200; tc.shot_interval_ms = 500; tc.max_observation_age_ms = 300;
+    mouse->physical(0, false);
+    require(stop.start(sc) && trigger.start(tc), "换目标归还组合worker启动");
+    until([&] { return mouse->drained() && trigger.snapshot().reason == TriggerReason::RELEASED; });
+    mouse->physical(2, true);
+    std::uint64_t sequence = 0;
+    auto publish = [&](bool changed) {
+        stop.publish_tracking_target(Clock::now() + 300ms);
+        stop.publish_target(Clock::now() + 300ms);
+        auto observation = fresh_observation(++sequence);
+        // 同一准星内大幅缩小的新框与旧框IoU仅0.25，必须取得新的候选编号。
+        if (changed) observation->detections[0] = {40, 40, 60, 60, .9f, 0};
+        trigger.publish(observation);
+    };
+    TriggerSnapshot first;
+    until([&] {
+        publish(false);
+        const auto firing = trigger.firing_signal();
+        const auto current = trigger.snapshot();
+        if (!firing.confirmed_down || current.command_id != firing.id || !current.estimated_stop_request_id) return false;
+        first = current; return true;
+    });
+    const auto cleanups_before = mouse->cleanups.load();
+    mouse->hold_up_ack = true;
+    until([&] { publish(true); return mouse->up_waiting.load(); });
+    std::this_thread::sleep_for(15ms);
+    const bool retained_before_ack = mouse->cleanups == cleanups_before && mouse->downs == 1 &&
+        !mouse->released() && !mouse->cleanup_during_shot.load();
+    mouse->hold_up_ack = false;
+    require(retained_before_ack, "换目标的UP ACK未到前禁止归还键盘或发下一次DOWN");
+    until([&] {
+        publish(true);
+        return mouse->cleanups > cleanups_before && mouse->released() && stop.estimated_completion_id() == 0;
+    }, 250ms);
+    require(!stop.snapshot().recovery_pending, "换目标归还后持续许可不得要求松键重按");
+    TriggerSnapshot second;
+    until([&] {
+        publish(true);
+        const auto firing = trigger.firing_signal();
+        const auto current = trigger.snapshot();
+        if (!firing.confirmed_down || current.command_id != firing.id || current.command_id == first.command_id) return false;
+        second = current; return true;
+    }, 1200ms);
+    const auto keys = mouse->keyboard_commands();
+    const auto log = trigger.execution_log();
+    // 第二发按原点射时长完成UP后再结束fixture，避免把另一个松许可键清理场景混入本回归。
+    until([&] { publish(true); return mouse->ups >= 2 && !trigger.snapshot().button_may_be_down; });
+    mouse->allow(false);
+    trigger.stop(); stop.stop();
+    const auto up = std::find_if(log.events.begin(), log.events.end(), [](const auto& event) {
+        return event.backend_called && event.button_action == TriggerButtonAction::UP;
+    });
+    const auto down = std::find_if(log.events.begin(), log.events.end(), [&](const auto& event) {
+        return event.backend_called && event.button_action == TriggerButtonAction::DOWN &&
+            event.snapshot.command_id == second.command_id;
+    });
+    require(up != log.events.end() && up->snapshot.reason == TriggerReason::TARGET_CHANGED &&
+        up->receipt_status == TriggerReceiptStatus::ACKNOWLEDGED, "必须由换目标触发首发UP，不能靠正常点射到期通过");
+    require(second.candidate_id != first.candidate_id && second.estimated_stop_request_id != 0 &&
+        second.estimated_stop_request_id != first.estimated_stop_request_id && !second.stop_not_needed,
+        "新目标点射必须使用新急停编号，不复用旧资格或原地绕过");
+    require(keys.size() == 6 && keys[3].mask == 0 && keys[4].mask == 8 && keys[5].mask == 0 &&
+        keys[3].submitted >= up->protocol_ack_received_at, "UP确认归还后第二发须重新zero到D到zero完整制动");
+    require(keys[5].submitted >= keys[4].acknowledged + (hud_reference ? 0ms : 40ms) &&
+        down != log.events.end() && down->call_started_at >= keys[5].acknowledged + 18ms,
+        "第二发必须等待本轮反向释放ACK及18ms资格等待");
+    require(!mouse->cleanup_during_shot && mouse->moves == 0, "归还始终位于LEFT清债之后，且不得发送鼠标位移");
+    std::cout << (hud_reference ? "HUD" : "H40") << "：换目标UP确认归还与新制动组合证据通过\n";
+}
 void stationary_owner_does_not_interrupt_shot() {
     auto mouse = std::make_shared<FakeMouse>();
     auto arbiter = std::make_shared<AutoStopOutputArbiter>();
@@ -671,7 +762,13 @@ void stationary_owner_does_not_interrupt_shot() {
 } // namespace
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--target-change-return") {
+            target_change_returns_before_next_brake();
+            target_change_returns_before_next_brake(true);
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--hud-reference") {
+            target_change_returns_before_next_brake(true);
             held_direction_after_overlap_requires_completed_brake(true);
             target_loss_lifecycle(false, true);
             target_loss_lifecycle(true, true);
@@ -680,6 +777,7 @@ int main(int argc, char** argv) {
             std::cout << "HUD实验组合专项通过：AD、目标消失、持续键武器恢复及UP ACK后等待\n";
             return 0;
         }
+        target_change_returns_before_next_brake();
         for (const char* item : {"weapon_knife", "weapon_hegrenade"}) gsi_session_recovery(item);
         held_direction_after_overlap_requires_completed_brake();
         target_loss_lifecycle(false);
