@@ -1082,7 +1082,9 @@ bool load_app_config(const std::string& path,
         // 旧配置无独立节时必须关闭，不能继承调用方已经开启的状态。
         candidate.auto_stop.enabled = ini.GetBoolValue("auto_stop", "enabled", false);
         candidate.auto_stop.cycle_enabled = ini.GetBoolValue("auto_stop", "cycle_enabled", false);
-        candidate.auto_stop.experimental_hud_model = ini.GetBoolValue("auto_stop", "experimental_hud_model", false);
+        // 缺键迁移到生产默认；保留显式H40选择，不继承调用方残留策略。
+        candidate.auto_stop.experimental_hud_model = ini.GetBoolValue(
+            "auto_stop", "experimental_hud_model", AppConfig{}.auto_stop.experimental_hud_model);
         // 旧开关已弃用；上方仍严格校验旧键，所有合法配置统一迁移到正式时序。
         candidate.auto_stop.use_counterpulse_timing = true;
         candidate.auto_stop.counter_hold_ms = static_cast<int>(ini.GetLongValue("auto_stop", "counter_hold_ms", 40));

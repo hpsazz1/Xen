@@ -51,10 +51,12 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'fixture git init failed' }
     Write-UpdateFixture (Join-Path $sourceRoot 'fixture.txt') 'worker source'
     Write-UpdateFixture (Join-Path $sourceRoot 'scripts/start_source_context_session.ps1') 'updated-source-session-script'
+    Write-UpdateFixture (Join-Path $sourceRoot 'scripts/invoke_hud_stop_acceptance.ps1') 'updated-hud-acceptance-script'
     foreach ($tool in @('import_recoil_profiles.py', 'migrate_legacy_recoil_profiles.py', 'invoke_recoil_legacy_acceptance.ps1')) {
         Write-UpdateFixture (Join-Path $sourceRoot "scripts/$tool") "updated-$tool"
     }
     & $git -C $sourceRoot add fixture.txt scripts/start_source_context_session.ps1
+    & $git -C $sourceRoot add scripts/invoke_hud_stop_acceptance.ps1
     & $git -C $sourceRoot add scripts/import_recoil_profiles.py scripts/migrate_legacy_recoil_profiles.py scripts/invoke_recoil_legacy_acceptance.ps1
     & $git -C $sourceRoot -c user.name=XenTest -c user.email=xen-test@example.invalid commit --quiet -m '发布夹具'
     if ($LASTEXITCODE -ne 0) { throw 'fixture git commit failed' }
@@ -113,6 +115,7 @@ try {
     Assert-UpdateTest ($evidence.base_package.manifest_sha256 -ieq $baseHash) '保留基包清单身份'
     Assert-UpdateTest (-not $evidence.inherited_payload_hashes_verified) '不虚称继承文件已全量哈希'
     Assert-UpdateTest (-not (Test-Path -LiteralPath (Join-Path $parameters.OutputDirectory 'cache/user-data/keep.txt'))) '不复制用户可变数据'
+    Assert-UpdateTest (-not (Test-Path -LiteralPath (Join-Path $parameters.OutputDirectory 'tools/acceptance/invoke_hud_stop_acceptance.ps1'))) '未指定开关不补入 HUD 验收脚本'
     Assert-UpdateTest ((Get-FileHash -LiteralPath $baseManifestPath -Algorithm SHA256).Hash -ceq $baseHash) '基包不变'
     foreach ($record in $published.files) {
         if ($record.path -notin @('runtimes/nvidia/Xen.exe', $evidenceRelative)) {
@@ -231,6 +234,7 @@ try {
     $deltaParameters.IncludeRecoilTools = $true
     $deltaParameters.IncludeRecoilMigrationScripts = $true
     $deltaParameters.IncludeSourceSessionScript = $true
+    $deltaParameters.IncludeHudAcceptanceScript = $true
     foreach ($tool in @('xen_recoil_calibration.exe', 'xen_recoil_tuner.exe')) {
         $missingTool = $deltaParameters.Clone()
         $missingTool.OutputDirectory = Join-Path $runRoot "missing-$tool"
@@ -251,7 +255,8 @@ try {
     Write-UpdateFixture (Join-Path $baseRoot 'config.ini') 'user changed configuration after original publication'
     Write-UpdateFixture (Join-Path $baseRoot 'cache/model-workspace/settings.json') '{"user_changed":true}'
     & $publisher @deltaParameters
-    Assert-UpdateTest (@(Get-ChildItem -LiteralPath $deltaOutput -Recurse -File).Count -eq 10) '差量只生成 Worker、选中桥接及启动脚本、两个压枪工具、三个迁移验收脚本、来源证据和清单'
+    Assert-UpdateTest (@(Get-ChildItem -LiteralPath $deltaOutput -Recurse -File).Count -eq 11) '差量只生成 Worker、选中桥接及启动脚本、两个压枪工具、三个迁移验收脚本、HUD 验收脚本、来源证据和清单'
+    Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $deltaOutput 'tools/acceptance/invoke_hud_stop_acceptance.ps1') -Raw) -ceq 'updated-hud-acceptance-script') '显式开关从当前源码补入 HUD 验收脚本'
     Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $deltaOutput 'tools/recoil/migrate_legacy_recoil_profiles.py') -Raw) -ceq 'updated-migrate_legacy_recoil_profiles.py') '新增迁移入口来自当前源码'
     Assert-UpdateTest (-not (Test-Path -LiteralPath (Join-Path $baseRoot 'tools/recoil/migrate_legacy_recoil_profiles.py'))) '生成阶段不修改基包新增入口'
     Assert-UpdateTest (-not (Test-Path -LiteralPath (Join-Path $deltaOutput 'config.ini'))) '差量不复制配置'
@@ -261,7 +266,7 @@ try {
     foreach ($relative in @('runtimes/nvidia/Xen.exe', 'runtimes/nvidia/xen_recoil_calibration.exe',
         'runtimes/nvidia/xen_recoil_tuner.exe', 'tools/source/xen_source_context.exe', 'tools/source/start_source_context_session.ps1',
         'tools/recoil/import_recoil_profiles.py', 'tools/recoil/migrate_legacy_recoil_profiles.py', 'tools/recoil/invoke_recoil_legacy_acceptance.ps1',
-        'tools/acceptance/WORKER-UPDATE.json', 'manifest.json')) {
+        'tools/acceptance/invoke_hud_stop_acceptance.ps1', 'tools/acceptance/WORKER-UPDATE.json', 'manifest.json')) {
         $oldPath = Join-Path $baseRoot $relative
         $oldHash = if (Test-Path -LiteralPath $oldPath) { (Get-FileHash -LiteralPath $oldPath).Hash.ToLowerInvariant() } else { '' }
         $deltaEntries += [ordered]@{ path = $relative; old_sha256 = $oldHash
@@ -321,6 +326,14 @@ try {
     Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $baseRoot 'tools/source/xen_source_context.exe') -Raw) -ceq 'updated-source-context-fixture') '选中桥接工具已更新'
     Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $baseRoot 'tools/source/start_source_context_session.ps1') -Raw) -ceq 'updated-source-session-script') '选中源启动脚本已更新'
     $deltaEvidence = Get-Content -LiteralPath (Join-Path $baseRoot 'tools/acceptance/WORKER-UPDATE.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $baseRoot 'tools/acceptance/invoke_hud_stop_acceptance.ps1') -Raw) -ceq 'updated-hud-acceptance-script') '选中 HUD 验收脚本已原子补入'
+    $hudIdentity = @($deltaEvidence.updated_components | Where-Object { $_.path -ceq 'tools/acceptance/invoke_hud_stop_acceptance.ps1' })
+    Assert-UpdateTest ($hudIdentity.Count -eq 1 -and $hudIdentity[0].git_commit -ceq $commit) 'HUD 验收脚本绑定源码提交'
+    $hudDefault = $deltaParameters.Clone()
+    $hudDefault.Remove('IncludeHudAcceptanceScript')
+    $hudDefault.OutputDirectory = Join-Path $runRoot 'hud-default-omitted'
+    & $publisher @hudDefault
+    Assert-UpdateTest (-not (Test-Path -LiteralPath (Join-Path $hudDefault.OutputDirectory 'tools/acceptance/invoke_hud_stop_acceptance.ps1'))) '既有 HUD 验收脚本未指定开关不进入差量'
     $toolIdentity = @($deltaEvidence.updated_components | Where-Object { $_.path -ceq 'tools/source/xen_source_context.exe' })
     Assert-UpdateTest ($toolIdentity.Count -eq 1 -and $toolIdentity[0].git_commit -ceq $commit) '桥接工具绑定同提交身份'
     foreach ($tool in @('xen_recoil_calibration.exe', 'xen_recoil_tuner.exe')) {

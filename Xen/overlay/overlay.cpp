@@ -2954,7 +2954,7 @@ struct Overlay::Impl {
             bool can_edit, OverlayActions& actions) {
         ImGui::TextWrapped("停止运行后可编辑并保存参数；下次启动生效。");
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        begin_config_panel("auto_stop_panel", app_config.auto_stop.experimental_hud_model ? "自动急停（HUD参考实验）" : "自动急停", 300.0f);
+        begin_config_panel("auto_stop_panel", app_config.auto_stop.experimental_hud_model ? "自动急停（HUD动态制动）" : "自动急停（H40对照）", 300.0f);
         const char* status = "已关闭";
         switch (snapshot.auto_stop.status) {
             case AutoStopStatus::DISABLED: status = "已关闭"; break;

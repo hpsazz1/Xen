@@ -1384,9 +1384,25 @@ void test_shared_weapon_timing_config() {
     { std::ofstream out(path); out << "[trigger]\nenabled=false\n"; }
     expect(load_app_config(path.string(), loaded, error) && !loaded.gsi.enabled &&
         !loaded.trigger.allow_estimated_stop &&
-        !loaded.auto_stop.experimental_hud_model && loaded.auto_stop.use_counterpulse_timing && loaded.auto_stop.counter_hold_ms == 40 &&
+        loaded.auto_stop.experimental_hud_model && loaded.auto_stop.use_counterpulse_timing && loaded.auto_stop.counter_hold_ms == 40 &&
         loaded.auto_stop.shot_after_release_ms == 18,
-        "旧配置不继承调用方已启用共享或估计策略");
+        "旧配置缺键采用HUD默认，不继承调用方已启用共享或估计策略");
+    expect(AppConfig{}.auto_stop.experimental_hud_model && !AutoStopConfig{}.experimental_hud_model,
+        "生产默认采用HUD，独立急停模块保留H40回归默认");
+    for (const auto* setting : {"", "experimental_hud_model=false\n", "experimental_hud_model=true\n"}) {
+        const bool expected_hud = std::string(setting) != "experimental_hud_model=false\n";
+        { std::ofstream out(path);
+          out << "[auto_stop]\n" << setting << "counter_hold_ms=55\nshot_after_release_ms=27\n"; }
+        loaded.auto_stop.experimental_hud_model = !expected_hud;
+        expect(load_app_config(path.string(), loaded, error) &&
+            loaded.auto_stop.experimental_hud_model == expected_hud &&
+            loaded.auto_stop.counter_hold_ms == 55 && loaded.auto_stop.shot_after_release_ms == 27,
+            "缺键选择HUD，显式策略优先且不改写自定义时长: " + error);
+        expect(save_app_config(path.string(), loaded, error) && load_app_config(path.string(), loaded, error) &&
+            loaded.auto_stop.experimental_hud_model == expected_hud &&
+            loaded.auto_stop.counter_hold_ms == 55 && loaded.auto_stop.shot_after_release_ms == 27,
+            "HUD默认与显式H40选择保存回读一致: " + error);
+    }
     expect(AppConfig{}.auto_stop.use_counterpulse_timing,
         "生产默认直接采用已验收反向保持时序");
     for (const auto* legacy : {"", "use_counterpulse_timing=false\n", "use_counterpulse_timing=true\n"}) {

@@ -15,6 +15,7 @@ $workerRelative = "runtimes/$($packet.runtime)/Xen.exe"
 $recoilTools = @("runtimes/$($packet.runtime)/xen_recoil_calibration.exe", "runtimes/$($packet.runtime)/xen_recoil_tuner.exe")
 $allowed = @($workerRelative, 'tools/acceptance/WORKER-UPDATE.json',
     'tools/acceptance/PACKAGE-NOTES.md', 'tools/acceptance/MANUAL-ACCEPTANCE.md',
+    'tools/acceptance/invoke_hud_stop_acceptance.ps1',
     'tools/source/xen_source_context.exe', 'tools/source/start_source_context_session.ps1', 'XenLauncher.exe', 'manifest.json',
     'tools/recoil/import_recoil_profiles.py', 'tools/recoil/migrate_legacy_recoil_profiles.py',
     'tools/recoil/invoke_recoil_legacy_acceptance.ps1') + $recoilTools

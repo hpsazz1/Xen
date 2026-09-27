@@ -85,7 +85,8 @@ struct AppConfig {
         return value;
     }();
     KeyboardConfig keyboard;
-    AutoStopConfig auto_stop;
+    // 日常入口采用HUD；显式false配置仍可选择H40对照。
+    AutoStopConfig auto_stop{.experimental_hud_model = true};
     TriggerConfig trigger = [] {
         TriggerConfig value;
         value.fire_delay_ms = 0;

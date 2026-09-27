@@ -285,7 +285,7 @@ void DebugPanel::render_counterpulse(const AppConfig& config, const Snapshot* s,
         ImGui::TextWrapped("此页测试固定反向时长的动作计划，用于节奏对照；生产急停在辅助页配置。此处的模型评价不会启用生产 HUD 动态制动。");
         ImGui::TextWrapped(config.auto_stop.experimental_hud_model ?
             "当前配置选择：HUD 动态制动。生产按输入模型逐轴计算制动时长，本页仍执行草稿中的固定时长。" :
-            "当前配置选择：固定时长制动。HUD 动态制动尚未设为默认；本页测试不改变生产策略。");
+            "当前配置选择：H40固定时长对照。生产默认使用HUD动态制动；本页测试不改变已保存的策略。");
         ImGui::TextWrapped("流程：选择对照动作和武器参数 → 校验并准备 → 用户前台启动 → 查看本组报告。反向制动顺序为移动 → 释放 → 反向 → 释放后等待 → 按住左键。");
         ImGui::TextWrapped("首发为基准射击，后续执行移动和所选制动动作；DOWN提交间隔只是下限，不是移动保持时长。");
         ImGui::BeginDisabled(s && s->busy);

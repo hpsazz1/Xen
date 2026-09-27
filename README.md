@@ -24,9 +24,12 @@ ctest --test-dir build/reference -C Release -R '^(reference_assessment_tests|ref
 
 构建目录须先按项目依赖完成 CMake 配置。独立打包使用 `scripts/package_reference_compare.ps1`，只创建新目录，保留原发布入口。
 
-### HUD运动模型实机实验
+### HUD动态制动与H40对照
 
-独立实验包可通过 `[auto_stop] experimental_hud_model=true` 选择HUD线性运动模型制动，默认false仍为原版。
+生产默认使用HUD线性运动模型制动；新配置及缺少策略键的旧配置采用 `[auto_stop] experimental_hud_model=true`。
+显式 `false` 保留H40固定时长对照，保存/回读不会改回HUD；策略默认变化不会开启急停、循环、武装或物理输出。
+需要切换现有配置时，停止Worker后使用 `scripts/set_hud_stop_strategy.ps1 -ConfigPath <config.ini路径> -Strategy HUD`；
+回退用 `-Strategy H40`。脚本仅改策略键并备份原文件；不能靠恢复缺键的旧INI回退，因为缺键现在采用HUD。
 每个Worker仅持有一个策略；逐轴计划按模型零交叉计算，释放后等待与目标、武器、许可、ACK、清理沿用原流程。
 这部分自动控制是Xen适配，原HUD只有输入评估；模型完成不代表游戏实际停稳。
 来源与适配区别见 [实机实验说明](assets/reference_assessment/HUD-EXPERIMENT.md)。

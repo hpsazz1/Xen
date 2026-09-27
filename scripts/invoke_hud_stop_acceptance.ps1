@@ -97,7 +97,7 @@ if ($Mode -ne 'Recover') {
         throw '配置必须唯一选择正式NVIDIA Worker路由。'
     }
     if ((Get-IniValue $config 'auto_stop' 'experimental_hud_model') -ine 'true') {
-        throw '本入口仅允许experimental_hud_model=true的独立HUD实验包。'
+        throw '本入口仅允许experimental_hud_model=true的HUD急停配置。'
     }
 }
 $identityPaths = @($launcher, (Join-Path $package 'runtimes/nvidia/Xen.exe'), $manifestPath, $configPath, $PSCommandPath,
@@ -118,14 +118,14 @@ if ($Mode -eq 'Prepare') {
         launch_command = $command; automatic_arm = $false; automatic_fire = $false
     })
     Write-Text (Join-Path $run 'TASK.md') @"
-# HUD急停独立实验人工比较
+# HUD急停人工复测
 
-任务 $taskId；当前仅Prepare，未执行。config.ini是证据副本；启动仍使用独立包原配置。
-HUD模型是输入评估模型经Xen控制适配，软件状态/ACK不证明游戏已停稳，不预设优于原版。
+任务 $taskId（保留历史任务标识兼容）；当前仅Prepare，未执行。config.ini是证据副本；启动仍使用包原配置。
+HUD模型是输入评估模型经Xen控制适配，软件状态/ACK不证明游戏已停稳。
 
 1. 源游戏前台确认焦点、GSI与源时钟有效，保持同一武器、场景、灵敏度、目标和参数。
-2. 先用原H40包记录同条件表现，停止Runtime并退出原包。再运行下方唯一命令打开独立实验包。
-3. 用户在UI启动Runtime并人工武装；持续方向+功能键、AD来回、目标消失后恢复逐项比较。
+2. 退出其他Xen版本，再运行下方唯一命令打开当前HUD包；仅专项对照时另行安排H40比较。
+3. 用户在UI启动Runtime并人工武装；持续方向+功能键、AD来回、连续换目标与移动恢复逐项观察。
 4. 切刀再返回枪，分别保持功能键和松开重按；观察是否需人为松方向才开火、目标消失是否释放。
 5. 验证End总急停。出现异常立即松键、End、停止Runtime并退出UI；不要同时运行两包。
 6. 每组建议不超过120秒，由用户自行停止。不要改变其他参数。结束后把观察直接回复当前任务。
@@ -157,10 +157,16 @@ if ($Mode -in @('Validate', 'Launch')) {
     if ($package.StartsWith('\\') -or $run.StartsWith('\\')) { throw 'Launch必须由用户在目标机本地前台运行。' }
     if (Test-Path -LiteralPath (Join-Path $run 'launch.json')) { throw '禁止重复Launch，请重新Prepare。' }
     Assert-Stopped
+    $beforeFiles = @(Get-ReportFiles)
+    $beforeMetadata = @($beforeFiles | ForEach-Object {
+        $item = Get-Item -LiteralPath $_
+        [ordered]@{ path = $_; length = $item.Length; last_write_utc_ticks = $item.LastWriteTimeUtc.Ticks }
+    })
     $launch = [ordered]@{ schema = 1; started_utc = [DateTime]::UtcNow.ToString('o')
-        before_files = @(Get-ReportFiles); entrypoint_pid = $null; ended_utc = $null; exit_code = $null }
+        before_files = $beforeFiles; before_file_metadata = $beforeMetadata
+        entrypoint_pid = $null; ended_utc = $null; exit_code = $null }
     Write-Json (Join-Path $run 'launch.json') $launch
-    Write-Host '即将打开实验包UI；用户自行启动Runtime与武装，End急停，完成后退出。'
+    Write-Host '即将打开HUD包UI；用户自行启动Runtime与武装，End急停，完成后退出。'
     # 复用发布包入口注入本机SourceContext；不读取或输出任何凭据内容。
     $process = Start-Process -FilePath $entrypoint -WorkingDirectory $package -WindowStyle Normal -PassThru
     $launch.entrypoint_pid = $process.Id
@@ -183,9 +189,18 @@ if (-not (Test-Path -LiteralPath $launchPath)) {
 $launch = Read-Json $launchPath
 if (-not $launch.entrypoint_pid -or -not $launch.ended_utc) { throw '启动入口记录尚未结束，无法回收；入口退出不代表UI或实机测试完成。' }
 $collected = @()
+$hasMetadata = $null -ne $launch.PSObject.Properties['before_file_metadata']
+$beforeByPath = @{}
+if ($hasMetadata) {
+    foreach ($item in @($launch.before_file_metadata)) { $beforeByPath[$item.path] = $item }
+}
 foreach ($file in @(Get-ReportFiles)) {
-    if ($file -in $launch.before_files) { continue }
-    if ((Get-Item -LiteralPath $file).LastWriteTimeUtc -lt [DateTime]::Parse($launch.started_utc).ToUniversalTime()) { continue }
+    $item = Get-Item -LiteralPath $file
+    if ($hasMetadata -and $beforeByPath.ContainsKey($file)) {
+        $before = $beforeByPath[$file]
+        if ($item.Length -eq $before.length -and $item.LastWriteTimeUtc.Ticks -eq $before.last_write_utc_ticks) { continue }
+    } elseif ($item.LastWriteTimeUtc -lt [DateTime]::Parse($launch.started_utc).ToUniversalTime()) { continue }
+    # 历史Run没有长度/时间元数据，保守收集启动后修改的文件；整份日志可能含历史Run，分析需再按Run筛选。
     $relative = $file.Substring($package.Length + 1)
     $target = Assert-PlainPath (Join-Path (Join-Path $run 'reports') $relative) $false
     if (Test-Path -LiteralPath $target) {
@@ -199,6 +214,8 @@ foreach ($file in @(Get-ReportFiles)) {
 Write-Json (Join-Path $run 'automatic-summary.json') ([ordered]@{
     schema = 1; task_id = $taskId; execution_status = 'ENTRYPOINT_EXITED'; entrypoint_exit_code = $launch.exit_code
     collected_files = $collected; physical_effect_verified = $false; human_observation_required = $true
+    collection_basis = $(if ($hasMetadata) { 'LENGTH_OR_WRITE_TIME_CHANGED' } else { 'LEGACY_WRITE_TIME_FALLBACK' })
+    reports_may_contain_other_runs = $true
     config_changed_during_ui = ((Get-Identity $configPath).sha256 -cne $task.snapshot_sha256)
 })
-Write-Output "回收$($collected.Count)份本轮新增文件；人工效果未判定。"
+Write-Output "回收$($collected.Count)份新增或变化文件；完整日志可能含其他Run，人工效果未判定。"

@@ -14,6 +14,7 @@
     [switch]$IncludeRecoilTools,
     [switch]$IncludeRecoilMigrationScripts,
     [switch]$IncludeSourceSessionScript,
+    [switch]$IncludeHudAcceptanceScript,
     [switch]$ChangesOnly
 )
 
@@ -153,6 +154,18 @@ if ($IncludeSourceSessionScript) {
     $sourceScriptHash = (Get-FileHash -LiteralPath $overrides[$sourceScriptRelative] -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 $recoilToolHashes = @{}
+$hudScriptRelative = 'tools/acceptance/invoke_hud_stop_acceptance.ps1'
+$hudScriptHash = ''
+if ($IncludeHudAcceptanceScript) {
+    $overrides[$hudScriptRelative] = Resolve-UpdateFile (Join-Path $sourceRoot 'scripts/invoke_hud_stop_acceptance.ps1')
+    $hudScriptHash = (Get-FileHash -LiteralPath $overrides[$hudScriptRelative] -Algorithm SHA256).Hash.ToLowerInvariant()
+    # 旧日常包可补入这个固定验收入口，不开放任意脚本路径。
+    if (-not $records.ContainsKey($hudScriptRelative)) {
+        $record = [pscustomobject][ordered]@{ path = $hudScriptRelative; runtime = ''; size = 0; sha256 = ''; source = '' }
+        $manifest.files = @($manifest.files) + @($record)
+        $records[$hudScriptRelative] = $record
+    }
+}
 $recoilScriptHashes = @{}
 if ($IncludeRecoilMigrationScripts) {
     foreach ($tool in @('import_recoil_profiles.py', 'migrate_legacy_recoil_profiles.py', 'invoke_recoil_legacy_acceptance.ps1')) {
@@ -225,6 +238,7 @@ try {
                 ($sourceHash -cne $workerHash -or $length -ne $workerLength)) { throw 'Worker 在发布期间变化。' }
             if ($relative -eq $sourceToolRelative -and $sourceHash -cne $sourceToolHash) { throw '源桥接工具在发布期间变化。' }
             if ($relative -eq $sourceScriptRelative -and $sourceHash -cne $sourceScriptHash) { throw '源启动脚本在发布期间变化。' }
+            if ($relative -eq $hudScriptRelative -and $sourceHash -cne $hudScriptHash) { throw 'HUD 验收脚本在发布期间变化。' }
             if ($recoilToolHashes.ContainsKey($relative) -and $sourceHash -cne $recoilToolHashes[$relative]) {
                 throw '压枪工具在发布期间变化。'
             }
@@ -233,7 +247,7 @@ try {
             }
             $record.size = [long]$length
             $record.sha256 = $sourceHash
-            $record.source = if ($relative -in @($workerRelative, $sourceToolRelative, $sourceScriptRelative) -or $recoilToolHashes.ContainsKey($relative) -or $recoilScriptHashes.ContainsKey($relative)) { "$source@$commit" } else { $source }
+            $record.source = if ($relative -in @($workerRelative, $sourceToolRelative, $sourceScriptRelative, $hudScriptRelative) -or $recoilToolHashes.ContainsKey($relative) -or $recoilScriptHashes.ContainsKey($relative)) { "$source@$commit" } else { $source }
         } elseif ($length -ne [long]$record.size) { throw "继承载荷复制长度错误：$relative" }
         $copiedBytes += $length
         Write-Progress -Activity '继承统一包显式载荷' -Status "$copiedBytes / $totalBytes 字节" `
@@ -273,6 +287,11 @@ try {
     if ($IncludeSourceSessionScript) {
         $updateEvidence.updated_components += [ordered]@{
             runtime = ''; path = $sourceScriptRelative; git_commit = $commit.ToLowerInvariant(); sha256 = $sourceScriptHash
+        }
+    }
+    if ($IncludeHudAcceptanceScript) {
+        $updateEvidence.updated_components += [ordered]@{
+            runtime = ''; path = $hudScriptRelative; git_commit = $commit.ToLowerInvariant(); sha256 = $hudScriptHash
         }
     }
     foreach ($relative in @($recoilToolHashes.Keys | Sort-Object)) {

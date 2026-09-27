@@ -1,5 +1,7 @@
 """仅用临时假包检查人工入口契约，绝不执行有授权的Launch。"""
 import json
+from datetime import datetime, timezone, timedelta
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -57,6 +59,65 @@ class HudAcceptanceTests(unittest.TestCase):
     def test_launch_without_token_rejected_before_prepare(self):
         self.invoke("Launch", success=False)
         self.assertFalse(self.run.exists())
+
+    def prepare_recovery(self, legacy=False):
+        self.invoke()
+        log = self.package / "logs/xen.log"
+        log.parent.mkdir()
+        log.write_text("old\n", encoding="utf-8")
+        old_time = (datetime.now(timezone.utc) - timedelta(minutes=1)).timestamp()
+        os.utime(log, (old_time, old_time))
+        launch = {"schema": 1, "started_utc": datetime.now(timezone.utc).isoformat(),
+                  "before_files": [str(log)], "entrypoint_pid": 1,
+                  "ended_utc": datetime.now(timezone.utc).isoformat(), "exit_code": 0}
+        if not legacy:
+            # Windows FILETIME 和 DateTime ticks 均以 100ns 计，纪元相差 1600 年。
+            ticks = log.stat().st_mtime_ns // 100 + 621355968000000000
+            launch["before_file_metadata"] = [{"path": str(log), "length": log.stat().st_size,
+                                                "last_write_utc_ticks": ticks}]
+        (self.run / "launch.json").write_text(json.dumps(launch), encoding="utf-8")
+        return log
+
+    def test_recover_appended_existing_log_and_preserve_evidence(self):
+        log = self.prepare_recovery()
+        original_times = (log.stat().st_atime_ns, log.stat().st_mtime_ns)
+        log.write_text("old\ncurrent\n", encoding="utf-8")
+        os.utime(log, ns=original_times)
+        self.invoke("Recover")
+        target = self.run / "reports/logs/xen.log"
+        self.assertEqual(target.read_bytes(), log.read_bytes())
+        summary = json.loads((self.run / "automatic-summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["collection_basis"], "LENGTH_OR_WRITE_TIME_CHANGED")
+        self.assertTrue(summary["reports_may_contain_other_runs"])
+        self.assertFalse(summary["physical_effect_verified"])
+        self.invoke("Recover")
+        log.write_text("old\ncurrent\nlater\n", encoding="utf-8")
+        self.invoke("Recover", success=False)
+        self.assertEqual(target.read_text(encoding="utf-8"), "old\ncurrent\n")
+
+    def test_recover_rewritten_existing_log(self):
+        log = self.prepare_recovery()
+        log.write_text("new\n", encoding="utf-8")
+        self.invoke("Recover")
+        self.assertEqual((self.run / "reports/logs/xen.log").read_bytes(), log.read_bytes())
+
+    def test_recover_unchanged_log_excluded_new_report_included(self):
+        self.prepare_recovery()
+        report = self.package / "logs/new.json"
+        report.write_text("{}", encoding="utf-8")
+        self.invoke("Recover")
+        self.assertFalse((self.run / "reports/logs/xen.log").exists())
+        self.assertTrue((self.run / "reports/logs/new.json").exists())
+
+    def test_recover_legacy_uses_write_time_fallback(self):
+        log = self.prepare_recovery(legacy=True)
+        self.invoke("Recover")
+        self.assertFalse((self.run / "reports/logs/xen.log").exists())
+        log.write_text("old\ncurrent\n", encoding="utf-8")
+        self.invoke("Recover")
+        self.assertEqual((self.run / "reports/logs/xen.log").read_bytes(), log.read_bytes())
+        summary = json.loads((self.run / "automatic-summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["collection_basis"], "LEGACY_WRITE_TIME_FALLBACK")
 
     def test_worker_changed_rejected(self):
         self.invoke()
