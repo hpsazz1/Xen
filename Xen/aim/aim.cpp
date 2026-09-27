@@ -24,6 +24,9 @@ namespace {
 constexpr std::size_t kTrackHorizontalTrendSampleCount = 51;
 constexpr std::size_t kTrackHorizontalTrendMinimumSampleCount = 5;
 constexpr std::size_t kTrackHorizontalRawMotionSampleCount = 3;
+// 新身份接管的工程候选过渡时间，不代表人类反应或物理到位时间。
+// 只释放位置纠偏额度，不增加等待门禁或改变持续目标的运动维护。
+constexpr float kTargetTransitionSeconds = 0.100f;
 // 最近三次原始共同边的任一次仍达到旧预测的 25% 时，不把低屏幕运动
 // 解释为预测失效。该比例只比较同一轨迹的观测/预测几何，不是速度档位。
 constexpr float kTrackHorizontalRecentMotionMaximumPredictionRatio = 0.25f;
@@ -1255,6 +1258,12 @@ struct Aim::Impl {
     bool controller_initialized = false;
     bool controller_lock_active = false;
     bool controller_has_history = false;
+    // 持锁身份独立于PI生命周期；无目标会清PI，但不能把重获冒充冷启动。
+    std::uint64_t held_control_track_id = 0;
+    std::uint64_t held_control_epoch = 0;
+    float target_transition_seconds = kTargetTransitionSeconds;
+    bool target_transition_gap = false;
+    std::chrono::steady_clock::time_point target_transition_at{};
     bool shaper_initialized = false;
     std::uint64_t lead_track_id = 0;
     bool lead_active = false;
@@ -4603,6 +4612,7 @@ struct Aim::Impl {
         // 短时丢框不发送物理命令。PI 状态只按真实时间连续泄漏，不读取
         // 丢失帧数，也不在重获时重新注入旧滤波方向。
         if (track.predicted) {
+            target_transition_gap = true;
             // Observation-owned bias expires with the observer on a prediction-only gap.
             model_residual_x = {};
             const float leak = std::exp(
@@ -5082,6 +5092,39 @@ struct Aim::Impl {
             tracking_proportional_input_x = residual_position_request;
             tracking_integral_input_x = model_residual_x.counts;
         }
+        // 空窗不蓄接管额度；同身份短丢失不启动新的过渡，但未完成的
+        // 过渡从当前有效步继续。新身份的controller已清空旧PI和余数。
+        const bool target_transition_active = frame.lock_active &&
+            target_transition_seconds < kTargetTransitionSeconds;
+        float target_transition_weight = 1.0f;
+        if (target_transition_active) {
+            const auto interval = current_controller_at - target_transition_at;
+            const float active_dt = target_transition_gap ||
+                    interval > AimFrame::kObservationHorizon
+                ? 0.0f : std::max(0.0f, std::chrono::duration<float>(interval).count());
+            target_transition_gap = false;
+            target_transition_at = current_controller_at;
+            target_transition_seconds = std::min(kTargetTransitionSeconds,
+                target_transition_seconds + active_dt);
+            target_transition_weight = target_transition_seconds / kTargetTransitionSeconds;
+            const float original_x = desired_x;
+            const float original_y = desired_y;
+            clamp_tracking_vector_preserving_y(desired_x, desired_y,
+                config.max_counts_per_frame);
+            desired_x *= target_transition_weight;
+            desired_y *= target_transition_weight;
+            if (original_x != 0.0f) {
+                tracking_integral_input_x *= desired_x / original_x;
+                tracking_proportional_input_x *= desired_x / original_x;
+            }
+            // 实际允许量回写，避免过渡结束释放未执行的积分请求。
+            if (!residual_role)
+                feedforward_x += (desired_x - original_x) * anti_windup_alpha;
+            feedforward_y = std::clamp(
+                feedforward_y + (desired_y - original_y) * anti_windup_alpha,
+                -kTrackingVerticalIntegralMaximumCounts,
+                kTrackingVerticalIntegralMaximumCounts);
+        }
         // 分轴一阶滤波保留用户 smoothing。旧二维方向重排会把既有 Y 模长
         // 瞬时搬到 X；这里每轴独立按自身零点连续通过，不再共享模长。
         // 松键预计算仍服务观测和预测，但它不是已执行输出。真正接管时
@@ -5092,7 +5135,8 @@ struct Aim::Impl {
         const bool initialize_filter = !controller_initialized || taking_control;
         // 无前序控制样本的冷启动保留原契约；这里处理已有预计算/旧目标
         // 到当前目标的接管，不改变从中途开始的离线冷启动闭环。
-        const float initial_filter_weight = taking_control ? config.smoothing : 1.0f;
+        const float initial_filter_weight = taking_control && !target_transition_active
+            ? config.smoothing : 1.0f;
         if (taking_control) {
             // 残差PI的持续路径在滤波后限幅；接管起点须先落在同一个
             // 输出安全域内，否则大误差乘平滑比例后仍会直接顶满。
@@ -5168,8 +5212,10 @@ struct Aim::Impl {
         controller_lock_active = frame.lock_active;
         controller_has_history = true;
         const float tracking_before_filter_cap_x = filtered_x;
+        // 观测更新可重投影已有PI记忆；滤波后也守住本阶段额度，不能由
+        // 空窗恢复前的状态绕过缓入。后续份额同步及anti-windup消费此实际值。
         clamp_tracking_vector_preserving_y(
-            filtered_x, filtered_y, config.max_counts_per_frame);
+            filtered_x, filtered_y, config.max_counts_per_frame * target_transition_weight);
         if (tracking_before_filter_cap_x != 0.0f) {
             tracking_filtered_integral_x *=
                 filtered_x / tracking_before_filter_cap_x;
@@ -5628,6 +5674,14 @@ struct Aim::Impl {
                  std::chrono::steady_clock::time_point current_controller_at,
                  AimControlDiagnostics& diagnostics,
                  AimCommand& command) noexcept {
+        if (frame.lock_active && !track.predicted) {
+            if (held_control_track_id != 0 && held_control_track_id != track.id) {
+                target_transition_seconds = 0.0f;
+                target_transition_at = current_controller_at;
+                target_transition_gap = true;
+            }
+            held_control_track_id = track.id;
+        }
         if (controller_track_id != track.id) {
             const bool previous_control_available = controller_has_history;
             reset_controller();
@@ -5653,6 +5707,10 @@ struct Aim::Impl {
     }
 
     void reset_all() noexcept {
+        held_control_track_id = 0;
+        held_control_epoch = 0;
+        target_transition_seconds = kTargetTransitionSeconds;
+        target_transition_gap = false;
         controller_has_history = false;
         frame_prediction_enabled = false;
         prediction_policy_track_id = 0;
@@ -5845,6 +5903,12 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
 
     const auto started = clock::now();
     try {
+        if (!frame.lock_active || impl_->held_control_epoch != frame.observation_epoch) {
+            impl_->held_control_track_id = 0;
+            impl_->target_transition_seconds = kTargetTransitionSeconds;
+            impl_->target_transition_gap = false;
+        }
+        impl_->held_control_epoch = frame.observation_epoch;
         const auto observations = impl_->build_observations(frame);
         const auto observed = clock::now();
         impl_->update_tracks(observations, frame);
@@ -5974,9 +6038,11 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
                     result.control,
                     result.command);
             } else {
+                impl_->target_transition_gap = true;
                 impl_->reset_controller();
             }
         } else {
+            impl_->target_transition_gap = true;
             impl_->reset_controller();
         }
         const auto finished = clock::now();

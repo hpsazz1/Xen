@@ -17074,7 +17074,8 @@ void test_position_tail_lifecycle_matches_fresh_tracking() {
                    "生命周期对照只确认本实例请求");
         }
     };
-    // reset、配置重建与完整丢失分别和新实例对照；不读取任何私有积分状态。
+    // reset/配置重建仍与冷实例对照；完整丢失须在相同持锁接管阶段
+    // 比较有/无旧积分的实例，验证状态清理，而非要求绕过新目标过渡。
     for (int transition = 0; transition < 3; ++transition) {
         Aim used(config);
         bool integral_seen = false;
@@ -17110,6 +17111,25 @@ void test_position_tail_lifecycle_matches_fresh_tracking() {
             }
         }
         Aim fresh(active_config);
+        if (transition == 2) {
+            auto centered = make_frame(1, base);
+            centered.control_at = centered.captured_at + std::chrono::milliseconds(1);
+            centered.lock_active = true;
+            centered.detections = {body(160.0f, 160.0f)};
+            const auto seed = fresh.process(centered);
+            expect(seed.has_target && !seed.has_command,
+                   "清洁对照只建立持锁身份，不积累旧方向输出");
+            for (int index = 0; index <= config.max_lost_frames; ++index) {
+                auto empty = make_frame(50 + index,
+                    base + std::chrono::milliseconds(200 + index * 4));
+                empty.control_at = empty.captured_at + std::chrono::milliseconds(1);
+                empty.lock_active = true;
+                const auto cleared = fresh.process(empty);
+                expect(!cleared.has_command, "清洁对照空窗不产生输出");
+                if (index == config.max_lost_frames)
+                    expect(!cleared.has_target, "清洁对照同样经过完整丢失");
+            }
+        }
         for (int index = 0; index < 32; ++index) {
             auto frame = make_frame(100 + index,
                 base + std::chrono::seconds(2) + std::chrono::milliseconds(index * 4));
@@ -17127,7 +17147,7 @@ void test_position_tail_lifecycle_matches_fresh_tracking() {
                        after.control.filtered_x_counts == reference.control.filtered_x_counts &&
                        after.control.feedforward_x_counts == reference.control.feedforward_x_counts &&
                        after.control.modelled_response_x_counts == reference.control.modelled_response_x_counts,
-                   "reset/配置重建/完整丢失后的位置尾部状态必须与新实例逐帧等价，transition=" +
+                   "reset/配置重建/完整丢失后的位置尾部状态须与同阶段清洁实例逐帧等价，transition=" +
                        std::to_string(transition) + " frame=" + std::to_string(index));
         }
     }
