@@ -6310,6 +6310,8 @@ void test_integral_tracks_constant_velocity_with_bounded_error() {
     struct ClosedLoopResult {
         float mean_error = 0.0f;
         int maximum_no_command = 0;
+        int quantization_gap_frames = 0;
+        int moving_command_frames = 0;
     };
     constexpr float kFrameSeconds = 1.0f / 240.0f;
     constexpr float kCameraResponse = 0.85f;
@@ -6335,6 +6337,7 @@ void test_integral_tracks_constant_velocity_with_bounded_error() {
         int measured_frames = 0;
         int consecutive_no_command = 0;
         int maximum_no_command = 0;
+        int moving_command_frames = 0;
 
         for (int index = 0; index < 420; ++index) {
             world_target_x += target_velocity * kFrameSeconds;
@@ -6348,10 +6351,11 @@ void test_integral_tracks_constant_velocity_with_bounded_error() {
                 160.0f + observed_error,
                 align_vertical_aim ? 172.0f : 160.0f)};
             const AimResult result = aim.process(frame);
-            if (result.has_command) {
+            if (result.has_command && result.command.dx_counts != 0) {
                 camera_x += result.command.dx_counts /
                     config.counts_per_pixel_x * camera_response;
                 consecutive_no_command = 0;
+                ++moving_command_frames;
             } else if (index >= no_command_measure_start) {
                 ++consecutive_no_command;
                 maximum_no_command = std::max(
@@ -6359,20 +6363,29 @@ void test_integral_tracks_constant_velocity_with_bounded_error() {
             }
 
             if (index >= 240) {
-                error_sum += std::fabs(world_target_x - camera_x);
+                // 误差必须对应输入观测时刻；本帧命令作用之后、下一次世界
+                // 位移之前的混合时相会把维持目标运动的必要一步计为反向误差。
+                error_sum += std::fabs(observed_error);
                 ++measured_frames;
             }
         }
-        return ClosedLoopResult{
-            error_sum / measured_frames, maximum_no_command};
+        // 整数命令一个量子的相机位移除以每帧目标位移，给出维持所需
+        // 最大间隔；不能要求比这个周期更密的同向整数，否则只能过冲。
+        const float command_quantum = camera_response / config.counts_per_pixel_x;
+        const int quantization_gap_frames = std::max(0,
+            static_cast<int>(std::ceil(command_quantum /
+                (std::fabs(target_velocity) * kFrameSeconds))) - 1);
+        return ClosedLoopResult{error_sum / measured_frames, maximum_no_command,
+                                quantization_gap_frames, moving_command_frames};
     };
 
     const ClosedLoopResult normal = run_case(180.0f);
     expect(normal.mean_error <= 0.75f,
            "0.40 增益下，真实积分必须把恒速目标的动态稳态误差限制在 0.75 px 内，实际=" +
                std::to_string(normal.mean_error));
-    expect(normal.maximum_no_command <= 1,
-           "恒速目标进入死区后不得周期停发并等待再次落后，最长停发=" +
+    expect(normal.moving_command_frames > 0 &&
+               normal.maximum_no_command <= std::max(1, normal.quantization_gap_frames),
+           "恒速目标不得超出整数相机量子所需间隔停发，最长停发=" +
                std::to_string(normal.maximum_no_command));
 
     const ClosedLoopResult subcount = run_case(
@@ -6400,7 +6413,7 @@ void test_integral_tracks_constant_velocity_with_bounded_error() {
 
 void test_current_deadzone_crossing_preserves_x_maintenance_state() {
     using namespace aim_x_deadzone_state_replay_fixture;
-    const auto replay = [](const auto& samples, bool perturb_one_sample, bool zero_backend = false, bool isolate_pair = false) {
+    const auto replay = [](const auto& samples, bool perturb_one_sample, bool zero_backend = false, bool isolate_pair = false, int perturb_pixel = 2237) {
         AimConfig config;
         config.person_class_ids = {0, 2};
         config.head_class_ids = {1, 3};
@@ -6448,7 +6461,7 @@ void test_current_deadzone_crossing_preserves_x_maintenance_state() {
                 // 成对负控只改变一次源观测的 X，幅度取既有 deadzone。
                 // 后续时间、原观测、Y、模型参数完全相同；它是噪声敏感性
                 // 合同，不是宣称该合成观测真实发生过或预测实际相机轨迹。
-                if (perturb_one_sample && sample.pixel == 2237) {
+                if (perturb_one_sample && sample.pixel == perturb_pixel) {
                     detection.x1 -= config.deadzone_pixels;
                     detection.x2 -= config.deadzone_pixels;
                 }
@@ -6467,8 +6480,8 @@ void test_current_deadzone_crossing_preserves_x_maintenance_state() {
                 expect(aim.record_backend_completed_command(
                            frame.sequence,
                            frame.control_at + duration(sample.backend_offset_ns),
-                           (zero_backend || (isolate_pair && sample.pixel >= 2237)) ? 0 : result.command.dx_counts,
-                           (zero_backend || (isolate_pair && sample.pixel >= 2237)) ? 0 : result.command.dy_counts),
+                           (zero_backend || (isolate_pair && sample.pixel >= perturb_pixel)) ? 0 : result.command.dx_counts,
+                           (zero_backend || (isolate_pair && sample.pixel >= perturb_pixel)) ? 0 : result.command.dy_counts),
                        "当前 X 状态回归必须只确认本次生成的整数请求");
             }
             trace.push_back(result);
@@ -6509,10 +6522,18 @@ void test_current_deadzone_crossing_preserves_x_maintenance_state() {
                        (actual.target.base_aim_x - 160.0f) *
                            (comparison.target.base_aim_x - 160.0f) < 0.0f,
                    "成对单帧扰动必须只在既有 X deadzone 内改变位置符号");
+            // filtered公开字段现在表示实际接受的PI份额，不再是旧方向门后的零值。
+            // 当前同向位置校正可以非零，但不能把它报告为M或量化空洞。
             expect(!actual.control.quantization_zero_x &&
-                       actual.control.filtered_x_counts == 0.0f &&
+                       actual.command.dx_counts *
+                           (actual.target.base_aim_x - 160.0f) >= 0.0f &&
+                       std::isfinite(actual.control.filtered_x_counts) &&
                        actual.control.modelled_response_x_counts == 0.0f,
-                   "当前方向不接受的滤波状态不得冒充量化空洞或运动追加");
+                   "当前位置PI不得冒充量化空洞或运动追加，filtered/M/q/量化零=" +
+                       std::to_string(actual.control.filtered_x_counts) + "/" +
+                       std::to_string(actual.control.modelled_response_x_counts) + "/" +
+                       std::to_string(actual.command.dx_counts) + "/" +
+                       std::to_string(actual.control.quantization_zero_x));
         }
         if (sample.pixel < 2238) continue;
         expect(actual.command.dx_counts != 0 && comparison.command.dx_counts != 0,
@@ -6526,8 +6547,15 @@ void test_current_deadzone_crossing_preserves_x_maintenance_state() {
                    std::hypot(static_cast<float>(actual.command.dx_counts),
                               static_cast<float>(actual.command.dy_counts)) <= 14.0f,
                "死区状态保留不得改变当前方向、Y 或二维 14-count 合同");
-        expect(std::abs(actual.command.dx_counts) <= last_request_before_crossing,
-               "近中心恢复不得新增超过穿零前已存在请求的运动预算");
+        // 分叉从2237起合法回执零应用，未执行位置差允许继续累积纠偏。
+        // 独立配对分支只改2237一次源观测且库存相同：逐帧与累计都只能
+        // 相差一计数，不能用自身新请求证明自身预算合理。
+        expect(std::abs(actual.command.dx_counts) <=
+                   std::abs(comparison.command.dx_counts) + 1,
+               "单帧死区换侧不得相对同库存独立配对增加超过一计数，pixel=" +
+                   std::to_string(sample.pixel) + "，当前/前缀=" +
+                   std::to_string(actual.command.dx_counts) + "/" +
+                   std::to_string(last_request_before_crossing));
     }
     expect(std::abs(command_deficit) <= 1,
            "单帧 deadzone 内换侧不得清掉同一真实前缀随后三帧的 X 维持能力；"
@@ -6583,7 +6611,26 @@ void test_current_deadzone_crossing_preserves_x_maintenance_state() {
                "2257 短暂回到原侧及随后的真实换侧不得放出旧X方向命令");
         if (sample.pixel == 2257) {
             expect(std::abs(result.command.dx_counts) <= request_before_rebound,
-                   "2257 不得借死区保留状态释放整份 observer 维持预算");
+                   "2257 不得借死区保留状态释放整份 observer 维持预算，当前/前缀=" +
+                       std::to_string(result.command.dx_counts) + "/" +
+                       std::to_string(request_before_rebound));
+        }
+    }
+    // 同一2256前缀，只在死区内改一次X，分叉后均零应用，独立观察
+    // 2257请求是否来自换侧清理。该探针不豁免上面的原幅度合同。
+    const auto rebound_pair_a = replay(kRebound, false, false, true, 2256);
+    const auto rebound_pair_b = replay(kRebound, true, false, true, 2256);
+    for (std::size_t index = 0; index < kRebound.size(); ++index) {
+        if (kRebound[index].pixel < 2256) continue;
+        const auto& a = rebound_pair_a[index];
+        const auto& b = rebound_pair_b[index];
+        expect(a.control.execution_unseen_command_x_counts == b.control.execution_unseen_command_x_counts,
+               "2256配对必须保持同历史、分叉后同零应用库存");
+        if (kRebound[index].pixel >= 2257) {
+            expect(std::abs(a.command.dx_counts - b.command.dx_counts) <= 1 &&
+                       a.command.dx_counts * (a.target.base_aim_x - 160.0f) >= 0.0f &&
+                       b.command.dx_counts * (b.target.base_aim_x - 160.0f) >= 0.0f,
+                   "2256单帧死区换侧不得增加后继纠偏且两支须保持当前方向");
         }
     }
     std::cout << "6970875 deadzone 状态成对回归: 后继三帧整数差="
@@ -14235,7 +14282,6 @@ void test_long_delay_prediction_distributes_horizontal_hold_command() {
 }
 
 void test_real_cadence_prediction_closes_public_point_error() {
-    constexpr int kActuationDelayFrames = 3;
     constexpr int kFrameCount = 900;
     constexpr int kSettledFrame = 300;
     // Run 20260811-145413 的 5347 个样本覆盖 78.17 秒，真实控制节奏约
@@ -14260,7 +14306,8 @@ void test_real_cadence_prediction_closes_public_point_error() {
 
     const auto base = std::chrono::steady_clock::now() +
         std::chrono::seconds(1);
-    std::array<int, kActuationDelayFrames> delayed_commands{};
+    std::vector<std::pair<std::chrono::steady_clock::time_point, int>> delayed_commands;
+    std::size_t next_applied_command = 0;
     float world_target_x = -12.0f;
     float camera_x = 0.0f;    FixtureBackground fixture_background;
     int active_frames = 0;
@@ -14271,10 +14318,14 @@ void test_real_cadence_prediction_closes_public_point_error() {
     float command_sum = 0.0f;
 
     for (int index = 0; index < kFrameCount; ++index) {
-        const int delay_slot = index % kActuationDelayFrames;
-        camera_x += delayed_commands[delay_slot] /
-            config.counts_per_pixel_x * kCameraResponse;
-        delayed_commands[delay_slot] = 0;
+        const auto observed_at = base + std::chrono::microseconds(
+            static_cast<long long>(index) * kFrameIntervalMicroseconds);
+        while (next_applied_command < delayed_commands.size() &&
+               delayed_commands[next_applied_command].first <= observed_at) {
+            camera_x += delayed_commands[next_applied_command].second /
+                config.counts_per_pixel_x * kCameraResponse;
+            ++next_applied_command;
+        }
         world_target_x += kWorldStep;
 
         const float animation_x = 0.35f * std::sin(index * 0.73f);
@@ -14298,7 +14349,12 @@ void test_real_cadence_prediction_closes_public_point_error() {
         const int command_x = result.has_command
             ? result.command.dx_counts : 0;
         if (result.has_command) {
-            delayed_commands[delay_slot] = command_x;
+            expect(aim.record_backend_completed_command(
+                       frame.sequence, frame.control_at,
+                       result.command.dx_counts, result.command.dy_counts),
+                   "68Hz闭环必须回执实际请求，40ms相机作用与软件完成分开");
+            delayed_commands.emplace_back(
+                frame.control_at + std::chrono::milliseconds(40), command_x);
         }
         if (index < kSettledFrame || !result.target.lead_active) continue;
 
@@ -14340,7 +14396,6 @@ void test_real_cadence_prediction_closes_public_point_error() {
 }
 
 void test_variable_real_cadence_prediction_closes_public_point_error() {
-    constexpr int kActuationDelayFrames = 4;
     constexpr int kFrameCount = 900;
     constexpr int kSettledFrame = 300;
     // 最新真实 Run 约 119 Hz，单帧间隔会跨越 8 ms 门槛。固定世界速度
@@ -14368,7 +14423,10 @@ void test_variable_real_cadence_prediction_closes_public_point_error() {
 
     const auto base = std::chrono::steady_clock::now() +
         std::chrono::seconds(1);
-    std::array<int, kActuationDelayFrames> delayed_commands{};
+    // 变周期回放必须按真实时间施加40ms作用延迟，不能把四帧误当40ms。
+    // 后端完成仅确认软件请求；相机作用仍在之后的独立时刻发生。
+    std::vector<std::pair<std::chrono::steady_clock::time_point, int>> delayed_commands;
+    std::size_t next_applied_command = 0;
     std::chrono::microseconds elapsed{};
     float world_target_x = -12.0f;
     float camera_x = 0.0f;    FixtureBackground fixture_background;
@@ -14380,14 +14438,17 @@ void test_variable_real_cadence_prediction_closes_public_point_error() {
     float command_sum = 0.0f;
 
     for (int index = 0; index < kFrameCount; ++index) {
-        const int delay_slot = index % kActuationDelayFrames;
-        camera_x += delayed_commands[delay_slot] /
-            config.counts_per_pixel_x * kCameraResponse;
-        delayed_commands[delay_slot] = 0;
         const int interval_us = kFrameIntervalsMicroseconds[
             static_cast<std::size_t>(index) %
             kFrameIntervalsMicroseconds.size()];
         if (index > 0) elapsed += std::chrono::microseconds(interval_us);
+        const auto observed_at = base + elapsed;
+        while (next_applied_command < delayed_commands.size() &&
+               delayed_commands[next_applied_command].first <= observed_at) {
+            camera_x += delayed_commands[next_applied_command].second /
+                config.counts_per_pixel_x * kCameraResponse;
+            ++next_applied_command;
+        }
         world_target_x += kWorldVelocityPixelsPerSecond *
             static_cast<float>(interval_us) / 1000000.0f;
 
@@ -14410,7 +14471,12 @@ void test_variable_real_cadence_prediction_closes_public_point_error() {
         const int command_x = result.has_command
             ? result.command.dx_counts : 0;
         if (result.has_command) {
-            delayed_commands[delay_slot] = command_x;
+            expect(aim.record_backend_completed_command(
+                       frame.sequence, frame.control_at,
+                       result.command.dx_counts, result.command.dy_counts),
+                   "119Hz闭环必须回执本分支实际请求，回执不代表相机已生效");
+            delayed_commands.emplace_back(
+                frame.control_at + std::chrono::milliseconds(40), command_x);
         }
         if (index < kSettledFrame || !result.target.lead_active) continue;
 
@@ -15566,6 +15632,7 @@ void test_prediction_adds_continuous_delay_derived_lead() {
         int invalid_sampled_crossings = 0;
         int zero_mediated_command_reversals = 0;
         int maximum_command_step = 0;
+        int maximum_lead_command_step = 0;
         int maximum_command_step_frame = -1;
         int maximum_command_step_before = 0;
         int maximum_command_step_after = 0;
@@ -15722,6 +15789,10 @@ void test_prediction_adds_continuous_delay_derived_lead() {
                 if (have_previous_command) {
                     const int command_step = std::abs(
                         horizontal_command - previous_horizontal_command);
+                    if (result.target.lead_active) {
+                        metrics.maximum_lead_command_step = std::max(
+                            metrics.maximum_lead_command_step, command_step);
+                    }
                     if (command_step > metrics.maximum_command_step) {
                         metrics.maximum_command_step = command_step;
                         metrics.maximum_command_step_frame = index;
@@ -15776,13 +15847,15 @@ void test_prediction_adds_continuous_delay_derived_lead() {
                std::to_string(prediction_mean));
     expect(prediction.invalid_sampled_crossings == 0 &&
                prediction.zero_mediated_command_reversals == 0 &&
-               prediction.maximum_command_step <= 4,
-           "可见预测提前的离散反向须有有限浮点过零及原step边界，直接反转=" +
+               prediction.maximum_lead_command_step <= 4 &&
+               prediction.maximum_command_step <= std::max(4, tracking.maximum_command_step),
+           "可见预测提前须保持过零和原step边界，启动不得增加独立tracking阶跃，直接反转=" +
                std::to_string(prediction.direct_command_reversals) +
                "，经零反转=" +
                std::to_string(prediction.zero_mediated_command_reversals) +
                "，tracking 经零反转=" +
                std::to_string(tracking.zero_mediated_command_reversals) +
+               "，活动预测最大阶跃=" + std::to_string(prediction.maximum_lead_command_step) +
                "，最大阶跃=" +
                std::to_string(prediction.maximum_command_step) +
                "，帧=" +
@@ -17052,8 +17125,24 @@ void test_current_nearcenter_position_tail_preserves_maintenance() {
             expect(left < 0.0f && right < 0.0f &&
                        result.control.proportional_x_counts < 0.0f && error < 0.0f,
                    "位置负控必须仍有同向共同位移和新的P校正输入");
-            expect(result.command.dx_counts == sample.expected_dx,
-                   "当前P仍在追赶的真实负控不得削减原同方向整数请求");
+            // 源P同向不代表执行P同向：已发而尚未进入图像的库存可能已覆盖位置。
+            // 仍有同向执行缺口的两条负控继续保留原整数请求；库存越过当前位置
+            // 时验证非零同向输出及预算收缩，不能要求重复支付旧画面中的位置差。
+            const bool execution_opposes_source =
+                result.control.execution_proportional_x_counts *
+                    result.control.proportional_x_counts < 0.0f;
+            expect(execution_opposes_source
+                       ? result.control.execution_unseen_command_x_counts * error > 0.0f &&
+                             result.command.dx_counts * error > 0.0f &&
+                             std::abs(result.command.dx_counts) <= std::abs(sample.expected_dx)
+                       : result.command.dx_counts == sample.expected_dx,
+                   "当前追赶须按执行位置缺口和未见库存支付，sequence=" +
+                       std::to_string(sample.sequence) + "，当前/历史=" +
+                       std::to_string(result.command.dx_counts) + "/" +
+                       std::to_string(sample.expected_dx) + "，源P/执行P/库存=" +
+                       std::to_string(result.control.proportional_x_counts) + "/" +
+                       std::to_string(result.control.execution_proportional_x_counts) + "/" +
+                       std::to_string(result.control.execution_unseen_command_x_counts));
             ++opening_rows;
         }
         if (sample.sequence != 3323) continue;

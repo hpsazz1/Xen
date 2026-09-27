@@ -116,7 +116,10 @@ std::vector<AimResult> run(const AimConfig& c, bool age = true) {
         compensations += r.target.delay_compensation_active;
     }
     expect(targets>200,"交叉测试必须实际进入稳定跟踪而非全部无目标");
-    if (c.enable_prediction) expect(leads>0,"prediction开启必须在合法移动输入上实际产生提前");
+    if (c.enable_prediction && (age || c.control_delay_ms > 0))
+        expect(leads>0,"非零预测时域必须在合法移动输入上实际产生提前");
+    if (!age && c.control_delay_ms == 0)
+        expect(leads==0,"零观测龄与零固定延迟不得凭空产生预测提前");
     if (!age && c.control_delay_ms==0)
         expect(compensations==0,"零观测龄且零固定delay不能凭空补偿");
     std::cout << "delay=" << c.enable_delay_compensation << " prediction=" << c.enable_prediction
@@ -134,11 +137,13 @@ void same_public(const AimResult& a,const AimResult& b) {
            near(a.control.residual_before_quantization_x_counts,b.control.residual_before_quantization_x_counts),
            "重建后最终点及库存须与同配置fresh实例一致");
 }
-void disabled_delay_parameter_independence() {
+void disabled_delay_geometry_and_inventory() {
     for (const bool prediction : {false,true}) for (int scenario=0;scenario<3;++scenario) {
         std::array<Aim,3> aims{Aim(frozen_config(false,prediction,0)),
             Aim(frozen_config(false,prediction,15)),Aim(frozen_config(false,prediction,44))};
-        int different_frames=0;
+        struct Completed { std::chrono::steady_clock::time_point at; int x; };
+        std::array<std::vector<Completed>,3> completed;
+        int different_commands=0, inventory_frames=0, nonzero_inventory_frames=0;
         for(int i=0;i<220;++i) {
                         auto f=frame_at(i,20);
             if (scenario>0) {
@@ -158,20 +163,44 @@ void disabled_delay_parameter_independence() {
                 f.control_at=f.captured_at;
             }
             std::array<AimResult,3> r;
-            for(int j=0;j<3;++j) {r[j]=aims[j].process(f);confirm(aims[j],f,r[j]);}
+            for(int j=0;j<3;++j) {
+                r[j]=aims[j].process(f);
+                const auto config=frozen_config(false,prediction,j==0 ? 0 : j==1 ? 15 : 44);
+                contract(config,f,r[j]);
+                if (r[j].control.residual_role_x) {
+                    // 公有合同：关闭目标提前仍核算自身未见命令；独立按完成时间求和。
+                    const auto cutoff=f.captured_at-std::chrono::milliseconds(j==0 ? 0 : j==1 ? 15 : 44);
+                    int expected=0;
+                    for (const auto& item:completed[j])
+                        if (item.at>cutoff && item.at<=f.control_at) expected+=item.x;
+                    expect(near(static_cast<float>(r[j].control.execution_unseen_command_x_counts),
+                                static_cast<float>(expected)),
+                           "关闭目标提前仍须按各自完成时间与固定延迟核算未见命令");
+                    expect(r[j].control.execution_world_preview_x_counts==0,
+                           "关闭目标提前不得把世界运动预览混入执行P");
+                    ++inventory_frames;
+                    nonzero_inventory_frames+=expected!=0;
+                }
+                confirm(aims[j],f,r[j]);
+                if (r[j].has_command)
+                    completed[j].push_back({f.control_at+std::chrono::microseconds(100),
+                        f.lock_active ? r[j].command.dx_counts : 0});
+            }
             for(int j=1;j<3;++j) {
                 const auto& a=r[0];const auto& b=r[j];
-                const bool same = a.status==b.status && a.has_target==b.has_target &&
-                    a.command.dx_counts==b.command.dx_counts && a.command.dy_counts==b.command.dy_counts &&
-                    near(a.target.base_aim_x,b.target.base_aim_x) && near(a.target.base_aim_y,b.target.base_aim_y) &&
-                    near(a.target.aim_x,b.target.aim_x) && near(a.target.aim_y,b.target.aim_y);
-                if (!same && different_frames++<4)
-                    std::cout << "disabled-delay difference prediction=" << prediction << " scenario=" << scenario << " seq=" << f.sequence
-                              << " fixed=" << (j==1?15:44) << " q0=" << a.command.dx_counts
-                              << " qOther=" << b.command.dx_counts << " base0=" << a.target.base_aim_x << " baseOther=" << b.target.base_aim_x << '\n';
+                expect(a.status==b.status && a.has_target==b.has_target &&
+                    a.target.track_id==b.target.track_id &&
+                    near(a.target.base_aim_x,b.target.base_aim_x) && near(a.target.base_aim_y,b.target.base_aim_y),
+                    "固定执行延迟不得回写公共基础几何或轨迹身份");
+                different_commands+=a.command.dx_counts!=b.command.dx_counts;
             }
         }
-        expect(different_frames==0,"关闭delay后修改其固定延迟0/15/44不得改变公开几何或请求，差异="+std::to_string(different_frames));
+        if (scenario==0) {
+            expect(inventory_frames>100 && nonzero_inventory_frames>0,
+                   "持锁夹具必须实际覆盖残差角色及非零未见命令库存");
+            expect(different_commands>0,
+                   "不同物理延迟的库存须实际影响请求，不能把关闭目标提前误作关闭记账");
+        }
     }
 }
 void restart_switches() {
@@ -201,7 +230,7 @@ int main() {
     }
     run(frozen_config(true,false,0));run(frozen_config(true,true,0));
     run(frozen_config(true,false,0),false);run(frozen_config(true,true,0),false);
-    restart_switches();disabled_delay_parameter_independence();
+    restart_switches();disabled_delay_geometry_and_inventory();
     std::cout << "失败总数=" << failures << '\n';
     return failures==0 ? 0 : 1;
 }

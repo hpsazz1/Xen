@@ -3,6 +3,7 @@
 #include "weapon/weapon_timing.h"
 #include "weapon/weapon_internal.h"
 #include "runtime/weapon_context_internal.h"
+#include "runtime/runtime_internal.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <atomic>
@@ -144,6 +145,35 @@ std::shared_ptr<TriggerObservation> fresh_observation(std::uint64_t sequence) {
     result->observed_at = Clock::now(); result->valid = result->timing_valid = true;
     return result;
 }
+// 将真实Aim选中生命周期接入生产许可转换，不再由fixture无条件续期目标。
+class AimTargetPublisher {
+public:
+    AimTargetPublisher() : aim(config) {}
+    void publish(AutoStopWorker& stop, TriggerWorker& trigger,
+                 std::shared_ptr<TriggerObservation> observation) {
+        AimFrame frame;
+        frame.detections = observation->detections;
+        frame.roi_width = frame.roi_height = 100;
+        frame.control_center_x = frame.control_center_y = 50;
+        frame.sequence = observation->sequence; frame.observation_epoch = 1;
+        frame.captured_at = observation->observed_at; frame.control_at = Clock::now();
+        // 此专项验证目标生命周期；位移发送与Y并发由专门输出专项覆盖。
+        frame.lock_active = false;
+        const auto selected = aim.process(frame);
+        FrameTiming timing;
+        timing.source_time_timing_valid = true;
+        timing.source_clock_uncertainty_ms = 1;
+        timing.source_time_at = frame.captured_at;
+        const auto permits = runtime::detail::auto_stop_target_permits(
+            frame, selected, config, timing, Clock::now());
+        trigger.publish(observation);
+        stop.publish_target(permits.admission_until, permits.reason);
+        stop.publish_tracking_target(permits.tracking_until);
+    }
+private:
+    AimConfig config;
+    Aim aim;
+};
 void gsi_trust_breaks_require_release() {
     const auto catalog = weapon::default_timing_catalog();
     for (const std::string_view failure : {"identity", "death", "invalid", "unknown_weapon", "timeout", "focus", "input", "manual", "emergency"}) {
@@ -210,7 +240,7 @@ void gsi_trust_breaks_require_release() {
 }
 
 // 走生产解析/连续性/Runtime转换，再驱动两个生产worker；许可始终来自FakeMouse。
-void gsi_session_recovery(const char* transition, bool hud_reference = false) {
+void gsi_session_recovery(const char* transition, bool hud_reference = false, bool aim_random = false) {
     const auto catalog = weapon::default_timing_catalog();
     weapon::GsiConfig gsi_config; gsi_config.enabled = true;
     weapon::detail::GsiState gsi;
@@ -243,17 +273,24 @@ void gsi_session_recovery(const char* transition, bool hud_reference = false) {
         [&](std::uint64_t id) { return stop.request(id); }, [&](std::uint64_t id) { stop.cancel(id); },
         [&] { const auto current = snapshot(); return trigger_context.update(current, catalog, Clock::now()); },
         [&] { return stop.estimated_completion_id(); },
-        [&](std::uint64_t id, TriggerTime deadline) { stop.resume_movement(id, deadline - 58ms); });
+        [&](std::uint64_t id, TriggerTime deadline) {
+            if (!stop.resume_movement(id, deadline - (hud_reference ? 90ms : 58ms))) stop.cancel(id);
+        });
     AutoStopConfig sc{true, 5}; sc.cycle_enabled = true; sc.counter_hold_ms = 40; sc.shot_after_release_ms = 18;
     TriggerConfig tc; tc.enabled = true; tc.hold_virtual_key = 5; tc.fire_delay_ms = 0;
     tc.require_stop = tc.allow_estimated_stop = true; tc.max_observation_age_ms = 300;
+    tc.random_timing_enabled = aim_random;
     mouse->physical(0, false);
     sc.experimental_hud_model = hud_reference;
     require(stop.start(sc) && trigger.start(tc), "GSI组合worker启动");
     until([&] { return mouse->drained() && trigger.snapshot().reason == TriggerReason::RELEASED; });
     mouse->physical(2, true);
     std::uint64_t sequence = 0;
-    auto publish = [&] { stop.publish_tracking_target(Clock::now() + 300ms); stop.publish_target(Clock::now() + 300ms); trigger.publish(fresh_observation(++sequence)); };
+    AimTargetPublisher aim_target;
+    auto publish = [&] {
+        if (aim_random) aim_target.publish(stop, trigger, fresh_observation(++sequence));
+        else { stop.publish_tracking_target(Clock::now() + 300ms); stop.publish_target(Clock::now() + 300ms); trigger.publish(fresh_observation(++sequence)); }
+    };
     TriggerSnapshot initial_down;
     until([&] {
         publish();
@@ -642,7 +679,7 @@ void held_direction_after_overlap_requires_completed_brake(bool hud_reference = 
     require(mouse->released(), "方向重叠组合结束必须收齐UP和键盘归还");
 }
 // 生产双worker跨目标连续点射：旧LEFT清债后归还，再以新编号完整制动。
-void target_change_returns_before_next_brake(bool hud_reference = false) {
+void target_change_returns_before_next_brake(bool hud_reference = false, bool aim_random = false) {
     auto mouse = std::make_shared<FakeMouse>();
     auto arbiter = std::make_shared<AutoStopOutputArbiter>();
     std::atomic<std::uint64_t> next_id{0};
@@ -657,18 +694,23 @@ void target_change_returns_before_next_brake(bool hud_reference = false) {
     TriggerConfig tc; tc.enabled = tc.require_stop = tc.allow_estimated_stop = true;
     tc.hold_virtual_key = 5; tc.fire_delay_ms = 0;
     tc.press_duration_ms = 200; tc.shot_interval_ms = 500; tc.max_observation_age_ms = 300;
+    tc.random_timing_enabled = aim_random;
     mouse->physical(0, false);
     require(stop.start(sc) && trigger.start(tc), "换目标归还组合worker启动");
     until([&] { return mouse->drained() && trigger.snapshot().reason == TriggerReason::RELEASED; });
     mouse->physical(2, true);
     std::uint64_t sequence = 0;
+    AimTargetPublisher aim_target;
     auto publish = [&](bool changed) {
-        stop.publish_tracking_target(Clock::now() + 300ms);
-        stop.publish_target(Clock::now() + 300ms);
         auto observation = fresh_observation(++sequence);
         // 同一准星内大幅缩小的新框与旧框IoU仅0.25，必须取得新的候选编号。
         if (changed) observation->detections[0] = {40, 40, 60, 60, .9f, 0};
-        trigger.publish(observation);
+        if (aim_random) aim_target.publish(stop, trigger, observation);
+        else {
+            stop.publish_tracking_target(Clock::now() + 300ms);
+            stop.publish_target(Clock::now() + 300ms);
+            trigger.publish(observation);
+        }
     };
     TriggerSnapshot first;
     until([&] {
@@ -725,6 +767,73 @@ void target_change_returns_before_next_brake(bool hud_reference = false) {
     require(!mouse->cleanup_during_shot && mouse->moves == 0, "归还始终位于LEFT清债之后，且不得发送鼠标位移");
     std::cout << (hud_reference ? "HUD" : "H40") << "：换目标UP确认归还与新制动组合证据通过\n";
 }
+void aim_random_release_lifecycle(bool lose_target, bool emergency) {
+    auto mouse = std::make_shared<FakeMouse>();
+    auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+    std::atomic<std::uint64_t> next_id{0};
+    std::atomic<bool> armed{true};
+    AutoStopWorker stop(mouse, arbiter, [&] { return armed.load(); }, [&] { return ++next_id; }, [] { return true; });
+    TriggerWorker trigger(mouse, arbiter, [&] { return armed.load(); }, [] { return true; }, [&] { return ++next_id; },
+        [&](std::uint64_t id) { return stop.request(id); }, [&](std::uint64_t id) { stop.cancel(id); }, {},
+        [&] { return stop.estimated_completion_id(); },
+        [&](std::uint64_t id, TriggerTime deadline) {
+            if (!stop.resume_movement(id, deadline - 90ms)) stop.cancel(id);
+        });
+    AutoStopConfig sc{true, 5}; sc.cycle_enabled = sc.experimental_hud_model = true;
+    TriggerConfig tc; tc.enabled = tc.require_stop = tc.allow_estimated_stop = true;
+    tc.random_timing_enabled = true; tc.hold_virtual_key = 5;
+    tc.press_duration_ms = 200; tc.shot_interval_ms = 500; tc.max_observation_age_ms = 300;
+    mouse->physical(0, false);
+    require(stop.start(sc) && trigger.start(tc), "Aim随机HUD组合启动");
+    until([&] { return mouse->drained() && trigger.snapshot().reason == TriggerReason::RELEASED; });
+    mouse->physical(2, true);
+    AimTargetPublisher publisher;
+    std::uint64_t sequence = 0;
+    auto publish = [&](bool visible, bool changed = false) {
+        auto observation = fresh_observation(++sequence);
+        if (!visible) observation->detections.clear();
+        else if (changed) observation->detections[0] = {40, 40, 60, 60, .9f, 0};
+        publisher.publish(stop, trigger, observation);
+    };
+    TriggerSnapshot first;
+    until([&] {
+        publish(true);
+        const auto firing = trigger.firing_signal(); first = trigger.snapshot();
+        return firing.confirmed_down && first.command_id == firing.id && first.estimated_stop_request_id != 0;
+    }, 1500ms);
+    require(first.sampled_release_interval_ms >= 120 && first.sampled_release_interval_ms <= 180,
+        "组合必须实际启用随机时序并锁存本发松开间隔");
+    const auto previous_stop = first.estimated_stop_request_id;
+    if (emergency) armed = false; // 与Runtime End撤销公共许可的worker边界一致，不代按实体键。
+    else if (!lose_target) mouse->allow(false);
+    until([&] {
+        publish(!lose_target);
+        return mouse->released() && !trigger.snapshot().button_may_be_down && stop.estimated_completion_id() == 0;
+    });
+    require(!mouse->cleanup_during_shot, "丢目标、松键或End撤销必须先确认UP再归还方向");
+    const auto downs = mouse->downs.load();
+    const auto requests = stop.snapshot().requests;
+    // 超过500ms武器间隔、最大随机等待及一次HUD制动预算，避免尚未到下一发时间造成假绿。
+    const auto blocked_until = Clock::now() + 800ms;
+    while (Clock::now() < blocked_until) {
+        publish(!lose_target);
+        require(mouse->downs == downs && mouse->released() && stop.snapshot().requests == requests,
+            "撤销条件持续存在时不得重用旧资格或再次接管");
+        std::this_thread::sleep_for(1ms);
+    }
+    if (lose_target && !emergency) {
+        TriggerSnapshot second;
+        until([&] {
+            publish(true, true);
+            const auto firing = trigger.firing_signal(); second = trigger.snapshot();
+            return firing.confirmed_down && second.command_id == firing.id && second.estimated_stop_request_id != 0 &&
+                second.estimated_stop_request_id != previous_stop;
+        }, 1500ms);
+        require(!stop.snapshot().recovery_pending, "丢目标后持键恢复必须绑定新制动且不要求人工重按");
+    }
+    trigger.stop(); stop.stop();
+    require(mouse->released() && !mouse->cleanup_during_shot, "组合结束无按钮或键盘债务");
+}
 void stationary_owner_does_not_interrupt_shot() {
     auto mouse = std::make_shared<FakeMouse>();
     auto arbiter = std::make_shared<AutoStopOutputArbiter>();
@@ -762,6 +871,16 @@ void stationary_owner_does_not_interrupt_shot() {
 } // namespace
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--aim-random") {
+            target_change_returns_before_next_brake(true, true);
+            aim_random_release_lifecycle(true, false);
+            aim_random_release_lifecycle(false, false);
+            aim_random_release_lifecycle(false, true);
+            for (const char* transition : {"weapon_knife", "weapon_hegrenade", "reloading", "active", "switch"})
+                gsi_session_recovery(transition, true, true);
+            std::cout << "真实Aim目标、随机Trigger与HUD恢复释放组合通过\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--target-change-return") {
             target_change_returns_before_next_brake();
             target_change_returns_before_next_brake(true);
