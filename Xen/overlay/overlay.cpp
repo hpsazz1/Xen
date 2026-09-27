@@ -3051,7 +3051,7 @@ struct Overlay::Impl {
     void render_trigger_config(const RuntimeSnapshot& snapshot, AppConfig& app_config,
             bool can_edit, const std::array<bool, 256>& key_active) {
         auto& trigger = app_config.trigger;
-        begin_config_panel("trigger_panel", "自动扳机", 285.0f);
+        begin_config_panel("trigger_panel", "自动扳机", 320.0f);
         ImGui::TextWrapped("准星进入有效头部或人体检测框的设定范围即判断开火；100%%覆盖完整目标框，按共享GSI武器资料点射。检测框不保证弹道命中。");
         ImGui::BeginDisabled(!can_edit);
         if (begin_form("trigger_form", 150.0f)) {
@@ -3066,8 +3066,10 @@ struct Overlay::Impl {
             form_row("移动急停联动", "按住移动键或存在制动事务时等待急停完成；无WASD且无制动事务时直接按目标范围判断，不等待停稳资格。");
             if (toggle_switch("##trigger_require_stop", &trigger.require_stop) && trigger.require_stop)
                 trigger.allow_estimated_stop = true;
-            form_row("触发范围 / %", "以检测框中心等比缩小宽高，100%为完整目标框；1%到100%，只允许框内触发。到达范围不追加首发等待，急停联动与有效输入条件仍须满足。停止运行后修改生效。");
+            form_row("触发范围 / %", "以检测框中心等比缩小宽高，100%为完整目标框；1%到100%，只允许框内触发。随机时序关闭时不追加首发等待，急停联动与有效输入条件仍须满足。停止运行后修改生效。");
             slider_float_control("trigger_range", &trigger.range_percent, 1.0f, 100.0f, "%.0f");
+            form_row("随机开火时序", "默认关闭；仅影响自动左键：开火条件满足后随机等待45–65毫秒；释放确认后到下一次按下至少等待120–180毫秒。加入不超过±15毫秒的随机抖动，最终仍在各自区间内。按住时长不变，实际开火仍受目标、武器和急停条件限制；松开许可键、End或故障立即取消等待，不延迟安全释放。停止运行后修改生效。");
+            toggle_switch("##trigger_random_timing", &trigger.random_timing_enabled);
             ImGui::EndTable();
         }
         ImGui::EndDisabled();

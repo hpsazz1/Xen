@@ -497,6 +497,8 @@ std::string trigger_metadata_json(const TriggerConfig& config,
         else output << "null";
         field("faulted", snapshot.faulted);
         field("button_may_be_down", snapshot.button_may_be_down);
+        field("sampled_fire_delay_ms", snapshot.sampled_fire_delay_ms);
+        field("sampled_release_interval_ms", snapshot.sampled_release_interval_ms);
         output << '}';
     }
     // 只读取公开状态；报告接口不接触源端token、host或环境变量。

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <optional>
+#include <random>
 #include <string_view>
 #include <vector>
 #include "detector/detector.h"
@@ -28,6 +29,8 @@ using TriggerTime = TriggerClock::time_point;
 struct TriggerConfig {
     bool enabled = false;
     bool fire_enabled = true;
+    // 只随机自动按下等待与UP后的松开间隔；清理和按住时长保持原合同。
+    bool random_timing_enabled = false;
     int hold_virtual_key = 0;
     float range_percent = 100.0f;
     float head_width_percent = 60.0f, head_height_percent = 60.0f;
@@ -104,6 +107,7 @@ struct TriggerSnapshot {
     // DOWN决策锁存，后续上下文变化导致UP时仍可追溯原发参数。
     TriggerContext firing_context;
     bool firing_context_available = false;
+    int sampled_fire_delay_ms = 0, sampled_release_interval_ms = 0;
 };
 
 struct TriggerDecision {
@@ -161,6 +165,7 @@ private:
     int roi_width_ = 0, roi_height_ = 0;
     // 当前 DOWN 的不可变快照，直到其 UP 清理结束仍用于保守冷却。
     int active_hold_ms_ = 0, active_interval_ms_ = 0;
+    std::mt19937 timing_random_;
 };
 
 #endif

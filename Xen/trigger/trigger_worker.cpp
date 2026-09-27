@@ -292,6 +292,13 @@ public:
                 cleanup_due = event.observed_at + std::chrono::milliseconds(2);
                 if (receipt.status == TriggerReceiptStatus::ACKNOWLEDGED) {
                     cleanup_active = false;
+                    if (config.random_timing_enabled) {
+                        // UP确认后立即归还方向；只把下一次制动的最早时间
+                        // 对齐到本发已锁存的松开间隔，不改HUD制动或清理时序。
+                        cycle_next_down = std::max(cycle_next_down,
+                            receipt.completed_at + std::chrono::milliseconds(
+                                event.snapshot.sampled_release_interval_ms));
+                    }
                     if (resume_movement && cycle_stop_id) {
                         const auto id = cycle_stop_id;
                         cycle_stop_id = 0;

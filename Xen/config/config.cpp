@@ -649,7 +649,7 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"auto_stop", "enabled"}, {"auto_stop", "cycle_enabled"},
         {"auto_stop", "use_counterpulse_timing"}, {"auto_stop", "experimental_hud_model"},
         {"trigger", "enabled"}, {"trigger", "fire_enabled"}, {"trigger", "require_stop"},
-        {"trigger", "allow_estimated_stop"},
+        {"trigger", "allow_estimated_stop"}, {"trigger", "random_timing_enabled"},
         {"source_context", "enabled"}, {"gsi", "enabled"},
         {"recoil", "enabled"}, {"recoil", "mixed_aim"},
         {"mouse", "allow_send_input"},
@@ -1130,6 +1130,7 @@ bool load_app_config(const std::string& path,
         candidate.trigger.general_class_ids = parse_int_list(ini.GetValue("trigger", "general_class_ids"), {});
         candidate.trigger.enabled = ini.GetBoolValue("trigger", "enabled", false);
         candidate.trigger.fire_enabled = ini.GetBoolValue("trigger", "fire_enabled", true);
+        candidate.trigger.random_timing_enabled = ini.GetBoolValue("trigger", "random_timing_enabled", false);
         candidate.trigger.require_stop = ini.GetBoolValue("trigger", "require_stop", false);
         candidate.trigger.allow_estimated_stop = ini.GetBoolValue("trigger", "allow_estimated_stop", false);
         // 生产没有严格停稳观察来源；旧联动配置统一使用移动急停完成策略。
@@ -1604,6 +1605,7 @@ bool save_app_config(const std::string& path,
         ini.SetBoolValue("trigger", "enabled", config.trigger.enabled);
         ini.SetDoubleValue("trigger", "range_percent", config.trigger.range_percent);
         ini.SetBoolValue("trigger", "fire_enabled", config.trigger.fire_enabled);
+        ini.SetBoolValue("trigger", "random_timing_enabled", config.trigger.random_timing_enabled);
         ini.SetBoolValue("trigger", "require_stop", config.trigger.require_stop);
         ini.SetBoolValue("trigger", "allow_estimated_stop", config.trigger.allow_estimated_stop);
         ini.SetValue("weapon_timing", "file", config.weapon_timing_file.c_str());

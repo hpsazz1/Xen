@@ -63,6 +63,8 @@ std::string trigger_execution_json(const RuntimeSnapshot& snapshot) {
             {"timing_weapon_id",timing.timing_weapon_id.empty() ? Json(nullptr) : Json(timing.timing_weapon_id)},
             {"shot_hold_ms",timing.timing_valid ? Json(timing.shot_hold_ms) : Json(nullptr)},
             {"fire_interval_ms",timing.timing_valid ? Json(timing.fire_interval_ms) : Json(nullptr)},
+            {"sampled_fire_delay_ms",state.sampled_fire_delay_ms},
+            {"sampled_release_interval_ms",state.sampled_release_interval_ms},
             {"actual_submit_interval_ms",interval}, {"actual_hold_ms",hold},
             {"phase",static_cast<int>(state.phase)}, {"reason",TriggerReasonName(state.reason)},
             {"button_action",static_cast<int>(event.button_action)}, {"stop_action",static_cast<int>(event.stop_action)},

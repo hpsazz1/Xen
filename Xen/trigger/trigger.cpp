@@ -6,6 +6,13 @@
 
 namespace {
 using Ms = std::chrono::milliseconds;
+int jittered_interval(std::mt19937& engine, int minimum, int maximum) noexcept {
+    const int base = std::uniform_int_distribution<int>(minimum, maximum)(engine);
+    // 在合法交集内抽取±15ms扰动，不把越界样本裁剪堆积到端点。
+    const int jitter = std::uniform_int_distribution<int>(
+        std::max(-15, minimum-base), std::min(15, maximum-base))(engine);
+    return base+jitter;
+}
 bool has(const std::vector<int>& ids, int id) noexcept {
     return std::find(ids.begin(), ids.end(), id) != ids.end();
 }
@@ -92,11 +99,16 @@ const char* TriggerReasonName(TriggerReason reason) noexcept {
 bool TriggerController::configure(const TriggerConfig& config) noexcept {
     if (!valid_trigger_config(config) || state_.button_may_be_down || pending_ != TriggerButtonAction::NONE ||
         state_.stop_request_id != 0 || state_.faulted) return false;
-    try { config_ = config; } catch (...) { config_valid_ = false; return false; }
+    try {
+        config_ = config;
+        if (config.random_timing_enabled) timing_random_.seed(std::random_device{}());
+    } catch (...) { config_valid_ = false; return false; }
     config_valid_ = true;
     candidate_valid_ = false;
     release_seen_ = false;
     observation_failure_ = TriggerReason::NONE;
+    state_.sampled_fire_delay_ms = config.fire_delay_ms;
+    state_.sampled_release_interval_ms = 0;
     state_.phase = config.enabled ? TriggerPhase::WAITING : TriggerPhase::DISABLED;
     state_.reason = config.enabled ? TriggerReason::WAIT_RELEASE : TriggerReason::DISABLED;
     return true;
@@ -110,7 +122,7 @@ TriggerDecision TriggerController::result(TriggerTime now) const noexcept {
     };
     if (candidate_valid_) {
         deadline(observation_expires_);
-        deadline(qualified_at_ + Ms(config_.fire_delay_ms));
+        deadline(qualified_at_ + Ms(state_.sampled_fire_delay_ms));
     }
     if (state_.phase == TriggerPhase::HELD) deadline(held_until_);
     deadline(cooldown_until_);
@@ -239,6 +251,8 @@ bool TriggerController::select_candidate(const TriggerObservation& observation, 
         if (next_candidate_id_ == std::numeric_limits<std::uint64_t>::max()) return false;
         state_.candidate_id = ++next_candidate_id_;
         qualified_at_ = now;
+        state_.sampled_fire_delay_ms = config_.random_timing_enabled
+            ? jittered_interval(timing_random_,45,65) : config_.fire_delay_ms;
         state_.reason = TriggerReason::TARGET_CHANGED;
     }
     anchor_ = next_anchor;
@@ -361,7 +375,7 @@ TriggerDecision TriggerController::tick(const TriggerPermit& permit, TriggerTime
         decision.stop_request_id = state_.stop_request_id;
         return decision;
     }
-    if (now < qualified_at_ + Ms(config_.fire_delay_ms)) {
+    if (now < qualified_at_ + Ms(state_.sampled_fire_delay_ms)) {
         state_.phase = TriggerPhase::QUALIFYING; state_.reason = TriggerReason::DELAY; return result(now);
     }
     const bool stop_qualified = config_.allow_estimated_stop ?
@@ -391,6 +405,8 @@ TriggerDecision TriggerController::tick(const TriggerPermit& permit, TriggerTime
     active_hold_ms_ = config_.fire_mode == TriggerFireMode::AUTOMATIC ? config_.max_hold_ms :
         weapon_timing ? permit.context.shot_hold_ms : config_.press_duration_ms;
     active_interval_ms_ = weapon_timing ? permit.context.fire_interval_ms : config_.shot_interval_ms;
+    state_.sampled_release_interval_ms = config_.random_timing_enabled
+        ? jittered_interval(timing_random_,120,180) : 0;
     unconfirmed_down_ = true;
     pending_at_ = now;
     state_.command_id = ++next_command_id_;
@@ -460,6 +476,16 @@ TriggerDecision TriggerController::acknowledge(const TriggerReceipt& receipt, Tr
         if (unconfirmed_down_) cooldown_until_ = std::max(cooldown_until_, receipt.completed_at + Ms(active_interval_ms_));
         unconfirmed_down_ = false;
         state_.button_may_be_down = false;
+        if (config_.random_timing_enabled) {
+            // 只限制下一次DOWN，不延迟本次UP或方向归还；武器DOWN间隔
+            // 下限仍保留。下一发候选驻留与此松开间隔并行，不串联等待。
+            cooldown_until_ = std::max(cooldown_until_,
+                receipt.completed_at + Ms(state_.sampled_release_interval_ms));
+            if (candidate_valid_) {
+                qualified_at_ = receipt.completed_at;
+                state_.sampled_fire_delay_ms = jittered_interval(timing_random_,45,65);
+            }
+        }
         state_.phase = state_.faulted ? TriggerPhase::FAULT : TriggerPhase::COOLDOWN;
     }
     return result(now);

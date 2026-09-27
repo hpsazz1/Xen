@@ -1254,6 +1254,19 @@ void test_trigger_legacy_timing_migration() {
     expect(write_file_bytes(path, "[trigger]\nrange_percent=55\n"), "写入框内范围比例");
     expect(load_app_config(path.string(), loaded, error) && loaded.trigger.range_percent == 55.0f,
         "用户范围比例必须读取而非被默认值覆盖");
+    expect(!loaded.trigger.random_timing_enabled && !AppConfig{}.trigger.random_timing_enabled,
+        "旧配置缺少随机时序开关时保持关闭");
+    for (const bool enabled : {true, false}) {
+        loaded.trigger.random_timing_enabled = enabled;
+        expect(save_app_config(path.string(), loaded, error) && load_app_config(path.string(), loaded, error) &&
+            loaded.trigger.random_timing_enabled == enabled, "独立随机时序开关保存往返");
+    }
+    expect(write_file_bytes(path, "[trigger]\nrandom_timing_enabled=perhaps\n") &&
+        !load_app_config(path.string(), loaded, error) && error.find("trigger.random_timing_enabled") != std::string::npos,
+        "随机时序开关拒绝非法布尔值");
+    loaded.trigger.random_timing_enabled = true;
+    expect(write_file_bytes(path, "[trigger]\nrange_percent=55\n") && load_app_config(path.string(), loaded, error) &&
+        !loaded.trigger.random_timing_enabled, "旧配置缺键不能沿用先前启用的随机时序");
     loaded.trigger.range_percent = 72.0f;
     expect(save_app_config(path.string(), loaded, error) && load_app_config(path.string(), loaded, error) &&
         loaded.trigger.range_percent == 72.0f, "框内范围比例保存往返");
@@ -1290,6 +1303,9 @@ void test_trigger_legacy_timing_migration() {
     expect(!validate_app_config(loaded, error), "自动扳机必须复用全局GSI识别");
     loaded.gsi.enabled = true;
     expect(validate_app_config(loaded, error), "开启统一GSI后满足扳机识别依赖");
+    loaded.trigger.random_timing_enabled = true;
+    expect(validate_app_config(loaded, error), "独立随机时序开关允许生产扳机使用");
+    loaded.trigger.random_timing_enabled = false;
     for (int variant = 0; variant < 6; ++variant) {
         auto unsupported = loaded;
         switch (variant) {

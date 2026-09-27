@@ -72,6 +72,7 @@ public:
             }
             if (return_delay_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(return_delay_ms.load()));
         }
+        if (!down) last_up_completed_ticks = receipt.backend_completed_at.time_since_epoch().count();
         return receipt;
     }
     void close() noexcept override {}
@@ -87,6 +88,7 @@ public:
     std::atomic<bool> block_down{false}, release_down{false}, down_entered{false};
     std::atomic<bool> block_up{false}, release_up{false}, up_entered{false};
     std::atomic<int> timing_mode{0}, return_delay_ms{0};
+    std::atomic<TriggerClock::duration::rep> last_up_completed_ticks{0};
 private:
     std::atomic<std::uint64_t> sequence{0};
     std::mutex mutex;
@@ -144,37 +146,63 @@ struct Fixture {
     void fire() { mouse->held=true; worker.publish(observation()); }
 };
 void cycle_resume_after_safe_up() {
-    for (int mode = 0; mode < 5; ++mode) {
+    for (int mode = 0; mode < 7; ++mode) {
         auto mouse = std::make_shared<Mouse>();
         auto arbiter = std::make_shared<AutoStopOutputArbiter>();
         std::atomic<unsigned> resumed{0}, canceled{0};
         std::atomic<bool> focused{true};
+        TriggerTime resumed_at{}, next_down_not_before{};
         TriggerWorker worker(mouse, arbiter, [] { return true; }, [&] { return focused.load(); },
             [] { return std::uint64_t{8}; }, [](std::uint64_t) { return true; },
             [&](std::uint64_t id) { if (id == 7) ++canceled; }, {}, [] { return std::uint64_t{7}; },
-            [&](std::uint64_t id, TriggerTime) { if (id == 7 && !mouse->dirty) ++resumed; });
+            [&](std::uint64_t id, TriggerTime not_before) {
+                if (id == 7 && !mouse->dirty) {
+                    resumed_at = TriggerClock::now();
+                    next_down_not_before = not_before;
+                    ++resumed;
+                }
+            });
         TriggerConfig config;
         config.enabled = config.require_stop = config.allow_estimated_stop = true;
         config.hold_virtual_key = 5; config.fire_delay_ms = 0;
         config.press_duration_ms = 80; config.shot_interval_ms = 250; config.max_observation_age_ms = 500;
+        config.random_timing_enabled = mode >= 5;
+        if (mode == 5) config.shot_interval_ms = 100;
+        if (mode == 6) config.shot_interval_ms = 350;
         expect(worker.start(config), "循环扳机测试启动");
         expect(until([&] { return worker.snapshot().reason == TriggerReason::RELEASED; }), "等待松键准入");
         mouse->held = true; worker.publish(observation());
         expect(until([&] { return mouse->count(true) == 1 && worker.firing_signal().confirmed_down; }), "等待循环首DOWN确认");
+        const auto release_interval_ms = worker.snapshot().sampled_release_interval_ms;
         if (mode == 1) worker.cancel();
         if (mode == 2) mouse->physical_left = true;
-        if (mode >= 3) {
+        if (mode == 3 || mode == 4) {
             if (mode == 4) focused = false;
             auto missing = observation(2);
             missing->detections.clear();
             worker.publish(missing);
         }
         expect(until([&] { return mouse->count(false) >= 1 && resumed + canceled >= 1; }), "LEFT UP后完成归还或取消回调");
-        const bool recoverable = mode == 0 || mode == 3;
+        const bool recoverable = mode == 0 || mode == 3 || mode >= 5;
         expect(resumed == (recoverable ? 1u : 0u) && canceled == (recoverable ? 0u : 1u),
             "正常或候选失效UP确认且安全时可续轮，显式取消、物理左键和失焦不得续轮");
+        if (mode >= 5 && resumed == 1) {
+            const TriggerTime up_completed{TriggerClock::duration{mouse->last_up_completed_ticks.load()}};
+            expect(release_interval_ms >= 120 && release_interval_ms <= 180,
+                "随机循环锁存的松开间隔必须在120到180毫秒内");
+            expect(next_down_not_before >= up_completed + std::chrono::milliseconds(release_interval_ms),
+                "下一次制动准入不得早于UP确认加本发随机松开间隔");
+            expect(resumed_at >= up_completed && resumed_at < up_completed + 120ms && resumed_at < next_down_not_before,
+                "本次UP确认立即归还移动，不等待下一发随机间隔结束");
+            if (mode == 5)
+                expect(next_down_not_before == up_completed + std::chrono::milliseconds(release_interval_ms),
+                    "随机松开间隔较长时应精确覆盖旧武器最小间隔");
+            else
+                expect(next_down_not_before > up_completed + std::chrono::milliseconds(release_interval_ms),
+                    "旧武器最小间隔较长时不得被随机松开间隔缩短");
+        }
         worker.publish(observation(3));
-        std::this_thread::sleep_for(270ms);
+        std::this_thread::sleep_for(mode >= 5 ? 400ms : 270ms);
         expect(mouse->count(true) == 1, "归还未完成或旧stop ID不得触发第二发");
         worker.stop();
     }

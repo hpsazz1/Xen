@@ -71,6 +71,79 @@ void geometry_and_timing() {
     TriggerController nan; arm(nan, fast); o = frame(1); o.detections[0].x1 = std::numeric_limits<float>::quiet_NaN();
     expect(nan.observe(o, permit(), at(1)).button_action == TriggerButtonAction::NONE, "NaN框必须拒绝");
 }
+
+void randomized_action_timing() {
+    auto cfg=config(); cfg.random_timing_enabled=true;
+    cfg.fire_delay_ms=0; cfg.max_observation_age_ms=5000;
+    for (int run=0;run<64;++run) {
+        TriggerController c; arm(c,cfg);
+        const auto start=c.observe(frame(1),permit(),at(1));
+        const int wait=start.snapshot.sampled_fire_delay_ms;
+        expect(wait>=45 && wait<=65,"随机按下等待最终须在45–65ms内");
+        expect(start.button_action==TriggerButtonAction::NONE,"随机首发不能绕过等待");
+        if (wait<45 || wait>65) continue;
+        for (int time=2;time<1+wait;++time) {
+            const auto tick=c.tick(permit(),at(time));
+            expect(tick.button_action==TriggerButtonAction::NONE &&
+                tick.snapshot.sampled_fire_delay_ms==wait,"重复tick不提前开火或重抽等待");
+        }
+        const auto down=c.tick(permit(),at(1+wait));
+        expect(down.button_action==TriggerButtonAction::DOWN,"抽样截止时刻可按下");
+        ack(c,down,2+wait);
+        const auto up=c.tick(permit(),at(2+wait+cfg.press_duration_ms));
+        expect(up.button_action==TriggerButtonAction::UP,"随机模式不延长按住时长");
+        const int released=3+wait+cfg.press_duration_ms;
+        const auto cleared=ack(c,up,released);
+        const int gap=cleared.snapshot.sampled_release_interval_ms;
+        expect(gap>=120 && gap<=180,"松开间隔最终须在120–180ms内");
+        if (gap<120 || gap>180) continue;
+        c.observe(frame(released+1,2),permit(),at(released+1));
+        expect(c.tick(permit(),at(released+gap-1)).button_action==TriggerButtonAction::NONE,
+               "UP确认后完整松开间隔内不能再按下");
+        expect(c.tick(permit(),at(released+gap)).button_action==TriggerButtonAction::DOWN,
+               "随机首发等待与松开间隔并行，不额外串联另一段等待");
+    }
+    TriggerController canceled; arm(canceled,cfg);
+    canceled.observe(frame(1),permit(),at(1));
+    canceled.tick(permit(false),at(2));
+    expect(canceled.tick(permit(),at(100)).button_action==TriggerButtonAction::NONE,
+           "松键取消随机待发，不在稍后补发");
+    TriggerController held; arm(held,cfg);
+    held.observe(frame(1),permit(),at(1));
+    const auto down=held.tick(permit(),at(66)); ack(held,down,67);
+    expect(held.tick(permit(false),at(68)).button_action==TriggerButtonAction::UP,
+           "松键立即弹起，不等待随机松开间隔");
+    cfg.require_stop=cfg.allow_estimated_stop=true;
+    for (bool late_stop : {false,true}) {
+        TriggerController stopped; arm(stopped,cfg);
+        auto p=permit();
+        const auto pending=stopped.observe(frame(1),p,at(1));
+        const int wait=pending.snapshot.sampled_fire_delay_ms;
+        const int ready=late_stop ? 90 : 1+wait;
+        expect(stopped.tick(p,at(ready)).button_action==TriggerButtonAction::NONE,
+               "随机等待结束仍不得跳过急停资格");
+        p.stop_estimated_qualified=true; p.estimated_stop_request_id=70;
+        const auto down=stopped.tick(p,at(ready));
+        expect(down.button_action==TriggerButtonAction::DOWN,
+               "急停与随机等待并行，到齐后不再串联等待");
+        ack(stopped,down,ready+1);
+        p.stop_estimated_qualified=false;
+        expect(stopped.tick(p,at(ready+2)).button_action==TriggerButtonAction::UP,
+               "急停资格失效立即UP，不等按住或随机间隔");
+    }
+    cfg.require_stop=cfg.allow_estimated_stop=false;
+    TriggerController weapon; expect(weapon.configure(cfg),"随机武器配置合法");
+    auto p=permit(false);
+    p.context={1,true,true,true,true,20,500};
+    weapon.tick(p,at(0)); p.held=true;
+    weapon.observe(frame(1),p,at(1));
+    auto weapon_down=weapon.tick(p,at(66)); ack(weapon,weapon_down,67);
+    auto up=weapon.tick(p,at(87)); ack(weapon,up,88);
+    weapon.observe(frame(89,2),p,at(89));
+    expect(weapon.tick(p,at(566)).button_action==TriggerButtonAction::NONE &&
+           weapon.tick(p,at(567)).button_action==TriggerButtonAction::DOWN,
+           "随机松开间隔不能缩短既有武器DOWN间隔下限");
+}
 void roi_clipped_detection_bounds() {
     auto cfg = config(); cfg.fire_delay_ms = 0;
     cfg.body_width_percent = cfg.body_height_percent = 100;
@@ -535,6 +608,7 @@ void blocked_status_does_not_alternate_with_observations() {
 }
 
 int main() {
+    randomized_action_timing();
     roi_clipped_detection_bounds();
     acknowledged_single_shot_can_leave_trigger_region();
     acknowledged_shot_region_fallback_keeps_safety_boundaries();
