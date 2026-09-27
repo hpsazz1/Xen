@@ -1497,6 +1497,11 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(aim_tests OPENCV)
     add_test(NAME aim_tests COMMAND aim_tests)
 
+    add_executable(aim_transition_smoothing_tests tests/aim_transition_smoothing_tests.cpp)
+    target_link_libraries(aim_transition_smoothing_tests PRIVATE aim log)
+    xen_deploy_runtime_dlls(aim_transition_smoothing_tests OPENCV)
+    add_test(NAME aim_transition_smoothing_tests COMMAND aim_transition_smoothing_tests)
+
     add_executable(aim_production_red_producer_tests
         tests/aim_production_red_producer_tests.cpp)
     target_link_libraries(aim_production_red_producer_tests PRIVATE

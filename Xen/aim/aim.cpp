@@ -1253,6 +1253,8 @@ struct Aim::Impl {
     float previous_command_y = 0.0f;
     std::chrono::steady_clock::time_point controller_at{};
     bool controller_initialized = false;
+    bool controller_lock_active = false;
+    bool controller_has_history = false;
     bool shaper_initialized = false;
     std::uint64_t lead_track_id = 0;
     bool lead_active = false;
@@ -3582,6 +3584,8 @@ struct Aim::Impl {
         previous_command_y = 0.0f;
         controller_at = {};
         controller_initialized = false;
+        controller_lock_active = false;
+        controller_has_history = false;
         shaper_initialized = false;
     }
 
@@ -4594,6 +4598,7 @@ struct Aim::Impl {
                   current_controller_at - controller_at).count());
         diagnostics.controller_dt_ms = controller_dt * 1000.0f;
         controller_at = current_controller_at;
+        if (!frame.lock_active) controller_lock_active = false;
 
         // 短时丢框不发送物理命令。PI 状态只按真实时间连续泄漏，不读取
         // 丢失帧数，也不在重获时重新注入旧滤波方向。
@@ -5079,6 +5084,30 @@ struct Aim::Impl {
         }
         // 分轴一阶滤波保留用户 smoothing。旧二维方向重排会把既有 Y 模长
         // 瞬时搬到 X；这里每轴独立按自身零点连续通过，不再共享模长。
+        // 松键预计算仍服务观测和预测，但它不是已执行输出。真正接管时
+        // 从零输出按既有平滑比例起步，不直通新目标或预计算的满幅请求；
+        // 不清空源观测、预测、控制时间及已完成命令库存。
+        const bool taking_control = frame.lock_active && !controller_lock_active &&
+            controller_has_history;
+        const bool initialize_filter = !controller_initialized || taking_control;
+        // 无前序控制样本的冷启动保留原契约；这里处理已有预计算/旧目标
+        // 到当前目标的接管，不改变从中途开始的离线冷启动闭环。
+        const float initial_filter_weight = taking_control ? config.smoothing : 1.0f;
+        if (taking_control) {
+            // 残差PI的持续路径在滤波后限幅；接管起点须先落在同一个
+            // 输出安全域内，否则大误差乘平滑比例后仍会直接顶满。
+            const float requested_x = desired_x;
+            clamp_tracking_vector_preserving_y(
+                desired_x, desired_y, config.max_counts_per_frame);
+            if (requested_x != 0.0f) {
+                tracking_integral_input_x *= desired_x / requested_x;
+                tracking_proportional_input_x *= desired_x / requested_x;
+            }
+            filtered_x = filtered_y = 0.0f;
+            tracking_filtered_integral_x = tracking_filtered_proportional_x = 0.0f;
+            residual_x = residual_y = 0.0f;
+            quantization_request_direction_x = 0;
+        }
         enum class FilterUpdate { Reset, Initialize, Smooth };
         const auto filter_axis = [&](float desired, float error,
                                      float& filtered) {
@@ -5089,8 +5118,8 @@ struct Aim::Impl {
                 filtered = 0.0f;
                 return FilterUpdate::Reset;
             }
-            if (!controller_initialized) {
-                filtered = desired;
+            if (initialize_filter) {
+                filtered = desired * initial_filter_weight;
                 return FilterUpdate::Initialize;
             }
             const float candidate =
@@ -5107,10 +5136,10 @@ struct Aim::Impl {
         // 目标运动，也会同时丢掉积分与已经平滑好的维持量。
         FilterUpdate x_filter_update;
         if (residual_role || x_error_magnitude <= config.deadzone_pixels) {
-            filtered_x = controller_initialized
+            filtered_x = !initialize_filter
                 ? filtered_x + (desired_x - filtered_x) * config.smoothing
-                : desired_x;
-            x_filter_update = controller_initialized
+                : desired_x * initial_filter_weight;
+            x_filter_update = !initialize_filter
                 ? FilterUpdate::Smooth : FilterUpdate::Initialize;
         } else {
             x_filter_update = filter_axis(desired_x, error_x, filtered_x);
@@ -5122,8 +5151,8 @@ struct Aim::Impl {
             tracking_filtered_proportional_x = 0.0f;
             break;
         case FilterUpdate::Initialize:
-            tracking_filtered_integral_x = tracking_integral_input_x;
-            tracking_filtered_proportional_x = tracking_proportional_input_x;
+            tracking_filtered_integral_x = tracking_integral_input_x * initial_filter_weight;
+            tracking_filtered_proportional_x = tracking_proportional_input_x * initial_filter_weight;
             break;
         case FilterUpdate::Smooth:
             tracking_filtered_integral_x +=
@@ -5136,6 +5165,8 @@ struct Aim::Impl {
         }
         const auto y_filter_update = filter_axis(desired_y, error_y, filtered_y);
         controller_initialized = true;
+        controller_lock_active = frame.lock_active;
+        controller_has_history = true;
         const float tracking_before_filter_cap_x = filtered_x;
         clamp_tracking_vector_preserving_y(
             filtered_x, filtered_y, config.max_counts_per_frame);
@@ -5598,7 +5629,9 @@ struct Aim::Impl {
                  AimControlDiagnostics& diagnostics,
                  AimCommand& command) noexcept {
         if (controller_track_id != track.id) {
+            const bool previous_control_available = controller_has_history;
             reset_controller();
+            controller_has_history = previous_control_available;
             controller_track_id = track.id;
         }
         diagnostics = {};
@@ -5620,6 +5653,7 @@ struct Aim::Impl {
     }
 
     void reset_all() noexcept {
+        controller_has_history = false;
         frame_prediction_enabled = false;
         prediction_policy_track_id = 0;
         prediction_policy_epoch = 0;
