@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <iostream>
+#include <utility>
 
 namespace {
 int failures = 0;
@@ -34,6 +35,11 @@ struct Driver {
     int step_us = 4167;
     std::uint64_t epoch = 1;
     explicit Driver(float smoothing) : aim(config(smoothing)) {}
+    Driver(float smoothing, bool soft) : aim([=] {
+        auto c=config(smoothing);
+        if(soft) { c.soft_zone_radius_percent=30; c.soft_zone_min_strength=.2f; }
+        return c;
+    }()) {}
     AimResult step(bool locked, int axis, bool other = false, bool missing = false,
                    float motion_x_offset = 0.0f) {
         AimFrame f;
@@ -139,8 +145,8 @@ void test_takeover(int axis, int preview_frames) {
            "持锁完全丢失后新身份必须从小额度接管，不冒充首次冷启动");
 }
 
-void test_reacquisition_interval(int axis) {
-    Driver switched(.475f), cold(.475f);
+void test_reacquisition_interval(int axis, bool soft = false) {
+    Driver switched(.475f,soft), cold(.475f,soft);
     switched.step(true,axis,true);
     for (int i=0;i<12;++i) switched.step(true,axis,true);
     for (int i=0;i<12;++i)
@@ -148,20 +154,35 @@ void test_reacquisition_interval(int axis) {
                "空窗必须立即停发，不能平滑续发旧目标");
     double early_switched = 0, early_cold = 0;
     bool started = false, progressed = false;
+    int first_x_quantized = -1, first_x_command = -1;
     for (int i=0;i<36;++i) {
         const auto a=switched.step(true,axis);
         const auto b=cold.step(true,axis);
+        if(i<3) {
+            expect(a.control.evaluated,"接管首三帧持续计算，不插入固定等待");
+            if(i>0 && axis!=1) expect(std::fabs(a.control.shaped_x_counts)>.001f,
+                "零起点之后立即有X浮点请求，不能以延迟发令冒充平滑");
+        }
+        if(axis!=1 && i<8 && first_x_command<0) {
+            const int rounded=static_cast<int>(std::lround(
+                a.control.shaped_x_counts+a.control.residual_before_quantization_x_counts));
+            if(rounded!=0 && first_x_quantized<0) first_x_quantized=i;
+            expect(a.command.dx_counts==rounded,
+                   "接管首个X整数须在浮点请求加连续余数跨最近整数阈值时立即发出");
+            if(a.command.dx_counts!=0) first_x_command=i;
+        }
         if (i<8) { early_switched += magnitude(a); early_cold += magnitude(b); }
         if (i<3) started |= a.has_command;
         if (i>=24) progressed |= magnitude(a)>2;
         if (i<8) expect(magnitude(a)<8,
             "重获后前段需持续缓入，不能只改变第一个控制样本");
     }
-    expect(started,"接管立即计算并在量化可见后输出，不插入反应等待");
+    expect(axis==1 ? started : first_x_quantized>=0 && first_x_command==first_x_quantized,
+           "Y沿原首三帧启动合同，X及混合轴以实际最近整数阈值启动且不得额外等待");
     expect(early_switched<early_cold*.5,
            "整段接管前缀的输出须明显低于直接冷启动");
     expect(progressed,"同身份持续控制须完成过渡，不能每帧重新起步");
-    std::cout << "接管前8样本 axis=" << axis << " transition=" << early_switched
+    std::cout << "接管前8样本 axis=" << axis << " soft=" << soft << " transition=" << early_switched
               << " cold=" << early_cold << '\n';
 }
 
@@ -831,11 +852,134 @@ void test_soft_zone_background_activation_budget() {
     expect(consumed_moving_background && resumed_moving_background,
            "接管额度回归必须在背景失效前后实际消费非零运动维护，不能以空覆盖通过");
 }
+void probe_static_xy_path() {
+    // 软件离散相机只反馈本分支整数命令，不代表真实物理plant。
+    constexpr double response=.55;
+    for (const auto initial : {std::pair{24.0,80.0},std::pair{24.0,24.0},std::pair{12.0,24.0},std::pair{47.6,62.8},std::pair{76.5,102.6},std::pair{100.0,100.0}})
+    for (int sign_x : {-1,1}) for (int sign_y : {-1,1})
+    for (float radius : {0.0f,30.0f}) for (bool ease : {false,true}) {
+        auto c=config(.475f); c.soft_zone_radius_percent=radius;
+        c.soft_zone_min_strength=.2f; c.body_aim_range_percent=50; c.body_aim_height_ratio=.5f;
+        Aim aim(c);
+        const double x0=initial.first*sign_x,y0=initial.second*sign_y;
+        double x=x0,y=y0,max_progress_gap=0,max_chord=0,other_when_first=-1;
+        int dx=0,dy=0,first_x=-1,first_y=-1,sent=0;
+        for(int i=0;i<=192;++i) {
+            if(i) { x-=response*dx; y-=response*dy; }
+            if(std::fabs(x)<=1.5 && first_x<0) first_x=i;
+            if(std::fabs(y)<=1.5 && first_y<0) first_y=i;
+            if(other_when_first<0 && (first_x>=0 || first_y>=0))
+                other_when_first=first_x>=0 ? std::fabs(y/y0):std::fabs(x/x0);
+            if(std::hypot(x,y)>1.5) {
+                max_progress_gap=std::max(max_progress_gap,std::fabs(x/x0-y/y0));
+                max_chord=std::max(max_chord,std::fabs(x*y0-y*x0)/std::hypot(x0,y0));
+            }
+            AimFrame f; f.sequence=i+1; f.observation_epoch=101;
+            f.captured_at=std::chrono::steady_clock::time_point(std::chrono::seconds(1000))+
+                std::chrono::nanoseconds(4166667LL*i); f.control_at=f.captured_at;
+            f.roi_width=f.roi_height=320; f.control_center_x=f.control_center_y=160;
+            f.lock_active=true; f.ease_first_activation=ease;
+            f.detections={{static_cast<float>(144+x),static_cast<float>(120+y),
+                           static_cast<float>(176+x),static_cast<float>(200+y),.95f,0}};
+            const auto r=aim.process(f);
+            expect(r.status==AimStatus::SUCCESS && r.has_target,"XY路径探针必须保持真实目标");
+            dx=r.has_command?r.command.dx_counts:0; dy=r.has_command?r.command.dy_counts:0;
+            if(r.has_command) { ++sent; expect(aim.record_backend_completed_command(
+                f.sequence,f.control_at,dx,dy),"XY路径只反馈当前分支自身命令"); }
+        }
+        if(radius==30 && ease) {
+            // 允许两个既有死区宽度和一个整数响应，不要求逐帧整数共线。
+            const double corridor=2*c.deadzone_pixels+response;
+            expect(max_chord<=corridor,
+                   "静态近远斜向接管不得产生超过死区与整数响应容差的中途折线");
+        }
+        std::cout<<"XY_PATH initial="<<x0<<','<<y0<<" soft="<<radius<<" ease="<<ease
+                 <<" gap="<<max_progress_gap<<" chord="<<max_chord
+                 <<" first_x_ms="<<(first_x<0?-1:first_x*4.166667)<<" first_y_ms="<<(first_y<0?-1:first_y*4.166667)
+                 <<" other_fraction="<<other_when_first<<" final="<<x<<','<<y<<" sent="<<sent<<'\n';
+    }
+}
+
+void test_moving_xy_feedback_path_bounds() {
+    for(int direction:{-1,1}) {
+        auto c=config(.475f); c.soft_zone_radius_percent=30;
+        c.soft_zone_min_strength=.2f; c.body_aim_range_percent=50; c.body_aim_height_ratio=.5f;
+        Aim aim(c); double x=12*direction,y=24*direction,max_error=0,tail_error=0;
+        int dx=0,dy=0,tail_samples=0,moving_x=0,moving_y=0,reverse_x=0,reverse_y=0;
+        for(int i=0;i<600;++i) {
+            const double phase=i<200?1:i<400?-1:0;
+            if(i) { x+=direction*.3*phase-.55*dx; y+=direction*.4*phase-.55*dy; }
+            AimFrame f; f.sequence=i+1; f.observation_epoch=102;
+            f.captured_at=std::chrono::steady_clock::time_point(std::chrono::seconds(1100))+
+                std::chrono::nanoseconds(4166667LL*i); f.control_at=f.captured_at;
+            f.roi_width=f.roi_height=320; f.control_center_x=f.control_center_y=160;
+            f.lock_active=true; f.ease_first_activation=true;
+            f.detections={{static_cast<float>(144+x),static_cast<float>(120+y),
+                           static_cast<float>(176+x),static_cast<float>(200+y),.95f,0}};
+            const auto r=aim.process(f);
+            expect(r.status==AimStatus::SUCCESS && r.has_target &&
+                       std::isfinite(x) && std::isfinite(y),"动态XY自身反馈须保持目标与有限状态");
+            dx=r.has_command?r.command.dx_counts:0; dy=r.has_command?r.command.dy_counts:0;
+            expect(std::hypot(dx,dy)<=c.max_counts_per_frame,
+                   "移动变向和停止仍服从二维物理步长，不要求沿旧目标弦线");
+            if(r.has_command) expect(aim.record_backend_completed_command(f.sequence,f.control_at,dx,dy),
+                                     "动态XY只反馈本分支完成命令");
+            if(i<200) { moving_x+=direction*dx>0; moving_y+=direction*dy>0; }
+            if(i>=300 && i<400) { reverse_x+=direction*dx<0; reverse_y+=direction*dy<0; }
+            max_error=std::max(max_error,std::hypot(x,y));
+            if(i>=500) { tail_error+=std::hypot(x,y); ++tail_samples; }
+        }
+        expect(moving_x>0 && moving_y>0 && reverse_x>0 && reverse_y>0 &&
+                   max_error<144 && tail_error/tail_samples<=8,
+               "双轴动态须真实追赶及换向，停止后回到身体50%半窗尺度内而非发散");
+        std::cout<<"XY_MOVING direction="<<direction<<" max="<<max_error
+                 <<" tail="<<tail_error/tail_samples<<" moving="<<moving_x<<','<<moving_y
+                 <<" reverse="<<reverse_x<<','<<reverse_y<<'\n';
+    }
+}
+
+void test_soft_xy_integer_disk_limits() {
+    for(float limit:{1.0f,5.5f,14.0f})
+    for(int sign_x:{-1,1}) for(int sign_y:{-1,1}) {
+        auto c=config(.475f); c.soft_zone_radius_percent=30; c.soft_zone_min_strength=.2f;
+        c.body_aim_range_percent=50; c.body_aim_height_ratio=.5f; c.max_counts_per_frame=limit;
+        Aim aim(c); int sent=0,x_sent=0,y_sent=0;
+        for(int i=0;i<96;++i) {
+            AimFrame f; f.sequence=i+1; f.observation_epoch=104;
+            f.captured_at=std::chrono::steady_clock::time_point(std::chrono::seconds(1250))+
+                std::chrono::microseconds(4167*i); f.control_at=f.captured_at;
+            f.roi_width=f.roi_height=320; f.control_center_x=f.control_center_y=160;
+            f.lock_active=true; f.ease_first_activation=true;
+            const float x=160+sign_x*40.0f,y=160+sign_y*60.0f;
+            f.detections={{x-16,y-40,x+16,y+40,.95f,0}};
+            const auto r=aim.process(f);
+            expect(r.status==AimStatus::SUCCESS && r.has_target && r.control.evaluated &&
+                       std::isfinite(r.control.shaped_x_counts) &&
+                       std::hypot(r.command.dx_counts,r.command.dy_counts)<=limit,
+                   "soft开启的整数量化在1、5.5、14实际圆盘边界内且控制状态有限");
+            expect(sign_x*r.command.dx_counts>=0 && sign_y*r.command.dy_counts>=0,
+                   "四象限固定斜向目标的整数圆盘投影不得反向");
+            if(r.has_command) {
+                ++sent; x_sent+=r.command.dx_counts!=0; y_sent+=r.command.dy_counts!=0;
+                expect(aim.record_backend_completed_command(f.sequence,f.control_at,
+                    r.command.dx_counts,r.command.dy_counts),"圆盘边界仅回执本分支实际请求");
+            }
+        }
+        expect(sent>0,"小整数圆盘仍应有非零输出，不能依靠永远停发过关");
+        if(limit==14) expect(x_sent>0 && y_sent>0,
+                            "正常14count斜向边界必须实际执行两轴，不靠退化成单轴通过");
+    }
+}
+
 }
 
 int main() {
+    test_soft_xy_integer_disk_limits();
+    probe_static_xy_path();
+    test_moving_xy_feedback_path_bounds();
     for (int axis : {0,1,2}) for (int preview : {0,60}) test_takeover(axis,preview);
     for (int axis : {0,1,2}) test_reacquisition_interval(axis);
+    test_reacquisition_interval(2,true);
     test_session_boundaries();
     test_transition_clock();
     test_activation_gap();

@@ -568,6 +568,40 @@ void clamp_tracking_command_preserving_y(
     x = std::clamp(x, -x_limit, x_limit);
 }
 
+void clamp_tracking_vector(float& x, float& y, float maximum) noexcept {
+    const double limit = std::max(0.0, static_cast<double>(maximum));
+    const double magnitude = std::hypot(static_cast<double>(x), static_cast<double>(y));
+    if (magnitude <= limit || magnitude == 0.0) return;
+    const double scale = limit / magnitude;
+    x = static_cast<float>(x * scale);
+    y = static_cast<float>(y * scale);
+    // 同比收缩保留输入方向，不先耗尽某一轴；向零修正浮点圆盘边界。
+    if (std::hypot(static_cast<double>(x), static_cast<double>(y)) > limit) {
+        x = std::nextafter(x, 0.0f);
+        y = std::nextafter(y, 0.0f);
+    }
+}
+
+void clamp_tracking_command(int& x, int& y, float maximum) noexcept {
+    const double limit = std::max(0.0, static_cast<double>(maximum));
+    const double magnitude = std::hypot(static_cast<double>(x), static_cast<double>(y));
+    if (magnitude <= limit || magnitude == 0.0) return;
+    const double target_x = x * (limit / magnitude);
+    const double target_y = y * (limit / magnitude);
+    x = static_cast<int>(std::lround(target_x));
+    y = static_cast<int>(std::lround(target_y));
+    // 最近整数可能落在圆盘外；每次选择距同比目标更近的内收格点，
+    // 等距时确定性内收X，不采用整段Y优先分配；余数只保存未裁切请求。
+    while (std::hypot(static_cast<double>(x), static_cast<double>(y)) > limit) {
+        const int next_x = x == 0 ? 0 : x + (x > 0 ? -1 : 1);
+        const int next_y = y == 0 ? 0 : y + (y > 0 ? -1 : 1);
+        const double cost_x = std::hypot(next_x - target_x, y - target_y);
+        const double cost_y = std::hypot(x - target_x, next_y - target_y);
+        if (x != 0 && (y == 0 || cost_x <= cost_y)) x = next_x;
+        else y = next_y;
+    }
+}
+
 void move_vector_toward(float target_x, float target_y,
                         float maximum_delta,
                         float& current_x, float& current_y) noexcept {
@@ -4659,6 +4693,17 @@ struct Aim::Impl {
                           AimControlDiagnostics& diagnostics,
                           AimCommand& command) noexcept {
         diagnostics.evaluated = true;
+        // 协调属于开启软化后的路径合同；关闭/强度1保留原分轴控制基线。
+        const bool coordinated_path = config.soft_zone_radius_percent > 0.0f &&
+            config.soft_zone_min_strength < 1.0f;
+        const auto limit_tracking_vector = [&](float& x, float& y, float maximum) {
+            if (coordinated_path) clamp_tracking_vector(x, y, maximum);
+            else clamp_tracking_vector_preserving_y(x, y, maximum);
+        };
+        const auto limit_tracking_command = [&](int& x, int& y, float maximum) {
+            if (coordinated_path) clamp_tracking_command(x, y, maximum);
+            else clamp_tracking_command_preserving_y(x, y, maximum);
+        };
         const float controller_dt = controller_at ==
                 std::chrono::steady_clock::time_point{}
             ? track.prediction_dt
@@ -5052,7 +5097,7 @@ struct Aim::Impl {
         const float unconstrained_y = proportional_y + feedforward_y;
         float desired_x = unconstrained_x;
         float desired_y = unconstrained_y;
-        clamp_tracking_vector_preserving_y(
+        limit_tracking_vector(
             desired_x, desired_y, config.max_counts_per_frame);
         if (unconstrained_x != 0.0f) {
             tracking_integral_input_x *= desired_x / unconstrained_x;
@@ -5171,7 +5216,7 @@ struct Aim::Impl {
             target_transition_weight = target_transition_seconds / kTargetTransitionSeconds;
             const float original_x = desired_x;
             const float original_y = desired_y;
-            clamp_tracking_vector_preserving_y(desired_x, desired_y,
+            limit_tracking_vector(desired_x, desired_y,
                 config.max_counts_per_frame);
             desired_x *= target_transition_weight;
             desired_y *= target_transition_weight;
@@ -5203,7 +5248,7 @@ struct Aim::Impl {
             // 残差PI的持续路径在滤波后限幅；接管起点须先落在同一个
             // 输出安全域内，否则大误差乘平滑比例后仍会直接顶满。
             const float requested_x = desired_x;
-            clamp_tracking_vector_preserving_y(
+            limit_tracking_vector(
                 desired_x, desired_y, config.max_counts_per_frame);
             if (requested_x != 0.0f) {
                 tracking_integral_input_x *= desired_x / requested_x;
@@ -5276,8 +5321,12 @@ struct Aim::Impl {
         const float tracking_before_filter_cap_x = filtered_x;
         // 观测更新可重投影已有PI记忆；滤波后也守住本阶段额度，不能由
         // 空窗恢复前的状态绕过缓入。后续份额同步及anti-windup消费此实际值。
-        clamp_tracking_vector_preserving_y(
-            filtered_x, filtered_y, config.max_counts_per_frame * target_transition_weight);
+        const float filter_y_limit = config.max_counts_per_frame * target_transition_weight;
+        const float filter_y_before = std::clamp(filtered_y, -filter_y_limit, filter_y_limit);
+        limit_tracking_vector(filtered_x, filtered_y, filter_y_limit);
+        feedforward_y = std::clamp(feedforward_y +
+            (filtered_y - filter_y_before) * anti_windup_alpha,
+            -kTrackingVerticalIntegralMaximumCounts, kTrackingVerticalIntegralMaximumCounts);
         if (tracking_before_filter_cap_x != 0.0f) {
             tracking_filtered_integral_x *=
                 filtered_x / tracking_before_filter_cap_x;
@@ -5443,9 +5492,12 @@ struct Aim::Impl {
                 -kTrackingVerticalIntegralMaximumCounts,kTrackingVerticalIntegralMaximumCounts);
             motion_compensated_y=constrained_y;
         }
-        clamp_tracking_vector_preserving_y(
-            motion_compensated_x, motion_compensated_y,
-            config.max_counts_per_frame);
+        const float allocation_y_before = std::clamp(motion_compensated_y,
+            -config.max_counts_per_frame, config.max_counts_per_frame);
+        limit_tracking_vector(motion_compensated_x, motion_compensated_y, config.max_counts_per_frame);
+        feedforward_y = std::clamp(feedforward_y +
+            (motion_compensated_y - allocation_y_before) * anti_windup_alpha,
+            -kTrackingVerticalIntegralMaximumCounts, kTrackingVerticalIntegralMaximumCounts);
         // 残差角色的输出使用实际 PI+M 分配；旧 eligible_filtered 只是
         // 未消费的兼容路径结果，不能拿它从总量反推实际维护量。
         const float accepted_maintenance_after_cap_x = residual_role
@@ -5485,7 +5537,7 @@ struct Aim::Impl {
         const float before_transition_y = shaped_y;
         // PI之后补入的运动维持也必须遵守接管预算，不能首帧绕过零起点。
         if (target_transition_active) {
-            clamp_tracking_vector_preserving_y(shaped_x, shaped_y,
+            limit_tracking_vector(shaped_x, shaped_y,
                 config.max_counts_per_frame * target_transition_weight);
         }
         const float transition_accept_x = before_transition_x != 0.0f
@@ -5530,7 +5582,7 @@ struct Aim::Impl {
             // 不锁存“曾经追上”，也不把横向几何当Y命中或开火许可。
             soft_x = 1.0f - capture_weight_x * (1.0f - soft_x);
         }
-        const float soft_y = zone_strength(feedback_target_y - frame.control_center_y);
+        float soft_y = zone_strength(feedback_target_y - frame.control_center_y);
         shaped_x *= soft_x;
         shaped_y *= soft_y;
         float accepted_soft_maintenance = accepted_maintenance_after_cap_x *
@@ -5551,15 +5603,52 @@ struct Aim::Impl {
             // 同一二维和接管额度；同步接受比例不能把新增M记成PI。
             const float requested_soft_x = shaped_x;
             const float allocation_limit = config.max_counts_per_frame * target_transition_weight;
-            clamp_tracking_vector_preserving_y(shaped_x, shaped_y, allocation_limit);
+            limit_tracking_vector(shaped_x, shaped_y, allocation_limit);
             soft_allocation_accept_x = requested_soft_x != 0.0f
                 ? shaped_x / requested_soft_x : (allocation_limit > 0.0f ? 1.0f : 0.0f);
             accepted_soft_maintenance *= soft_allocation_accept_x;
         }
-        // X和二维分配已经完成；单独收紧Y，不把本帧释放的额度重新分给X。
-        // 下方回算消费最终Y，防止未执行的接管请求积攒到周期结束。
-        const float y_before_takeover = shaped_y;
-        shaped_y = std::clamp(shaped_y, -vertical_allowance, vertical_allowance);
+        // 位置纠偏按当前误差的共同进度推进；只有当前双边背景支持的
+        // 维护量独立保留，模型回退估计不能把静态自身相机响应当成豁免。
+        // 靠近分轴死区时连续退出协调，让最后一轴继续收敛而非等待零请求。
+        float position_accept_x = 1.0f;
+        const float supported_maintenance_fraction = residual_role && background_role && nominal_request != 0.0f
+            ? static_cast<float>(std::clamp(static_cast<double>(current_supported_maintenance_x) /
+                nominal_request, 0.0, 1.0)) : 0.0f;
+        const float protected_maintenance = accepted_maintenance_after_cap_x *
+            transition_accept_x * supported_maintenance_fraction * soft_allocation_accept_x;
+        const float position_x = shaped_x - protected_maintenance;
+        const float reference_x = error_x;
+        const float reference_y = error_y;
+        if (coordinated_path && position_x * reference_x > 0.0f && shaped_y * reference_y > 0.0f) {
+            const float progress = std::min(position_x / reference_x, shaped_y / reference_y);
+            const auto axis_weight = [&](float error) {
+                if (config.deadzone_pixels <= 0.0f) return 1.0f;
+                const float t = std::clamp(std::fabs(error) / config.deadzone_pixels - 1.0f, 0.0f, 1.0f);
+                return t * t * (3.0f - 2.0f * t);
+            };
+            const float weight = std::min(axis_weight(error_x), axis_weight(error_y));
+            const float synchronized_x = position_x + weight * (reference_x * progress - position_x);
+            shaped_y += weight * (reference_y * progress - shaped_y);
+            position_accept_x = synchronized_x / position_x;
+            shaped_x = synchronized_x + protected_maintenance;
+            accepted_soft_maintenance = protected_maintenance +
+                (accepted_soft_maintenance - protected_maintenance) * position_accept_x;
+            // PI与M抵消时，缩小PI可能增大净请求；重新守同一共同额度。
+            const float requested_x = shaped_x;
+            limit_tracking_vector(shaped_x, shaped_y,
+                config.max_counts_per_frame * target_transition_weight);
+            const float accept = requested_x != 0.0f ? shaped_x / requested_x : 1.0f;
+            accepted_soft_maintenance *= accept;
+            soft_allocation_accept_x *= accept;
+        }
+        // 远Y接管额度同比作用于当前向量，不能让X先完成后再补Y。
+        const float takeover_accept = std::fabs(shaped_y) > vertical_allowance
+            ? vertical_allowance / std::fabs(shaped_y) : 1.0f;
+        shaped_x *= takeover_accept;
+        shaped_y *= takeover_accept;
+        accepted_soft_maintenance *= takeover_accept;
+        soft_allocation_accept_x *= takeover_accept;
         if (!residual_role && shaped_x != before_transition_x) {
             feedforward_x = std::clamp(feedforward_x +
                 (shaped_x - before_transition_x) * anti_windup_alpha,
@@ -5590,7 +5679,7 @@ struct Aim::Impl {
 
         model_residual_x.float_position_counts = representable_float(floating_position_after)
             ? static_cast<float>(floating_position_after) * transition_accept_x * soft_x *
-                soft_allocation_accept_x : 0.0f;
+                soft_allocation_accept_x * position_accept_x : 0.0f;
         model_residual_x.previous_source_p = proportional_x;
         shaper_initialized = true;
         if (y_filter_update == FilterUpdate::Reset) {
@@ -5652,16 +5741,6 @@ struct Aim::Impl {
         }
         // 无延迟 Y 的合法亚半 count 请求不能持续丢失后让 PI 代偿舍入误差。
         // 此处只守恒最近整数舍入差，不引入第二个积分器。
-        // 以收紧前的Y和同一舍入库存保留整数X占位，避免Y收紧后多放出X。
-        float reserved_y = y_before_takeover;
-        if (frame.lock_active && std::fabs(error_y) > config.deadzone_pixels &&
-            std::fabs(reserved_y) > 0.001f) {
-            reserved_y += residual_y;
-        }
-        int reserved_dy = static_cast<int>(std::lround(reserved_y));
-        if (reserved_dy != 0 && reserved_dy * y_before_takeover < 0.0f) {
-            reserved_dy = static_cast<int>(std::lround(y_before_takeover));
-        }
         float quantized_y = shaped_y;
         const bool quantization_residual_eligible_y =
             frame.lock_active &&
@@ -5681,13 +5760,11 @@ struct Aim::Impl {
         }
         const int quantized_command_y = command.dy_counts;
         const int quantized_command_x = command.dx_counts;
-        clamp_tracking_command_preserving_y(
-            command.dx_counts, reserved_dy, config.max_counts_per_frame);
-        clamp_tracking_command_preserving_y(
+        limit_tracking_command(
             command.dx_counts, command.dy_counts,
             config.max_counts_per_frame);
-        // 残余只表示最近整数舍入误差。若二维安全域收缩了 X，则不把
-        // 执行器饱和差伪装成后续量化库存；Y 的候选和整数命令保持原样。
+        // 残余只表示最近整数舍入误差。二维安全域收缩了哪一轴，
+        // 就丢弃该轴裁切差，不能把执行器饱和差伪装成量化库存。
         residual_x = quantization_residual_eligible_x
             ? (command.dx_counts == quantized_command_x
                 ? quantized_x - static_cast<float>(quantized_command_x) : 0.0f)
