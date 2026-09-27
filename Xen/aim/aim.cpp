@@ -1266,6 +1266,13 @@ struct Aim::Impl {
     bool previous_frame_locked = false;
     bool target_transition_gap = false;
     std::chrono::steady_clock::time_point target_transition_at{};
+    struct VerticalTakeover {
+        float elapsed = kTargetTransitionSeconds;
+        float duration = kTargetTransitionSeconds;
+        bool pending = false;
+        bool gap = false;
+        std::chrono::steady_clock::time_point at{};
+    } vertical_takeover;
     bool shaper_initialized = false;
     std::uint64_t lead_track_id = 0;
     bool lead_active = false;
@@ -4595,6 +4602,56 @@ struct Aim::Impl {
             tracking_target_velocity_counts_per_second_x;
     }
 
+    void begin_vertical_takeover(std::chrono::steady_clock::time_point at) noexcept {
+        vertical_takeover = {};
+        vertical_takeover.elapsed = 0.0f;
+        vertical_takeover.pending = true;
+        vertical_takeover.at = at;
+    }
+
+    float vertical_takeover_limit(const AimFrame& frame, float roi_error,
+                                 std::chrono::steady_clock::time_point at) noexcept {
+        if (!frame.lock_active) return config.max_counts_per_frame;
+        // 关闭软化时沿用共同接管预算，不引入独立暂停或恢复语义。
+        if (config.soft_zone_radius_percent <= 0.0f ||
+            config.soft_zone_min_strength >= 1.0f) {
+            return config.max_counts_per_frame;
+        }
+        if (frame.recoil_y_owned) {
+            // 压枪占用期间不采样接管起点，也不积攒恢复后的Y额度。
+            vertical_takeover.gap = true;
+            return 0.0f;
+        }
+        if (vertical_takeover.pending) {
+            const float radius = std::min(frame.roi_width, frame.roi_height) *
+                0.5f * config.soft_zone_radius_percent / 100.0f;
+            const float excess = radius > 0.0f
+                ? std::clamp(std::fabs(roi_error) / radius - 1.0f, 0.0f, 1.0f) : 0.0f;
+            // 只按首次有效ROI几何延长Y接管，最多增加一个既有周期；
+            // 起点冻结，避免误差回落时缩短预算造成突释。不是速度档。
+            vertical_takeover.duration = kTargetTransitionSeconds *
+                (1.0f + (1.0f - config.soft_zone_min_strength) * excess);
+            vertical_takeover.elapsed = 0.0f;
+            vertical_takeover.pending = false;
+            vertical_takeover.gap = false;
+            vertical_takeover.at = at;
+        } else if (vertical_takeover.elapsed < vertical_takeover.duration) {
+            const auto interval = at - vertical_takeover.at;
+            const float dt = vertical_takeover.gap || interval > AimFrame::kObservationHorizon
+                ? 0.0f : std::max(0.0f, std::chrono::duration<float>(interval).count());
+            vertical_takeover.elapsed = std::min(vertical_takeover.duration,
+                vertical_takeover.elapsed + dt);
+            vertical_takeover.at = at;
+            vertical_takeover.gap = false;
+        }
+        // 近距离接管也完全沿用既有共同预算。
+        if (vertical_takeover.duration <= kTargetTransitionSeconds) {
+            return config.max_counts_per_frame;
+        }
+        return config.max_counts_per_frame *
+            std::min(1.0f, vertical_takeover.elapsed / vertical_takeover.duration);
+    }
+
     bool control_tracking(const AimFrame& frame, const Track& track,
                           float feedback_target_x, float feedback_target_y,
                           std::chrono::steady_clock::time_point
@@ -4615,6 +4672,7 @@ struct Aim::Impl {
         // 丢失帧数，也不在重获时重新注入旧滤波方向。
         if (track.predicted) {
             target_transition_gap = true;
+            vertical_takeover.gap = true;
             // Observation-owned bias expires with the observer on a prediction-only gap.
             model_residual_x = {};
             const float leak = std::exp(
@@ -5096,6 +5154,8 @@ struct Aim::Impl {
         }
         // 空窗不蓄接管额度；同身份短丢失不启动新的过渡，但未完成的
         // 过渡从当前有效步继续。新身份的controller已清空旧PI和余数。
+        const float vertical_allowance = vertical_takeover_limit(frame,
+            feedback_target_y - frame.control_center_y, current_controller_at);
         const bool target_transition_active = frame.lock_active &&
             target_transition_seconds < kTargetTransitionSeconds;
         float target_transition_weight = 1.0f;
@@ -5496,6 +5556,10 @@ struct Aim::Impl {
                 ? shaped_x / requested_soft_x : (allocation_limit > 0.0f ? 1.0f : 0.0f);
             accepted_soft_maintenance *= soft_allocation_accept_x;
         }
+        // X和二维分配已经完成；单独收紧Y，不把本帧释放的额度重新分给X。
+        // 下方回算消费最终Y，防止未执行的接管请求积攒到周期结束。
+        const float y_before_takeover = shaped_y;
+        shaped_y = std::clamp(shaped_y, -vertical_allowance, vertical_allowance);
         if (!residual_role && shaped_x != before_transition_x) {
             feedforward_x = std::clamp(feedforward_x +
                 (shaped_x - before_transition_x) * anti_windup_alpha,
@@ -5588,6 +5652,16 @@ struct Aim::Impl {
         }
         // 无延迟 Y 的合法亚半 count 请求不能持续丢失后让 PI 代偿舍入误差。
         // 此处只守恒最近整数舍入差，不引入第二个积分器。
+        // 以收紧前的Y和同一舍入库存保留整数X占位，避免Y收紧后多放出X。
+        float reserved_y = y_before_takeover;
+        if (frame.lock_active && std::fabs(error_y) > config.deadzone_pixels &&
+            std::fabs(reserved_y) > 0.001f) {
+            reserved_y += residual_y;
+        }
+        int reserved_dy = static_cast<int>(std::lround(reserved_y));
+        if (reserved_dy != 0 && reserved_dy * y_before_takeover < 0.0f) {
+            reserved_dy = static_cast<int>(std::lround(y_before_takeover));
+        }
         float quantized_y = shaped_y;
         const bool quantization_residual_eligible_y =
             frame.lock_active &&
@@ -5607,6 +5681,8 @@ struct Aim::Impl {
         }
         const int quantized_command_y = command.dy_counts;
         const int quantized_command_x = command.dx_counts;
+        clamp_tracking_command_preserving_y(
+            command.dx_counts, reserved_dy, config.max_counts_per_frame);
         clamp_tracking_command_preserving_y(
             command.dx_counts, command.dy_counts,
             config.max_counts_per_frame);
@@ -5769,6 +5845,7 @@ struct Aim::Impl {
         if (frame.lock_active && !track.predicted) {
             if (held_control_track_id != 0 && held_control_track_id != track.id) {
                 target_transition_seconds = 0.0f;
+                begin_vertical_takeover(current_controller_at);
                 target_transition_at = current_controller_at;
                 target_transition_gap = true;
             }
@@ -5805,6 +5882,7 @@ struct Aim::Impl {
         held_control_epoch = 0;
         target_transition_seconds = kTargetTransitionSeconds;
         target_transition_gap = false;
+        vertical_takeover = {};
         controller_has_history = false;
         frame_prediction_enabled = false;
         prediction_policy_track_id = 0;
@@ -5989,6 +6067,7 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
     if (invalid_reason) {
         result.status = AimStatus::INVALID_INPUT;
         if (impl_) {
+            impl_->vertical_takeover.gap = true;
             impl_->log_status_transition(
                 result.status, frame.sequence, invalid_reason);
         }
@@ -6005,10 +6084,12 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
             impl_->held_control_track_id = 0;
             impl_->target_transition_seconds = kTargetTransitionSeconds;
             impl_->target_transition_gap = false;
+            impl_->vertical_takeover = {};
         }
         if (activation_edge) {
             // 激活边沿独立于目标确认与controller重置：空拍不把重新接管变成冷启动。
             impl_->target_transition_seconds = 0.0f;
+            impl_->begin_vertical_takeover(control_at);
             impl_->target_transition_at = control_at;
             impl_->target_transition_gap = true;
         }
@@ -6035,6 +6116,7 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
             // observer跳过更新而继续以旧模型输出，X背景也不能补足Y账本。
             result.status = AimStatus::INVALID_INPUT;
             impl_->log_status_transition(result.status, frame.sequence, "外部位移原始帧对覆盖不足");
+            impl_->vertical_takeover.gap = true;
             return result;
         }
         if (target) {
@@ -6145,10 +6227,12 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
                     result.command);
             } else {
                 impl_->target_transition_gap = true;
+                impl_->vertical_takeover.gap = true;
                 impl_->reset_controller();
             }
         } else {
             impl_->target_transition_gap = true;
+            impl_->vertical_takeover.gap = true;
             impl_->reset_controller();
         }
         const auto finished = clock::now();

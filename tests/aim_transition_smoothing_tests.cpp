@@ -302,6 +302,166 @@ void test_moving_activation_budget() {
     }
 }
 
+void test_far_y_activation_budget() {
+    for (int direction : {-1,1}) for (bool irregular : {false,true}) {
+        for (int setting=0;setting<4;++setting) {
+            auto c=config(.475f);
+            c.soft_zone_radius_percent=setting==1?0.0f:30.0f;
+            c.soft_zone_min_strength=setting==2?1.0f:.2f;
+            c.body_aim_height_ratio=.5f;
+            const float initial_error=setting==3?24.0f:80.0f;
+            const float radius=160*c.soft_zone_radius_percent/100;
+            const float duration_us=100000*(1+(radius>0 ?
+                (1-c.soft_zone_min_strength)*std::clamp(initial_error/radius-1,0.0f,1.0f):0));
+            Aim aim(c);
+            int wall_us=0; std::uint64_t sequence=0,epoch=91;
+            const auto step=[&](bool missing) {
+                AimFrame f; f.sequence=++sequence; f.observation_epoch=epoch;
+                f.captured_at=std::chrono::steady_clock::time_point(std::chrono::seconds(800))+
+                    std::chrono::microseconds(wall_us); f.control_at=f.captured_at;
+                f.roi_width=f.roi_height=320; f.control_center_x=f.control_center_y=160;
+                f.lock_active=true; f.ease_first_activation=true;
+                const float y=160+direction*initial_error;
+                if(!missing) f.detections={{144,y-16,176,y+16,.95f,0}};
+                const auto r=aim.process(f);
+                if(r.has_command) expect(aim.record_backend_completed_command(f.sequence,f.control_at,
+                    r.command.dx_counts,r.command.dy_counts),"远Y预算只回执本分支命令");
+                return r;
+            };
+            // 首次激活、显式reset、source epoch变化均应重新建立真实零起点。
+            for(int phase=0;phase<3;++phase) {
+                if(phase==1) aim.reset();
+                if(phase==2) ++epoch;
+                wall_us+=4000;
+                int effective_us=0,sent=0; bool full_legacy_seen=false;
+                for(int i=0;effective_us<=220000;++i) {
+                    if(i) {
+                        const int dt=irregular?(i%2?3000:7000):4000;
+                        wall_us+=dt;
+                        if(i==8) {
+                            expect(!step(true).has_command,"远Y过渡观测空帧必须停发");
+                            wall_us+=dt;
+                            // 恢复帧不把丢失及恢复间隔计入有效预算。
+                        } else effective_us+=dt;
+                    }
+                    const auto r=step(false);
+                    const float allowance=14*std::min(1.0f,effective_us/duration_us);
+                    expect(r.status==AimStatus::SUCCESS && r.has_target && r.control.evaluated,
+                           "远Y激活预算必须有真实生产目标与有效控制");
+                    expect(std::fabs(static_cast<float>(r.command.dy_counts))<=allowance+1.0f,
+                           "Y预算须按初始距离和软区强度延长有效接管，空帧不得蓄时");
+                    if(!i) expect(!r.has_command,"首次激活及reset或epoch重建必须从零命令开始");
+                    expect(r.command.dx_counts==0,"纯Y夹具不得生成无关X命令");
+                    sent+=r.has_command?1:0;
+                    if(effective_us>=100000 && std::abs(r.command.dy_counts)>=13) full_legacy_seen=true;
+                }
+                expect(sent>0,"延长Y接管仍在200ms内有非零跟随，不能靠停发通过");
+                if(setting==1 || setting==2)
+                    expect(full_legacy_seen,"软区关闭或强度1继续原100ms路径，不能全局减增益");
+            }
+        }
+    }
+}
+
+void test_far_y_recoil_pause_budget() {
+    auto c=config(.475f); c.soft_zone_radius_percent=30;
+    c.soft_zone_min_strength=.2f; c.body_aim_height_ratio=.5f;
+    Aim aim(c); bool previous_owned=true; int effective_us=0,sent=0;
+    for(int i=0;i<80;++i) {
+        const bool owned=i<10 || (i>=18 && i<28);
+        if(!owned && !previous_owned) effective_us+=4000;
+        AimFrame f; f.sequence=i+1; f.observation_epoch=93;
+        f.captured_at=std::chrono::steady_clock::time_point(std::chrono::seconds(850))+
+            std::chrono::microseconds(4000*i); f.control_at=f.captured_at;
+        f.roi_width=f.roi_height=320; f.control_center_x=f.control_center_y=160;
+        f.lock_active=true; f.ease_first_activation=true; f.recoil_y_owned=owned;
+        f.detections={{144,224,176,256,.95f,0}};
+        const auto r=aim.process(f);
+        expect(r.status==AimStatus::SUCCESS && r.has_target,
+               "压枪交接测试仍保持真实远Y目标");
+        const float allowance=14*std::min(1.0f,effective_us/(100000*(1+.8f*(80.0f/48-1))));
+        expect(owned ? r.command.dy_counts==0 : std::abs(r.command.dy_counts)<=allowance+1,
+               "压枪占用不得消费Y接管时间或用屏蔽后零误差初始化短周期");
+        if(i==10) expect(!r.has_command,"首次占用结束须按真实80ROI建立零起点");
+        if(r.has_command) { ++sent; expect(aim.record_backend_completed_command(
+            f.sequence,f.control_at,r.command.dx_counts,r.command.dy_counts),"压枪交接回执有效"); }
+        previous_owned=owned;
+    }
+    expect(sent>0,"压枪释放后Y必须恢复有效跟随，不能永久停发");
+}
+
+void test_legacy_y_recoil_release_bypasses_extended_cap() {
+    for(int setting=0;setting<3;++setting) {
+        auto c=config(.475f);
+        c.soft_zone_radius_percent=setting==0?0.0f:30.0f;
+        c.soft_zone_min_strength=setting==1?1.0f:.2f;
+        c.body_aim_height_ratio=.5f;
+        const float error=setting==2?24.0f:80.0f;
+        Aim eased(c),legacy(c);
+        for(int i=0;i<=31;++i) {
+            AimFrame f; f.sequence=i+1; f.observation_epoch=95;
+            f.captured_at=std::chrono::steady_clock::time_point(std::chrono::seconds(950))+
+                std::chrono::milliseconds(4*i); f.control_at=f.captured_at;
+            f.roi_width=f.roi_height=320; f.control_center_x=f.control_center_y=160;
+            f.lock_active=true; f.recoil_y_owned=i<30;
+            const float y=160+error;
+            f.detections={{144,y-16,176,y+16,.95f,0}};
+            // 两分支占用期间Y状态均为零；共同100ms过程已完成，
+            // 不需要扩展的配置释放时应与不请求首次缓入的分支一致。
+            f.ease_first_activation=true;
+            const auto actual=eased.process(f);
+            f.ease_first_activation=false;
+            const auto reference=legacy.process(f);
+            expect(actual.has_target && reference.has_target,
+                   "旧Y释放语义对照始终有当前目标");
+            if(i<30) expect(actual.command.dy_counts==0 && reference.command.dy_counts==0,
+                            "两个Y释放对照在recoil占用期间均不得输出");
+            else expect(reference.has_command && reference.command.dy_counts!=0 &&
+                            actual.command.dy_counts==reference.command.dy_counts &&
+                            actual.command.dx_counts==reference.command.dx_counts,
+                        "关闭软区、强度1、近区在120ms压枪占用后应旁路新Ycap，不得重新缓入100ms");
+            if(actual.has_command) expect(eased.record_backend_completed_command(f.sequence,f.control_at,
+                actual.command.dx_counts,actual.command.dy_counts),"兼容分支回执有效");
+            if(reference.has_command) expect(legacy.record_backend_completed_command(f.sequence,f.control_at,
+                reference.command.dx_counts,reference.command.dy_counts),"旧语义对照回执有效");
+        }
+    }
+}
+
+void test_far_y_discrete_feedback_settles() {
+    // 合成单步离散相机仅验证软件预算后段，不拟合或声明真实设备plant。
+    constexpr double response=.55;
+    for(float initial:{-88.0f,-65.0f,65.0f,88.0f}) {
+        auto c=config(.475f); c.soft_zone_radius_percent=30;
+        c.soft_zone_min_strength=.2f; c.body_aim_height_ratio=.5f;
+        Aim aim(c); double error=initial,tail_error=0; int previous=0,sent=0,tail_samples=0,tail_peak=0;
+        const float duration_us=100000*(1+.8f*std::clamp(std::fabs(initial)/48-1,0.0f,1.0f));
+        for(int i=0;i<=150;++i) {
+            if(i) error-=response*previous;
+            AimFrame f; f.sequence=i+1; f.observation_epoch=94;
+            f.captured_at=std::chrono::steady_clock::time_point(std::chrono::seconds(900))+
+                std::chrono::microseconds(4000*i); f.control_at=f.captured_at;
+            f.roi_width=f.roi_height=320; f.control_center_x=f.control_center_y=160;
+            f.lock_active=true; f.ease_first_activation=true;
+            const float y=160+static_cast<float>(error);
+            f.detections={{144,y-16,176,y+16,.95f,0}};
+            const auto r=aim.process(f);
+            expect(r.status==AimStatus::SUCCESS && r.has_target,
+                   "远Y离散闭环始终保有当前目标");
+            previous=r.has_command?r.command.dy_counts:0;
+            const float allowance=14*std::min(1.0f,4000*i/duration_us);
+            expect(std::abs(previous)<=allowance+1,
+                   "误差接近目标时不能缩短冻结的Y接管周期而突释");
+            if(r.has_command) { ++sent; expect(aim.record_backend_completed_command(
+                f.sequence,f.control_at,r.command.dx_counts,r.command.dy_counts),"离散Y闭环只反馈自身回执"); }
+            if(i>=75) { tail_error+=std::fabs(error); ++tail_samples; tail_peak=std::max(tail_peak,std::abs(previous)); }
+        }
+        expect(sent>0 && tail_samples>0 && tail_error/tail_samples<=4 && tail_peak<=3,
+               "远Y软件闭环300至600ms尾段须收敛且没有延迟满幅释放");
+        std::cout<<"远Y软件闭环 initial="<<initial<<" tail="<<tail_error/tail_samples<<" peak="<<tail_peak<<'\n';
+    }
+}
+
 void test_soft_zone() {
     const auto run=[](float radius,float strength,float offset) {
         auto c=config(.475f); c.soft_zone_radius_percent=radius;
@@ -680,6 +840,10 @@ int main() {
     test_transition_clock();
     test_activation_gap();
     test_moving_activation_budget();
+    test_far_y_activation_budget();
+    test_far_y_recoil_pause_budget();
+    test_legacy_y_recoil_release_bypasses_extended_cap();
+    test_far_y_discrete_feedback_settles();
     test_soft_zone();
     test_soft_zone_requires_target_window();
     test_soft_zone_leaves_current_window_without_latching();
