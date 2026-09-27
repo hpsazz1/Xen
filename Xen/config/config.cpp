@@ -611,6 +611,8 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"aim", "body_aim_height_ratio"},
         {"aim", "body_aim_range_percent"},
         {"aim", "deadzone_pixels"},
+        {"aim", "soft_zone_radius_percent"},
+        {"aim", "soft_zone_min_strength"},
         {"aim", "smoothing"},
         {"aim", "counts_per_pixel_x"},
         {"aim", "counts_per_pixel_y"},
@@ -1325,6 +1327,11 @@ bool load_app_config(const std::string& path,
         XEN_READ_AIM_FLOAT(body_aim_height_ratio);
         XEN_READ_AIM_FLOAT(body_aim_range_percent);
         XEN_READ_AIM_FLOAT(deadzone_pixels);
+        // 旧配置缺键时恢复兼容默认值，不继承上次加载的软化区设置。
+        candidate.aim.soft_zone_radius_percent = static_cast<float>(ini.GetDoubleValue(
+            "aim", "soft_zone_radius_percent", AimConfig{}.soft_zone_radius_percent));
+        candidate.aim.soft_zone_min_strength = static_cast<float>(ini.GetDoubleValue(
+            "aim", "soft_zone_min_strength", AimConfig{}.soft_zone_min_strength));
         XEN_READ_AIM_FLOAT(smoothing);
         XEN_READ_AIM_FLOAT(counts_per_pixel_x);
         XEN_READ_AIM_FLOAT(counts_per_pixel_y);
@@ -1545,6 +1552,8 @@ bool save_app_config(const std::string& path,
         XEN_WRITE_AIM_FLOAT(body_aim_height_ratio);
         XEN_WRITE_AIM_FLOAT(body_aim_range_percent);
         XEN_WRITE_AIM_FLOAT(deadzone_pixels);
+        XEN_WRITE_AIM_FLOAT(soft_zone_radius_percent);
+        XEN_WRITE_AIM_FLOAT(soft_zone_min_strength);
         XEN_WRITE_AIM_FLOAT(smoothing);
         XEN_WRITE_AIM_FLOAT(counts_per_pixel_x);
         XEN_WRITE_AIM_FLOAT(counts_per_pixel_y);

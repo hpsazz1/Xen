@@ -4276,8 +4276,23 @@ void test_dynamic_control_range_does_not_reduce_observation() {
            "目标越出控制范围时必须继续更新同一轨迹，只暂停鼠标命令");
     expect(fourth.has_target &&
                fourth.target.track_id == first.target.track_id &&
-               fourth.range_allows_control && fourth.has_command,
-           "同一目标回到动态范围后应直接恢复预计算命令，不能重新建轨迹");
+               fourth.range_allows_control && fourth.control.evaluated,
+           "同一目标回到动态范围后应保持轨迹并继续计算，过渡首帧允许零命令");
+    bool resumed_command_seen = false;
+    for (int index = 1; index <= 11; ++index) {
+        AimFrame continued = make_frame(
+            static_cast<std::uint64_t>(4 + index),
+            base + std::chrono::milliseconds(30 + index * 10));
+        continued.lock_active = true;
+        continued.detections = {body(220.0f, 160.0f)};
+        const AimResult result = aim.process(continued);
+        expect(result.has_target && result.target.track_id == first.target.track_id &&
+                   result.range_allows_control && result.control.evaluated,
+               "范围恢复后的接管过渡必须保持同轨迹和有效控制");
+        resumed_command_seen = resumed_command_seen || result.has_command;
+    }
+    expect(resumed_command_seen,
+           "范围恢复后必须在有效接管过渡内重新发出命令，不能永久停发");
 }
 
 constexpr std::array<double, 3> kPredictionTimingCadences{
@@ -5336,7 +5351,7 @@ void test_no_delay_prediction_precomputes_while_unlocked() {
     constexpr double kSecondRampStartSeconds = 0.72;
     constexpr double kSecondRampEndSeconds = 0.77;
     constexpr double kRelockSeconds = 0.90;
-    constexpr double kTraceEndSeconds = 0.98;
+    constexpr double kTraceEndSeconds = 1.02;
 
     const auto error_at = [](double elapsed_seconds) {
         float error_pixels = prediction_timing_first_lifecycle_error(
@@ -5362,6 +5377,7 @@ void test_no_delay_prediction_precomputes_while_unlocked() {
             bool unlocked_control_seen = false;
             bool unlocked_command_seen = false;
             bool relock_seen = false;
+            bool relock_command_seen = false;
             bool relock_continuous = false;
             bool relock_basic_continuous = false;
             std::uint64_t public_track_id = 0;
@@ -5407,21 +5423,29 @@ void test_no_delay_prediction_precomputes_while_unlocked() {
                 if (lock_active &&
                     elapsed_seconds >= kRelockSeconds && !relock_seen) {
                     relock_seen = true;
-                    relock_basic_continuous = result.target.track_id == public_track_id && result.control.evaluated && result.has_command;
+                    relock_basic_continuous = result.target.track_id == public_track_id &&
+                        result.has_target && result.control.evaluated;
                     relock_continuous =
                         result.target.track_id == public_track_id &&
-                        axis_active && result.control.evaluated &&
-                        result.has_command;
+                        axis_active && result.control.evaluated;
+                }
+                if (lock_active && elapsed_seconds > kRelockSeconds) {
+                    expect(result.has_target && result.target.track_id == public_track_id &&
+                               result.control.evaluated,
+                           context + " 重锁过渡必须继续同轨迹和控制计算");
+                    relock_command_seen = relock_command_seen || result.has_command;
                 }
             });
 
+            expect(relock_command_seen,
+                   context + " 重锁有效过渡后必须恢复非零命令，不能永久停发");
             expect(unlocked_candidate_event_seen && unlocked_control_seen && unlocked_command_seen && relock_seen && relock_basic_continuous, "无Y提前仍保留松键处理及重锁同身份控制请求");
             expect_y_timing_history(vertical, first_active_seen && release_seen_while_unlocked &&
                        unlocked_candidate_event_seen && unlocked_lead_seen &&
                        unlocked_control_seen && unlocked_command_seen &&
                        relock_seen && relock_continuous,
                    context +
-                       " 解锁期间必须继续同一Track的centered/candidate/lead/control/command预计算，重锁首帧直接延续，first/release/event/lead/control/cmd/relock=" +
+                       " 解锁期间必须继续同一Track的centered/candidate/lead/control/command预计算，重锁首帧延续轨迹与计算并允许零命令，first/release/event/lead/control/cmd/relock=" +
                        std::to_string(first_active_seen) + "/" +
                        std::to_string(release_seen_while_unlocked) + "/" +
                        std::to_string(unlocked_candidate_event_seen) + "/" +
@@ -15405,6 +15429,7 @@ void test_short_glide_preserves_base_tracking_hold() {
     float world_target_x = 32.0f;
     float camera_x = 0.0f;
     int first_recovery_command = -1;
+    std::uint64_t held_track_id = 0;
 
     for (int index = 0; index < 220; ++index) {
         world_target_x += kTargetVelocity * kFrameSeconds;
@@ -15420,6 +15445,13 @@ void test_short_glide_preserves_base_tracking_hold() {
                 body(160.0f + world_target_x - camera_x, 160.0f)};
         }
         const AimResult result = aim.process(frame);
+        if (index == 149) held_track_id = result.target.track_id;
+        if (index >= 152) {
+            expect(result.has_target && result.target.track_id == held_track_id,
+                   "松键滑行后仍须保持同一轨迹，不能以重新建轨逃过恢复合同");
+            if (index == 152) expect(!result.has_command,
+                   "松键后重新接管以零额度开始，运动维持不得绕过过渡");
+        }
         if (index == 150 || index == 151) {
             expect(result.has_target && result.target.predicted &&
                        !result.has_command,
@@ -15434,8 +15466,8 @@ void test_short_glide_preserves_base_tracking_hold() {
         }
     }
 
-    expect(first_recovery_command >= 152 && first_recovery_command <= 153,
-           "同一轨迹短时丢框恢复后必须连续接回基础保持量，首次恢复命令帧=" +
+    expect(first_recovery_command > 152 && first_recovery_command <= 156,
+           "同轨迹重新按键应在首20ms有效过渡内开始恢复输出，首次恢复命令帧=" +
                std::to_string(first_recovery_command));
     expect(std::fabs(world_target_x - camera_x) <= 3.0f,
            "短时滑行恢复后不得因重建基础保持量留下持续滞后，误差=" +

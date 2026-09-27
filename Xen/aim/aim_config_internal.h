@@ -35,6 +35,10 @@ inline bool valid_aim_config(const AimConfig& config) noexcept {
            config.body_aim_range_percent <= 100.0f &&
            std::isfinite(config.deadzone_pixels) &&
            config.deadzone_pixels >= 0.0f &&
+           std::isfinite(config.soft_zone_radius_percent) &&
+           config.soft_zone_radius_percent >= 0.0f && config.soft_zone_radius_percent <= 100.0f &&
+           std::isfinite(config.soft_zone_min_strength) &&
+           config.soft_zone_min_strength >= 0.0f && config.soft_zone_min_strength <= 1.0f &&
            std::isfinite(config.smoothing) &&
            config.smoothing >= 0.0f && config.smoothing <= 1.0f &&
            std::isfinite(config.counts_per_pixel_x) &&

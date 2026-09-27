@@ -1262,6 +1262,8 @@ struct Aim::Impl {
     std::uint64_t held_control_track_id = 0;
     std::uint64_t held_control_epoch = 0;
     float target_transition_seconds = kTargetTransitionSeconds;
+    bool activation_frame_seen = false;
+    bool previous_frame_locked = false;
     bool target_transition_gap = false;
     std::chrono::steady_clock::time_point target_transition_at{};
     bool shaper_initialized = false;
@@ -5416,10 +5418,46 @@ struct Aim::Impl {
         shaped_x = motion_compensated_x -
             error_direction_x * derivative_damping_x;
         shaped_y = motion_compensated_y;
+        const float before_transition_x = shaped_x;
+        const float before_transition_y = shaped_y;
+        // PI之后补入的运动维持也必须遵守接管预算，不能首帧绕过零起点。
+        if (target_transition_active) {
+            clamp_tracking_vector_preserving_y(shaped_x, shaped_y,
+                config.max_counts_per_frame * target_transition_weight);
+        }
+        const float transition_accept_x = before_transition_x != 0.0f
+            ? shaped_x / before_transition_x : 1.0f;
+        // 在最终浮点预算上弱化全部Aim分量，避免维护量绕过软区。
+        // 按ROI几何分轴计算，不让另一轴误差抬高本轴强度；不改已发库存。
+        const float zone_radius = std::min(frame.roi_width, frame.roi_height) *
+            0.5f * config.soft_zone_radius_percent / 100.0f;
+        const auto zone_strength = [&](float roi_error) {
+            if (zone_radius <= 0.0f || config.soft_zone_min_strength == 1.0f) return 1.0f;
+            const float t = std::clamp(std::fabs(roi_error) / zone_radius, 0.0f, 1.0f);
+            return config.soft_zone_min_strength +
+                (1.0f - config.soft_zone_min_strength) * t * t * (3.0f - 2.0f * t);
+        };
+        const float soft_x = zone_strength(feedback_target_x - frame.control_center_x);
+        const float soft_y = zone_strength(feedback_target_y - frame.control_center_y);
+        shaped_x *= soft_x;
+        shaped_y *= soft_y;
+        const float accepted_soft_maintenance = accepted_maintenance_after_cap_x *
+            transition_accept_x * soft_x;
+        if (!residual_role && shaped_x != before_transition_x) {
+            feedforward_x = std::clamp(feedforward_x +
+                (shaped_x - before_transition_x) * anti_windup_alpha,
+                -config.max_counts_per_frame, config.max_counts_per_frame);
+        }
+        if (shaped_y != before_transition_y) {
+            feedforward_y = std::clamp(feedforward_y +
+                (shaped_y - before_transition_y) * anti_windup_alpha,
+                -kTrackingVerticalIntegralMaximumCounts, kTrackingVerticalIntegralMaximumCounts);
+        }
+        diagnostics.modelled_response_x_counts = accepted_soft_maintenance;
         const double floating_position_after = static_cast<double>(floating_position_before_cap) *
             (allocation_total_before_cap != 0.0f ? motion_compensated_x / allocation_total_before_cap : 1.0f) - error_direction_x * derivative_damping_x;
         if (residual_role) {
-            const float accepted_m = accepted_maintenance_after_cap_x;
+            const float accepted_m = accepted_soft_maintenance;
             const float accepted_pi = shaped_x - accepted_m;
             model_residual_x.counts = static_cast<float>(std::clamp(
                 static_cast<double>(model_residual_x.counts) +
@@ -5434,7 +5472,7 @@ struct Aim::Impl {
         }
 
         model_residual_x.float_position_counts = representable_float(floating_position_after)
-            ? static_cast<float>(floating_position_after) : 0.0f;
+            ? static_cast<float>(floating_position_after) * transition_accept_x * soft_x : 0.0f;
         model_residual_x.previous_source_p = proportional_x;
         shaper_initialized = true;
         if (y_filter_update == FilterUpdate::Reset) {
@@ -5707,6 +5745,8 @@ struct Aim::Impl {
     }
 
     void reset_all() noexcept {
+        activation_frame_seen = false;
+        previous_frame_locked = false;
         held_control_track_id = 0;
         held_control_epoch = 0;
         target_transition_seconds = kTargetTransitionSeconds;
@@ -5903,11 +5943,22 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
 
     const auto started = clock::now();
     try {
+        const bool same_activation_epoch = impl_->held_control_epoch == frame.observation_epoch;
+        const bool activation_edge = same_activation_epoch && impl_->activation_frame_seen &&
+            !impl_->previous_frame_locked && frame.lock_active;
         if (!frame.lock_active || impl_->held_control_epoch != frame.observation_epoch) {
             impl_->held_control_track_id = 0;
             impl_->target_transition_seconds = kTargetTransitionSeconds;
             impl_->target_transition_gap = false;
         }
+        if (activation_edge) {
+            // 激活边沿独立于目标确认与controller重置：空拍不把重新接管变成冷启动。
+            impl_->target_transition_seconds = 0.0f;
+            impl_->target_transition_at = control_at;
+            impl_->target_transition_gap = true;
+        }
+        impl_->activation_frame_seen = true;
+        impl_->previous_frame_locked = frame.lock_active;
         impl_->held_control_epoch = frame.observation_epoch;
         const auto observations = impl_->build_observations(frame);
         const auto observed = clock::now();

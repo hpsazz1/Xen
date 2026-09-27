@@ -3269,7 +3269,7 @@ struct Overlay::Impl {
     }
 
     void render_basic_aim_form(AppConfig& app_config) {
-        begin_config_panel("basic_aim_panel", "基础瞄准", 344.0f);
+        begin_config_panel("basic_aim_panel", "基础瞄准", 408.0f);
         if (begin_form("basic_aim_form", 170.0f)) {
             form_row(
                 "目标置信度",
@@ -3327,6 +3327,18 @@ struct Overlay::Impl {
             slider_float_control(
                 "deadzone_pixels", &app_config.aim.deadzone_pixels,
                 0.0f, 50.0f, "%.2f");
+            form_row(
+                "软化区范围 / %",
+                "以控制中心为圆心，半径按 ROI 短边一半的百分比计算，范围 0～100%；0 关闭。区内只减弱 Aim，向边缘连续恢复原强度，不产生随机晃动。停止 Runtime 后修改。");
+            slider_float_control(
+                "soft_zone_radius_percent", &app_config.aim.soft_zone_radius_percent,
+                0.0f, 100.0f, "%.1f%%");
+            form_row(
+                "中心保留强度",
+                "软化区中心保留的 Aim 强度比例，范围 0～1；越小减弱越多，1 不减弱。向软化区边缘连续恢复原强度，只作用于 Aim，不添加随机晃动。范围为 0 时不生效，停止 Runtime 后修改。");
+            slider_float_control(
+                "soft_zone_min_strength", &app_config.aim.soft_zone_min_strength,
+                0.0f, 1.0f, "%.2f");
             form_row(
                 "最大步长",
                 "限制每帧二维相对移动总 counts。基础追踪点始终在当前模型框内；启用预测时可移动到框外提前点，但历史动量不得背离当前控制点或越过它。");

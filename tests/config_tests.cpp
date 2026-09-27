@@ -1186,6 +1186,70 @@ void test_d3d11_directml_interop_config() {
            "CUDA 与 DirectML 互操作开关不得同时启用");
 }
 
+void test_aim_soft_zone_config() {
+    const auto directory = make_temp_test_directory("aim_soft_zone");
+    if (directory.empty()) { expect(false, "软化区配置隔离目录"); return; }
+    const auto path = directory / "config.ini";
+    AppConfig loaded;
+    std::string error;
+    expect(loaded.aim.soft_zone_radius_percent == 0.0f &&
+               loaded.aim.soft_zone_min_strength == 0.2f,
+           "软化区默认关闭且中心保留强度为 0.2");
+    loaded.aim.soft_zone_radius_percent = 40.0f;
+    loaded.aim.soft_zone_min_strength = 0.6f;
+    expect(write_file_bytes(path, "[aim]\nsmoothing=0.625\n") &&
+               load_app_config(path.string(), loaded, error) &&
+               loaded.aim.soft_zone_radius_percent == 0.0f &&
+               loaded.aim.soft_zone_min_strength == 0.2f &&
+               loaded.aim.smoothing == 0.625f,
+           "旧配置缺键恢复软化区默认值，不沿用先前值或修改其他参数: " + error);
+    loaded.aim.soft_zone_min_strength = 0.6f;
+    expect(write_file_bytes(path, "[aim]\nsoft_zone_radius_percent=35\n") &&
+               load_app_config(path.string(), loaded, error) &&
+               loaded.aim.soft_zone_radius_percent == 35.0f &&
+               loaded.aim.soft_zone_min_strength == 0.2f,
+           "只有范围键时中心强度恢复默认值");
+    expect(write_file_bytes(path, "[aim]\nsoft_zone_min_strength=0.5\n") &&
+               load_app_config(path.string(), loaded, error) &&
+               loaded.aim.soft_zone_radius_percent == 0.0f &&
+               loaded.aim.soft_zone_min_strength == 0.5f,
+           "只有强度键时范围恢复关闭值");
+    for (const float radius : {0.0f, 25.0f, 100.0f}) {
+        for (const float strength : {0.0f, 0.375f, 1.0f}) {
+            loaded.aim.soft_zone_radius_percent = radius;
+            loaded.aim.soft_zone_min_strength = strength;
+            expect(save_app_config(path.string(), loaded, error),
+                   "软化区合法边界允许保存: " + error);
+            AppConfig restored;
+            expect(load_app_config(path.string(), restored, error) &&
+                       restored.aim.soft_zone_radius_percent == radius &&
+                       restored.aim.soft_zone_min_strength == strength,
+                   "软化区参数保存往返，包括关闭时的强度: " + error);
+        }
+    }
+    for (const auto* key : {"soft_zone_radius_percent", "soft_zone_min_strength"}) {
+        for (const auto* value : {"nan", "inf", "typo", "1junk", "-0.01", "100.1"}) {
+            const auto original = loaded.aim;
+            expect(write_file_bytes(path, std::string("[aim]\n") + key + "=" + value + "\n") &&
+                       !load_app_config(path.string(), loaded, error),
+                   std::string("软化区严格拒绝非法值: ") + key + "=" + value);
+            expect(loaded.aim.soft_zone_radius_percent == original.soft_zone_radius_percent &&
+                       loaded.aim.soft_zone_min_strength == original.soft_zone_min_strength,
+                   "加载失败不得部分覆盖原有软化区配置");
+        }
+    }
+    expect(write_file_bytes(path, "[aim]\nsoft_zone_min_strength=1.01\n") &&
+               !load_app_config(path.string(), loaded, error),
+           "中心保留强度不能超过 1");
+    loaded.aim.soft_zone_radius_percent = 100.01f;
+    expect(!save_app_config(path.string(), loaded, error), "保存拒绝超过上界的软化区范围");
+    loaded.aim.soft_zone_radius_percent = 0.0f;
+    loaded.aim.soft_zone_min_strength = std::numeric_limits<float>::quiet_NaN();
+    expect(!save_app_config(path.string(), loaded, error), "关闭软化区也不能保存非法中心强度");
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+}
+
 void test_feature_combinations_round_trip() {
     const auto path = std::filesystem::temp_directory_path() /
                       "xen_feature_combinations.ini";
@@ -1456,6 +1520,7 @@ int main() {
     test_load_or_create_default_config();
     test_round_trip();
     test_feature_combinations_round_trip();
+    test_aim_soft_zone_config();
     test_removed_observe_only_control_config();
     test_log_defaults_and_invalid_level();
     test_log_output_levels_round_trip();

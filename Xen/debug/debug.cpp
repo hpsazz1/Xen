@@ -552,6 +552,8 @@ std::string aim_config_json(const AimConfig& config) {
     field("body_aim_height_ratio", config.body_aim_height_ratio);
     field("body_aim_range_percent", config.body_aim_range_percent);
     field("deadzone_pixels", config.deadzone_pixels);
+    field("soft_zone_radius_percent", config.soft_zone_radius_percent);
+    field("soft_zone_min_strength", config.soft_zone_min_strength);
     field("smoothing", config.smoothing);
     field("counts_per_pixel_x", config.counts_per_pixel_x);
     field("counts_per_pixel_y", config.counts_per_pixel_y);
