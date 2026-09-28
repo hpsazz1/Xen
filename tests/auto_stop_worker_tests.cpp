@@ -1314,8 +1314,75 @@ void hud_reference_output_contracts() {
     }
 }
 
+void mixed_request_owner_contracts() {
+    AutoStopConfig config{true, 5};
+    config.use_counterpulse_timing = false;
+    for (const bool explicit_first : {true, false}) {
+        auto fake = std::make_shared<Fake>();
+        std::atomic<std::uint64_t> watermark{0}, allocations{0}, focus_reads{0};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [&] { ++allocations; return ++watermark; },
+            [&] { ++focus_reads; return true; });
+        require(worker.start(config), "混合请求归属测试启动");
+        ready(worker, fake);
+        std::uint64_t accepted_id = 0, rejected_id = 0;
+        if (explicit_first) {
+            accepted_id = ++watermark;
+            require(worker.request(accepted_id), "显式先到必须占有唯一请求槽");
+            wait_for([&] { return worker.snapshot().status == AutoStopStatus::ESTIMATED; });
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(1));
+            wait_for([&] { return worker.snapshot().target_available; });
+            require(allocations.load() == 0, "显式请求在途时独立目标不能分配第二个请求");
+            rejected_id = ++watermark;
+            require(!worker.request(rejected_id), "占用期间第二个显式请求必须拒绝");
+        } else {
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(1));
+            wait_for([&] { return worker.snapshot().status == AutoStopStatus::ESTIMATED; });
+            accepted_id = worker.snapshot().request_id;
+            rejected_id = ++watermark;
+            require(allocations.load() == 1 && !worker.request(rejected_id),
+                "独立先到只分配一次，后到显式请求必须拒绝");
+        }
+        require(worker.snapshot().requests == 1 && worker.snapshot().request_id == accepted_id,
+            "混合调用方只能有一个已接收请求且归属不变");
+        worker.cancel(rejected_id);
+        const auto next_focus_reads = focus_reads.load() + 2;
+        wait_for([&] { return focus_reads.load() >= next_focus_reads; });
+        require(worker.snapshot().canceled == 0 && worker.snapshot().request_id == accepted_id,
+            "未取得请求槽的调用方取消不得清理已接收owner");
+        worker.cancel(accepted_id);
+        // 等worker处理取消并重新检查准入，不能只命中清理与错误重入之间的瞬时窗口。
+        const auto after_cancel_reads = focus_reads.load() + 16;
+        wait_for([&] { return focus_reads.load() >= after_cancel_reads; });
+        try {
+            wait_for([&] { return fake->released() && worker.snapshot().canceled == 1; });
+        } catch (...) {
+            const auto state = worker.snapshot();
+            std::cerr << "混合归属失败：explicit_first=" << explicit_first
+                << " accepted=" << accepted_id << " rejected=" << rejected_id
+                << " requests=" << state.requests << " canceled=" << state.canceled
+                << " allocations=" << allocations.load() << " recovery=" << state.recovery_pending
+                << " target=" << state.target_available << " released=" << fake->released()
+                << " status=" << AutoStopStatusName(state.status)
+                << " block=" << AutoStopBlockReasonName(state.block_reason) << '\n';
+            throw;
+        }
+        require(worker.snapshot().requests == 1, "正确owner取消只能清理原请求，不生成替代请求");
+        if (explicit_first) {
+            publish_present_target(worker, Clock::now() + std::chrono::seconds(1));
+            wait_for([&] { return worker.snapshot().requests == 2 && !fake->released(); });
+            require(worker.snapshot().request_id > rejected_id && !worker.snapshot().recovery_pending,
+                "旧owner取消后新发布目标可重新准入，不要求人工松键");
+        }
+        worker.stop();
+    }
+}
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--mixed-owner") {
+            mixed_request_owner_contracts();
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--automatic-recovery") {
             automatic_recovery_contracts(false);
             automatic_recovery_contracts(true);
@@ -1883,44 +1950,7 @@ int main(int argc, char** argv) {
             require(!worker.snapshot().fire_permitted, "独立急停不得授予开火资格");
             worker.stop();
         }
-        for (const bool explicit_first : {true, false}) {
-            auto fake = std::make_shared<Fake>();
-            std::atomic<std::uint64_t> watermark{0}, allocations{0}, focus_reads{0};
-            AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
-                [&] { ++allocations; return ++watermark; },
-                [&] { ++focus_reads; return true; });
-            require(worker.start(config), "混合请求归属测试启动");
-            ready(worker, fake);
-            std::uint64_t accepted_id = 0, rejected_id = 0;
-            if (explicit_first) {
-                accepted_id = ++watermark;
-                require(worker.request(accepted_id), "显式先到必须占有唯一请求槽");
-                wait_for([&] { return worker.snapshot().status == AutoStopStatus::ESTIMATED; });
-                publish_present_target(worker, Clock::now() + std::chrono::seconds(1));
-                wait_for([&] { return worker.snapshot().target_available; });
-                require(allocations.load() == 0, "显式请求在途时独立目标不能分配第二个请求");
-                rejected_id = ++watermark;
-                require(!worker.request(rejected_id), "占用期间第二个显式请求必须拒绝");
-            } else {
-                publish_present_target(worker, Clock::now() + std::chrono::seconds(1));
-                wait_for([&] { return worker.snapshot().status == AutoStopStatus::ESTIMATED; });
-                accepted_id = worker.snapshot().request_id;
-                rejected_id = ++watermark;
-                require(allocations.load() == 1 && !worker.request(rejected_id),
-                    "独立先到只分配一次，后到显式请求必须拒绝");
-            }
-            require(worker.snapshot().requests == 1 && worker.snapshot().request_id == accepted_id,
-                "混合调用方只能有一个已接收请求且归属不变");
-            worker.cancel(rejected_id);
-            const auto next_focus_reads = focus_reads.load() + 2;
-            wait_for([&] { return focus_reads.load() >= next_focus_reads; });
-            require(worker.snapshot().canceled == 0 && worker.snapshot().request_id == accepted_id,
-                "未取得请求槽的调用方取消不得清理已接收owner");
-            worker.cancel(accepted_id);
-            wait_for([&] { return fake->released() && worker.snapshot().canceled == 1; });
-            require(worker.snapshot().requests == 1, "正确owner取消只能清理原请求，不生成替代请求");
-            worker.stop();
-        }
+        mixed_request_owner_contracts();
         for (int reason = 0; reason < 6; ++reason) {
             auto fake = std::make_shared<Fake>();
             std::atomic<std::uint64_t> id{0};

@@ -1273,8 +1273,14 @@ void AutoStopWorker::cancel(std::uint64_t request_id) noexcept {
         // 武器或目标已撤销该请求时，Trigger的对应UP清理不再升级成独立信任中断。
         if ((impl_->normal_weapon_generation != impl_->cancel_generation.load() &&
              impl_->normal_target_generation != impl_->cancel_generation.load()) ||
-            impl_->submitted_generation == impl_->cancel_generation.load())
+            impl_->submitted_generation == impl_->cancel_generation.load()) {
             impl_->cancel_generation.fetch_add(1, std::memory_order_acq_rel);
+            // owner撤销连同旧准入快照失效；保留物理输入历史不能让旧目标立即重入。
+            // 后续新帧仍可重新发布目标，已撤销的普通武器/目标过渡保持原恢复分支。
+            impl_->estimated_id = 0;
+            impl_->target_until = {}; impl_->tracking_target_until = {};
+            impl_->state.target_available = false;
+        }
         impl_->wake.notify_all();
     } catch (...) {}
 }
