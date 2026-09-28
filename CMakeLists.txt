@@ -1095,6 +1095,9 @@ add_custom_target(model_workspace_tools
         "${XEN_MODEL_TOOLS_OUTPUT}/tools/source"
         "${XEN_MODEL_TOOLS_OUTPUT}/assets/recoil"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${PROJECT_SOURCE_DIR}/assets/weapon_catalog.inc"
+        "${XEN_MODEL_TOOLS_OUTPUT}/assets"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${PROJECT_SOURCE_DIR}/scripts/start_source_context_session.ps1"
         "${XEN_MODEL_TOOLS_OUTPUT}/tools/source"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -2246,7 +2249,9 @@ if(BUILD_TESTING)
         "${PROJECT_SOURCE_DIR}/tests/release_bundle_tests.ps1"
         -PublishScript "${PROJECT_SOURCE_DIR}/scripts/publish_release_bundle.ps1"
         -GitExecutable "${GIT_EXECUTABLE}"
-        -TestRoot "${CMAKE_BINARY_DIR}/release-bundle-tests")
+        -TestRoot "${CMAKE_BINARY_DIR}/release-bundle-tests"
+        -ActualReleaseDirectory "${XEN_MODEL_TOOLS_OUTPUT}"
+        -ActualRepositoryRoot "${PROJECT_SOURCE_DIR}")
     xen_add_windows_powershell_test(publish_worker_update_tests
         "${PROJECT_SOURCE_DIR}/scripts/test_publish_worker_update.ps1"
         -GitExecutable "${GIT_EXECUTABLE}"

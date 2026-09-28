@@ -4,7 +4,9 @@
     [Parameter(Mandatory = $true)]
     [string]$GitExecutable,
     [Parameter(Mandatory = $true)]
-    [string]$TestRoot
+    [string]$TestRoot,
+    [string]$ActualReleaseDirectory = "",
+    [string]$ActualRepositoryRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -102,6 +104,46 @@ function New-FakeBuild(
     }
 }
 
+# 直接读取生产发布器的常量表；不执行发布器，也不再维护第二份载荷清单。
+$parseTokens = $null; $parseErrors = $null
+$publisherAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    (Resolve-Path -LiteralPath $PublishScript).Path, [ref]$parseTokens, [ref]$parseErrors)
+$payloadAssignments = @($publisherAst.FindAll({ param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $node.Left.Extent.Text -eq '$repositoryPayload'
+}, $true))
+if ($parseErrors.Count -ne 0 -or $payloadAssignments.Count -ne 1) {
+    throw "发布器 repositoryPayload 必须是唯一可解析常量表"
+}
+$payloadTable = $payloadAssignments[0].Right.Find({ param($node)
+    $node -is [System.Management.Automation.Language.HashtableAst]
+}, $true)
+if ($null -eq $payloadTable) { throw "发布器缺少 repositoryPayload 常量表" }
+$fixturePayload = $payloadTable.SafeGetValue()
+if ($fixturePayload.Count -eq 0) { throw "发布器载荷清单为空" }
+if ([bool]$ActualReleaseDirectory -ne [bool]$ActualRepositoryRoot) {
+    throw "实际部署校验必须同时提供构建输出目录和源码根目录"
+}
+if ($ActualReleaseDirectory) {
+    foreach ($entry in $fixturePayload.GetEnumerator()) {
+        $source = Join-Path $ActualRepositoryRoot $entry.Value
+        $deployed = Join-Path $ActualReleaseDirectory $entry.Key
+        foreach ($path in @($source, $deployed)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                throw "实际构建载荷缺失：$path"
+            }
+            $item = Get-Item -LiteralPath $path -Force
+            if ($item.Length -eq 0 -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw "实际构建载荷必须为普通非空文件：$path"
+            }
+        }
+        if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ne
+            (Get-FileHash -LiteralPath $deployed -Algorithm SHA256).Hash) {
+            throw "实际构建载荷与源码SHA不一致：$($entry.Key)"
+        }
+    }
+    Write-Host "实际构建载荷全表与源码SHA一致：$($fixturePayload.Count)项。"
+}
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $ownedTest = New-XenOwnedTestDirectory -BasePath $TestRoot `
     -RepositoryRoot $repositoryRoot
@@ -111,18 +153,6 @@ try {
     $repository = Join-Path $root "repo"
     New-Item -ItemType Directory -Path $repository | Out-Null
     Write-Utf8 (Join-Path $repository "tracked.txt") "fixture"
-    $fixturePayload = [ordered]@{
-        "tools/source/start_source_context_session.ps1" = "scripts/start_source_context_session.ps1"
-        "tools/model-data/model_data_pipeline.py" = "scripts/model_data_pipeline.py"
-        "tools/model-data/model_data_review.html" = "scripts/model_data_review.html"
-        "tools/model-data/model_training_environment.py" = "scripts/model_training_environment.py"
-        "tools/model-data/model_training_requirements.txt" = "scripts/model_training_requirements.txt"
-        "tools/recoil/import_recoil_profiles.py" = "scripts/import_recoil_profiles.py"
-        "tools/recoil/build_recoil_dataset.py" = "scripts/build_recoil_dataset.py"
-        "assets/weapon_catalog.inc" = "assets/weapon_catalog.inc"
-        "assets/recoil/legacy_manifest.json" = "assets/recoil/legacy_manifest.json"
-        "assets/recoil/README.md" = "assets/recoil/README.md"
-    }
     foreach ($relativePath in $fixturePayload.Values) {
         $destination = Join-Path $repository $relativePath
         New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
