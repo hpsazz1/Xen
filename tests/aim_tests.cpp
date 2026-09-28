@@ -35,6 +35,8 @@
 #include <utility>
 #include <vector>
 
+int run_aim_feedback_budget_tests();
+
 namespace {
 
 int failures = 0;
@@ -6593,9 +6595,56 @@ void test_current_deadzone_crossing_preserves_x_maintenance_state() {
             reverse_request_sum += std::max(0, result.command.dx_counts);
         }
     }
-    expect(reverse_request_sum <= 30,
-           "当前减速后继不得增加原有反侧纠正请求总量，实际=" +
-               std::to_string(reverse_request_sum));
+    // 原30-count界来自旧控制器的固定画面回放，不是当前反馈质量上界。
+    // 状态敏感性由下方同库存配对检查；过付质量由独立world/plant闭环检查。
+    // 在452单帧死区扰动前共享全部状态；之后两支都零应用，隔离自身库存。
+    // 这直接检查状态寿命引起的额外反侧请求，不把旧画面当新命令的物理反馈。
+    const auto slowing_pair_a = replay(kSlowing, false, false, true, 452);
+    const auto slowing_pair_b = replay(kSlowing, true, false, true, 452);
+    int slowing_pair_difference = 0;
+    int slowing_pair_requests = 0;
+    for (std::size_t index = 0; index < kSlowing.size(); ++index) {
+        const auto pixel = kSlowing[index].pixel;
+        const auto& a = slowing_pair_a[index];
+        const auto& b = slowing_pair_b[index];
+        if (pixel == 451) {
+            expect(a.command.dx_counts != 0 &&
+                       a.command.dx_counts == b.command.dx_counts &&
+                       a.control.feedforward_x_counts != 0.0f &&
+                       a.control.feedforward_x_counts == b.control.feedforward_x_counts &&
+                       a.control.execution_unseen_command_x_counts != 0.0 &&
+                       a.control.execution_unseen_command_x_counts == b.control.execution_unseen_command_x_counts,
+                   "452减速配对必须从非空命令、R和库存的共同前缀分叉");
+        }
+        if (pixel < 452) continue;
+        expect(a.control.execution_unseen_command_x_counts == b.control.execution_unseen_command_x_counts &&
+                   a.control.pending_net_x_counts == b.control.pending_net_x_counts &&
+                   a.control.pending_absolute_x_counts == b.control.pending_absolute_x_counts,
+               "452分叉后两支零应用须保持相同执行库存和完成库存");
+        if (pixel == 452) {
+            const float error_a = a.target.base_aim_x - 160.0f;
+            const float error_b = b.target.base_aim_x - 160.0f;
+            expect(std::fabs(error_a) < 1.5f && std::fabs(error_b) < 1.5f &&
+                       error_a * error_b < 0.0f &&
+                       a.control.feedforward_x_counts != 0.0f &&
+                       b.control.feedforward_x_counts != 0.0f,
+                   "452只在死区内改变误差符号，不能清空两支原有R");
+            continue;
+        }
+        const int difference = std::abs(a.command.dx_counts - b.command.dx_counts);
+        slowing_pair_difference += difference;
+        slowing_pair_requests += std::abs(a.command.dx_counts) + std::abs(b.command.dx_counts);
+        expect(difference <= 1 &&
+                   a.command.dx_counts * (a.target.base_aim_x - 160.0f) >= 0.0f &&
+                   b.command.dx_counts * (b.target.base_aim_x - 160.0f) >= 0.0f &&
+                   a.command.dy_counts == b.command.dy_counts &&
+                   std::hypot(static_cast<float>(a.command.dx_counts), static_cast<float>(a.command.dy_counts)) <= 14.0f &&
+                   std::hypot(static_cast<float>(b.command.dx_counts), static_cast<float>(b.command.dy_counts)) <= 14.0f,
+               "452死区扰动不得增加后继反侧请求且须保持方向、Y和二维上限");
+    }
+    expect(slowing_pair_requests > 0 && slowing_pair_difference <= 1,
+           "452非空后继累计绝对请求差不得超过一计数，实际=" +
+               std::to_string(slowing_pair_difference));
     const auto rebound = replay(kRebound, false);
     const auto rebound_geometry = replay(kRebound, false, true);
     int request_before_rebound = 0;
@@ -6610,29 +6659,59 @@ void test_current_deadzone_crossing_preserves_x_maintenance_state() {
         expect(result.command.dx_counts * (result.target.base_aim_x - 160.0f) >= 0.0f,
                "2257 短暂回到原侧及随后的真实换侧不得放出旧X方向命令");
         if (sample.pixel == 2257) {
-            expect(std::abs(result.command.dx_counts) <= request_before_rebound,
-                   "2257 不得借死区保留状态释放整份 observer 维持预算，当前/前缀=" +
-                       std::to_string(result.command.dx_counts) + "/" +
-                       std::to_string(request_before_rebound));
+            // 两帧的观测间隔、位置和库存均不同，前帧整数不是同状态预算。
+            // 保留历史差异供追溯，不用它替代下方配对及独立闭环质量门。
+            std::cout << "[历史预算] 2257请求/2255幅度="
+                      << result.command.dx_counts << '/' << request_before_rebound << '\n';
         }
     }
     // 同一2256前缀，只在死区内改一次X，分叉后均零应用，独立观察
-    // 2257请求是否来自换侧清理。该探针不豁免上面的原幅度合同。
+    // 2257请求是否来自换侧清理；闭环质量由独立world/plant门并列检查。
     const auto rebound_pair_a = replay(kRebound, false, false, true, 2256);
     const auto rebound_pair_b = replay(kRebound, true, false, true, 2256);
+    int rebound_pair_difference = 0;
+    int rebound_pair_requests = 0;
     for (std::size_t index = 0; index < kRebound.size(); ++index) {
-        if (kRebound[index].pixel < 2256) continue;
         const auto& a = rebound_pair_a[index];
         const auto& b = rebound_pair_b[index];
-        expect(a.control.execution_unseen_command_x_counts == b.control.execution_unseen_command_x_counts,
+        if (kRebound[index].pixel == 2255) {
+            expect(a.command.dx_counts != 0 &&
+                       a.command.dx_counts == b.command.dx_counts &&
+                       a.control.feedforward_x_counts != 0.0f &&
+                       a.control.feedforward_x_counts == b.control.feedforward_x_counts &&
+                       a.control.execution_unseen_command_x_counts != 0.0 &&
+                       a.control.execution_unseen_command_x_counts == b.control.execution_unseen_command_x_counts,
+                   "2256配对必须从非空命令、R和库存的共同前缀分叉");
+        }
+        if (kRebound[index].pixel < 2256) continue;
+        expect(a.control.execution_unseen_command_x_counts == b.control.execution_unseen_command_x_counts &&
+                   a.control.pending_net_x_counts == b.control.pending_net_x_counts &&
+                   a.control.pending_absolute_x_counts == b.control.pending_absolute_x_counts,
                "2256配对必须保持同历史、分叉后同零应用库存");
+        if (kRebound[index].pixel == 2256) {
+            const float error_a = a.target.base_aim_x - 160.0f;
+            const float error_b = b.target.base_aim_x - 160.0f;
+            expect(std::fabs(error_a) < 1.5f && std::fabs(error_b) < 1.5f &&
+                       error_a * error_b < 0.0f &&
+                       a.control.feedforward_x_counts != 0.0f &&
+                       b.control.feedforward_x_counts != 0.0f,
+                   "2256只在死区内改变误差符号，不能清空两支原有R");
+        }
         if (kRebound[index].pixel >= 2257) {
+            rebound_pair_difference += std::abs(a.command.dx_counts - b.command.dx_counts);
+            rebound_pair_requests += std::abs(a.command.dx_counts) + std::abs(b.command.dx_counts);
             expect(std::abs(a.command.dx_counts - b.command.dx_counts) <= 1 &&
                        a.command.dx_counts * (a.target.base_aim_x - 160.0f) >= 0.0f &&
-                       b.command.dx_counts * (b.target.base_aim_x - 160.0f) >= 0.0f,
-                   "2256单帧死区换侧不得增加后继纠偏且两支须保持当前方向");
+                       b.command.dx_counts * (b.target.base_aim_x - 160.0f) >= 0.0f &&
+                       a.command.dy_counts == b.command.dy_counts &&
+                       std::hypot(static_cast<float>(a.command.dx_counts), static_cast<float>(a.command.dy_counts)) <= 14.0f &&
+                       std::hypot(static_cast<float>(b.command.dx_counts), static_cast<float>(b.command.dy_counts)) <= 14.0f,
+                   "2256单帧死区换侧不得增加后继纠偏且两支须保持方向、Y和二维上限");
         }
     }
+    expect(rebound_pair_requests > 0 && rebound_pair_difference <= 1,
+           "2256死区扰动后累计绝对请求差不得超过一计数，实际=" +
+               std::to_string(rebound_pair_difference));
     std::cout << "6970875 deadzone 状态成对回归: 后继三帧整数差="
               << command_deficit << "，减速反侧请求总量="
               << reverse_request_sum << '\n';
@@ -17517,6 +17596,7 @@ int main() {
     test_delayed_closed_loop_holds_moving_base_point();
     test_delayed_closed_loop_holds_moving_base_point(true);
     test_current_deadzone_crossing_preserves_x_maintenance_state();
+    failures += run_aim_feedback_budget_tests();
     test_deadzone_state_settles_with_noise_and_release();
     test_delayed_pose_closed_loop_keeps_tracking_pi_continuous();
     test_vertical_shape_noise_does_not_stutter_horizontal_tracking();
