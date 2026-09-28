@@ -64,6 +64,8 @@ std::string recoil_metadata_json(const RecoilConfig& config, const RuntimeSnapsh
     result["weapon"] = {{"status",weapon::status_name(weapon.status)}, {"valid",weapon.valid},
         {"id",weapon.canonical_id.empty() ? Json(nullptr) : Json(weapon.canonical_id)},
         {"source_epoch",weapon.source_epoch ? Json(weapon.source_epoch) : Json(nullptr)},
-        {"source_order_verified",weapon.source_order_verified}};
+        {"source_order_verified",weapon.source_order_verified},
+        {"team",weapon::team_name(weapon.team)}, {"game_phase",weapon::game_phase_name(weapon.game_phase)},
+        {"team_epoch",weapon.team_epoch}};
     return result.dump();
 }

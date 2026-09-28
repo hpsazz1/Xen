@@ -653,6 +653,7 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"trigger", "enabled"}, {"trigger", "fire_enabled"}, {"trigger", "require_stop"},
         {"trigger", "allow_estimated_stop"}, {"trigger", "random_timing_enabled"},
         {"source_context", "enabled"}, {"gsi", "enabled"},
+        {"team_filter", "enabled"},
         {"recoil", "enabled"}, {"recoil", "mixed_aim"},
         {"mouse", "allow_send_input"},
         {"ui", "enable_vsync"},
@@ -730,6 +731,8 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         return false;
     }
     constexpr TypedConfigKey kOptionalListKeys[]{
+        {"team_filter", "ct_class_ids"},
+        {"team_filter", "t_class_ids"},
         {"auto_stop", "release_virtual_keys"},
         {"trigger", "general_class_ids"},
         {"keyboard", "aim_hold_virtual_keys"},
@@ -1044,6 +1047,23 @@ bool validate_app_config(const AppConfig& config,
         if (config.gsi.enabled && !weapon::valid_config(config.gsi)) {
             error = "GSI绑定地址、来源限制或接收参数非法"; return false;
         }
+        const auto& team_filter = config.team_filter;
+        const auto valid_team_ids = [](const std::vector<int>& ids) {
+            for (std::size_t i = 0; i < ids.size(); ++i) {
+                if (ids[i] < 0 || std::find(ids.begin(), ids.begin() + i, ids[i]) != ids.begin() + i)
+                    return false;
+            }
+            return true;
+        };
+        if (!valid_team_ids(team_filter.ct_class_ids) || !valid_team_ids(team_filter.t_class_ids) ||
+            std::any_of(team_filter.ct_class_ids.begin(), team_filter.ct_class_ids.end(), [&](int id) {
+                return std::find(team_filter.t_class_ids.begin(), team_filter.t_class_ids.end(), id) != team_filter.t_class_ids.end();
+            })) {
+            error = "敌我筛选类别必须非负、无重复，CT与T不能重叠"; return false;
+        }
+        if (team_filter.enabled && (!config.gsi.enabled || team_filter.ct_class_ids.empty() || team_filter.t_class_ids.empty())) {
+            error = "自动敌我筛选需要启用GSI并配置CT与T类别"; return false;
+        }
         const bool physical_keyboard_invalid =
             config.mouse.allow_send_input &&
             (config.keyboard.aim_hold_virtual_keys.empty() ||
@@ -1097,6 +1117,12 @@ bool load_app_config(const std::string& path,
         candidate.auto_stop.release_virtual_keys = release_keys
             ? parse_int_list(release_keys, {}) : AutoStopConfig{}.release_virtual_keys;
         candidate.recoil = {}; candidate.gsi = {};
+        candidate.team_filter = {};
+        candidate.team_filter.enabled = ini.GetBoolValue("team_filter", "enabled", false);
+        if (const auto* ids = ini.GetValue("team_filter", "ct_class_ids"))
+            candidate.team_filter.ct_class_ids = parse_int_list(ids, {});
+        if (const auto* ids = ini.GetValue("team_filter", "t_class_ids"))
+            candidate.team_filter.t_class_ids = parse_int_list(ids, {});
         candidate.weapon_timing_file = ini.GetValue("weapon_timing", "file", "cache/recoil/weapon-timing.json");
         candidate.gsi.request_timeout_ms = static_cast<int>(ini.GetLongValue("gsi", "request_timeout_ms", 1000));
         candidate.recoil.max_observation_age_ms = static_cast<int>(ini.GetLongValue("recoil", "max_observation_age_ms", 50));
@@ -1596,6 +1622,9 @@ bool save_app_config(const std::string& path,
         ini.SetBoolValue("recoil", "enabled", config.recoil.enabled);
         ini.SetBoolValue("recoil", "mixed_aim", config.recoil.mixed_aim);
         ini.SetBoolValue("gsi", "enabled", config.gsi.enabled);
+        ini.SetBoolValue("team_filter", "enabled", config.team_filter.enabled);
+        ini.SetValue("team_filter", "ct_class_ids", format_int_list(config.team_filter.ct_class_ids).c_str());
+        ini.SetValue("team_filter", "t_class_ids", format_int_list(config.team_filter.t_class_ids).c_str());
         ini.SetValue("recoil", "profile_directory", config.recoil.profile_directory.c_str());
         ini.SetValue("recoil", "game_build", config.recoil.game_build.c_str());
         ini.SetValue("recoil", "conditions", config.recoil.conditions.c_str());

@@ -39,6 +39,36 @@ void arm(TriggerController& controller, TriggerConfig c = config()) {
 TriggerDecision ack(TriggerController& c, TriggerDecision d, int ms, TriggerReceiptStatus status = TriggerReceiptStatus::ACKNOWLEDGED) {
     return c.acknowledge({d.command_id, d.button_action, status, at(ms)}, at(ms));
 }
+void team_filter_epoch_and_cleanup() {
+    TriggerConfig cfg = config(); cfg.fire_delay_ms = 0; cfg.fire_mode = TriggerFireMode::AUTOMATIC;
+    TriggerController c; expect(c.configure(cfg), "阵营过滤配置合法");
+    auto p = permit(false); p.context.team_filter_required = p.context.team_filter_valid = true;
+    p.context.team_epoch = 1;
+    c.tick(p, at(0)); p.held = true;
+    auto old = frame(1); old.team_epoch = 1;
+    auto down = c.observe(old, p, at(1));
+    expect(down.button_action == TriggerButtonAction::DOWN, "同代敌方观察可开火"); ack(c, down, 2);
+    p.context.team_epoch = 2;
+    auto up = c.tick(p, at(3));
+    expect(up.button_action == TriggerButtonAction::UP, "无新图时换边立即清理旧按下"); ack(c, up, 4);
+    old = frame(130, 2); old.team_epoch = 1;
+    expect(c.observe(old, p, at(130)).button_action == TriggerButtonAction::NONE &&
+        c.snapshot().reason == TriggerReason::CONTEXT_CHANGED, "新阵营拒绝旧过滤观察");
+    auto current = frame(131, 3); current.team_epoch = 2;
+    down = c.observe(current, p, at(131));
+    expect(down.button_action == TriggerButtonAction::DOWN, "换边只撤销旧目标不额外要求松键"); ack(c, down, 132);
+    p.context.team_filter_valid = false;
+    up = c.tick(p, at(133));
+    expect(up.button_action == TriggerButtonAction::UP, "阵营过期立即释放旧按钮"); ack(c, up, 134);
+    expect(c.observe(current, p, at(135)).button_action == TriggerButtonAction::NONE, "未知阵营不能续用旧候选");
+    p.context.team_filter_valid = true; p.context.team_epoch = 3;
+    c.tick(p, at(260)); current = frame(261, 4); current.team_epoch = 3;
+    expect(c.observe(current, p, at(261)).button_action == TriggerButtonAction::DOWN, "新可信代际可持键恢复");
+    TriggerController disabled; arm(disabled, cfg);
+    current = frame(1); current.team_epoch = 99;
+    expect(disabled.observe(current, permit(), at(1)).button_action == TriggerButtonAction::DOWN,
+        "未启用过滤保持旧观察语义");
+}
 void geometry_and_timing() {
     TriggerController c; arm(c);
     auto o = frame(1);
@@ -710,6 +740,7 @@ void observation_epoch_preserves_healthy_hold() {
 }
 
 int main() {
+    team_filter_epoch_and_cleanup();
     observation_epoch_preserves_healthy_hold();
     randomized_action_timing();
     roi_clipped_detection_bounds();

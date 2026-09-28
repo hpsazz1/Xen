@@ -2,6 +2,7 @@
 #define CONFIG_H
 
 #include <string>
+#include <vector>
 #include "config/ui_theme.h"
 
 #include "aim/aim.h"
@@ -36,6 +37,13 @@ struct UiConfig {
     // 正式验收可在启动时自动打开不抢焦点的独立 TOPMOST 检测预览；普通用户默认关闭。
     bool open_detached_preview_on_start = false;
     UiTheme theme = UiTheme::LIGHT;
+};
+
+struct TeamFilterConfig {
+    // 通用模型默认关闭；类别必须与实际模型的 CT/T 语义一致。
+    bool enabled = false;
+    std::vector<int> ct_class_ids{0, 1};
+    std::vector<int> t_class_ids{2, 3};
 };
 
 struct AppConfig {
@@ -98,6 +106,7 @@ struct AppConfig {
     source_context::SourceContextConfig source_context;
     RecoilConfig recoil;
     weapon::GsiConfig gsi;
+    TeamFilterConfig team_filter;
     // 独立于弹道启用；启动时读取一次，运行中固定版本。
     std::string weapon_timing_file = "cache/recoil/weapon-timing.json";
     LogConfig log = [] {

@@ -57,6 +57,7 @@ struct TriggerObservation {
     TriggerTime observed_at{};
     std::chrono::nanoseconds uncertainty{};
     bool valid = false, timing_valid = false;
+    std::uint64_t team_epoch = 0;
 };
 
 // 可选的持续上下文；generation 由来源 owner 在身份/连续性/有效性变化时递增。
@@ -73,6 +74,9 @@ struct TriggerContext {
     // 0/false保留未提供可信分类的旧调用方保守语义。
     std::uint64_t trust_generation = 0;
     bool session_trusted = false;
+    // 阵营过滤独立于武器信任；观察必须绑定筛选时的同一阵营代际。
+    bool team_filter_required = false, team_filter_valid = false;
+    std::uint64_t team_epoch = 0;
 };
 
 struct TriggerPermit {

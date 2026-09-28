@@ -1512,9 +1512,46 @@ void test_shared_weapon_timing_config() {
     std::filesystem::remove_all(directory, ignored);
 }
 
+void test_team_filter_config() {
+    const auto directory = make_temp_test_directory("team_filter");
+    const auto path = directory / "config.ini";
+    AppConfig config, loaded;
+    std::string error;
+    expect(!config.team_filter.enabled && config.team_filter.ct_class_ids == std::vector<int>({0, 1}) &&
+        config.team_filter.t_class_ids == std::vector<int>({2, 3}), "通用模型默认关闭阵营筛选，保留四类模型映射");
+    config.team_filter.enabled = true;
+    expect(!validate_app_config(config, error), "开启阵营筛选必须有 GSI");
+    config.gsi.enabled = true;
+    config.team_filter.ct_class_ids = {4, 5};
+    config.team_filter.t_class_ids = {6, 7};
+    expect(save_app_config(path.string(), config, error) && load_app_config(path.string(), loaded, error) &&
+        loaded.team_filter.enabled && loaded.team_filter.ct_class_ids == config.team_filter.ct_class_ids &&
+        loaded.team_filter.t_class_ids == config.team_filter.t_class_ids, "自定义阵营映射往返保存: " + error);
+    for (const auto ids : {std::vector<int>{}, std::vector<int>{-1}, std::vector<int>{4, 4}, std::vector<int>{6}}) {
+        auto invalid = config;
+        invalid.team_filter.ct_class_ids = ids;
+        expect(!validate_app_config(invalid, error), "拒绝空、负数、重复及跨队重叠映射");
+    }
+    for (const auto* body : {"enabled=maybe\n", "enabled=true\nct_class_ids=\n",
+             "ct_class_ids=-1\n", "t_class_ids=2,x\n", "ct_class_ids=0,0\n", "ct_class_ids=2\n"}) {
+        expect(write_file_bytes(path, std::string("[gsi]\nenabled=true\n[team_filter]\n") + body) &&
+            !load_app_config(path.string(), loaded, error), "阵营配置严格解析并拒绝非法映射");
+    }
+    expect(write_file_bytes(path, "[team_filter]\nenabled=false\nct_class_ids=\nt_class_ids=\n") &&
+        load_app_config(path.string(), loaded, error) && loaded.team_filter.ct_class_ids.empty() &&
+        loaded.team_filter.t_class_ids.empty(), "关闭时允许空映射且不静默恢复默认类别");
+    loaded = config;
+    expect(write_file_bytes(path, "[gsi]\nenabled=true\n") && load_app_config(path.string(), loaded, error) &&
+        !loaded.team_filter.enabled && loaded.team_filter.ct_class_ids == std::vector<int>({0, 1}),
+        "旧配置缺少阵营节时不继承调用方已开启状态");
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+}
+
 } // namespace
 
 int main() {
+    test_team_filter_config();
     test_trigger_legacy_timing_migration();
     test_current_code_defaults();
     test_load_or_create_default_config();

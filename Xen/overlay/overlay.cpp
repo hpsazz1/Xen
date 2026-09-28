@@ -3258,8 +3258,46 @@ struct Overlay::Impl {
         end_config_panel();
     }
 
-    void render_aim_config(AppConfig& app_config, bool can_edit) {
+    void render_aim_config(const RuntimeSnapshot& snapshot, AppConfig& app_config, bool can_edit) {
         ImGui::TextWrapped("停止运行后可编辑并保存参数；下次启动生效。");
+        if (ImGui::CollapsingHeader("自动敌我筛选", ImGuiTreeNodeFlags_DefaultOpen)) {
+            const auto& player = snapshot.weapon_snapshot;
+            const bool gsi_current = snapshot.state == RuntimeState::RUNNING && player.identity_match &&
+                player.player_playing &&
+                weapon::Clock::now() < player.valid_until;
+            const bool team_current = gsi_current && player.team != weapon::Team::UNKNOWN;
+            ImGui::TextWrapped("GSI 本方阵营：%s", team_current ? weapon::team_name(player.team) : "未知 / 未就绪");
+            const char* phase = "未知 / 未就绪";
+            if (gsi_current && player.game_phase == weapon::GamePhase::PREPARATION) phase = "准备：原已选全部类别";
+            if (gsi_current && player.game_phase == weapon::GamePhase::ACTIVE) phase = "正式 / 回合结束：仅敌方";
+            ImGui::TextWrapped("GSI 比赛阶段：%s", phase);
+            ImGui::TextWrapped("开启后，热身与回合冻结阶段允许原已选全部类别；正式及回合结束仅敌方，换边跟随 GSI。阶段未知或过期、正式阶段阵营未知时暂停目标输出。");
+            ImGui::BeginDisabled(!can_edit);
+            if (begin_form("team_filter_form", 170.0f)) {
+                form_row("自动排除友军", "依据本机玩家 GSI 阵营和比赛阶段筛选 Aim 与扳机候选；准备阶段保留原已选类别，正式开始及回合结束仅敌方。开启同时启用 GSI，不启动物理输出。停止后修改，下次启动生效。");
+                if (toggle_switch("##team_filter_enabled", &app_config.team_filter.enabled) && app_config.team_filter.enabled)
+                    app_config.gsi.enabled = true;
+                const auto render_ids = [&](const char* label, const char* id, std::vector<int>& ids) {
+                    form_row(label, "填写实际模型中属于该阵营的类别 ID，包含身体与头部；类别不得为负、重复或同时属于两队。默认 CT 为 0、1，T 为 2、3。");
+                    ImGui::PushID(id);
+                    for (std::size_t i = 0; i < ids.size(); ++i) {
+                        ImGui::PushID(static_cast<int>(i));
+                        ImGui::SetNextItemWidth(110.0f);
+                        ImGui::InputInt("##class_id", &ids[i]);
+                        ImGui::SameLine();
+                        const bool remove = ImGui::SmallButton("移除");
+                        ImGui::PopID();
+                        if (remove) { ids.erase(ids.begin() + i); break; }
+                    }
+                    if (ImGui::SmallButton("添加类别")) ids.push_back(-1);
+                    ImGui::PopID();
+                };
+                render_ids("CT 模型类别", "ct_classes", app_config.team_filter.ct_class_ids);
+                render_ids("T 模型类别", "t_classes", app_config.team_filter.t_class_ids);
+                ImGui::EndTable();
+            }
+            ImGui::EndDisabled();
+        }
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         ImGui::BeginDisabled(!can_edit);
         render_basic_aim_form(app_config);
@@ -4161,7 +4199,7 @@ struct Overlay::Impl {
                         app_config, can_edit, actions);
                     break;
                 case WorkspacePage::AIM:
-                    render_aim_config(app_config, can_edit);
+                    render_aim_config(snapshot, app_config, can_edit);
                     break;
                 case WorkspacePage::AUXILIARY:
                     render_auxiliary_config(snapshot, app_config, can_edit, actions);

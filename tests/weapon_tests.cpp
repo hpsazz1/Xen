@@ -11,6 +11,7 @@ void expect(bool condition, const char* message) {
 nlohmann::json payload(const weapon::GsiConfig& config, std::uint64_t timestamp = 1700000000) {
     return {
         {"provider", {{"appid", 730}, {"steamid", "76561198000000000"}, {"timestamp", timestamp}}},
+        {"map", {{"phase", "live"}}}, {"round", {{"phase", "live"}}},
         {"player", {{"steamid", "76561198000000000"}, {"activity", "playing"},
             {"state", {{"health", 100}}}, {"weapons", {{"weapon_0", {
                 {"name", "weapon_ak47"}, {"state", "active"}, {"ammo_clip", 30},
@@ -36,6 +37,45 @@ int main() {
     constexpr std::int64_t utc = 1700000000000;
     auto full = payload(config);
     auto parsed = parse_payload(full.dump(), config, utc + 500);
+    expect(parsed.team == Team::UNKNOWN && parsed.valid, "旧payload缺阵营仍保留武器有效性");
+    auto team_payload = full;
+    team_payload["player"]["team"] = "CT";
+    expect(parse_payload(team_payload.dump(), config, utc).team == Team::CT, "精确读取本地CT阵营");
+    team_payload["player"]["team"] = "T";
+    expect(parse_payload(team_payload.dump(), config, utc).team == Team::T, "精确读取本地T阵营");
+    for (const auto& value : {nlohmann::json("ct"), nlohmann::json("SPECTATOR"), nlohmann::json(3), nlohmann::json(nullptr)}) {
+        team_payload["player"]["team"] = value;
+        const auto unknown_team = parse_payload(team_payload.dump(), config, utc);
+        expect(unknown_team.team == Team::UNKNOWN && unknown_team.valid, "阵营未知值不猜测且不改变武器契约");
+    }
+    team_payload["player"]["team"] = "CT";
+    team_payload["player"]["steamid"] = "76561198000000001";
+    expect(parse_payload(team_payload.dump(), config, utc).team == Team::UNKNOWN, "观战阵营不作为自身阵营");
+    team_payload = full; team_payload["player"]["team"] = "CT";
+    team_payload["player"]["state"]["health"] = 0;
+    expect(parse_payload(team_payload.dump(), config, utc).team == Team::UNKNOWN, "死亡快照不提供可信阵营");
+    expect(parse_payload(team_payload.dump(), config, utc).game_phase == GamePhase::UNKNOWN, "死亡快照也不提供准备态豁免");
+    auto phases = full;
+    expect(parse_payload(phases.dump(), config, utc).game_phase == GamePhase::ACTIVE, "正式地图正式回合为敌方过滤阶段");
+    phases["round"]["phase"] = "over";
+    expect(parse_payload(phases.dump(), config, utc).game_phase == GamePhase::ACTIVE, "回合结束仍维持敌方过滤");
+    phases["round"]["phase"] = "freezetime";
+    expect(parse_payload(phases.dump(), config, utc).game_phase == GamePhase::PREPARATION, "正式地图冻结时间为准备阶段");
+    phases["map"]["phase"] = "warmup"; phases.erase("round");
+    parsed = parse_payload(phases.dump(), config, utc);
+    expect(parsed.game_phase == GamePhase::PREPARATION && parsed.team == Team::UNKNOWN && parsed.valid,
+           "可信热身不依赖round或已知阵营且不改变武器有效性");
+    for (const auto& value : {nlohmann::json("gameover"), nlohmann::json("intermission"), nlohmann::json("Warmup"), nlohmann::json(1)}) {
+        phases["map"]["phase"] = value;
+        expect(parse_payload(phases.dump(), config, utc).game_phase == GamePhase::UNKNOWN, "比赛结束或未知地图阶段不可当准备");
+    }
+    phases = full; phases.erase("map");
+    expect(parse_payload(phases.dump(), config, utc).game_phase == GamePhase::UNKNOWN, "缺地图不继承准备状态");
+    phases = full; phases.erase("round");
+    expect(parse_payload(phases.dump(), config, utc).game_phase == GamePhase::UNKNOWN, "正式地图缺回合不放行");
+    phases["round"]["phase"] = "paused";
+    expect(parse_payload(phases.dump(), config, utc).game_phase == GamePhase::UNKNOWN, "不猜测未支持的回合阶段");
+    parsed = parse_payload(full.dump(), config, utc + 500);
     expect(parsed.valid && parsed.identity_match && parsed.canonical_id == "ak47" && parsed.ammo_clip == 30 &&
            !parsed.source_order_verified, "合法完整状态与不夸大源顺序");
     expect(canonical_weapon_id("weapon_m4a1") == "m4a4" &&
@@ -93,6 +133,85 @@ int main() {
     GsiState state;
     state.reset();
     const auto start = Clock::time_point{} + 1s;
+    GsiState phase_state;
+    auto preparation = full; preparation["map"]["phase"] = "warmup";
+    phase_state.ingest(preparation.dump(), config, start, utc);
+    const auto first_preparation = phase_state.snapshot(start);
+    preparation["player"]["weapons"]["weapon_0"]["ammo_clip"] = 29;
+    phase_state.ingest(preparation.dump(), config, start + 1ms, utc + 1);
+    expect(phase_state.snapshot(start + 1ms).team_epoch == first_preparation.team_epoch,
+           "准备阶段阵营未知的普通武器变化不反复撤销策略");
+    auto active = preparation; active["map"]["phase"] = "live"; active["player"]["team"] = "CT";
+    phase_state.ingest(active.dump(), config, start + 2ms, utc + 2);
+    const auto first_active = phase_state.snapshot(start + 2ms);
+    expect(first_active.game_phase == GamePhase::ACTIVE && first_active.team_epoch > first_preparation.team_epoch &&
+           first_active.control_safety_epoch == first_preparation.control_safety_epoch,
+           "同秒准备转正式会发布独立策略断点而不改变旧武器控制代际");
+    expect(phase_state.ingest(preparation.dump(), config, start + 3ms, utc + 3) == Status::DUPLICATE,
+           "同秒旧准备帧仍受重放去重");
+    const auto ambiguous_phase = phase_state.snapshot(start + 3ms);
+    expect(ambiguous_phase.game_phase == GamePhase::UNKNOWN && ambiguous_phase.team_epoch > first_active.team_epoch &&
+           ambiguous_phase.valid && ambiguous_phase.valid_until == first_active.valid_until,
+           "同秒阶段回退撤销旧准备许可但不改武器或续期");
+    preparation["provider"]["timestamp"] = 1700000001;
+    phase_state.ingest(preparation.dump(), config, start + 1s, utc + 1000);
+    expect(phase_state.snapshot(start + 1s).game_phase == GamePhase::PREPARATION &&
+           phase_state.snapshot(start + 1s).team_epoch > first_preparation.team_epoch,
+           "跳过正式与未知中间快照也可识别准备策略已换代");
+    expect(phase_state.snapshot(start + 4s).game_phase == GamePhase::UNKNOWN,
+           "过期准备态不可继续放行全类别");
+    GsiState phase_only;
+    auto same_team = full; same_team["player"]["team"] = "CT"; same_team["round"]["phase"] = "freezetime";
+    phase_only.ingest(same_team.dump(), config, start, utc);
+    const auto freezing = phase_only.snapshot(start);
+    same_team["round"]["phase"] = "live";
+    expect(phase_only.ingest(same_team.dump(), config, start + 1ms, utc + 1) == Status::READY &&
+           phase_only.snapshot(start + 1ms).game_phase == GamePhase::ACTIVE &&
+           phase_only.snapshot(start + 1ms).team_epoch > freezing.team_epoch,
+           "只改变回合阶段的同秒快照不会被去重吞掉");
+    GsiState teams;
+    auto ct = full; ct["player"]["team"] = "CT";
+    auto t = full; t["player"]["team"] = "T";
+    teams.ingest(ct.dump(), config, start, utc);
+    const auto initial_team = teams.snapshot(start);
+    expect(initial_team.team == Team::CT && initial_team.team_epoch > 0, "初始可信阵营含独立代际");
+    expect(teams.ingest(ct.dump(), config, start + 1ms, utc + 1) == Status::DUPLICATE &&
+           teams.snapshot(start + 1ms).team_epoch == initial_team.team_epoch, "相同阵营重复包不制造断点");
+    expect(teams.ingest(t.dump(), config, start + 2ms, utc + 2) == Status::READY, "同秒阵营变化不会被去重吞掉");
+    const auto changed_team = teams.snapshot(start + 2ms);
+    expect(changed_team.team == Team::T && changed_team.team_epoch > initial_team.team_epoch &&
+           changed_team.control_safety_epoch == initial_team.control_safety_epoch &&
+           changed_team.recoil_safety_epoch == initial_team.recoil_safety_epoch &&
+           changed_team.source_epoch == initial_team.source_epoch, "阵营变化只更新独立阵营代际");
+    expect(teams.ingest(ct.dump(), config, start + 3ms, utc + 3) == Status::DUPLICATE,
+           "同秒已见过完整状态仍保留武器去重");
+    const auto ambiguous_team = teams.snapshot(start + 3ms);
+    expect(ambiguous_team.team == Team::UNKNOWN && ambiguous_team.team_epoch > changed_team.team_epoch &&
+           ambiguous_team.valid && ambiguous_team.revision == changed_team.revision &&
+           ambiguous_team.valid_until == changed_team.valid_until, "同秒阵营回退不可判序时撤销阵营并保留武器快照");
+    ct["provider"]["timestamp"] = 1700000001;
+    teams.ingest(ct.dump(), config, start + 1s, utc + 1000);
+    const auto restored_team = teams.snapshot(start + 1s);
+    expect(restored_team.team == Team::CT && restored_team.team_epoch > initial_team.team_epoch,
+           "消费者跳过CT到T到CT中间状态仍能识别代际断点");
+    expect(teams.snapshot(start + 4s).team == Team::UNKNOWN, "过期快照不能继续提供阵营");
+    ct["provider"]["timestamp"] = 1700000004;
+    teams.ingest(ct.dump(), config, start + 4s, utc + 4000);
+    const auto after_expiry = teams.snapshot(start + 4s);
+    expect(after_expiry.team == Team::CT && after_expiry.team_epoch > restored_team.team_epoch,
+           "同阵营过期后恢复也保留可信断点");
+    auto unknown = ct; unknown["player"].erase("team");
+    teams.ingest(unknown.dump(), config, start + 4001ms, utc + 4001);
+    ct["provider"]["timestamp"] = 1700000005;
+    teams.ingest(ct.dump(), config, start + 5s, utc + 5000);
+    expect(teams.snapshot(start + 5s).team == Team::CT &&
+           teams.snapshot(start + 5s).team_epoch > after_expiry.team_epoch,
+           "跳过缺失阵营中间快照后同阵营也不能沿用旧目标");
+    auto spectator = ct; spectator["player"]["steamid"] = "76561198000000001";
+    teams.ingest(spectator.dump(), config, start + 5001ms, utc + 5001);
+    const auto after_identity_break = teams.snapshot(start + 5001ms);
+    expect(after_identity_break.team == Team::UNKNOWN && after_identity_break.team_epoch > after_expiry.team_epoch,
+           "身份失信持久撤销阵营连续性");
     expect(state.ingest(full.dump(), config, start, utc) == Status::READY, "首份完整快照");
     const auto first = state.snapshot(start);
     for (const auto& [name, type] : {std::pair{"weapon_knife", "Knife"}, {"weapon_knife_t", "Knife"},

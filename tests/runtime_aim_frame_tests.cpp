@@ -583,6 +583,64 @@ int main() {
             }
         }
     }
+    {
+        TeamFilterConfig policy;
+        policy.enabled = true;
+        const std::vector<Detection> raw{{145, 120, 175, 205, .99f, 0},
+            {190, 110, 230, 210, .95f, 2}, {195, 110, 225, 135, .94f, 3},
+            {20, 20, 40, 40, .9f, 7}};
+        auto enemy = runtime::detail::enemy_detections(raw, policy, weapon::Team::CT, weapon::GamePhase::ACTIVE, true);
+        expect(enemy.size() == 2 && enemy[0].class_id == 2 && enemy[1].class_id == 3,
+            "CT只允许T身体和头部，友军和未映射类别被过滤");
+        expect(raw.size() == 4 && raw[0].class_id == 0, "过滤不改变原始采集和预览的双方检测");
+        expect(runtime::detail::enemy_detections(raw, policy, weapon::Team::T, weapon::GamePhase::ACTIVE, true).size() == 1,
+            "换边到T自动选择CT");
+        expect(runtime::detail::enemy_detections(raw, policy, weapon::Team::UNKNOWN, weapon::GamePhase::PREPARATION, true).size() == raw.size(),
+            "可信准备阶段保留全部原候选");
+        expect(runtime::detail::enemy_detections(raw, policy, weapon::Team::CT, weapon::GamePhase::UNKNOWN, true).empty() &&
+            runtime::detail::enemy_detections(raw, policy, weapon::Team::CT, weapon::GamePhase::ACTIVE, false).empty(),
+            "未知或过期策略不回退全部");
+        AimConfig options;
+        options.person_class_ids = {0, 2}; options.head_class_ids = {1, 3};
+        options.min_confirmed_hits = 1;
+        Aim controlled(options);
+        AimFrame frame;
+        frame.sequence = 1; frame.roi_width = frame.roi_height = 320;
+        frame.control_center_x = frame.control_center_y = 160;
+        frame.captured_at = frame.control_at = start;
+        frame.lock_active = true; frame.detections = enemy;
+        const auto result = controlled.process(frame);
+        expect(result.has_target && result.target.x1 > 175, "生产Aim不能选更靠近准星的友军");
+        options.person_class_ids = {0}; options.head_class_ids = {1};
+        Aim user_selection(options);
+        expect(!user_selection.process(frame).has_target, "敌方筛选与用户类别取交集，不扩大原选择");
+        weapon::WeaponSnapshot current;
+        current.valid = current.identity_match = current.player_playing = true;
+        current.player_health = 100; current.source_epoch = current.control_safety_epoch = current.team_epoch = 1;
+        current.status = weapon::Status::READY; current.state = weapon::WeaponState::ACTIVE;
+        current.canonical_id = "AK47"; current.ammo_clip = 30;
+        current.received_at = start; current.valid_until = start + std::chrono::seconds(2);
+        current.team = weapon::Team::CT; current.game_phase = weapon::GamePhase::PREPARATION;
+        runtime::detail::AimWeaponSessionGate gate;
+        const auto prepared = gate.update(current, true, {}, false, true, start, true);
+        expect(prepared.allowed && prepared.team_valid, "准备阶段保留健康持键许可");
+        current.game_phase = weapon::GamePhase::ACTIVE; ++current.team_epoch;
+        const auto live = gate.update(current, true, {}, false, true, start, true);
+        expect(live.allowed && live.reset_aim && !runtime::detail::aim_frame_dispatch_allowed(frame, true, prepared, live),
+            "开局立即清理准备阶段旧帧，不强制松键");
+        current.team = weapon::Team::T; ++current.team_epoch;
+        const auto switched = gate.update(current, true, {}, false, true, start, true);
+        expect(switched.allowed && switched.reset_aim && !runtime::detail::aim_frame_dispatch_allowed(frame, true, live, switched),
+            "发送前换边拒绝旧命令并保留正常持键");
+        current.game_phase = weapon::GamePhase::UNKNOWN; ++current.team_epoch;
+        expect(!gate.update(current, true, {}, false, true, start, true).allowed, "未知阶段暂停");
+        current.game_phase = weapon::GamePhase::ACTIVE; ++current.team_epoch;
+        expect(gate.update(current, true, {}, false, true, start, true).allowed, "新可信阶段可自动恢复");
+        expect(!runtime::detail::team_context_valid(current, current.valid_until), "过期阶段不得放行");
+        policy.enabled = false;
+        expect(runtime::detail::enemy_detections(raw, policy, weapon::Team::UNKNOWN, weapon::GamePhase::UNKNOWN, false).size() == raw.size(),
+            "关闭过滤保留原语义");
+    }
     expect(failures == 0, "Runtime/Aim 组装合同失败");
     return failures ? 1 : 0;
 }

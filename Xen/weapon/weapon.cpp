@@ -57,9 +57,24 @@ std::string fingerprint(const WeaponSnapshot& s) {
     return s.player_id + ":" + s.raw_name + ":" + std::to_string(static_cast<int>(s.state)) + ":" +
         value(s.ammo_clip) + ":" + value(s.ammo_clip_max) + ":" + value(s.ammo_reserve) + ":" +
         std::to_string(static_cast<int>(s.status)) + ":" + value(s.player_health) + ":" +
-        (s.player_playing ? "playing" : "inactive");
+        (s.player_playing ? "playing" : "inactive") + std::string(":") + team_name(s.team) + ":" + game_phase_name(s.game_phase);
 }
 } // namespace
+
+const char* team_name(Team team) noexcept {
+    switch (team) {
+    case Team::CT: return "CT";
+    case Team::T: return "T";
+    default: return "UNKNOWN";
+    }
+}
+const char* game_phase_name(GamePhase phase) noexcept {
+    switch (phase) {
+    case GamePhase::PREPARATION: return "PREPARATION";
+    case GamePhase::ACTIVE: return "ACTIVE";
+    default: return "UNKNOWN";
+    }
+}
 
 const char* status_name(Status status) noexcept {
     switch (status) {
@@ -164,6 +179,23 @@ WeaponSnapshot parse_payload(std::string_view body, const GsiConfig& config, std
         if (!result.player_playing || !result.player_health || *result.player_health == 0) {
             result.status = Status::PLAYER_INACTIVE; return result;
         }
+        if (player.contains("team") && player["team"].is_string()) {
+            if (player["team"] == "CT") result.team = Team::CT;
+            else if (player["team"] == "T") result.team = Team::T;
+        }
+        if (json.contains("map") && json["map"].is_object()) {
+            const auto& map = json["map"];
+            if (map.contains("phase") && map["phase"].is_string()) {
+                if (map["phase"] == "warmup") result.game_phase = GamePhase::PREPARATION;
+                else if (map["phase"] == "live" && json.contains("round") && json["round"].is_object()) {
+                    const auto& round = json["round"];
+                    if (round.contains("phase") && round["phase"].is_string()) {
+                        if (round["phase"] == "freezetime") result.game_phase = GamePhase::PREPARATION;
+                        else if (round["phase"] == "live" || round["phase"] == "over") result.game_phase = GamePhase::ACTIVE;
+                    }
+                }
+            }
+        }
         if (!player.contains("weapons") || !player["weapons"].is_object() || player["weapons"].size() > 64) return result;
         const Json* selected = nullptr;
         for (const auto& value : player["weapons"].items()) {
@@ -204,6 +236,7 @@ void GsiState::reset() noexcept {
     if (epoch_ != std::numeric_limits<std::uint64_t>::max()) ++epoch_;
     if (recoil_safety_epoch_ != std::numeric_limits<std::uint64_t>::max()) ++recoil_safety_epoch_;
     if (control_safety_epoch_ != std::numeric_limits<std::uint64_t>::max()) ++control_safety_epoch_;
+    if (team_epoch_ != std::numeric_limits<std::uint64_t>::max()) ++team_epoch_;
 }
 Status GsiState::ingest(std::string_view body, const GsiConfig& config,
                       Clock::time_point now, std::int64_t local_utc_ms) noexcept {
@@ -212,6 +245,7 @@ Status GsiState::ingest(std::string_view body, const GsiConfig& config,
         if (epoch_ == 0) epoch_ = 1;
         if (recoil_safety_epoch_ == 0) recoil_safety_epoch_ = 1;
         if (control_safety_epoch_ == 0) control_safety_epoch_ = 1;
+        if (team_epoch_ == 0) team_epoch_ = 1;
         if (now < last_now_ || epoch_ == std::numeric_limits<std::uint64_t>::max() ||
             control_safety_epoch_ == std::numeric_limits<std::uint64_t>::max() ||
             recoil_safety_epoch_ == std::numeric_limits<std::uint64_t>::max() || revision_ == std::numeric_limits<std::uint64_t>::max()) {
@@ -227,7 +261,18 @@ Status GsiState::ingest(std::string_view body, const GsiConfig& config,
                 seen_states_.clear();
             }
             const auto key = fingerprint(incoming);
-            if (std::find(seen_states_.begin(), seen_states_.end(), key) != seen_states_.end()) return Status::DUPLICATE;
+            if (std::find(seen_states_.begin(), seen_states_.end(), key) != seen_states_.end()) {
+                // 同秒策略回退既可能是真实变化也可能是旧包；不再沿用中间阵营或准备态。
+                // 仅撤销策略，不修改旧武器快照/去重/TTL契约。
+                if ((incoming.team != current_.team || incoming.game_phase != current_.game_phase) &&
+                    (current_.team != Team::UNKNOWN || current_.game_phase != GamePhase::UNKNOWN)) {
+                    current_.team = Team::UNKNOWN;
+                    current_.game_phase = GamePhase::UNKNOWN;
+                    if (team_epoch_ != std::numeric_limits<std::uint64_t>::max()) ++team_epoch_;
+                    current_.team_epoch = team_epoch_;
+                }
+                return Status::DUPLICATE;
+            }
             if (seen_states_.size() >= 128) { current_.valid = false; current_.status = Status::INVALID_PAYLOAD; return current_.status; }
             seen_states_.push_back(key);
             // 同秒不同完整状态正常发布，但期限锁定到该timestamp首次接收，不能靠重放续命。
@@ -256,6 +301,20 @@ Status GsiState::ingest(std::string_view body, const GsiConfig& config,
         const bool control_break = !control_state(incoming) || incoming.valid_until <= now ||
             (current_.revision && (!control_state(current_) || current_.valid_until <= now || current_.player_id != incoming.player_id));
         if (control_break) ++control_safety_epoch_;
+        const auto policy_state = [&](const WeaponSnapshot& snapshot) {
+            return control_state(snapshot) && (snapshot.game_phase == GamePhase::PREPARATION ||
+                (snapshot.game_phase == GamePhase::ACTIVE && snapshot.team != Team::UNKNOWN));
+        };
+        const bool team_break = !policy_state(incoming) || incoming.valid_until <= now ||
+            (current_.revision && (!policy_state(current_) || current_.valid_until <= now ||
+                current_.player_id != incoming.player_id || current_.team != incoming.team || current_.game_phase != incoming.game_phase));
+        if (team_break && team_epoch_ != std::numeric_limits<std::uint64_t>::max()) ++team_epoch_;
+        // 策略代际耗尽仅关闭阵营/阶段可信度，不影响原武器有效性。
+        if (team_epoch_ == std::numeric_limits<std::uint64_t>::max() || !control_state(incoming) || incoming.valid_until <= now) {
+            incoming.team = Team::UNKNOWN;
+            incoming.game_phase = GamePhase::UNKNOWN;
+        }
+        incoming.team_epoch = team_epoch_;
         incoming.control_safety_epoch = control_safety_epoch_;
         incoming.recoil_safety_epoch = recoil_safety_epoch_;
         // 武器切换也持久撤销旧工作，即使消费者跳过中间武器快照。
@@ -271,6 +330,10 @@ Status GsiState::ingest(std::string_view body, const GsiConfig& config,
 WeaponSnapshot GsiState::snapshot(Clock::time_point now) const {
     auto result = current_;
     if (result.valid && (now < result.received_at || now >= result.valid_until)) { result.valid = false; result.status = Status::EXPIRED; }
+    if (now < result.received_at || now >= result.valid_until) {
+        result.team = Team::UNKNOWN;
+        result.game_phase = GamePhase::UNKNOWN;
+    }
     return result;
 }
 } // namespace detail

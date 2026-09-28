@@ -114,6 +114,8 @@ struct Fixture {
     std::atomic<bool> context_required{false}, context_valid{false};
     std::atomic<std::uint64_t> trust_generation{0};
     std::atomic<bool> session_trusted{false};
+    std::atomic<bool> team_filter_required{false}, team_filter_valid{false};
+    std::atomic<std::uint64_t> team_epoch{0};
     std::atomic<bool> timing_required{false}, timing_valid{false};
     std::atomic<int> shot_hold_ms{60}, fire_interval_ms{600};
     std::atomic<std::uint64_t> estimated_id{0};
@@ -128,7 +130,8 @@ struct Fixture {
             if (context_hook) context_hook();
             return TriggerContext{context_generation.load(), context_required.load(), context_valid.load(),
                 timing_required.load(), timing_valid.load(), shot_hold_ms.load(), fire_interval_ms.load(),
-                0, {}, trust_generation.load(), session_trusted.load()};
+                0, {}, trust_generation.load(), session_trusted.load(),
+                team_filter_required.load(), team_filter_valid.load(), team_epoch.load()};
         }, [&] { if (estimated_hook) estimated_hook(); return estimated_id.load(); }, {}, {},
         [&](const InputSnapshot&) { if (idle_hook) idle_hook(); return stop_idle.load(); }};
     bool start(bool stop=false, int age=50, int cleanup_budget_ms=1000, int press_ms=10, bool fire_enabled=true,
@@ -575,6 +578,28 @@ void timing_change_at_down_revalidation() {
     f.worker.stop();
     expect(f.mouse->count(true) == 0, "不要求GSI身份仍须检查武器时序变更");
 }
+void team_change_at_down_revalidation() {
+    Fixture f;
+    f.team_filter_required = f.team_filter_valid = true; f.team_epoch = 1;
+    std::atomic<bool> change_at_output_gate{true};
+    f.context_hook = [&] {
+        if (f.arbiter->snapshot().sources[static_cast<std::size_t>(OutputArbiterSource::TRIGGER)].acquired &&
+            change_at_output_gate.exchange(false)) f.team_epoch = 2;
+    };
+    expect(f.start(false, 200), "阵营二检回归启动");
+    f.mouse->held = true; auto first = observation(); first->team_epoch = 1; f.worker.publish(first);
+    expect(until([&] { return !change_at_output_gate.load(); }), "已到阵营发送二检边界");
+    expect(until([&] {
+        for (const auto& event : f.worker.execution_log().events)
+            if (event.button_action == TriggerButtonAction::DOWN && !event.backend_called &&
+                std::string_view(event.rejection_reason) == "context_changed") return true;
+        return false;
+    }), "发送前换边拒绝旧DOWN");
+    expect(f.mouse->count(true) == 0, "旧阵营未发送按钮");
+    auto next = observation(2); next->team_epoch = 2; f.worker.publish(next);
+    expect(until([&] { return f.mouse->count(true) == 1; }), "新阵营新帧无需固定松键恢复");
+    f.worker.stop();
+}
 void context_change_at_down_revalidation() {
     for (const bool invalid : {false, true}) {
         Fixture f;
@@ -934,6 +959,7 @@ void exception_uses_bounded_cleanup() {
 
 }
 int main() {
+    team_change_at_down_revalidation();
     measurement_epoch_keeps_held_permission();
     deferred_down_revalidates_and_cancels();
     withdraw_unsent_rejects_backend_debt();

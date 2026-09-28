@@ -302,6 +302,41 @@ int wmain(int argc, wchar_t** argv) {
             input.down = false; frame();
             input.position = {400,40}; frame(); frame();
         };
+        select_page(2);
+        require_page_table("team_filter_form");
+        require(capture.text.find("GSI 比赛阶段：未知 / 未就绪") != std::string::npos,
+            "停止时阵营筛选必须显示阶段未就绪");
+        save_window(capture, output / "aim-team-filter-stopped.png");
+        config.team_filter.enabled = true;
+        config.gsi.enabled = true;
+        runtime.state = RuntimeState::RUNNING;
+        runtime.weapon_snapshot.identity_match = true;
+        runtime.weapon_snapshot.player_playing = true;
+        runtime.weapon_snapshot.team = weapon::Team::CT;
+        runtime.weapon_snapshot.game_phase = weapon::GamePhase::PREPARATION;
+        runtime.weapon_snapshot.valid_until = weapon::Clock::now() + std::chrono::minutes(1);
+        frame(); frame();
+        require(capture.text.find("GSI 本方阵营：CT") != std::string::npos &&
+            capture.text.find("准备：原已选全部类别") != std::string::npos,
+            "准备阶段必须显示当前本方阵营及全部原已选类别");
+        save_window(capture, output / "aim-team-filter-preparation.png");
+        runtime.weapon_snapshot.team = weapon::Team::T;
+        runtime.weapon_snapshot.game_phase = weapon::GamePhase::ACTIVE;
+        frame(); frame();
+        require(capture.text.find("GSI 本方阵营：T") != std::string::npos &&
+            capture.text.find("正式 / 回合结束：仅敌方") != std::string::npos,
+            "正式阶段与换边必须显示新阵营及仅敌方规则");
+        save_window(capture, output / "aim-team-filter-active.png");
+        runtime.weapon_snapshot.valid_until = weapon::Clock::now() - std::chrono::seconds(1);
+        frame(); frame();
+        require(capture.text.find("GSI 本方阵营：未知 / 未就绪") != std::string::npos &&
+            capture.text.find("GSI 比赛阶段：未知 / 未就绪") != std::string::npos,
+            "过期快照不能继续展示有效阵营与阶段");
+        save_window(capture, output / "aim-team-filter-expired.png");
+        runtime = {};
+        runtime.state = RuntimeState::STOPPED;
+        config.team_filter.enabled = false;
+        config.gsi.enabled = false;
         select_page(4);
         require_page_table("collection_settings");
         save_window(capture, output / "collection.png");

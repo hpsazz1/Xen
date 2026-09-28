@@ -70,6 +70,21 @@ WASD 全松且急停所有者已处理松键、完成制动和清理后，可直
 取消主动缓冲和节流（buffer/throttle 均为 0.0）；脚本保留其他配置和原文件备份，支持 `-WhatIf`。
 修改后重启游戏再由用户前台采集，以排除旧配置缓存。GSI 仍有传输和调度延迟，接收计数不代表精确逐发时刻。
 
+瞄准页可开启“自动排除友军”，依据本地玩家 GSI 身份、阵营和比赛阶段筛选 Aim 与自动扳机。
+热身及每回合冻结准备阶段允许原已选全部类别；正式回合与回合结束只保留敌方类别。
+本方 CT 时允许 T，本方 T 时允许 CT；半场/加时换边跟随 GSI 最新状态，不根据局数推测。
+阶段未知、正式阶段阵营未知、过期或观战身份不符时暂停自动目标输出；换边及开局清除旧锁定与待发按钮，
+可信状态恢复后重新选目标，不额外要求正常持键松开。原武器/焦点安全恢复规则仍适用。
+
+通用配置默认关闭，必须按实际模型设置 `[team_filter]` 的 `ct_class_ids` / `t_class_ids`。
+当前四类模型 `CT-boby,CT-head,T-boby,T-head` 对应 CT=0,1、T=2,3；切换其他模型需核对映射。
+停机迁移可用 `scripts/set_team_filter.ps1 -ConfigPath <config.ini> -Enabled true -CtClassIds 0,1 -TClassIds 2,3`，仅修改该节并备份；关闭用 `-Enabled false`。
+源端执行 `scripts/set_xen_gsi_realtime.ps1 -CfgPath <实际cfg路径> -IncludeTeamContext`
+补充 `map` 和 `round` 订阅并重启游戏。GSI只识别本方，框的阵营仍由模型分类；不保证消除误分类误伤。
+同阵营互相敌对的自由混战/特殊玩法应关闭此筛选。采集、自动标注和完整预览保留双方原始框，
+友军不会因控制过滤而被采成空标注；准备/正式策略都与原瞄准类别选择取交集。
+
+
 | 层 | 当前能力 |
 |---|---|
 | Capture | DXGI Desktop Duplication、UDP MJPEG、XUDP JPEG、NDI |

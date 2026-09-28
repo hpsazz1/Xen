@@ -11,6 +11,10 @@
 namespace weapon {
 using Clock = std::chrono::steady_clock;
 enum class WeaponState { UNKNOWN, ACTIVE, RELOADING, HOLSTERED };
+enum class Team { UNKNOWN, CT, T };
+const char* team_name(Team team) noexcept;
+enum class GamePhase { UNKNOWN, PREPARATION, ACTIVE };
+const char* game_phase_name(GamePhase phase) noexcept;
 enum class Status { DISABLED, UNAVAILABLE, READY, EXPIRED, INVALID_PAYLOAD,
                     IDENTITY_MISMATCH, PLAYER_INACTIVE, UNKNOWN_WEAPON, RELOADING, EMPTY,
                     CLOCK_REJECTED, OUT_OF_ORDER, DUPLICATE, COUNTER_EXHAUSTED, NON_FIREARM };
@@ -33,6 +37,10 @@ struct WeaponSnapshot {
     // 仅为普通压枪区分确认死亡与缺失/非游戏状态，不放宽 valid。
     bool player_playing = false;
     std::optional<int> player_health;
+    Team team = Team::UNKNOWN;
+    GamePhase game_phase = GamePhase::UNKNOWN;
+    // 独立阵营/阶段策略代际；未知也保留断点，非零本身不代表可信。
+    std::uint64_t team_epoch = 0;
     Status status = Status::UNAVAILABLE;
     std::string player_id; // 自动从客户端身份取得，不是固定配置。
     std::string raw_name;

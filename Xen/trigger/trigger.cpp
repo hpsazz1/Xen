@@ -177,16 +177,24 @@ std::optional<TriggerDecision> TriggerController::check_context(const TriggerPer
             previous.fire_interval_ms != permit.context.fire_interval_ms)));
     const bool trust_changed = previous.trust_generation != permit.context.trust_generation ||
         previous.session_trusted != permit.context.session_trusted;
-    const bool changed = trust_changed || timing_changed || previous.required != permit.context.required ||
+    const bool team_changed = previous.team_filter_required != permit.context.team_filter_required ||
+        (permit.context.team_filter_required && (previous.team_filter_valid != permit.context.team_filter_valid ||
+            previous.team_epoch != permit.context.team_epoch));
+    const bool weapon_changed = trust_changed || timing_changed || previous.required != permit.context.required ||
         (permit.context.required && (previous.generation != permit.context.generation || previous.valid != permit.context.valid));
-    const bool available = (!permit.context.required || (permit.context.valid && permit.context.generation != 0)) &&
+    const bool changed = weapon_changed || team_changed;
+    const bool available = (!permit.context.team_filter_required ||
+        (permit.context.team_filter_valid && permit.context.team_epoch != 0)) &&
+        (!permit.context.required || (permit.context.valid && permit.context.generation != 0)) &&
         (!timing_required || (permit.context.timing_valid && permit.context.generation != 0 &&
             permit.context.shot_hold_ms >= 1 && permit.context.shot_hold_ms <= 500 &&
             permit.context.fire_interval_ms >= permit.context.shot_hold_ms && permit.context.fire_interval_ms <= 2000));
     if (!changed && available) return std::nullopt;
     // 正常武器变更仍退出旧候选/旧按钮事务，只保留已观察过的健康持键许可。
-    const bool ordinary = previous.required && permit.context.required && previous.session_trusted &&
-        permit.context.session_trusted && previous.trust_generation != 0 && !trust_changed;
+    const bool team_only = !weapon_changed && (team_changed || permit.context.team_filter_required) &&
+        (!permit.context.required || permit.context.valid) && (!timing_required || permit.context.timing_valid);
+    const bool ordinary = team_only || (previous.required && permit.context.required && previous.session_trusted &&
+        permit.context.session_trusted && previous.trust_generation != 0 && !trust_changed);
     const auto reason = available ? TriggerReason::CONTEXT_CHANGED : TriggerReason::CONTEXT_UNAVAILABLE;
     auto decision = ordinary ? release(reason, now) : cancel(reason, now);
     // 变化当次已观察到健康释放时可作为新边沿起点；失效期间的释放不能武装恢复后的上下文。
@@ -273,6 +281,8 @@ TriggerDecision TriggerController::observe(const TriggerObservation& observation
         observation_failure_ = reason;
         return release(reason, now);
     };
+    if (permit.context.team_filter_required && observation.team_epoch != permit.context.team_epoch)
+        return reject_observation(TriggerReason::CONTEXT_CHANGED);
     const bool same_epoch = observation.epoch == state_.observation_epoch;
     if (!observation.valid || observation.epoch == 0 || observation.sequence == 0 ||
         (same_epoch && observation.sequence <= state_.observation_sequence) ||

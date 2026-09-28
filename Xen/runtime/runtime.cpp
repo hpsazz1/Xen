@@ -426,7 +426,12 @@ struct Runtime::Impl {
                 [this](std::uint64_t id) { if (auto stop = auto_stop_worker.load()) stop->cancel(id); },
                 [this, timing_catalog, context = runtime::detail::TriggerWeaponContext{}]() mutable {
                     const auto current = gsi_receiver.snapshot();
-                    return context.update(current, *timing_catalog, TriggerClock::now());
+                    const auto now = TriggerClock::now();
+                    auto result = context.update(current, *timing_catalog, now);
+                    result.team_filter_required = config.team_filter.enabled;
+                    result.team_filter_valid = runtime::detail::team_context_valid(current, now);
+                    result.team_epoch = current.team_epoch;
+                    return result;
                 },
                 [this] { auto stop = auto_stop_worker.load(); return stop ? stop->estimated_completion_id() : 0; },
                 std::move(resume_movement), [this](std::uint64_t id) {
@@ -812,7 +817,7 @@ struct Runtime::Impl {
             const auto source = config.source_context.enabled ? source_context_client.snapshot() :
                 source_context::SourceContextSnapshot{};
             return aim_weapon_session.update(current_weapon, config.gsi.enabled, source, config.source_context.enabled,
-                safety_gate.hold_active(), weapon::Clock::now());
+                safety_gate.hold_active(), weapon::Clock::now(), config.team_filter.enabled);
         };
         const bool probes_enabled = config.runtime.enable_performance_probes;
         while (!stop_requested.load(std::memory_order_acquire)) {
@@ -900,6 +905,12 @@ struct Runtime::Impl {
                     aim->reset();
                 }
                 aim_frame = std::move(prepared.frame);
+                if (config.team_filter.enabled) {
+                    // 背景运动先使用完整检测掩码；控制过滤不污染采集预标注。
+                    detections = std::move(aim_frame.detections);
+                    aim_frame.detections = runtime::detail::enemy_detections(detections, config.team_filter,
+                        frame_weapon_session.team, frame_weapon_session.game_phase, frame_weapon_session.team_valid);
+                }
                 profile.background_motion_ms = prepared.background_motion_ms;
                 if (auto trigger = trigger_worker.load()) {
                     auto observation = std::make_shared<TriggerObservation>();
@@ -909,6 +920,7 @@ struct Runtime::Impl {
                     observation->roi_width = aim_frame.roi_width;
                     observation->roi_height = aim_frame.roi_height;
                     observation->epoch = aim_frame.observation_epoch;
+                    observation->team_epoch = frame_weapon_session.team_epoch;
                     observation->sequence = aim_frame.sequence;
                     observation->observed_at = frame->timing.source_time_at;
                     observation->timing_valid = frame->timing.source_time_timing_valid &&
@@ -1095,7 +1107,7 @@ struct Runtime::Impl {
             profile.total_ms = std::chrono::duration<double, std::milli>(
                 finished - frame->timing.captured_at).count();
             const std::span<const Detection> preview_detections =
-                profile.detector.status == DetectionStatus::SUCCESS
+                profile.detector.status == DetectionStatus::SUCCESS && !config.team_filter.enabled
                     ? std::span<const Detection>(aim_frame.detections)
                     : std::span<const Detection>(detections);
             // 本帧输出已经完成，采集只复制被选中的同帧像素，不等待编码/磁盘。

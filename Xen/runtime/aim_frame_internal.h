@@ -6,6 +6,7 @@
 #include "runtime/camera_motion_internal.h"
 #include "runtime/runtime_internal.h"
 #include "runtime/weapon_context_internal.h"
+#include "runtime/team_filter_internal.h"
 
 namespace runtime::detail {
 
@@ -19,6 +20,10 @@ struct AimWeaponSessionDecision {
     bool allowed = false;
     bool reset_aim = false;
     std::uint64_t generation = 0;
+    weapon::Team team = weapon::Team::UNKNOWN;
+    std::uint64_t team_epoch = 0;
+    bool team_valid = false;
+    weapon::GamePhase game_phase = weapon::GamePhase::UNKNOWN;
 };
 
 // 仅由 pipeline 线程推进。普通武器变化撤销旧目标/命令；信任断点才撤销持键恢复资格。
@@ -26,7 +31,11 @@ class AimWeaponSessionGate final {
 public:
     AimWeaponSessionDecision update(const weapon::WeaponSnapshot& weapon, bool weapon_required,
             const source_context::SourceContextSnapshot& source, bool focus_required,
-            bool hold_active, weapon::Clock::time_point now) {
+            bool hold_active, weapon::Clock::time_point now, bool team_filter_required = false) {
+        const bool team_allowed = !team_filter_required || (weapon_required && team_context_valid(weapon, now));
+        const auto team_epoch = team_filter_required ? weapon.team_epoch : 0;
+        const auto team = team_filter_required ? weapon.team : weapon::Team::UNKNOWN;
+        const auto phase = team_filter_required ? weapon.game_phase : weapon::GamePhase::UNKNOWN;
         const bool trusted = !weapon_required || weapon_session_trusted(weapon, now);
         const bool ready = !weapon_required || weapon_ready(weapon, now);
         const bool focused = !focus_required || (source.available && source.focused && source.session_id != 0);
@@ -41,7 +50,8 @@ public:
         if (trusted && focused && !hold_active) release_required_ = false;
         const bool changed = !initialized_ || ready_ != ready || trusted_ != trusted || focused_ != focused ||
             weapon_epoch_ != weapon_epoch || weapon_id_ != weapon_id || trust_changed ||
-            previous_release_required != release_required_;
+            previous_release_required != release_required_ || team_allowed_ != team_allowed ||
+            team_epoch_ != team_epoch || team_ != team || game_phase_ != phase;
         if (changed) {
             if (generation_ == std::numeric_limits<std::uint64_t>::max()) exhausted_ = true;
             else ++generation_;
@@ -50,13 +60,19 @@ public:
         ready_ = ready; trusted_ = trusted; focused_ = focused;
         weapon_epoch_ = weapon_epoch; trust_epoch_ = trust_epoch; focus_session_ = focus_session;
         weapon_id_ = weapon_id;
-        return {ready && trusted && focused && !release_required_ && !exhausted_, changed, generation_};
+        team_allowed_ = team_allowed; team_epoch_ = team_epoch; team_ = team; game_phase_ = phase;
+        return {ready && trusted && focused && team_allowed && !release_required_ && !exhausted_,
+            changed, generation_, team, team_epoch, team_allowed, phase};
     }
 private:
     bool initialized_ = false, ready_ = false, trusted_ = false, focused_ = false;
     bool release_required_ = false, exhausted_ = false;
     std::uint64_t weapon_epoch_ = 0, trust_epoch_ = 0, focus_session_ = 0, generation_ = 0;
     std::string weapon_id_;
+    bool team_allowed_ = true;
+    std::uint64_t team_epoch_ = 0;
+    weapon::Team team_ = weapon::Team::UNKNOWN;
+    weapon::GamePhase game_phase_ = weapon::GamePhase::UNKNOWN;
 };
 
 // 新按键许可不能追溯激活按未输出状态计算的旧帧；当前撤销仍立即生效。

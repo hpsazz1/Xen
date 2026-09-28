@@ -207,7 +207,12 @@ public:
                           fresh.context.generation == decided_context.generation &&
                           fresh.context.shot_hold_ms == decided_context.shot_hold_ms &&
                           fresh.context.fire_interval_ms == decided_context.fire_interval_ms)));
-                    const bool context_valid = fresh.context.required == decided_context.required &&
+                    const bool team_valid = fresh.context.team_filter_required == decided_context.team_filter_required &&
+                        (!fresh.context.team_filter_required || (fresh.context.team_filter_valid &&
+                         decided_context.team_filter_valid && fresh.context.team_epoch != 0 &&
+                         fresh.context.team_epoch == decided_context.team_epoch && evaluated_observation &&
+                         evaluated_observation->team_epoch == fresh.context.team_epoch));
+                    const bool context_valid = team_valid && fresh.context.required == decided_context.required &&
                         timing_valid &&
                         (!fresh.context.required || (fresh.context.valid && decided_context.valid &&
                             fresh.context.generation != 0 && fresh.context.generation == decided_context.generation &&
