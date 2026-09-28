@@ -1,6 +1,7 @@
 #ifndef SESSION_ARCHIVE_H
 #define SESSION_ARCHIVE_H
 #include "debug/debug.h"
+namespace xen::debug::detail { class SessionArchiveTestAccess; }
 
 struct SessionArchiveConfig {
     std::string directory;
@@ -17,6 +18,7 @@ struct SessionArchiveStatus {
     std::uint64_t accepted_samples = 0, written_samples = 0, dropped_samples = 0;
     std::uint64_t written_segments = 0, trigger_events_dropped = 0, marker_count = 0;
     std::uint64_t dropped_batches = 0;
+    std::uint64_t coalesced_batches = 0, queue_capacity_rejections = 0, sample_capacity_rejections = 0;
     std::size_t queued_batches = 0;
     std::string directory, last_error;
 };
@@ -37,6 +39,7 @@ public:
     void stop() noexcept;
     SessionArchiveStatus status() const;
 private:
+    friend class xen::debug::detail::SessionArchiveTestAccess;
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

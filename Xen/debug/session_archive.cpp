@@ -5,6 +5,7 @@
 #undef ERROR
 #endif
 #include "debug/session_archive.h"
+#include "debug/session_archive_internal.h"
 #include <nlohmann/json.hpp>
 #include <atomic>
 #include <condition_variable>
@@ -58,6 +59,7 @@ struct SessionArchive::Impl {
     std::vector<RuntimePipelineSample> pending;
     RuntimeSnapshot latest;
     std::vector<TriggerExecutionEvent> events;
+    std::function<void()> before_flush;
     Clock::time_point segment_started;
 
     void error(const std::string& message) {
@@ -80,6 +82,8 @@ struct SessionArchive::Impl {
             {"accepted_samples",s.accepted_samples}, {"written_samples",s.written_samples},
             {"dropped_samples",s.dropped_samples}, {"written_segments",s.written_segments},
             {"dropped_batches",s.dropped_batches},
+            {"coalesced_batches",s.coalesced_batches}, {"queue_capacity_rejections",s.queue_capacity_rejections},
+            {"sample_capacity_rejections",s.sample_capacity_rejections},
             {"trigger_events_dropped",s.trigger_events_dropped}, {"marker_count",s.marker_count},
             {"runtime_samples_dropped",latest.debug_samples_dropped},
             {"last_error",s.last_error}, {"complete",closed && !s.dropped_batches && !s.dropped_samples && !s.trigger_events_dropped && !latest.debug_samples_dropped && s.last_error.empty()},
@@ -88,6 +92,9 @@ struct SessionArchive::Impl {
     }
     void flush() {
         if (pending.empty() && events.empty()) return;
+        std::function<void()> callback;
+        { std::lock_guard lock(mutex); callback=before_flush; }
+        if (callback) callback();
         const auto number = ++segment_number;
         const auto base = std::filesystem::path(config.directory) / ("segment-" + std::to_string(number));
         auto report_config = config.report_config;
@@ -221,13 +228,41 @@ bool SessionArchive::start(const SessionArchiveConfig& config, std::string& erro
 }
 bool SessionArchive::submit(std::span<const RuntimePipelineSample> samples, const RuntimeSnapshot& snapshot) noexcept {
     try {
-        std::unique_lock lock(impl_->mutex, std::try_to_lock);
-        if (!lock || !impl_->state.active || impl_->stopping || impl_->queue.size() >= impl_->config.queue_capacity || samples.size()>10000 || impl_->queued_samples+samples.size()>12000 || snapshot.trigger_execution_log.events.size()>2048) {
+        if (samples.size()>10000 || snapshot.trigger_execution_log.events.size()>2048) {
             impl_->rejected += samples.size(); ++impl_->rejected_batches; return false;
         }
         Impl::Batch batch; batch.steady=steady_ns(); batch.system=system_ns();
         batch.samples.assign(samples.begin(), samples.end()); batch.snapshot = snapshot;
-        impl_->queue.push_back(std::move(batch)); impl_->state.accepted_samples += samples.size();
+        // App 冷路径只等待内存移交；消费者在该锁外序列化、写盘和运行测试回调。
+        std::unique_lock lock(impl_->mutex);
+        if (!impl_->state.active || impl_->stopping || impl_->queued_samples+samples.size()>12000) {
+            if (impl_->queued_samples+samples.size()>12000) ++impl_->state.sample_capacity_rejections;
+            impl_->rejected += samples.size(); ++impl_->rejected_batches; return false;
+        }
+        const std::size_t merge_limit=std::min<std::size_t>(1200,impl_->config.segment_samples);
+        const bool merge=!impl_->queue.empty() && !impl_->queue.back().marker &&
+            impl_->queue.back().samples.size()+samples.size()<=merge_limit &&
+            impl_->queue.back().snapshot.trigger_execution_log.events.size()+snapshot.trigger_execution_log.events.size()<=2048;
+        if (merge) {
+            auto& tail=impl_->queue.back();
+            // 先完成所有可能分配的操作，再改变尾批；失败不能部分写入后又计作丢弃。
+            auto combined_events=tail.snapshot.trigger_execution_log.events;
+            combined_events.insert(combined_events.end(),snapshot.trigger_execution_log.events.begin(),snapshot.trigger_execution_log.events.end());
+            const auto needed=tail.samples.size()+samples.size();
+            if (needed>tail.samples.capacity()) tail.samples.reserve(std::max(needed,
+                std::min(merge_limit,tail.samples.capacity()*2)));
+            tail.samples.insert(tail.samples.end(),batch.samples.begin(),batch.samples.end());
+            batch.snapshot.trigger_execution_log.events=std::move(combined_events);
+            tail.snapshot=std::move(batch.snapshot); tail.steady=batch.steady; tail.system=batch.system;
+            ++impl_->state.coalesced_batches;
+        } else {
+            if (impl_->queue.size()>=impl_->config.queue_capacity) {
+                ++impl_->state.queue_capacity_rejections;
+                impl_->rejected += samples.size(); ++impl_->rejected_batches; return false;
+            }
+            impl_->queue.push_back(std::move(batch));
+        }
+        impl_->state.accepted_samples += samples.size();
         impl_->queued_samples += samples.size();
         lock.unlock(); impl_->wake.notify_one(); return true;
     } catch (...) { impl_->rejected += samples.size(); ++impl_->rejected_batches; return false; }
@@ -248,3 +283,8 @@ void SessionArchive::note_gap(const std::string& reason) noexcept {
     try { impl_->error(reason.empty() ? "上游遥测缺口" : reason); } catch (...) {}
 }
 SessionArchiveStatus SessionArchive::status() const { return impl_->status(); }
+void xen::debug::detail::SessionArchiveTestAccess::before_flush(
+        SessionArchive& archive, std::function<void()> callback) {
+    std::lock_guard lock(archive.impl_->mutex);
+    archive.impl_->before_flush=std::move(callback);
+}
