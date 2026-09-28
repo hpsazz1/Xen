@@ -14,6 +14,7 @@ if ($packet.schema -ne 1 -or $packet.runtime -notin @('nvidia', 'directml', 'ope
 $workerRelative = "runtimes/$($packet.runtime)/Xen.exe"
 $recoilTools = @("runtimes/$($packet.runtime)/xen_recoil_calibration.exe", "runtimes/$($packet.runtime)/xen_recoil_tuner.exe")
 $allowed = @($workerRelative, 'tools/acceptance/WORKER-UPDATE.json',
+    'tools/model-data/model_data_pipeline.py', 'tools/model-data/model_data_review.html',
     'tools/acceptance/PACKAGE-NOTES.md', 'tools/acceptance/MANUAL-ACCEPTANCE.md',
     'tools/acceptance/invoke_hud_stop_acceptance.ps1',
     'tools/acceptance/measure_process_resources.ps1', 'tools/acceptance/soak_acceptance_support.ps1',

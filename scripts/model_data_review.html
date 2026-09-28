@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Xen 素材审核</title>
+<style>
+:root{color-scheme:dark;font:15px system-ui,sans-serif;background:#121820;color:#e4edf4}body{margin:0;padding:20px;max-width:1600px;margin:auto}h1{font-size:24px;margin:0 0 8px}p{line-height:1.6}button,input,select{font:inherit;background:#24313e;color:inherit;border:1px solid #526477;border-radius:5px;padding:7px}button{cursor:pointer}button:disabled{opacity:.45;cursor:default}button:hover:not(:disabled){border-color:#65bded}label{display:inline-flex;gap:6px;align-items:center}.bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:12px 0}.notice{padding:10px;background:#1c2c3d;border-left:3px solid #65bded;white-space:pre-wrap}.error{border-color:#ff7d7d;color:#ffb3b3}#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}.card{border:1px solid #405264;border-radius:8px;padding:9px;background:#1b2530}.card.selected{outline:2px solid #63c7ef}.card header{display:flex;justify-content:space-between;gap:8px}.image{position:relative;margin:8px 0;cursor:zoom-in;aspect-ratio:1;display:grid;place-items:center;overflow:hidden}.image img{width:100%;height:100%;object-fit:contain}.image svg{position:absolute;width:100%;height:100%;inset:0;pointer-events:none}.meta{font-size:12px;color:#b8cbd9;overflow-wrap:anywhere}.status{font-size:13px;color:#8cd4fa}dialog{background:#17212c;color:inherit;border:1px solid #5a758f;border-radius:10px;max-width:1000px;width:94vw;max-height:90vh;overflow:auto}dialog::backdrop{background:#000b}.detail{display:grid;grid-template-columns:minmax(240px,1fr) 280px;gap:16px}canvas{width:100%;height:auto;display:block;background:#0c1218;touch-action:none}#boxes{width:100%;height:130px}.coords{display:grid;grid-template-columns:1fr 1fr;gap:8px}.coords input{width:90px}small{color:#b8cbd9}@media(max-width:650px){.detail{grid-template-columns:1fr}.bar{gap:6px}}
+</style>
+</head>
+<body>
+<h1>素材审核</h1>
+<p>① 按原因筛选并查看框；② 勾选本页样本批量确认，疑难图点击放大调整；③ 填写审核者并导出，回 Xen「采集」页选择并导入决策文件。<br>自动建议不是已审核标签；空框可能漏检。页面不联网、不改原图，关闭前请导出草稿。导入决策文件可恢复进度。</p>
+<details><summary>标注规则：活体、负样本与倒地</summary><p>所有可见活体按原四类标注；遮挡、蹲低不等于死亡。确认已死亡的尸体不标为目标：整图无活体时可确认困难负样本，同框有活体时只标活体。倒地过渡或生死不明请参考前后图片；无法确定时排除并保留原图待复核。UI、菜单、损坏或域外图片应排除，不能当游戏负样本。页面不会根据姿态自动判死，也不会新增类别。预测一致也不等于正确；同一模型的 PT 与 ONNX 不构成独立验证。头框与身体框可合法包含，不按重叠直接删除。</p></details>
+<div id="message" class="notice" role="status">正在读取报告…</div>
+<div class="bar">
+<label>审核者 <input id="reviewer" placeholder="姓名或代号" maxlength="120"></label>
+<button id="export">导出决策 / 草稿</button><label>恢复草稿 <input id="import" type="file" accept=".json,application/json"></label>
+<span id="progress"></span><span id="summary" class="meta"></span>
+</div>
+<div class="bar">
+<label>分组 <select id="group"></select></label><label>原因 <select id="reason"></select></label>
+<label>排序 <select id="sort"><option value="priority">异常优先</option><option value="id">样本顺序</option></select></label>
+<label><input id="unprocessed" type="checkbox">仅看未处理</label><button id="refresh-pending">刷新未处理列表</button>
+<label><input id="show-reviewed" type="checkbox">显示原有已审核</label>
+<label><input id="show-boxes" type="checkbox" checked>显示框</label>
+</div>
+<div class="bar">
+<button id="previous">上一页</button><span id="page"></span><button id="next">下一页</button>
+<button id="select-page">选择本页</button><button id="clear-selection">清空选择</button><span id="selection"></span>
+</div>
+<div class="bar">
+<button id="positive">确认所选预标注（正样本）</button><button id="negative" title="确认整图没有任何可见活体目标；空检测不代表无目标">确认所选无目标（负样本）</button><button id="exclude" title="用于UI、域外、坏图或无法确定的样本；保留原图">排除所选</button>
+</div>
+<div id="grid"></div>
+<dialog id="detail">
+<h2 id="detail-title">样本</h2><p id="detail-reasons"></p>
+<div class="detail"><div><canvas id="canvas"></canvas><p><small>选择模式：点击框。新增模式：在图上拖出矩形；坐标可在右侧精确调整。当前修改只有点击确认才进入决策。</small></p></div>
+<div><div class="bar"><label>操作 <select id="mode"><option value="select">选择框</option><option value="draw">新增框</option></select></label></div>
+<select id="boxes" size="6" aria-label="框列表"></select>
+<div class="bar"><label>类别 <select id="class"></select></label></div>
+<div class="coords"><label>x1 <input id="x1" type="number" step="any"></label><label>y1 <input id="y1" type="number" step="any"></label><label>x2 <input id="x2" type="number" step="any"></label><label>y2 <input id="y2" type="number" step="any"></label></div>
+<div class="bar"><button id="apply-box">应用坐标 / 类别</button><button id="delete-box">删除框</button><button id="clear-boxes">清空全部框</button></div>
+<div class="bar"><button id="undo">撤销未确认修改</button></div>
+<p id="draft-status"></p>
+</div></div>
+<div class="bar"><button id="detail-positive">确认正样本</button><button id="detail-negative" title="必须确认整图没有可见活体，先明确清空不应保留的框">确认负样本</button><button id="detail-exclude" title="用于域外或无法确定；不删除原图">排除此图</button><button id="close-detail">关闭</button></div>
+</dialog>
+<script type="application/json" id="review-data">__XEN_REVIEW_DATA__</script>
+<script id="review-core">
+'use strict';
+// 纯数据契约供页面和无浏览器自检共同调用；建议不改变人工审核状态。
+const XenReviewCore = (() => {
+  const states = new Set(['UNKNOWN','VERIFIED_POSITIVE','VERIFIED_NEGATIVE','EXCLUDED']);
+  const key = s => JSON.stringify([s.session_id,s.sample_id]);
+  const fail = message => { throw new Error(message); };
+  const text = v => typeof v === 'string' && v.length > 0;
+  const clone = v => JSON.parse(JSON.stringify(v));
+  function boxes(value, sample, classes) {
+    if (!Array.isArray(value) || value.length > 1024) fail('框数量无效');
+    return value.map(b => {
+      if (!Number.isInteger(b.class_id) || b.class_id < 0 || b.class_id >= classes.length) fail('类别 ID 无效');
+      if (![b.x1,b.y1,b.x2,b.y2].every(Number.isFinite) || b.x1 < 0 || b.y1 < 0 || b.x2 > sample.width || b.y2 > sample.height || b.x1 >= b.x2 || b.y1 >= b.y2) fail('框坐标超出原图或面积无效');
+      return {class_id:b.class_id,x1:b.x1,y1:b.y1,x2:b.x2,y2:b.y2};
+    });
+  }
+  function validate(data) {
+    if (data.schema_version !== 1 || !text(data.root_identity) || !Array.isArray(data.class_names) || !data.class_names.length || !data.class_names.every(text) || new Set(data.class_names).size !== data.class_names.length || !Array.isArray(data.samples)) fail('报告格式或类别表无效');
+    const seen = new Set();
+    for (const s of data.samples) {
+      if (!text(s.session_id) || !text(s.sample_id) || !/^[a-f0-9]{64}$/i.test(s.image_sha256) || !Number.isInteger(s.width) || !Number.isInteger(s.height) || s.width <= 0 || s.height <= 0 || s.width > 16384 || s.height > 16384 || typeof s.base_review_token !== 'string' || !states.has(s.state)) fail('样本身份或尺寸无效');
+      if (!/^images\/[A-Za-z0-9_.-]+\.png$/.test(s.image) || s.image.includes('..')) fail('图片必须是报告内的 PNG');
+      if (seen.has(key(s))) fail('样本身份重复');
+      seen.add(key(s)); boxes(s.detections,s,data.class_names);
+      if (!Array.isArray(s.reasons) || !s.reasons.every(v => typeof v === 'string') || typeof s.group !== 'string' || !Number.isFinite(s.priority)) fail('样本建议字段无效');
+    }
+    return data;
+  }
+  function decision(sample, state, detections, classes) {
+    if (!states.has(state) || state === 'UNKNOWN') fail('必须明确确认正样本、负样本或排除');
+    const checked = boxes(detections,sample,classes);
+    if (state === 'VERIFIED_POSITIVE' && !checked.length) fail('空框不能确认正样本，请补框或复核');
+    if (state === 'VERIFIED_NEGATIVE' && checked.length) fail('带框不能确认负样本，请明确清空后复核');
+    return {session_id:sample.session_id,sample_id:sample.sample_id,image_sha256:sample.image_sha256,base_review_token:sample.base_review_token,state,detections:state === 'EXCLUDED' ? [] : checked};
+  }
+  function batch(samples, visibleKeys, selectedKeys, state, decisions, classes) {
+    const visible = new Set(visibleKeys);
+    const selected = samples.filter(s => visible.has(key(s)) && selectedKeys.has(key(s)));
+    if (!selected.length) fail('请先勾选当前页样本');
+    // 先全部验证，避免混合正负样本时部分写入而误报整批成功。
+    return selected.map(s => decision(s,state,(decisions.get(key(s)) || s).detections,classes));
+  }
+  function requireLoaded(changes, loaded, state) {
+    if (state !== 'EXCLUDED' && changes.some(s => !loaded.has(key(s))))
+      fail('所选图片尚未全部加载成功，请等待图片显示并逐页查看；读取失败时不能确认正负样本');
+  }
+  function exportDraft(data, reviewer, decisions) {
+    if (!text(reviewer.trim())) fail('请填写审核者');
+    if (!decisions.size) fail('尚未明确处理任何样本');
+    const lookup = new Map(data.samples.map(s => [key(s),s]));
+    const samples = [...decisions.values()].map(d => {
+      const source = lookup.get(key(d));
+      if (!source || source.image_sha256 !== d.image_sha256 || source.base_review_token !== d.base_review_token) fail('决策身份不匹配');
+      return decision(source,d.state,d.detections,data.class_names);
+    });
+    return {schema_version:1,format:'xen-native-review-v1',class_names:clone(data.class_names),reviewer:reviewer.trim(),root_identity:data.root_identity,samples};
+  }
+  function importDraft(data, draft) {
+    if (draft.schema_version !== 1 || draft.format !== 'xen-native-review-v1' || draft.root_identity !== data.root_identity || JSON.stringify(draft.class_names) !== JSON.stringify(data.class_names) || !text(draft.reviewer?.trim()) || !Array.isArray(draft.samples)) fail('草稿与本报告的根目录身份、类别或格式不一致');
+    const lookup = new Map(data.samples.map(s => [key(s),s]));
+    const next = new Map();
+    for (const d of draft.samples) {
+      const s = lookup.get(key(d));
+      if (!s || next.has(key(d)) || d.image_sha256 !== s.image_sha256 || d.base_review_token !== s.base_review_token) fail('草稿包含重复/未知样本、不同图片或过期审核');
+      next.set(key(d),decision(s,d.state,d.detections,data.class_names));
+    }
+    return next;
+  }
+  function duplicateGroups(samples) {
+    const groups = new Map();
+    for (const sample of samples) {
+      if (!sample.group) continue;
+      if (!groups.has(sample.group)) groups.set(sample.group, []);
+      groups.get(sample.group).push(sample);
+    }
+    return [...groups].filter(([, members]) => members.length > 1).map(([value, members], index) => {
+      const friendly = members.find(s => typeof s.group_label === 'string' && s.group_label.trim());
+      const title = friendly ? friendly.group_label.trim() : `重复组${index + 1}`;
+      return {value, count: members.length, label: `${title}（${members.length}张）`};
+    });
+  }
+  function filterRows(samples, filters, decisions) {
+    return samples.filter(s => (filters.showReviewed || s.state === 'UNKNOWN') &&
+      (!filters.unprocessed || !decisions.has(key(s))) &&
+      (!filters.group || s.group === filters.group) &&
+      (!filters.reason || s.reasons.includes(filters.reason))).sort((a, b) =>
+        (filters.sort === 'priority' ? b.priority - a.priority : 0) ||
+        a.session_id.localeCompare(b.session_id) ||
+        a.sample_id.localeCompare(b.sample_id, undefined, {numeric:true}));
+  }
+  function canvasSize(width, height) {
+    const scale = Math.min(1, 1024 / Math.max(width, height));
+    return {width:Math.max(1,Math.round(width * scale)),height:Math.max(1,Math.round(height * scale))};
+  }
+  function imageToDisplay(point, width, height, rect) {
+    return {x:rect.left + point.x * rect.width / width,y:rect.top + point.y * rect.height / height};
+  }
+  function displayToImage(point, width, height, rect) {
+    return {x:Math.max(0,Math.min(width,(point.x-rect.left)*width/rect.width)),
+      y:Math.max(0,Math.min(height,(point.y-rect.top)*height/rect.height))};
+  }
+  // 列表是用户显式刷新时的快照；处理样本不会替换当前页的位置。
+  function pageRows(rows, page) { return rows.slice(page * 24, (page + 1) * 24); }
+  return {validate,key,boxes,decision,batch,exportDraft,importDraft,clone,duplicateGroups,filterRows,pageRows,requireLoaded,canvasSize,imageToDisplay,displayToImage};
+
+})();
+if (typeof globalThis !== 'undefined') globalThis.XenReviewCore = XenReviewCore;
+</script>
+<script id="review-ui">
+'use strict';
+(() => {
+  const $ = id => document.getElementById(id), C = XenReviewCore;
+  const message = (text, error=false) => { $('message').textContent=text; $('message').className='notice'+(error?' error':''); };
+  const safely = f => { try { return f(); } catch(e) { message(e.message,true); } };
+  let data;
+  try { data=C.validate(JSON.parse($('review-data').textContent)); }
+  catch(e) { message('无法打开报告：'+e.message,true); document.querySelectorAll('button,input,select').forEach(e=>e.disabled=true); return; }
+  const loaded=new Set();
+  if(data.summary){const v=data.summary;$('summary').textContent=`原图 ${v.original_count ?? data.samples.length} · 精确去重 ${v.exact_unique_count ?? '—'} · 近重复提示组 ${v.near_duplicate_group_count ?? '—'}（非独立场景数）`;}
+  let decisions=new Map(), selected=new Set(), page=0, visible=[], active=null, draft=[], picked=-1, dirty=false, anchor=null, image=null, imageReady=false;
+  const names={UNKNOWN:'未审核',VERIFIED_POSITIVE:'已确认正样本',VERIFIED_NEGATIVE:'已确认负样本',EXCLUDED:'已排除'};
+  const el=(tag,text)=>{const e=document.createElement(tag);if(text!==undefined)e.textContent=text;return e;};
+  const option=(value,label)=>{const e=el('option',label);e.value=value;return e;};
+  $('reviewer').value=typeof data.reviewer==='string'?data.reviewer:'';
+  const duplicateGroups=C.duplicateGroups(data.samples);
+  const groupLabels=new Map(duplicateGroups.map(g=>[g.value,g.label]));
+  $('group').append(option('','全部'));
+  duplicateGroups.forEach(g=>$('group').append(option(g.value,g.label)));
+  $('reason').append(option('','全部'));
+  [...new Set(data.samples.flatMap(s=>s.reasons))].sort().forEach(v=>$('reason').append(option(v,v)));
+  data.class_names.forEach((name,i)=>$('class').append(option(String(i),`${i} · ${name}`)));
+  function filtered(){return C.filterRows(data.samples,{
+    showReviewed:$('show-reviewed').checked,unprocessed:$('unprocessed').checked,
+    group:$('group').value,reason:$('reason').value,sort:$('sort').value
+  },decisions);}
+  let rows=filtered();
+  function refreshRows(){page=0;selected.clear();rows=filtered();render();}
+  function drawOverlay(host,s,boxes){
+    const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox',`0 0 ${s.width} ${s.height}`);svg.setAttribute('preserveAspectRatio','xMidYMid meet');
+    if($('show-boxes').checked)boxes.forEach(b=>{const r=document.createElementNS(ns,'rect');for(const [k,v]of Object.entries({x:b.x1,y:b.y1,width:b.x2-b.x1,height:b.y2-b.y1,fill:'none',stroke:b.class_id%2?'#ffb85b':'#60e7b0','stroke-width':Math.max(s.width,s.height)/180}))r.setAttribute(k,String(v));svg.append(r);});host.append(svg);
+  }
+  function updateSelection(){ $('selection').textContent=`本页已选 ${selected.size} 张`; }
+  function render(){
+    const pages=Math.max(1,Math.ceil(rows.length/24)); page=Math.min(page,pages-1);visible=C.pageRows(rows,page);
+    const keys=new Set(visible.map(C.key));selected=new Set([...selected].filter(k=>keys.has(k)));
+    $('grid').replaceChildren();
+    for(const s of visible){
+      const k=C.key(s),current=decisions.get(k)||s,card=el('article');card.className='card'+(selected.has(k)?' selected':'');
+      const head=el('header'),label=el('label'),check=el('input');check.type='checkbox';check.checked=selected.has(k);check.disabled=$('unprocessed').checked&&decisions.has(k);check.setAttribute('aria-label','选择样本 '+s.sample_id);
+      check.onchange=()=>{check.checked?selected.add(k):selected.delete(k);card.classList.toggle('selected',check.checked);updateSelection();};label.append(check,el('span',s.sample_id));head.append(label,el('span',(decisions.has(k)?'本次 · ':'')+names[current.state]));card.append(head);
+      const picture=el('div');picture.className='image';const img=el('img');img.loading='eager';img.alt=`样本 ${s.sample_id}`;img.src=s.image;img.onerror=()=>{loaded.delete(k);img.alt='图片无法读取';picture.classList.add('error');};img.onload=()=>loaded.add(k);picture.append(img);drawOverlay(picture,s,current.detections);picture.onclick=()=>openDetail(s);card.append(picture);
+      const meta=el('div',`${groupLabels.get(s.group)||'未命中重复提示'} · ${s.reasons.join(' / ')||'无额外提示'}`);meta.className='meta';card.append(meta,el('small',s.session_id));$('grid').append(card);
+    }
+    $('page').textContent=`${page+1} / ${pages} 页 · 列表 ${rows.length} 张 · 本页已处理 ${visible.filter(s=>decisions.has(C.key(s))).length} 张`; $('previous').disabled=page===0;$('next').disabled=page+1>=pages;
+    $('progress').textContent=`本次明确处理 ${decisions.size} / ${data.samples.length} 张`;updateSelection();
+  }
+  ['group','reason','sort','show-reviewed','unprocessed'].forEach(id=>$(id).onchange=refreshRows);
+  $('show-boxes').onchange=render;
+  $('refresh-pending').onclick=()=>{refreshRows();message('列表已更新；批量确认后会保留当前页，避免样本移位。');};
+  $('previous').onclick=()=>{page--;selected.clear();render();};$('next').onclick=()=>{page++;selected.clear();render();};
+  $('select-page').onclick=()=>{selected=new Set(visible.filter(s=>!$('unprocessed').checked||!decisions.has(C.key(s))).map(C.key));render();};$('clear-selection').onclick=()=>{selected.clear();render();};
+  function applyBatch(state){safely(()=>{const changes=C.batch(data.samples,visible.map(C.key),selected,state,decisions,data.class_names);C.requireLoaded(changes,loaded,state);if(changes.some(d=>data.samples.find(s=>C.key(s)===C.key(d)).state!=='UNKNOWN')&&!confirm('所选含已有审核。确认用本次明确决定更新这些记录？'))return;changes.forEach(d=>decisions.set(C.key(d),d));selected.clear();render();message(`已处理 ${changes.length} 张；本页保留供核对；仅看未处理时刷新可移除已处理项。请导出保存。`);});}
+  $('positive').onclick=()=>applyBatch('VERIFIED_POSITIVE');$('negative').onclick=()=>applyBatch('VERIFIED_NEGATIVE');$('exclude').onclick=()=>applyBatch('EXCLUDED');
+  function fieldState(){
+    $('boxes').replaceChildren();draft.forEach((b,i)=>$('boxes').append(option(String(i),`${i+1} · ${data.class_names[b.class_id]}`)));$('boxes').value=String(picked);
+    const b=draft[picked];if(b){$('class').value=String(b.class_id);['x1','y1','x2','y2'].forEach(k=>$(k).value=String(b[k]));}
+    ['apply-box','delete-box','x1','y1','x2','y2'].forEach(id=>$(id).disabled=!b);
+    $('draft-status').textContent=dirty?'有未确认修改':'未修改草稿';draw();
+  }
+  function draw(){
+    if(!active)return;
+    const canvas=$('canvas'),ctx=canvas.getContext('2d');
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    if(imageReady)ctx.drawImage(image,0,0,canvas.width,canvas.height);
+    const scaleX=canvas.width/active.width,scaleY=canvas.height/active.height;
+    const strokeScale=Math.min(scaleX,scaleY);
+    ctx.save();ctx.setTransform(scaleX,0,0,scaleY,0,0);
+    draft.forEach((b,i)=>{
+      ctx.strokeStyle=i===picked?'#ffce68':'#67e9b9';ctx.lineWidth=(i===picked?3:1.5)/strokeScale;
+      ctx.strokeRect(b.x1,b.y1,b.x2-b.x1,b.y2-b.y1);
+      ctx.font=`${12/strokeScale}px sans-serif`;ctx.fillStyle=ctx.strokeStyle;
+      ctx.fillText(`${i+1} ${data.class_names[b.class_id]}`,b.x1,Math.max(12/strokeScale,b.y1-3/strokeScale));
+    });
+    ctx.restore();
+  }
+  function resetDraft(){draft=C.clone((decisions.get(C.key(active))||active).detections);picked=draft.length?0:-1;dirty=false;fieldState();}
+  function openDetail(s){active=s;imageReady=false;$('detail-title').textContent=`样本 ${s.sample_id} · ${s.width} × ${s.height}`;$('detail-reasons').textContent=s.reasons.join(' / ');const size=C.canvasSize(s.width,s.height);$('canvas').width=size.width;$('canvas').height=size.height;resetDraft();const loading=new Image();image=loading;loading.onload=()=>{if(image!==loading)return;imageReady=true;draw();};loading.onerror=()=>message('详细图片无法读取，不能凭空确认标注',true);loading.src=s.image;$('detail').showModal();}
+  function point(event){return C.displayToImage({x:event.clientX,y:event.clientY},active.width,active.height,$('canvas').getBoundingClientRect());}
+  $('canvas').onpointerdown=e=>{if(!imageReady)return;const p=point(e);if($('mode').value==='draw'){anchor=p;$('canvas').setPointerCapture(e.pointerId);}else{picked=-1;for(let i=draft.length-1;i>=0;i--){const b=draft[i];if(p.x>=b.x1&&p.x<=b.x2&&p.y>=b.y1&&p.y<=b.y2){picked=i;break;}}fieldState();}};
+  $('canvas').onpointerup=e=>{if(!anchor)return;const p=point(e),a=anchor;anchor=null;const b={class_id:Number($('class').value),x1:Math.min(a.x,p.x),y1:Math.min(a.y,p.y),x2:Math.max(a.x,p.x),y2:Math.max(a.y,p.y)};safely(()=>{C.boxes([b],active,data.class_names);draft.push(b);picked=draft.length-1;dirty=true;fieldState();});};
+  $('canvas').onpointermove=e=>{
+    if(!anchor)return;draw();const p=point(e),canvas=$('canvas'),ctx=canvas.getContext('2d');
+    const sx=canvas.width/active.width,sy=canvas.height/active.height;
+    ctx.save();ctx.setTransform(sx,0,0,sy,0,0);ctx.strokeStyle='#ffce68';ctx.lineWidth=2/Math.min(sx,sy);
+    ctx.strokeRect(anchor.x,anchor.y,p.x-anchor.x,p.y-anchor.y);ctx.restore();
+  };
+  $('canvas').onpointercancel=()=>{anchor=null;};$('boxes').onchange=()=>{picked=Number($('boxes').value);fieldState();};
+  $('apply-box').onclick=()=>safely(()=>{if(picked<0)return;const b={class_id:Number($('class').value)};for(const k of ['x1','y1','x2','y2']){if($(k).value.trim()==='')throw new Error('坐标不能为空');b[k]=Number($(k).value);}draft[picked]=C.boxes([b],active,data.class_names)[0];dirty=true;fieldState();});
+  $('delete-box').onclick=()=>{if(picked<0)return;draft.splice(picked,1);picked=draft.length?Math.min(picked,draft.length-1):-1;dirty=true;fieldState();};
+  $('clear-boxes').onclick=()=>{if(draft.length&&!confirm('清空此图所有框？这不会自动确认负样本。'))return;draft=[];picked=-1;dirty=true;fieldState();};$('undo').onclick=resetDraft;
+  function closeDetail(){if(dirty&&!confirm('放弃此图尚未确认的修改？'))return;$('detail').close();active=null;anchor=null;}
+  $('close-detail').onclick=closeDetail;$('detail').oncancel=e=>{e.preventDefault();closeDetail();};
+  function commitDetail(state){safely(()=>{if(!imageReady)throw new Error('请先加载图片');const d=C.decision(active,state,draft,data.class_names);if(active.state!=='UNKNOWN'&&!confirm('此图已有审核，确认更新？'))return;decisions.set(C.key(active),d);dirty=false;$('detail').close();active=null;render();message('此图已明确处理，请导出保存。');});}
+  $('detail-positive').onclick=()=>commitDetail('VERIFIED_POSITIVE');$('detail-negative').onclick=()=>commitDetail('VERIFIED_NEGATIVE');$('detail-exclude').onclick=()=>commitDetail('EXCLUDED');
+  $('export').onclick=()=>safely(()=>{const result=C.exportDraft(data,$('reviewer').value,decisions);const url=URL.createObjectURL(new Blob([JSON.stringify(result,null,2)],{type:'application/json'}));const a=el('a');a.href=url;a.download='review-decisions.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message('已请求下载 review-decisions.json。请回 Xen 采集页选择该文件并导入；页面导出不等于已经导入。');});
+  $('import').onchange=async()=>{const f=$('import').files[0];if(!f)return;try{if(f.size>32*1024*1024)throw new Error('草稿文件超过32MiB，拒绝读取');const parsed=JSON.parse(await f.text()),next=C.importDraft(data,parsed);if(decisions.size&&!confirm('用导入草稿替换本页未导出的处理记录？'))return;decisions=next;$('reviewer').value=parsed.reviewer;refreshRows();message(`已恢复 ${next.size} 项明确决定，未覆盖报告原件。`);}catch(e){message(e.message,true);}finally{$('import').value='';}};
+  window.addEventListener('beforeunload',e=>{if(decisions.size||dirty){e.preventDefault();e.returnValue='';}});
+  render();message('报告已就绪。优先复核异常样本；批量操作只作用于当前页勾选项。');
+})();
+</script>
+</body></html>

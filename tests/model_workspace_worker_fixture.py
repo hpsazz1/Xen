@@ -29,6 +29,11 @@ if spec['operation'] == 'train':
             raise SystemExit(2)
         time.sleep(0.025)
 result = {'root': spec.get('root', '')}
+if spec['operation'] == 'review_curate':
+    output = Path(spec['output'])
+    output.mkdir(parents=True, exist_ok=True)
+    (output / 'review.html').write_text('<!doctype html><title>审核夹具</title>', encoding='utf-8')
+    result.update(review_preview=str(output / 'review.html'), prelabels_received=spec.get('prelabels', ''))
 if spec['operation'] in {'env_check', 'env_install'}:
     result.update(ready=True, python_executable=spec['python_executable'], environment_report='fixture-only')
 if spec['operation'] == 'pt_check':

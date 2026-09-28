@@ -50,6 +50,9 @@ try {
     & $git -C $sourceRoot init --quiet
     if ($LASTEXITCODE -ne 0) { throw 'fixture git init failed' }
     Write-UpdateFixture (Join-Path $sourceRoot 'fixture.txt') 'worker source'
+    foreach ($tool in @('model_data_pipeline.py', 'model_data_review.html')) {
+        Write-UpdateFixture (Join-Path $sourceRoot "scripts/$tool") "updated-$tool"
+    }
     Write-UpdateFixture (Join-Path $sourceRoot 'scripts/start_source_context_session.ps1') 'updated-source-session-script'
     Write-UpdateFixture (Join-Path $sourceRoot 'scripts/invoke_hud_stop_acceptance.ps1') 'updated-hud-acceptance-script'
     foreach ($tool in @('measure_process_resources.ps1', 'soak_acceptance_support.ps1')) {
@@ -59,6 +62,7 @@ try {
         Write-UpdateFixture (Join-Path $sourceRoot "scripts/$tool") "updated-$tool"
     }
     & $git -C $sourceRoot add fixture.txt scripts/start_source_context_session.ps1
+    & $git -C $sourceRoot add scripts/model_data_pipeline.py scripts/model_data_review.html
     & $git -C $sourceRoot add scripts/invoke_hud_stop_acceptance.ps1
     & $git -C $sourceRoot add scripts/measure_process_resources.ps1 scripts/soak_acceptance_support.ps1
     & $git -C $sourceRoot add scripts/import_recoil_profiles.py scripts/migrate_legacy_recoil_profiles.py scripts/invoke_recoil_legacy_acceptance.ps1
@@ -236,6 +240,7 @@ try {
     $deltaParameters = $parameters.Clone()
     foreach ($key in @('ConfigPath', 'PackageNotesPath', 'ManualAcceptancePath')) { $deltaParameters.Remove($key) }
     $deltaParameters.OutputDirectory = $deltaOutput
+    $deltaParameters.IncludeModelDataReview = $true
     $deltaParameters.ChangesOnly = $true
     $deltaParameters.SourceContextExecutable = Join-Path $buildRoot 'Release\xen_source_context.exe'
     $deltaParameters.IncludeRecoilTools = $true
@@ -274,7 +279,10 @@ try {
     Write-UpdateFixture (Join-Path $baseRoot 'config.ini') 'user changed configuration after original publication'
     Write-UpdateFixture (Join-Path $baseRoot 'cache/model-workspace/settings.json') '{"user_changed":true}'
     & $publisher @deltaParameters
-    Assert-UpdateTest (@(Get-ChildItem -LiteralPath $deltaOutput -Recurse -File).Count -eq 13) '差量只生成选定Worker/工具、长稳两脚本及其依赖、来源证据和清单'
+    Assert-UpdateTest (@(Get-ChildItem -LiteralPath $deltaOutput -Recurse -File).Count -eq 15) '差量只生成选定Worker/工具、审核两资源、长稳依赖、来源证据和清单'
+    foreach ($tool in @('model_data_pipeline.py', 'model_data_review.html')) {
+        Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $deltaOutput "tools/model-data/$tool") -Raw) -ceq "updated-$tool") "审核资源来自当前源码 $tool"
+    }
     Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $deltaOutput 'tools/source/start_source_context_session.ps1') -Raw) -ceq 'updated-source-session-script') '长稳开关自动纳入源启动依赖脚本'
     Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $deltaOutput 'tools/acceptance/invoke_hud_stop_acceptance.ps1') -Raw) -ceq 'updated-hud-acceptance-script') '显式开关从当前源码补入 HUD 验收脚本'
     Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $deltaOutput 'tools/recoil/migrate_legacy_recoil_profiles.py') -Raw) -ceq 'updated-migrate_legacy_recoil_profiles.py') '新增迁移入口来自当前源码'
@@ -284,6 +292,7 @@ try {
     [IO.Directory]::Move($deltaOutput, $deltaStage)
     $deltaEntries = @()
     foreach ($relative in @('runtimes/nvidia/Xen.exe', 'runtimes/nvidia/xen_recoil_calibration.exe',
+        'tools/model-data/model_data_pipeline.py', 'tools/model-data/model_data_review.html',
         'runtimes/nvidia/xen_recoil_tuner.exe', 'tools/source/xen_source_context.exe', 'tools/source/start_source_context_session.ps1',
         'tools/recoil/import_recoil_profiles.py', 'tools/recoil/migrate_legacy_recoil_profiles.py', 'tools/recoil/invoke_recoil_legacy_acceptance.ps1',
         'tools/acceptance/invoke_hud_stop_acceptance.ps1', 'tools/acceptance/measure_process_resources.ps1',

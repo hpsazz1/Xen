@@ -33,6 +33,7 @@ $sourceToolNames = @(
     "XenCaptureEvidence.exe", "XenAutoStopCapture.exe")
 $repositoryPayload = [ordered]@{
     "tools/model-data/model_data_pipeline.py" = "scripts/model_data_pipeline.py"
+    "tools/model-data/model_data_review.html" = "scripts/model_data_review.html"
     "tools/model-data/model_training_environment.py" = "scripts/model_training_environment.py"
     "tools/model-data/model_training_requirements.txt" = "scripts/model_training_requirements.txt"
     "tools/recoil/import_recoil_profiles.py" = "scripts/import_recoil_profiles.py"

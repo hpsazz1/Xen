@@ -6,6 +6,7 @@
 #endif
 #include <Windows.h>
 #include <shellapi.h>
+#include <commdlg.h>
 #include <bcrypt.h>
 #ifdef ERROR
 #undef ERROR
@@ -180,6 +181,7 @@ const char* operation_for(Action action) {
         case Action::INSPECT_DATA: return "inspect";
         case Action::PRELABEL: return "prelabel";
         case Action::EXPORT_REVIEW: return "review_export";
+        case Action::CURATE_REVIEW: return "review_curate";
         case Action::IMPORT_LABELS: return "import_labels";
         case Action::EXPORT_DATASET: return "export";
         case Action::TRAIN: return "train";
@@ -202,6 +204,7 @@ Json settings_json(const Settings& value, const fs::path& data_root) {
         {"weights_path", value.weights_path}, {"dataset_path", value.dataset_path},
         {"model_path", value.model_path}, {"review_manifest", value.review_manifest},
         {"prelabels_path", value.prelabels_path},
+        {"review_preview_path", value.review_preview_path},
         {"device", value.device}, {"interval_ms", value.interval_ms},
         {"exploration_interval_ms", value.exploration_interval_ms},
         {"epochs", value.epochs}, {"image_size", value.image_size},
@@ -406,6 +409,7 @@ bool Workspace::initialize(const fs::path& data_root, Settings& settings,
             XEN_DATA_SETTING(dataset_path); XEN_DATA_SETTING(model_path);
             XEN_DATA_SETTING(review_manifest); XEN_DATA_SETTING(device);
             XEN_DATA_SETTING(prelabels_path);
+            XEN_DATA_SETTING(review_preview_path);
             // 旧设置的数量/磁盘配额字段作为未知键兼容忽略，连续采集不再使用。
             XEN_DATA_SETTING(interval_ms); XEN_DATA_SETTING(exploration_interval_ms);
             XEN_DATA_SETTING(epochs); XEN_DATA_SETTING(image_size); XEN_DATA_SETTING(batch_size);
@@ -462,6 +466,16 @@ Snapshot Workspace::poll(Settings* settings) noexcept {
             settings->dataset_path = result.value("dataset", settings->dataset_path);
             settings->review_manifest = result.value("review_manifest", settings->review_manifest);
             settings->prelabels_path = result.value("prelabels", settings->prelabels_path);
+            if (impl_->view.job_operation == "review_curate") {
+                const auto preview = checked_path(path_from(result.at("review_preview").get<std::string>()));
+                const auto within = preview.lexically_relative(impl_->job_directory);
+                check(!within.empty() && *within.begin() != L".." &&
+                    preview.filename() == L"review.html" && fs::is_regular_file(preview),
+                    "批量预览结果不属于当前作业");
+                settings->review_preview_path = utf8(preview);
+                impl_->view.message = "自动整理完成，点击打开批量预览；自动提示不等于审核通过。";
+                write_json(impl_->workspace_root / "settings.json", settings_json(*settings, impl_->data_root));
+            }
             settings->model_path = result.value("candidate", settings->model_path);
             if (impl_->view.job_operation == "inspect" && result.contains("model_sha256")) {
                 const auto inspected_hash = result.at("model_sha256").get<std::string>();
@@ -518,7 +532,7 @@ Snapshot Workspace::poll(Settings* settings) noexcept {
     }
 }
 
-bool Workspace::execute(Action action, const Settings& settings,
+bool Workspace::execute(Action action, Settings& settings,
                         bool runtime_running, bool gpu_frames,
                         const std::string& active_model_path) noexcept {
     try {
@@ -527,6 +541,35 @@ bool Workspace::execute(Action action, const Settings& settings,
         const bool collecting = impl_->collector && impl_->collector->snapshot().active;
         if (action == Action::NONE) return true;
         if (action == Action::CANCEL_JOB) { impl_->cancel(); return true; }
+        if (action == Action::OPEN_REVIEW || action == Action::PICK_REVIEW_MANIFEST) {
+            check(!runtime_running && !collecting && !impl_->process.valid(),
+                "请先停止Runtime、采集和后台作业，再打开审核工具");
+            if (action == Action::OPEN_REVIEW) {
+                const auto preview = checked_path(path_from(settings.review_preview_path));
+                const auto within = preview.lexically_relative(impl_->workspace_root / "jobs");
+                check(!within.empty() && !within.is_absolute() && *within.begin() != L".." &&
+                    preview.filename() == L"review.html" && fs::is_regular_file(preview),
+                    "请先生成当前工作区的批量预览");
+                check(reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", preview.c_str(),
+                    nullptr, nullptr, SW_SHOWNORMAL)) > 32, "无法打开本地批量预览");
+            } else {
+                std::array<wchar_t, 32768> filename{};
+                OPENFILENAMEW dialog{};
+                dialog.lStructSize = sizeof(dialog);
+                dialog.lpstrFilter = L"审核结果 JSON\0*.json\0\0";
+                dialog.lpstrFile = filename.data();
+                dialog.nMaxFile = static_cast<DWORD>(filename.size());
+                dialog.lpstrTitle = L"选择浏览器导出的 review-decisions.json";
+                dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+                if (!GetOpenFileNameW(&dialog)) {
+                    check(CommDlgExtendedError() == 0, "审核文件选择失败");
+                    return true;
+                }
+                settings.review_manifest = utf8(checked_path(filename.data()));
+                impl_->view.message = "已选择审核结果，点击导入审核结果提交；原始素材保持不变。";
+            }
+            return true;
+        }
         if (action == Action::SAVE_SETTINGS) {
             write_json(impl_->workspace_root / "settings.json", settings_json(settings, impl_->data_root));
             impl_->view.message = "采集与训练设置已保存。"; return true;
@@ -665,7 +708,7 @@ bool Workspace::execute(Action action, const Settings& settings,
         if (action != Action::INSPECT_DATA) job["class_names"] = names_from(settings);
         else if (settings.class_schema_confirmed) job["class_names"] = names_from(settings);
         else job.erase("root");
-        if (action == Action::EXPORT_REVIEW && !settings.prelabels_path.empty())
+        if ((action == Action::EXPORT_REVIEW || action == Action::CURATE_REVIEW) && !settings.prelabels_path.empty())
             job["prelabels"] = settings.prelabels_path;
         if (action == Action::EVALUATE && !active_model_path.empty() &&
             settings.model_path != active_model_path) job["baseline_model"] = active_model_path;

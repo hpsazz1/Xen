@@ -16,6 +16,7 @@
     [switch]$IncludeSourceSessionScript,
     [switch]$IncludeHudAcceptanceScript,
     [switch]$IncludeSoakAcceptanceTools,
+    [switch]$IncludeModelDataReview,
     [switch]$ChangesOnly
 )
 
@@ -174,6 +175,19 @@ if ($IncludeHudAcceptanceScript) {
 }
 $recoilScriptHashes = @{}
 $soakScriptHashes = @{}
+$modelReviewHashes = @{}
+if ($IncludeModelDataReview) {
+    foreach ($tool in @('model_data_pipeline.py', 'model_data_review.html')) {
+        $relative = "tools/model-data/$tool"
+        $overrides[$relative] = Resolve-UpdateFile (Join-Path $sourceRoot "scripts/$tool")
+        $modelReviewHashes[$relative] = (Get-FileHash -LiteralPath $overrides[$relative] -Algorithm SHA256).Hash.ToLowerInvariant()
+        if (-not $records.ContainsKey($relative)) {
+            $record = [pscustomobject][ordered]@{ path = $relative; runtime = ''; size = 0; sha256 = ''; source = '' }
+            $manifest.files = @($manifest.files) + @($record)
+            $records[$relative] = $record
+        }
+    }
+}
 if ($IncludeSoakAcceptanceTools) {
     foreach ($tool in @('measure_process_resources.ps1', 'soak_acceptance_support.ps1')) {
         $relative = "tools/acceptance/$tool"
@@ -316,6 +330,11 @@ try {
     foreach ($relative in @($soakScriptHashes.Keys | Sort-Object)) {
         $updateEvidence.updated_components += [ordered]@{
             runtime = ''; path = $relative; git_commit = $commit.ToLowerInvariant(); sha256 = $soakScriptHashes[$relative]
+        }
+    }
+    foreach ($relative in @($modelReviewHashes.Keys | Sort-Object)) {
+        $updateEvidence.updated_components += [ordered]@{
+            runtime = ''; path = $relative; git_commit = $commit.ToLowerInvariant(); sha256 = $modelReviewHashes[$relative]
         }
     }
     foreach ($relative in @($recoilToolHashes.Keys | Sort-Object)) {

@@ -8,7 +8,8 @@ from __future__ import annotations
 import argparse
 import ast
 from collections import Counter
-from datetime import datetime, timezone
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.metadata
 import json
@@ -27,6 +28,7 @@ import zipfile
 SCHEMA = 1
 TRAINER_VERSION = "8.3.203"
 VERIFIED = {"VERIFIED_POSITIVE", "VERIFIED_NEGATIVE"}
+REVIEW_TEMPLATE = Path(__file__).with_name("model_data_review.html")
 
 
 class PipelineError(Exception):
@@ -101,6 +103,8 @@ def boxes_checked(boxes, width, height, names):
     if not isinstance(boxes, list):
         raise PipelineError("detections 必须为数组")
     for box in boxes:
+        if not isinstance(box, dict):
+            raise PipelineError("标注框必须为对象")
         cls = box.get("class_id")
         if isinstance(cls, bool) or not isinstance(cls, int) or not 0 <= cls < len(names):
             raise PipelineError("标注类别超出冻结 schema")
@@ -215,7 +219,15 @@ def load_samples(ctx):
             if (width, height) != (sample.get("width"), sample.get("height")):
                 raise PipelineError("图片实际尺寸与 manifest 不一致")
             detections = boxes_checked(sample.get("detections", []), width, height, names)
-            samples[key] = dict(sample, detections=detections, _path=path, _thumb=thumb, _session=directory)
+            confidences = []
+            for box in sample.get("detections", []):
+                confidence = box.get("confidence")
+                if confidence is not None and (isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or
+                        not math.isfinite(confidence) or not 0 <= confidence <= 1):
+                    raise PipelineError("原始预标注 confidence 必须为有限的 0..1 数值")
+                confidences.append(confidence)
+            samples[key] = dict(sample, detections=detections, _confidences=confidences,
+                                _path=path, _thumb=thumb, _session=directory)
     if not samples:
         raise PipelineError("未找到完整采集样本")
     return names, samples
@@ -284,6 +296,212 @@ def review_export(ctx):
     return dict(output=str(output), review_manifest=str(output / "review.json"), samples=len(entries), instruction="在 CVAT 审核后将 YOLO txt 放回对应路径；填写 reviewer，并逐图设置 VERIFIED_POSITIVE/VERIFIED_NEGATIVE/EXCLUDED，再导入 review.json。UNKNOWN 不会被导入。")
 
 
+def stable_json_hash(value):
+    encoded = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def review_root_identity(root, names):
+    # 不猜测 UNC 与映射盘的别名；审核生成和导入须使用同一规范数据根。
+    return stable_json_hash(dict(schema_version=SCHEMA, root=os.path.normcase(str(Path(root).resolve())), class_names=names))
+
+
+def review_token(review):
+    return stable_json_hash(review) if review is not None else "none"
+
+
+def box_iou(left, right):
+    intersection = max(0, min(left["x2"], right["x2"]) - max(left["x1"], right["x1"])) * max(0, min(left["y2"], right["y2"]) - max(left["y1"], right["y1"]))
+    union = (left["x2"] - left["x1"]) * (left["y2"] - left["y1"]) + (right["x2"] - right["x1"]) * (right["y2"] - right["y1"])-intersection
+    return intersection / union if union > 0 else 0
+
+
+def prediction_disagreements(original, predicted):
+    # 一对一几何配对后再检查类别，避免类别冲突被同类配对隐藏。
+    candidates = sorted(((-box_iou(a, b), i, j) for i, a in enumerate(original)
+                         for j, b in enumerate(predicted)), key=lambda value: value)
+    used_original, used_predicted = set(), set()
+    class_conflicts = position_conflicts = 0
+    for negative_iou, i, j in candidates:
+        if -negative_iou < 0.5:
+            break
+        if i in used_original or j in used_predicted:
+            continue
+        used_original.add(i); used_predicted.add(j)
+        class_conflicts += original[i]["class_id"] != predicted[j]["class_id"]
+        position_conflicts += -negative_iou < 0.8
+    return dict(unmatched_original=len(original)-len(used_original),
+                unmatched_predicted=len(predicted)-len(used_predicted),
+                class_conflicts=class_conflicts, position_conflicts=position_conflicts)
+
+
+def review_curate(ctx):
+    names, samples = load_samples(ctx)
+    reviews = latest_reviews(ctx.job["root"], samples, names)
+    predicted = {}
+    prediction_identity = None
+    if ctx.job.get("prelabels"):
+        prediction = read_json(ctx.job["prelabels"])
+        if prediction.get("schema_version") != SCHEMA or prediction.get("class_names") != names:
+            raise PipelineError("离线预标注 schema 与采集数据不一致")
+        prediction_identity = dict(file_sha256=sha256(ctx.job["prelabels"]),
+                                   model_sha256=prediction.get("model_sha256"),
+                                   settings=prediction.get("prediction_settings"))
+        for item in prediction.get("samples", []):
+            key = (item["session_id"], item["sample_id"])
+            if key not in samples or key in predicted or item.get("image_sha256") != samples[key]["image_sha256"]:
+                raise PipelineError("离线预标注重复、未知样本或图片哈希不符")
+            sample = samples[key]
+            predicted[key] = boxes_checked(item["detections"], sample["width"], sample["height"], names)
+            for box in item["detections"]:
+                confidence = box.get("confidence")
+                if confidence is not None and (isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not math.isfinite(confidence) or not 0 <= confidence <= 1):
+                    raise PipelineError("离线预标注 confidence 必须是0..1有限数")
+    # 与浏览器审核契约一致的单图边界；必须在框的两两比较和产物目录创建前拒绝。
+    for key, sample in samples.items():
+        ctx.check()
+        if sample["width"] > 16384 or sample["height"] > 16384:
+            raise PipelineError("浏览器审核单图宽高不能超过16384；请单独处理超限原图")
+        for boxes in (sample["detections"], predicted.get(key, []), reviews.get(key, {}).get("detections", [])):
+            if len(boxes) > 1024:
+                raise PipelineError("浏览器审核单图框数不能超过1024；原始、离线预测和已有审核均须满足")
+    if not REVIEW_TEMPLATE.is_file():
+        raise PipelineError("缺少本地 model_data_review.html 审核模板")
+    template = REVIEW_TEMPLATE.read_text(encoding="utf-8")
+    if template.count("__XEN_REVIEW_DATA__") != 1:
+        raise PipelineError("审核模板数据占位符必须唯一")
+    output = ctx.output()
+    (output / "images").mkdir()
+    exact = Counter(sample["image_sha256"] for sample in samples.values())
+    entries, representatives = [], []
+    seen_hashes, near_groups = set(), set()
+    display_groups = {}
+    from PIL import Image
+    for index, (key, sample) in enumerate(sorted(samples.items())):
+        ctx.check()
+        reasons, priority = [], 0
+        original = sample["detections"]
+        reviewed = reviews.get(key)
+        boxes = reviewed["detections"] if reviewed else predicted.get(key, original)
+        state = reviewed["state"] if reviewed else "UNKNOWN"
+        if not original:
+            reasons.append("原始预标注为空，需确认是否漏检"); priority = max(priority, 80)
+        if sample.get("detection_status") != "SUCCESS":
+            reasons.append("原始检测未成功或状态未知，空框不能作为正常负例"); priority = max(priority, 100)
+        if any(min(box["x2"]-box["x1"], box["y2"]-box["y1"]) < 8 for box in original):
+            reasons.append("存在最小边不足8px的小框，仅提示放大检查，不判无效"); priority = max(priority, 65)
+        if any(min(box["x1"], box["y1"], sample["width"]-box["x2"], sample["height"]-box["y2"]) <= 1 for box in original):
+            reasons.append("存在距图边不超过1px的框，需核对截断与遮挡"); priority = max(priority, 65)
+        if any(value is not None and value < 0.5 for value in sample["_confidences"]):
+            reasons.append("原始预标注存在低置信框"); priority = max(priority, 60)
+        if any(box_iou(a, b) >= 0.7 for i, a in enumerate(original) for b in original[i+1:]):
+            reasons.append("原始框高度重叠，需核对重复或类别冲突"); priority = max(priority, 70)
+        if key in predicted:
+            disagreement = prediction_disagreements(original, predicted[key])
+            if disagreement["unmatched_original"] or disagreement["unmatched_predicted"]:
+                reasons.append(f"离线模型框数或位置分歧：原始未配对{disagreement['unmatched_original']}，离线未配对{disagreement['unmatched_predicted']}")
+                priority = max(priority, 90)
+            if disagreement["class_conflicts"]:
+                reasons.append("离线模型与原始预标注类别分歧"); priority = max(priority, 100)
+            if disagreement["position_conflicts"]:
+                reasons.append("离线模型与原始预标注定位分歧"); priority = max(priority, 85)
+            if not original and not predicted[key]:
+                reasons.append("两份预测均为空，仍不能自动视为负样本")
+            if prediction_identity["settings"] is None:
+                reasons.append("离线推理参数未记录，分歧仅供提示")
+        if exact[sample["image_sha256"]] > 1:
+            reasons.append(f"原图完全重复组，共{exact[sample['image_sha256']]}张；未删除任何样本")
+        near = None
+        # 有界最近代表比较；不会宣称穷尽全库近重复，更不会传播标签。
+        if sample["image_sha256"] not in seen_hashes:
+            for other_key, other in reversed(representatives):
+                distance = sum(abs(x-y) for a, b in zip(sample["_thumb"], other["_thumb"]) for x, y in zip(a, b)) / 768
+                if distance <= 2:
+                    near = other_key
+                    near_groups.add(other_key)
+                    break
+            if near is None:
+                representatives.append((key, sample))
+                representatives = representatives[-64:]
+            display_groups[sample["image_sha256"]] = samples[near]["image_sha256"] if near else sample["image_sha256"]
+            seen_hashes.add(sample["image_sha256"])
+        if near is not None:
+            reasons.append(f"画面近似{near[0]}/{near[1]}，仅提示，须保留小目标差异")
+            if prediction_disagreements(original, samples[near]["detections"]) != dict(unmatched_original=0, unmatched_predicted=0, class_conflicts=0, position_conflicts=0):
+                reasons.append("近似画面的框或类别有变化，不可传播标签")
+        if reviewed:
+            reasons.insert(0, "已有人工审核；自动建议不会覆盖审核结果")
+        if not reasons:
+            reasons.append("待人工核对")
+        image = f"images/{key[0]}__{key[1]}.png"
+        with Image.open(sample["_path"]) as picture:
+            picture = picture.convert("RGB")
+            picture.thumbnail((640, 640), Image.Resampling.LANCZOS)
+            picture.save(output / image, format="PNG")
+        entries.append(dict(session_id=key[0], sample_id=key[1], image_sha256=sample["image_sha256"],
+                            width=sample["width"], height=sample["height"], image=image, detections=boxes,
+                            state=state, reasons=reasons, group=display_groups[sample["image_sha256"]], priority=priority,
+                            base_review_token=review_token(reviewed)))
+        ctx.report("RUNNING", f"自动整理 {index+1}/{len(samples)}；未自动确认审核")
+    near_hashes = {samples[key]["image_sha256"] for key in near_groups}
+    for item in entries:
+        item["group_kind"] = "near" if item["group"] in near_hashes else "exact" if exact[item["image_sha256"]] > 1 else "single"
+    entries.sort(key=lambda item: (-item["priority"], item["session_id"], item["sample_id"]))
+    summary = dict(original_count=len(entries), exact_unique_count=len(exact),
+                   near_duplicate_group_count=len(near_groups),
+                   near_duplicate_scope="最近64个不同图像代表的缩略图提示；不是独立场景数量")
+    payload = dict(schema_version=SCHEMA, class_names=names, reviewer="", summary=summary,
+                   root_identity=review_root_identity(ctx.job["root"], names), samples=entries)
+    report = dict(payload, policy=dict(version=1, low_confidence=0.5, overlap_iou=0.7,
+                                      match_iou=0.5, position_iou=0.8, near_thumbnail_mad=2,
+                                      automatic_verification=False, near_duplicates="recent_64_representative_hints_only"),
+                  prediction=prediction_identity, counts=dict(samples=len(entries),
+                  exact_duplicate_groups=sum(count > 1 for count in exact.values()),
+                  states=dict(Counter(item["state"] for item in entries))))
+    write_json(output / "triage.json", report)
+    encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False).replace("<", "\\u003c").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    (output / "review.html").write_text(template.replace("__XEN_REVIEW_DATA__", encoded), encoding="utf-8")
+    return dict(review_preview=str(output / "review.html"), triage_report=str(output / "triage.json"),
+                **summary, samples=len(entries), message="已自动整理全部样本；仅人工明确处理并导入的条目进入审核修订")
+
+
+@contextmanager
+def review_write_lock(root):
+    directory = Path(root).resolve() / "reviews"
+    directory.mkdir(parents=True, exist_ok=True)
+    lock = directory / ".import.lock"
+    try:
+        stream = lock.open("x", encoding="utf-8")
+    except FileExistsError as exc:
+        raise PipelineError("其他审核导入正在写入或留下未恢复锁，拒绝并发覆盖") from exc
+    try:
+        with stream:
+            stream.write(str(os.getpid()))
+        yield directory
+    finally:
+        lock.unlink()
+
+
+def append_review_revision(directory, names, reviewer, manifest_path, accepted):
+    timestamp = datetime.now(timezone.utc)
+    previous = sorted(p.name for p in directory.iterdir() if (p / "revision.json").is_file())
+    if previous:
+        try:
+            last_time = datetime.strptime(previous[-1].split("-", 1)[0], "%Y%m%dT%H%M%S%fZ").replace(tzinfo=timezone.utc)
+        except ValueError as exc:
+            raise PipelineError("既有审核修订名称不能安全排序，拒绝产生可能失效的新修订") from exc
+        if timestamp <= last_time:
+            timestamp = last_time + timedelta(microseconds=1)
+    revision_id = timestamp.strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid.uuid4().hex[:8]
+    destination = directory / revision_id
+    destination.mkdir(exist_ok=False)
+    # revision.json 最后原子出现；原样本、旧修订和未完成目录均不覆盖。
+    write_json(destination / "revision.json", dict(schema_version=SCHEMA, revision_id=revision_id,
+               created_at=now(), class_names=names, reviewer=reviewer,
+               source_manifest_sha256=sha256(manifest_path), samples=accepted))
+    return dict(revision=str(destination), samples=len(accepted), states=dict(Counter(i["state"] for i in accepted)))
+
+
 def import_labels(ctx):
     job = dict(ctx.job)
     manifest_path = Path(job.get("review_manifest") or job.get("session") or "").resolve()
@@ -292,35 +510,43 @@ def import_labels(ctx):
     job.pop("session", None)
     names, samples = load_samples(Context(job, cancel=ctx.cancel))
     manifest = read_json(manifest_path)
-    if manifest.get("schema_version") != SCHEMA or manifest.get("class_names") != names or not str(manifest.get("reviewer", "")).strip():
+    if manifest.get("schema_version") != SCHEMA or manifest.get("class_names") != names or (not isinstance(manifest.get("reviewer"), str) or not manifest["reviewer"].strip()):
         raise PipelineError("审核 manifest schema 不匹配或未填写 reviewer")
-    accepted = []
-    seen = set()
-    for item in manifest.get("samples", []):
+    native = manifest.get("format") == "xen-native-review-v1"
+    if manifest.get("format") not in (None, "xen-native-review-v1"):
+        raise PipelineError("未知审核格式")
+    if native and manifest.get("root_identity") != review_root_identity(job["root"], names):
+        raise PipelineError("审核数据根身份不匹配")
+    with review_write_lock(job["root"]) as directory:
+        current = latest_reviews(job["root"], samples, names)
+        accepted, seen = [], set()
+        for item in manifest.get("samples", []):
+            ctx.check()
+            key = (item["session_id"], item["sample_id"])
+            if key in seen or key not in samples:
+                raise PipelineError("审核 manifest 包含重复或未知样本")
+            seen.add(key)
+            sample = samples[key]
+            if item.get("image_sha256") != sample["image_sha256"]:
+                raise PipelineError("审核图片哈希不匹配")
+            state = item.get("state")
+            if state == "UNKNOWN" and not native:
+                continue
+            if state not in VERIFIED | {"EXCLUDED"}:
+                raise PipelineError("必须显式设置审核正例、负例或排除状态；UNKNOWN 不能训练")
+            if native:
+                if item.get("base_review_token") != review_token(current.get(key)):
+                    raise PipelineError("所选样本审核已更新，请重新整理后复核，不能覆盖过期审核")
+                boxes = boxes_checked(item["detections"], sample["width"], sample["height"], names)
+            else:
+                boxes = [] if state == "EXCLUDED" else read_labels(contained(manifest_path.parent, item["label"]), sample["width"], sample["height"], names)
+            if (state in {"VERIFIED_NEGATIVE", "EXCLUDED"} and boxes) or (state == "VERIFIED_POSITIVE" and not boxes):
+                raise PipelineError("审核正负或排除状态与标签内容矛盾")
+            accepted.append(dict(session_id=key[0], sample_id=key[1], image_sha256=sample["image_sha256"], state=state, detections=boxes))
+        if not accepted:
+            raise PipelineError("没有明确人工审核的样本；UNKNOWN 不能训练")
         ctx.check()
-        key = (item["session_id"], item["sample_id"])
-        if key in seen or key not in samples:
-            raise PipelineError("审核 manifest 包含重复或未知样本")
-        seen.add(key)
-        sample = samples[key]
-        if item.get("image_sha256") != sample["image_sha256"]:
-            raise PipelineError("审核图片哈希不匹配")
-        state = item.get("state")
-        if state == "UNKNOWN":
-            continue
-        if state not in VERIFIED | {"EXCLUDED"}:
-            raise PipelineError("必须显式设置审核正例、负例或排除状态")
-        boxes = [] if state == "EXCLUDED" else read_labels(contained(manifest_path.parent, item["label"]), sample["width"], sample["height"], names)
-        if (state == "VERIFIED_NEGATIVE" and boxes) or (state == "VERIFIED_POSITIVE" and not boxes):
-            raise PipelineError("审核正负状态与标签内容矛盾")
-        accepted.append(dict(session_id=key[0], sample_id=key[1], image_sha256=sample["image_sha256"], state=state, detections=boxes))
-    if not accepted:
-        raise PipelineError("没有明确人工审核的样本；UNKNOWN 不能训练")
-    revision_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid.uuid4().hex[:8]
-    directory = Path(job["root"]).resolve() / "reviews" / revision_id
-    directory.mkdir(parents=True, exist_ok=False)
-    write_json(directory / "revision.json", dict(schema_version=SCHEMA, revision_id=revision_id, created_at=now(), class_names=names, reviewer=manifest["reviewer"], source_manifest_sha256=sha256(manifest_path), samples=accepted))
-    return dict(revision=str(directory), samples=len(accepted), states=dict(Counter(i["state"] for i in accepted)))
+        return append_review_revision(directory, names, manifest["reviewer"], manifest_path, accepted)
 
 
 def check_leakage(entries):
@@ -799,7 +1025,7 @@ def inspect(ctx):
     return result
 
 
-OPERATIONS = dict(inspect=inspect, review_export=review_export, import_labels=import_labels, export=export_dataset, prelabel=prelabel, train=train, evaluate=evaluate)
+OPERATIONS = dict(review_curate=review_curate, inspect=inspect, review_export=review_export, import_labels=import_labels, export=export_dataset, prelabel=prelabel, train=train, evaluate=evaluate)
 
 
 def execute(job, status=None, cancel=None):

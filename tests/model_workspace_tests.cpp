@@ -84,7 +84,7 @@ void test_tool_paths(const fs::path& test_root, const char* python) {
 }
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
     if (argc != 3) return 2;
     const auto root = fs::temp_directory_path() /
         (L"xen-model-workspace-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
@@ -106,6 +106,24 @@ int main(int argc, char** argv) {
     expect(!workspace.execute(Action::EXPORT_DATASET, settings, false, false, ""),
            "未确认schema不得准备数据");
     settings.class_schema_confirmed = true;
+    expect(!workspace.execute(Action::CURATE_REVIEW, settings, true, false, ""),
+           "Runtime运行时拒绝离线整理，避免打断生产控制");
+    settings.prelabels_path = utf8(root / L"离线预标注.json");
+    expect(workspace.execute(Action::CURATE_REVIEW, settings, false, false, ""),
+           "采集页可通过生产后台作业启动自动整理");
+    auto review_view = wait(workspace);
+    workspace.poll(&settings);
+    expect(review_view.job_state == "SUCCEEDED" &&
+           fs::is_regular_file(fs::u8path(settings.review_preview_path)),
+           "自动整理完成回填可打开的当前作业预览");
+    {
+        std::ifstream stream(fs::u8path(review_view.job_directory) / "status.json");
+        nlohmann::json status; stream >> status;
+        expect(status.at("result").at("prelabels_received") == settings.prelabels_path,
+               "自动整理接收可选的离线预测对比输入");
+    }
+    expect(settings.review_manifest.empty(), "生成预览不能冒充已人工处理的审核结果");
+    settings.prelabels_path.clear();
     expect(!workspace.execute(Action::START_COLLECTION, settings, true, true, ""),
            "GPU帧不静默改CPU采集");
     expect(!workspace.execute(Action::TRAIN, settings, true, false, ""),
@@ -254,4 +272,7 @@ int main(int argc, char** argv) {
     // 临时目录属于本测试，保留供失败诊断，不触及用户数据。
     std::cout << "工作区专项 failures=" << failures << " root=" << utf8(root) << '\n';
     return failures ? 1 : 0;
+} catch (const std::exception& error) {
+    std::cerr << "工作区专项异常：" << error.what() << '\n';
+    return 1;
 }

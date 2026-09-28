@@ -997,7 +997,7 @@ add_library(model_workspace STATIC
     Xen/model_workspace/model_workspace.cpp)
 target_include_directories(model_workspace PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(model_workspace PUBLIC data_collection
-    PRIVATE nlohmann_json::nlohmann_json bcrypt shell32 log)
+    PRIVATE nlohmann_json::nlohmann_json bcrypt shell32 comdlg32 log)
 
 add_library(input_training STATIC Xen/input_training/input_training.cpp)
 target_include_directories(input_training PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
@@ -1094,6 +1094,7 @@ add_custom_target(model_workspace_tools
         "${XEN_MODEL_TOOLS_OUTPUT}/assets/recoil"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${PROJECT_SOURCE_DIR}/scripts/model_data_pipeline.py"
+        "${PROJECT_SOURCE_DIR}/scripts/model_data_review.html"
         "${PROJECT_SOURCE_DIR}/scripts/model_training_environment.py"
         "${PROJECT_SOURCE_DIR}/scripts/model_training_requirements.txt"
         "${XEN_MODEL_TOOLS_OUTPUT}/tools/model-data"
@@ -1858,6 +1859,9 @@ if(BUILD_TESTING)
     add_test(NAME model_data_pipeline_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
         "${PROJECT_SOURCE_DIR}/tests/model_data_pipeline_tests.py")
+    add_test(NAME model_data_review_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+        "${PROJECT_SOURCE_DIR}/tests/model_data_review_tests.py")
     add_test(NAME model_training_environment_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
         "${PROJECT_SOURCE_DIR}/tests/model_training_environment_tests.py")

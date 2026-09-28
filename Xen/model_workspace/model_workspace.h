@@ -14,7 +14,8 @@ enum class Action {
     STOP_COLLECTION, MARK_SAMPLE, INSPECT_DATA, PRELABEL,
     EXPORT_REVIEW, IMPORT_LABELS, EXPORT_DATASET, TRAIN,
     CANCEL_JOB, EVALUATE, IMPORT_CANDIDATE, OPEN_DATA_DIRECTORY,
-    SAVE_SETTINGS, OPEN_JOB_DIRECTORY, ENV_CHECK, ENV_INSTALL, PT_CHECK
+    SAVE_SETTINGS, OPEN_JOB_DIRECTORY, ENV_CHECK, ENV_INSTALL, PT_CHECK,
+    CURATE_REVIEW, OPEN_REVIEW, PICK_REVIEW_MANIFEST
 };
 
 struct Settings {
@@ -35,6 +36,7 @@ struct Settings {
     std::string model_path;
     std::string review_manifest;
     std::string prelabels_path;
+    std::string review_preview_path;
     std::string device = "0";
     int interval_ms = 1000;
     int exploration_interval_ms = 10000;
@@ -70,7 +72,7 @@ public:
                     Settings& settings, std::string& error) noexcept;
     // 仅App主线程调用；运行中仅按低频读取小状态文件。
     Snapshot poll(Settings* settings = nullptr) noexcept;
-    bool execute(Action action, const Settings& settings,
+    bool execute(Action action, Settings& settings,
                  bool runtime_running, bool gpu_frames,
                  const std::string& active_model_path) noexcept;
     void shutdown() noexcept;

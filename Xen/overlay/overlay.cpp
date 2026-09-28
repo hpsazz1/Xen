@@ -3964,6 +3964,24 @@ struct Overlay::Impl {
         const auto session_utf8 = collection.session_directory.u8string();
         ImGui::TextWrapped("当前会话：%s", reinterpret_cast<const char*>(session_utf8.c_str()));
         ImGui::Separator();
+        if (ImGui::CollapsingHeader("自动整理与批量审核", ImGuiTreeNodeFlags_DefaultOpen)) {
+            const bool review_idle = idle && runtime.state == RuntimeState::STOPPED;
+            ImGui::TextWrapped("先自动整理重复图与疑难图，再批量看图确认；只有少量问题图需要调整框。停止 Runtime 后操作，不影响原始图片和自动标注。");
+            workspace_button("自动整理并生成预览", "离线检查完整性、归组重复图并排列疑难样本，生成本地带框预览；不自动判定负样本、不启动训练。可使用训练页指定的离线预标注作对比。", Action::CURATE_REVIEW,
+                review_idle && settings.class_schema_confirmed, actions);
+            ImGui::SameLine();
+            workspace_button("打开批量预览", "在浏览器打开本地审核页，支持筛选、多选、批量确认与少量改框。完成后导出审核结果JSON；关闭前先导出草稿。", Action::OPEN_REVIEW,
+                review_idle && !settings.review_preview_path.empty(), actions);
+            workspace_button("选择审核结果文件", "选择浏览器下载的review-decisions.json，或已有外部审核review.json；选择本身不会导入。", Action::PICK_REVIEW_MANIFEST,
+                review_idle, actions);
+            ImGui::SameLine();
+            workspace_button("导入审核结果", "校验图片身份、类别、正负状态和审核版本后追加审核记录；旧图原始标注不覆盖，只有已明确审核的结果进入训练导出。", Action::IMPORT_LABELS,
+                review_idle && settings.class_schema_confirmed && !settings.review_manifest.empty(), actions);
+            ImGui::TextWrapped("已选审核文件：%s", settings.review_manifest.c_str());
+            workspace_button("取消整理作业", "请求当前后台作业取消，原始图片和已有审核结果保持；不停止或启动Runtime。", Action::CANCEL_JOB,
+                workspace.job_running, actions);
+        }
+        ImGui::Separator();
         ImGui::BeginDisabled(!idle);
         if (begin_form("collection_settings", 160.0f)) {
             form_row("数据根目录", "本地素材和作业目录；结束采集及后台作业后可修改。路径可含中文和空格。");
@@ -3992,7 +4010,7 @@ struct Overlay::Impl {
         using Action = model_workspace::Action;
         const bool idle = !workspace.job_running && !workspace.collection.active;
         const bool stopped = runtime.state == RuntimeState::STOPPED;
-        ImGui::TextWrapped("流程：检查素材 → 自动预标注 → CVAT / 外部审核 → 导入标签 → 导出数据集 → 训练 → 评估候选。未审核、失败、未知样本不能作为空标签训练。");
+        ImGui::TextWrapped("流程：检查素材 → 自动预标注 → 采集页批量审核 / CVAT → 导入标签 → 导出数据集 → 训练 → 评估候选。未审核、失败、未知样本不能作为空标签训练。");
         if (ImGui::CollapsingHeader("训练环境", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::BeginDisabled(!idle);
             if (begin_form("training_environment", 156.0f)) {

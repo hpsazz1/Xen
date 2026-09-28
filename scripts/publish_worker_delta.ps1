@@ -14,6 +14,7 @@
     [switch]$IncludeSourceSessionScript,
     [switch]$IncludeHudAcceptanceScript,
     [switch]$IncludeSoakAcceptanceTools,
+    [switch]$IncludeModelDataReview,
     [string]$SourceContextExecutable = '',
     [string]$SshIdentityFile = (Join-Path $env:USERPROFILE '.ssh\xen_foxos_ed25519'),
     [string]$KnownHostsFile = (Join-Path $env:USERPROFILE '.ssh\known_hosts'),
@@ -89,7 +90,8 @@ try {
         -IncludeRecoilMigrationScripts:$IncludeRecoilMigrationScripts `
         -IncludeSourceSessionScript:$IncludeSourceSessionScript `
         -IncludeHudAcceptanceScript:$IncludeHudAcceptanceScript `
-        -IncludeSoakAcceptanceTools:$IncludeSoakAcceptanceTools
+        -IncludeSoakAcceptanceTools:$IncludeSoakAcceptanceTools `
+        -IncludeModelDataReview:$IncludeModelDataReview
     $ownedStages.Add([pscustomobject]@{ parent = (Split-Path -Parent $localRoot); name = $stageName })
     $null = Resolve-XenDirectChildPath $localRoot $stageName '移入主机包前暂存'
     [IO.Directory]::Move($generated, $localStage)
@@ -110,6 +112,9 @@ try {
     if ($IncludeHudAcceptanceScript) { $relativeFiles += 'tools/acceptance/invoke_hud_stop_acceptance.ps1' }
     if ($IncludeSoakAcceptanceTools) {
         $relativeFiles += @('tools/acceptance/measure_process_resources.ps1', 'tools/acceptance/soak_acceptance_support.ps1')
+    }
+    if ($IncludeModelDataReview) {
+        $relativeFiles += @('tools/model-data/model_data_pipeline.py', 'tools/model-data/model_data_review.html')
     }
     $baseManifest = Get-Content -LiteralPath (Join-Path $localRoot 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     foreach ($relative in $relativeFiles) {
