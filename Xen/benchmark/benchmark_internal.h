@@ -326,7 +326,7 @@ bool publish_benchmark_reports_with_adapter(
     std::string& error) noexcept;
 
 // formal 成功样本由这里统一聚合并写入固定容量环。生产循环与测试读取
-// 同一组按 sequence 排序的 span，避免 DebugReport 满容量后逐样本搬移。
+// 同一组按 sequence 排序的 span，报告仅接收最终尾窗而不重复摄入全程样本。
 class FormalSampleTracker final {
 public:
     explicit FormalSampleTracker(std::size_t retention_capacity)

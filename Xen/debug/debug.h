@@ -159,6 +159,8 @@ private:
 
     DebugReportConfig config_;
     std::vector<RuntimePipelineSample> samples_;
+    // 满容量后指向最旧样本；导出前一次归序，避免采集时逐帧搬移。
+    std::size_t sample_head_ = 0;
     DebugReportSummary summary_;
     std::uint64_t report_samples_dropped_ = 0;
     std::uint64_t aim_lock_activation_epoch_ = 0;

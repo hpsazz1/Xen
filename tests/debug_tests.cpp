@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <windows.h>
@@ -785,14 +786,18 @@ void test_report_pair_publish_failure_preserves_previous_pair() {
 
     DebugReport report;
     config.session_id = "new-session";
+    config.max_samples = 3;
     expect(report.start(config, error),
            "Debug report pair 测试应成功启动: " + error);
     if (report.active()) {
-        const RuntimePipelineSample sample = make_sample(1, 1.0, true);
-        report.ingest(std::span<const RuntimePipelineSample>(&sample, 1));
+        std::vector<RuntimePipelineSample> samples;
+        for (std::uint64_t sequence = 1; sequence <= 8; ++sequence) {
+            samples.push_back(make_sample(sequence, static_cast<double>(sequence), true));
+        }
+        report.ingest(samples);
         RuntimeSnapshot final_snapshot;
         const bool finalized = report.finalize(final_snapshot, error);
-        expect(!finalized && !error.empty(),
+        expect(!finalized && !error.empty() && report.active(),
                "锁定 JSON 必须让第二次报告发布显式失败");
     }
     json_reader.reset();
@@ -824,7 +829,13 @@ void test_report_pair_publish_failure_preserves_previous_pair() {
     expect(directory_has_only_pair(),
            "report pair 发布失败后目录只能保留旧 CSV/JSON 目标");
 
+    // 失败finalize若为导出重排了环存储，继续ingest必须仍覆盖最旧项。
+    // 8条/容量3先回绕到非零头，再补9、10；重试应只保留8、9、10。
+    const std::array<RuntimePipelineSample, 2> continued{
+        make_sample(9, 9.0, false), make_sample(10, 10.0, true)};
+    report.ingest(continued);
     RuntimeSnapshot retry_snapshot;
+    retry_snapshot.debug_samples_dropped = 23;
     expect(report.finalize(retry_snapshot, error),
            "解除第二次发布故障后应提交新 report pair: " + error);
     std::ifstream committed_csv_stream(csv_path, std::ios::binary);
@@ -840,11 +851,164 @@ void test_report_pair_publish_failure_preserves_previous_pair() {
                committed_json.find("\"session_id\": \"new-session\"") !=
                    std::string::npos,
            "故障解除后的提交必须让 CSV/JSON 同时属于新 session");
+    const auto& retry_summary = report.summary();
+    expect(retry_summary.sample_count == 3 && retry_summary.successful_samples == 2 &&
+               retry_summary.failed_samples == 1 && retry_summary.total.mean_ms == 9.0 &&
+               retry_summary.report_samples_dropped == 7 && retry_summary.runtime_samples_dropped == 23,
+           "发布失败后继续采集必须保留新尾部并累计容量丢弃，不串入旧槽位");
+    std::vector<std::uint64_t> csv_sequences;
+    std::istringstream rows(committed_csv);
+    std::string line;
+    bool samples_started = false;
+    while (std::getline(rows, line)) {
+        if (line.starts_with("sequence,capture_ms")) samples_started = true;
+        else if (samples_started && !line.empty() && line[0] != '#') {
+            csv_sequences.push_back(std::stoull(line.substr(0, line.find(','))));
+        }
+    }
+    std::vector<std::uint64_t> json_sequences;
+    const auto samples_begin = committed_json.find("\"samples\": [");
+    auto position = samples_begin == std::string::npos ? std::string::npos :
+        committed_json.find("{\"sequence\":", samples_begin);
+    while (position != std::string::npos) {
+        constexpr std::size_t key_length = std::string_view("{\"sequence\":").size();
+        json_sequences.push_back(std::stoull(committed_json.substr(position + key_length)));
+        position = committed_json.find("{\"sequence\":", position + 1);
+    }
+    const std::vector<std::uint64_t> expected_sequences{8, 9, 10};
+    expect(csv_sequences == expected_sequences && json_sequences == expected_sequences,
+           "失败finalize后追加并重试的CSV/JSON必须按8、9、10顺序导出");
     committed_csv_stream.close();
     committed_json_stream.close();
     expect(directory_has_only_pair(),
            "已有 pair 成功提交后不得遗留临时或回滚文件");
     cleanup_root();
+}
+
+void test_report_keeps_last_samples_across_batches_and_restarts() {
+    OwnedDebugPairTestRoot owned;
+    std::string error;
+    expect(create_owned_debug_pair_test_root(owned, error),
+           "尾部窗口回归应创建本轮独占临时根: " + error);
+    if (owned.path.empty() || !std::filesystem::exists(owned.owner_path)) return;
+
+    DebugReport report;
+    // 容量3分别在未满、整轮和非整轮回绕后导出；同一对象连续start
+    // 能抓住遗留头指针/丢弃计数。容量1额外覆盖每次输入都覆盖同一槽位。
+    constexpr std::array<std::pair<std::size_t, std::size_t>, 6> cases{{
+        {3, 8}, {3, 9}, {3, 10}, {3, 11}, {3, 2}, {1, 7}}};
+    const auto scalar = [](const std::string& row, const std::string& name) {
+        const auto key = "\"" + name + "\":";
+        const auto position = row.find(key);
+        if (position == std::string::npos) return std::string{};
+        const auto begin = row.find_first_not_of(" \t", position + key.size());
+        if (begin == std::string::npos) return std::string{};
+        const auto delimiter = row.find_first_of(",}", begin);
+        const auto end = row.find_last_not_of(" \t\r", delimiter - 1);
+        return row.substr(begin, end - begin + 1);
+    };
+    const auto split = [](const std::string& row) {
+        std::vector<std::string> cells;
+        std::istringstream input(row);
+        std::string cell;
+        while (std::getline(input, cell, ',')) {
+            if (!cell.empty() && cell.back() == '\r') cell.pop_back();
+            cells.push_back(cell);
+        }
+        return cells;
+    };
+    for (std::size_t run = 0; run < cases.size(); ++run) {
+        const auto [capacity, count] = cases[run];
+        DebugReportConfig config;
+        config.csv_path = (owned.path / "window.csv").string();
+        config.json_path = (owned.path / "window.json").string();
+        config.session_id = "window-" + std::to_string(run);
+        config.max_samples = capacity;
+        expect(report.start(config, error), "同一报告应重新开始独立尾部窗口: " + error);
+        if (!report.active()) continue;
+        std::vector<RuntimePipelineSample> input;
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto sequence = static_cast<std::uint64_t>(100 * (run + 1) + index + 1);
+            auto sample = make_sample(sequence, static_cast<double>(index + 1), index % 3 != 1);
+            sample.frame_timing.source_timestamp = 9007199254740993LL + sequence;
+            sample.frame_timing.source_timestamp_valid = true;
+            sample.aim_control.execution_proportional_x_counts = static_cast<float>(sequence) + 0.125f;
+            input.push_back(sample);
+        }
+        // 批长含大于容量和非整除容量；空批不能改变头指针或丢弃计数。
+        constexpr std::array<std::size_t, 4> batch_sizes{2, 4, 1, 4};
+        std::size_t offset = 0;
+        std::size_t batch = 0;
+        while (offset < input.size()) {
+            const auto size = (std::min)(batch_sizes[batch++ % batch_sizes.size()], input.size() - offset);
+            report.ingest(std::span<const RuntimePipelineSample>(input.data() + offset, size));
+            report.ingest(std::span<const RuntimePipelineSample>{});
+            offset += size;
+        }
+        RuntimeSnapshot snapshot;
+        snapshot.debug_samples_dropped = 17 + run;
+        expect(report.finalize(snapshot, error), "尾部窗口必须通过公有接口导出: " + error);
+        const auto retained = (std::min)(capacity, count);
+        const auto first = count - retained;
+        std::uint64_t successes = 0;
+        double total = 0.0;
+        for (std::size_t index = first; index < count; ++index) {
+            if (index % 3 != 1) {
+                ++successes;
+                total += static_cast<double>(index + 1);
+            }
+        }
+        const auto& summary = report.summary();
+        expect(summary.sample_count == retained && summary.successful_samples == successes &&
+                   summary.failed_samples == retained - successes &&
+                   summary.report_samples_dropped == count - retained &&
+                   summary.runtime_samples_dropped == snapshot.debug_samples_dropped &&
+                   summary.total.sample_count == successes &&
+                   summary.total.mean_ms == (successes ? total / static_cast<double>(successes) : 0.0),
+               "回绕及重启后汇总只能消费最后N条，成功耗时和两类丢弃不得串会话");
+
+        std::ifstream csv(config.csv_path), json(config.json_path);
+        const std::string json_text(
+            (std::istreambuf_iterator<char>(json)), std::istreambuf_iterator<char>());
+        std::vector<std::string> header;
+        std::vector<std::vector<std::string>> rows;
+        std::string line;
+        while (std::getline(csv, line)) {
+            if (line.starts_with("sequence,capture_ms")) header = split(line);
+            else if (!header.empty() && !line.empty() && line[0] != '#') rows.push_back(split(line));
+        }
+        std::vector<std::string> json_rows;
+        const auto samples_begin = json_text.find("\"samples\": [");
+        auto begin = samples_begin == std::string::npos ? std::string::npos :
+            json_text.find("{\"sequence\":", samples_begin);
+        while (begin != std::string::npos) {
+            const auto next = json_text.find("{\"sequence\":", begin + 1);
+            json_rows.push_back(json_text.substr(begin, next - begin));
+            begin = next;
+        }
+        expect(rows.size() == retained && json_rows.size() == retained,
+               "CSV/JSON回绕导出均须恰好最后N条，不能输出旧槽位或重复样本");
+        for (std::size_t index = 0; index < retained && index < rows.size() && index < json_rows.size(); ++index) {
+            const auto& sample = input[first + index];
+            std::ostringstream proportional;
+            proportional << sample.aim_control.execution_proportional_x_counts;
+            const std::array<std::pair<std::string, std::string>, 3> fields{{
+                {"sequence", std::to_string(sample.sequence)},
+                {"source_timestamp", std::to_string(sample.frame_timing.source_timestamp)},
+                {"aim_execution_proportional_x_counts", proportional.str()}}};
+            for (const auto& [name, expected] : fields) {
+                const auto found = std::find(header.begin(), header.end(), name);
+                const auto column = static_cast<std::size_t>(found - header.begin());
+                const auto expected_json = name == "source_timestamp" ? "\"" + expected + "\"" : expected;
+                expect(found != header.end() && column < rows[index].size() &&
+                           rows[index][column] == expected && scalar(json_rows[index], name) == expected_json,
+                       "CSV/JSON尾部必须按输入先后导出且字段绑定同一帧，run=" +
+                           std::to_string(run) + "，sequence=" + std::to_string(sample.sequence) + "，field=" + name);
+            }
+        }
+    }
+    expect(cleanup_owned_debug_pair_test_root(owned, error),
+           "尾部窗口回归只清理本轮独占临时根: " + error);
 }
 
 void test_report_rejects_invalid_capacity() {
@@ -1572,6 +1736,7 @@ int main() {
     Log::init(log_config);
     test_report_summary_and_atomic_files();
     test_report_pair_publish_failure_preserves_previous_pair();
+    test_report_keeps_last_samples_across_batches_and_restarts();
     test_report_rejects_invalid_capacity();
     test_aim_lock_active_marker_lifecycle();
     test_disabled_probes_are_not_reported_as_zero_cost_samples();

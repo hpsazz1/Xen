@@ -1203,6 +1203,7 @@ bool DebugReport::start(const DebugReportConfig& config,
         config_ = config;
         samples_.clear();
         samples_.reserve(config.max_samples);
+        sample_head_ = 0;
         summary_ = {};
         report_samples_dropped_ = 0;
         aim_lock_activation_epoch_ = 0;
@@ -1230,10 +1231,12 @@ void DebugReport::ingest(
             update_aim_lock_marker(
                 sample.aim_lock_active, sample.sequence);
             if (samples_.size() == config_.max_samples) {
-                samples_.erase(samples_.begin());
+                samples_[sample_head_] = sample;
+                sample_head_ = (sample_head_ + 1) % samples_.size();
                 ++report_samples_dropped_;
+            } else {
+                samples_.push_back(sample);
             }
-            samples_.push_back(sample);
         }
     } catch (...) {
         // 诊断报告不能影响 Runtime；本批次剩余样本直接丢弃。
@@ -1250,6 +1253,13 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
         return false;
     }
     try {
+        // 汇总和序列化沿用时间序。发布失败后仍允许继续采集和重试，
+        // 因而归序后立即复位，不能等发布成功才清除环索引。
+        if (sample_head_ != 0) {
+            std::rotate(samples_.begin(), samples_.begin() + sample_head_,
+                        samples_.end());
+            sample_head_ = 0;
+        }
         summary_ = make_summary(
             samples_, report_samples_dropped_,
             final_snapshot.debug_samples_dropped);
