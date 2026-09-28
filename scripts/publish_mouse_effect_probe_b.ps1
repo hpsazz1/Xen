@@ -173,7 +173,7 @@ function Assert-Package(
         -not [bool]$Manifest.composite_phase_tooling_included -or
         [bool]$Manifest.composite_phase_run_included -or
         [int]$Manifest.file_count -ne @($Manifest.files).Count -or
-        @($Manifest.files).Count -ne 21) {
+        @($Manifest.files).Count -ne 23) {
         throw "Physical B 工具包 manifest 身份或安全边界无效"
     }
     $declared = [Collections.Generic.HashSet[string]]::new(
@@ -224,6 +224,7 @@ if ($commit -notmatch '^[0-9a-f]{40}$') {
 }
 
 $scriptNames = @(
+    "probe_ndi_runtime_support.ps1",
     "prepare_mouse_effect_probe_b.ps1",
     "prepare_mouse_effect_probe_b_holdout.ps1",
     "prepare_mouse_effect_probe_b_command_magnitude.ps1",
@@ -266,6 +267,7 @@ if ([int]$identity.schema -ne 1 -or
 }
 
 $buildNames = @(
+    "xen-runtime-deployment.json",
     "XenMouseEffectProbe.exe",
     "XenCaptureEvidence.exe",
     "XenMouseEffectProbeSequence.exe",

@@ -232,6 +232,8 @@ GPU 或 NDI 构建再按脚本参数传入对应 SDK 根目录。正式脚本按
 `build/nvidia`、`build/directml`、`build/openvino`，也可通过 `-BuildDirectory` 指定独立目录。
 VC CRT 从所用 Visual Studio 的官方 Redist 目录解析；可用 `-MsvcRedistRoot` 明确指定，
 不从系统目录补拷 DLL。
+依赖 NDI 图像见证的 Prepare 只接受启用 NDI 且运行库完整的工具目录；未启用时明确拒绝，
+不生成缺少采集能力的半成品任务。
 
 ## 运行
 
@@ -243,6 +245,8 @@ VC CRT 从所用 Visual Studio 的官方 Redist 目录解析；可用 `-MsvcRedi
 无需允许键或目标；W+D松开W不动作，随后松开D才轻点A。反向释放后复用当前配置等待并自动结束，
 重新按方向键立即撤销并归还。快捷键急停接管和清理期间的释放不叠加、不在归还后补发；
 输入历史异常不推测松键。两种模式共用开关、源机焦点和安全许可，松键模式不授予扳机开火资格。
+用于撤销的可信新按下，在清理成功且输入与许可仍有效后，可建立下一次真实松开的制动资格；
+持续按住不提前制动，输入断流、代际变化或清理失败时不保留该资格。
 
 Runtime 已提供 `request_auto_stop(request_id)` / `cancel_auto_stop(request_id)` 供后续自动扳机调用，
 请求编号在会话中严格递增。自动扳机可请求制动；估算完成不等于已有独立停稳观察。

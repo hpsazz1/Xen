@@ -10,6 +10,13 @@
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+$ndiSupported = & (Join-Path $PSScriptRoot "probe_ndi_prepare_contract_support.ps1") `
+    -PrepareScript $PrepareScript -ToolRoot $ToolRoot -TestRoot $TestRoot
+if (-not $ndiSupported) {
+    Write-Host "NDI capability rejection and missing/corrupt runtime contracts verified"
+    return
+}
+
 function Write-NewUtf8Json([string]$Path, [object]$Value) {
     if (Test-Path -LiteralPath $Path) {
         throw "测试输入已存在：$Path"

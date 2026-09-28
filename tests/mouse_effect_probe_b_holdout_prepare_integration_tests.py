@@ -66,6 +66,21 @@ def main() -> int:
     parser.add_argument("--test-root", type=pathlib.Path, required=True)
     options = parser.parse_args()
 
+    capability = subprocess.run(
+        [str(options.powershell), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+         str(pathlib.Path(__file__).with_name("probe_ndi_prepare_contract_support.ps1")),
+         "-PrepareScript", str(options.prepare_script), "-ToolRoot", str(options.tool_root),
+         "-TestRoot", str(options.test_root)],
+        text=True, encoding="utf-8", errors="replace", stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, check=False)
+    if capability.returncode != 0:
+        raise RuntimeError("NDI Prepare 能力合同失败: " + capability.stdout)
+    if capability.stdout.strip() == "False":
+        print("NDI capability rejection and missing/corrupt runtime contracts verified")
+        return 0
+    if capability.stdout.strip() != "True":
+        raise RuntimeError("NDI Prepare 能力合同返回值不明确")
+
     root = options.test_root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     case = root / f"case-{uuid.uuid4().hex}"

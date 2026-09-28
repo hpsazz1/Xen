@@ -24,6 +24,9 @@
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot "probe_ndi_runtime_support.ps1")
+Assert-XenProbeNdiRuntime $ToolRoot
+
 function Get-FileSha256([string]$Path) {
     $algorithm = [Security.Cryptography.SHA256]::Create()
     $stream = [IO.File]::Open(

@@ -26,6 +26,9 @@
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot "probe_ndi_runtime_support.ps1")
+Assert-XenProbeNdiRuntime $ToolRoot
+
 $prepareConfirmation = "XEN_MOUSE_EFFECT_PROBE_B_PRIMARY_PREPARE_ONLY"
 $physicalConfirmation =
     "XEN_MOUSE_EFFECT_PROBE_B_SENDS_REAL_KMBOX_INPUT"

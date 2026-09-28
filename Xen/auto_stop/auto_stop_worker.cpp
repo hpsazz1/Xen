@@ -708,20 +708,31 @@ public:
                         // 正式消费动作拥有期间的事件，撤销后不能把该窗口重新解释为新一轮松键。
                         return still_released && events_ok;
                     };
-                    if (hotkey_priority || !valid_manual()) {
+                    const auto cancel_manual = [&](const char* reason) {
                         const auto new_press = intent.held_mask;
-                        const bool may_rearm = manual_permission(input) && input_ok && events_ok && intent.history_valid &&
-                            intent.epoch == active_input_epoch && new_press != 0 && new_press == held_wasd(input) &&
+                        const auto generation = active_generation;
+                        // 事件消费晚于快照；新按下既撤销旧动作，也可武装其后续真实释放。
+                        // 只重读当前状态核对已消费事实，不补事件、不改事件时间或HUD模型。
+                        if (new_press != 0 && events_ok)
+                            input_ok = mouse->poll_input(input) && input.state_valid && input.status == InputMonitorStatus::READY;
+                        const auto checked_at = now_ns();
+                        const bool may_rearm = input_ok && events_ok && intent.history_valid && intent.input_continuous &&
+                            intent.epoch == active_input_epoch && intent.epoch == cursor.epoch && intent.sequence == cursor.sequence &&
+                            intent.received_at_ns > 0 && checked_at >= intent.received_at_ns &&
+                            checked_at - intent.received_at_ns < 500'000'000 &&
+                            new_press != 0 && new_press == held_wasd(input) && manual_permission(input) &&
                             active_generation == cancel_generation.load();
-                        cancel_active(false, "manual_release_revoked");
+                        cancel_active(false, reason);
                         // 人工新按下已取消无屏蔽的反向输出；正常清理后允许其下一次真实全松。
-                        if (may_rearm && !debt && !fault) release_armed_mask = new_press;
-                    }
+                        if (may_rearm && !debt && !fault && manual_permission(input) && generation == cancel_generation.load())
+                            release_armed_mask = new_press;
+                    };
+                    if (hotkey_priority || !valid_manual()) cancel_manual("manual_release_revoked");
                     else {
                         auto decision = controller.tick(now_ns());
                         if (decision.phase == AutoStopPhase::WAITING_ACK) {
                             if (!reserve() || !(input_ok = mouse->poll_input(input)) || !reports_still_released() || !valid_manual())
-                                cancel_active(false, "manual_permission_before_report");
+                                cancel_manual("manual_permission_before_report");
                             else {
                                 const auto started = now_ns();
                                 if (software_mask && decision.desired_mask == 0) {

@@ -60,6 +60,7 @@ $destination = Join-Path $resolvedTestRoot "remote"
 [void](New-Item -ItemType Directory -Path (Join-Path $destination "releases") -Force)
 
 foreach ($name in @(
+        "probe_ndi_runtime_support.ps1",
         "prepare_mouse_effect_probe_b.ps1",
         "prepare_mouse_effect_probe_b_holdout.ps1",
         "prepare_mouse_effect_probe_b_command_magnitude.ps1",
@@ -76,6 +77,7 @@ foreach ($name in @(
     Write-Utf8NoBom (Join-Path $scripts $name) "fixture:$name`n"
 }
 foreach ($name in @(
+        "xen-runtime-deployment.json",
         "XenMouseEffectProbe.exe",
         "XenCaptureEvidence.exe",
         "XenMouseEffectProbeSequence.exe",
@@ -273,11 +275,13 @@ Assert-True ([int]$manifest.schema_version -eq 1 -and
              -not [bool]$manifest.command_magnitude_run_included -and
              [bool]$manifest.composite_phase_tooling_included -and
              -not [bool]$manifest.composite_phase_run_included -and
-             [int]$manifest.file_count -eq 21 -and
-             @($manifest.files).Count -eq 21) `
+             [int]$manifest.file_count -eq 23 -and
+             @($manifest.files).Count -eq 23) `
     "Physical B manifest 身份、clean/Launch 边界或文件数错误"
 $manifestNames = @($manifest.files | ForEach-Object { [string]$_.name })
 foreach ($requiredName in @(
+        "probe_ndi_runtime_support.ps1",
+        "xen-runtime-deployment.json",
         "prepare_mouse_effect_probe_b_holdout.ps1",
         "analyze_mouse_effect_probe_b_holdout.py",
         "prepare_mouse_effect_probe_b_command_magnitude.ps1",

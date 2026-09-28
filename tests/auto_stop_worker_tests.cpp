@@ -57,8 +57,10 @@ public:
         input.virtual_keys['S'] = (held & 4) != 0;
         input.virtual_keys['D'] = (held & 8) != 0;
         const bool inject_release = release_after_poll.exchange(false);
+        const auto inject_press = press_after_poll.exchange(0);
         lock.unlock();
         if (inject_release) physical(0);
+        if (inject_press) physical(static_cast<std::uint8_t>(inject_press));
         return true;
     }
     bool set_wasd_event_subscription(bool value) noexcept override {
@@ -158,6 +160,7 @@ public:
     Clock::time_point cleaned_at() { std::lock_guard<std::mutex> lock(mutex); return cleanup_at; }
     std::mutex mutex;
     std::atomic<bool> release_after_poll{false};
+    std::atomic<int> press_after_poll{0};
     std::atomic<int> active_backend_calls{0}, max_backend_calls{0}, moves{0};
     std::deque<WasdEvent> events;
     std::vector<int> software, masks;
@@ -228,13 +231,26 @@ void bounded_aim_transaction_wait() {
     require(arbiter.try_enter_cleanup().owns_lock(), "故障后仍可进入清理事务");
 }
 
-void hud_manual_release_contracts() {
+void hud_manual_release_contracts(int selected_mode = -1) {
     using namespace std::chrono_literals;
     // 保持足够真实按键历史；原固定时序的零时长按下/松开fixture不能代表HUD已有运动。
-    for (const bool rearm : {false, true}) {
+    for (const int rearm_mode : {0, 1, 2, 3}) {
+        if (selected_mode >= 0 && rearm_mode != selected_mode) continue;
+        const bool rearm = rearm_mode != 0;
         auto fake = std::make_shared<Fake>(); fake->activation = false;
+        auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+        std::atomic<bool> reverse_read_waiting{false}, resume_reverse_read{false};
+        if (rearm_mode == 3) fake->before_wasd_read = [&] {
+            if (reverse_read_waiting.load()) return;
+            const auto reports = fake->reports();
+            if (std::find(reports.begin(), reports.end(), 4) == reports.end()) return;
+            // 下一轮读事件前worker已归还上一事务；主线程因此能确定取得输出门。
+            reverse_read_waiting = true;
+            const auto deadline = Clock::now() + 2s;
+            while (!resume_reverse_read.load() && Clock::now() < deadline) std::this_thread::sleep_for(1ms);
+        };
         std::atomic<std::uint64_t> id{0};
-        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+        AutoStopWorker worker(fake, arbiter, [] { return true; },
             [&] { return ++id; }, [] { return true; });
         AutoStopConfig config{true, 0}; config.experimental_hud_model = true;
         require(worker.start(config), "HUD manual无绑定启动");
@@ -245,7 +261,26 @@ void hud_manual_release_contracts() {
         fake->physical(0);
         wait_for([&] { const auto reports = fake->reports(); return std::find(reports.begin(), reports.end(), 4) != reports.end(); });
         if (rearm) {
-            fake->physical(8);
+            // 固定D真实按下晚于快照、早于事件读取，不能靠调度恰巧避开旧快照。
+            if (rearm_mode == 2) fake->press_after_poll = 8;
+            else if (rearm_mode == 3) {
+                // 阻塞最终零报告的事务准入，等worker已申请后才按D；固定发送前复核窗口。
+                wait_for([&] { return reverse_read_waiting.load(); });
+                auto held = arbiter->try_enter_cleanup();
+                resume_reverse_read = true;
+                require(held.owns_lock(), "发送前复核须先占用输出事务门");
+                auto inject = std::async(std::launch::async, [&] {
+                    wait_for([&] {
+                        OutputArbiterRejection rejection;
+                        auto attempt = arbiter->try_enter_aim(OutputArbiterSource::AIM, &rejection);
+                        return rejection == OutputArbiterRejection::AUXILIARY_PENDING;
+                    });
+                    fake->physical(8);
+                });
+                inject.get();
+                held.unlock();
+            }
+            else fake->physical(8);
             wait_for([&] { return fake->has_cleanup(); });
             const auto before = fake->reports().size();
             // W模型自然减速上界400ms；不把残余W误称作错误继承或先强制模型清零。
@@ -1379,6 +1414,18 @@ void mixed_request_owner_contracts() {
 }
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--hud-manual-rearm-poll") {
+            hud_manual_release_contracts(2);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--hud-manual-rearm-report") {
+            hud_manual_release_contracts(3);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--hud-manual") {
+            hud_manual_release_contracts();
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--mixed-owner") {
             mixed_request_owner_contracts();
             return 0;
