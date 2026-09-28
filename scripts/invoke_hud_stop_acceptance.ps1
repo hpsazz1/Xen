@@ -2,17 +2,24 @@
     [ValidateSet('Prepare', 'Validate', 'Launch', 'Recover')][string]$Mode = 'Prepare',
     [Parameter(Mandatory = $true)][string]$PackageRoot,
     [Parameter(Mandatory = $true)][string]$RunDirectory,
+    [ValidateSet('HudStop', 'Soak')][string]$Profile = 'HudStop',
+    [ValidateRange(1,82800)][int]$RuntimeDurationSeconds = 3600,
+    [ValidateRange(100,60000)][int]$ResourceIntervalMilliseconds = 5000,
+    [ValidateRange(1,1800)][int]$StartupWaitBudgetSeconds = 300,
+    [ValidateRange(1,1800)][int]$CloseWaitBudgetSeconds = 300,
     [switch]$AllowPhysicalOutput,
     [string]$Confirm = ''
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-$taskId = 'AUTO-STOP-HUD-EXPERIMENT-001'
+$taskId = if ($Profile -eq 'Soak') { 'SOAK-RC-001' } else { 'AUTO-STOP-HUD-EXPERIMENT-001' }
+$confirmation = if ($Profile -eq 'Soak') { 'XEN_SOAK_SENDS_REAL_INPUT' } else { 'HUD_STOP_EXPERIMENT' }
 if ($Mode -eq 'Launch') {
-    if (-not $AllowPhysicalOutput -or $Confirm -cne 'HUD_STOP_EXPERIMENT') {
-        throw 'Launch必须由用户前台提供-AllowPhysicalOutput -Confirm HUD_STOP_EXPERIMENT。'
+    if (-not $AllowPhysicalOutput -or $Confirm -cne $confirmation) {
+        throw "Launch必须由用户前台提供-AllowPhysicalOutput -Confirm $confirmation。"
     }
 } elseif ($AllowPhysicalOutput -or $Confirm) { throw '仅Launch接受物理输出授权。' }
+if ($Profile -eq 'Soak') { . (Join-Path $PSScriptRoot 'soak_acceptance_support.ps1') }
 
 function Assert-PlainPath([string]$Path, [bool]$MustExist = $true) {
     $full = [IO.Path]::GetFullPath($Path)
@@ -96,13 +103,28 @@ if ($Mode -ne 'Recover') {
         $routes[0].id -cne 'nvidia' -or $routes[0].executable -cne 'runtimes/nvidia/Xen.exe') {
         throw '配置必须唯一选择正式NVIDIA Worker路由。'
     }
-    if ((Get-IniValue $config 'auto_stop' 'experimental_hud_model') -ine 'true') {
+    if ($Profile -eq 'HudStop' -and (Get-IniValue $config 'auto_stop' 'experimental_hud_model') -ine 'true') {
         throw '本入口仅允许experimental_hud_model=true的HUD急停配置。'
+    }
+    if ($Profile -eq 'Soak') {
+        $sourceSession = Get-Content -LiteralPath (Assert-PlainPath (
+            Join-Path $package 'tools/source/start_source_context_session.ps1')) -Raw -Encoding UTF8
+        if ($sourceSession -notmatch '(?m)^# XEN_ACCEPTANCE_LAUNCH_RECEIPT_SCHEMA=1\r?$') {
+            throw '包内Source-session缺少公开Launcher身份回执合同，请先差量更新工具。'
+        }
     }
 }
 $identityPaths = @($launcher, (Join-Path $package 'runtimes/nvidia/Xen.exe'), $manifestPath, $configPath, $PSCommandPath,
     $entrypoint, (Join-Path $package 'tools/source/start_source_context_session.ps1'))
-$identities = @($identityPaths | ForEach-Object { Get-Identity $_ })
+if ($Profile -eq 'Soak') {
+    $identityPaths += @((Join-Path $PSScriptRoot 'soak_acceptance_support.ps1'),
+        (Join-Path $PSScriptRoot 'measure_process_resources.ps1'))
+}
+$identities = @($identityPaths | ForEach-Object {
+    if ($Mode -eq 'Recover' -and $Profile -eq 'Soak' -and -not (Test-Path -LiteralPath $_)) {
+        [ordered]@{ path = [IO.Path]::GetFullPath($_); sha256 = $null }
+    } else { Get-Identity $_ }
+})
 if ($Mode -eq 'Prepare') {
     if (Test-Path -LiteralPath $run) { throw 'Run已存在，禁止覆盖。' }
     New-Item -ItemType Directory -Path $run | Out-Null
@@ -110,13 +132,53 @@ if ($Mode -eq 'Prepare') {
     $quote = { param([string]$Value) "'" + $Value.Replace("'", "''") + "'" }
     $command = 'powershell -NoProfile -ExecutionPolicy Bypass -File ' + (& $quote $PSCommandPath) +
         ' -Mode Launch -PackageRoot ' + (& $quote $package) + ' -RunDirectory ' + (& $quote $run) +
-        ' -AllowPhysicalOutput -Confirm HUD_STOP_EXPERIMENT'
-    Write-Json (Join-Path $run 'task.json') ([ordered]@{
+        $(if ($Profile -eq 'Soak') { ' -Profile Soak' } else { '' }) +
+        ' -AllowPhysicalOutput -Confirm ' + $confirmation
+    $preparedTask = [ordered]@{
         schema = 1; task_id = $taskId; prepared_utc = [DateTime]::UtcNow.ToString('o')
         package_root = $package; run_directory = $run; identities = $identities
         snapshot_sha256 = (Get-Identity (Join-Path $run 'config.ini')).sha256
         launch_command = $command; automatic_arm = $false; automatic_fire = $false
-    })
+    }
+    if ($Profile -eq 'Soak') {
+        $preparedTask.profile = 'Soak'
+        $preparedTask.runtime_duration_seconds = $RuntimeDurationSeconds
+        $preparedTask.resource_interval_milliseconds = $ResourceIntervalMilliseconds
+        $preparedTask.startup_wait_budget_seconds = $StartupWaitBudgetSeconds
+        $preparedTask.close_wait_budget_seconds = $CloseWaitBudgetSeconds
+        $preparedTask.resource_max_duration_seconds = $RuntimeDurationSeconds + $StartupWaitBudgetSeconds + $CloseWaitBudgetSeconds
+        $preparedTask.duration_basis = if ($PSBoundParameters.ContainsKey('RuntimeDurationSeconds')) {
+            'explicit_prepare_parameter'
+        } else { 'plan_default_60_minutes_not_user_confirmed' }
+        $preparedTask.plan_sha256 = Get-XenSoakPlanHash $preparedTask
+    }
+    Write-Json (Join-Path $run 'task.json') $preparedTask
+    if ($Profile -eq 'Soak') {
+        Write-Text (Join-Path $run 'TASK.md') @"
+# 发布候选长稳
+
+任务SOAK-RC-001；仅Prepare，尚未执行。Runtime目标$RuntimeDurationSeconds 秒；时长来源$($preparedTask.duration_basis)。默认60分钟不是用户确认，修改须重新Prepare。
+资源周期$ResourceIntervalMilliseconds 毫秒；最大窗口$($preparedTask.resource_max_duration_seconds)秒，包含启动等待$StartupWaitBudgetSeconds 秒与退出保存$CloseWaitBudgetSeconds 秒。
+config.ini是证据副本；入口使用包原目录配置，不修改控制参数。
+
+1. 退出其他版本。用户在目标机本地前台执行下方唯一命令。
+2. 等待控制台确认Worker身份及首条资源样本就绪，再在UI启动Runtime并自行武装；需要录像则先开始录像。
+3. 连续运行计划时长；普通使用中记录异常及恢复，不重复End/AD专项。出现异常由用户自行停止。
+4. 到时仅提示，不自动停止Runtime、退出、按键或开火；用户停止Runtime保存报告并退出UI。
+5. UI存活/资源采样够时长不等于Runtime长稳；回收时按一个Runtime的全摄入跨度及覆盖独立核对。重启Runtime或Worker不得拼接时长。
+
+## 唯一Launch命令
+
+``````powershell
+$command
+``````
+
+仅用户前台执行。资源采集器只读，不代表Runtime验收；结束后回复观察，由代理Recover。
+"@
+        Write-Text (Join-Path $run 'OBSERVATION.md') "# 长稳人工观察`n`n尚未执行；记录实际Runtime开始/停止、场景、异常、恢复和结论。不重复已确认End/AD专项。`n"
+        Write-Output $command
+        return
+    }
     Write-Text (Join-Path $run 'TASK.md') @"
 # HUD急停人工复测
 
@@ -148,6 +210,19 @@ $command
 $task = Read-Json (Join-Path $run 'task.json')
 if ($task.schema -ne 1 -or $task.task_id -cne $taskId -or $task.package_root -ine $package -or
     $task.run_directory -ine $run -or $task.automatic_arm -or $task.automatic_fire) { throw '任务身份不符。' }
+if ($Profile -eq 'Soak') {
+    Assert-XenSoakTask $task
+    foreach ($binding in @(
+        @('RuntimeDurationSeconds','runtime_duration_seconds'),
+        @('ResourceIntervalMilliseconds','resource_interval_milliseconds'),
+        @('StartupWaitBudgetSeconds','startup_wait_budget_seconds'),
+        @('CloseWaitBudgetSeconds','close_wait_budget_seconds'))) {
+        if ($PSBoundParameters.ContainsKey($binding[0]) -and
+            [int]$PSBoundParameters[$binding[0]] -ne [int]$task.($binding[1])) {
+            throw 'Launch/Validate/Recover不得修改Prepare冻结的时长或周期。'
+        }
+    }
+}
 if ($Mode -in @('Validate', 'Launch')) {
     if (@($task.identities).Count -ne $identities.Count) { throw '绑定身份数量不符。' }
     for ($i = 0; $i -lt $identities.Count; $i++) {
@@ -167,7 +242,38 @@ if ($Mode -in @('Validate', 'Launch')) {
     $launch = [ordered]@{ schema = 1; started_utc = [DateTime]::UtcNow.ToString('o')
         before_files = $beforeFiles; before_file_metadata = $beforeMetadata
         entrypoint_pid = $null; ended_utc = $null; exit_code = $null }
+    if ($Profile -eq 'Soak') {
+        $launch.supervision_status = 'interrupted'
+        $launch.worker_identity = $null
+        $launch.launcher_identity = $null
+        $launch.collector_identity = $null
+        $launch.resource_ready_utc = $null
+        $launch.resource_exit_code = $null
+        $launch.failure_type = $null
+        $launch.runtime_duration_notice_basis = 'worker_resource_clock_not_runtime_clock'
+    }
     Write-Json (Join-Path $run 'launch.json') $launch
+    if ($Profile -eq 'Soak') {
+        $savedReceipt = [Environment]::GetEnvironmentVariable('XEN_ACCEPTANCE_LAUNCH_RECEIPT')
+        $process = $null
+        try {
+            [Environment]::SetEnvironmentVariable('XEN_ACCEPTANCE_LAUNCH_RECEIPT', (Join-Path $run 'launcher-identity.json'))
+            # 正式Start-Xen原入口保持SourceContext注入；公开回执由Source-session消费。
+            $process = Start-Process -FilePath $entrypoint -WorkingDirectory $package -WindowStyle Normal -PassThru
+        } finally { [Environment]::SetEnvironmentVariable('XEN_ACCEPTANCE_LAUNCH_RECEIPT', $savedReceipt) }
+        try {
+            $launch.entrypoint_pid = $process.Id
+            Write-Json (Join-Path $run 'launch.json') $launch
+            Invoke-XenSoakSupervision -Task $task -Launch $launch -LauncherPath $launcher `
+                -WorkerPath (Join-Path $package 'runtimes/nvidia/Xen.exe') -RunDirectory $run `
+                -SamplerPath (Join-Path $PSScriptRoot 'measure_process_resources.ps1') `
+                -SaveState { param($Record) Write-Json (Join-Path $run 'launch.json') $Record }
+            if ($launch.supervision_status -cne 'worker_exited') {
+                throw '长稳监督未完整收尾，证据已保留；请按launch.json状态处理，不代表Runtime通过。'
+            }
+        } finally { if ($null -ne $process) { $process.Dispose() } }
+        return
+    }
     Write-Host '即将打开HUD包UI；用户自行启动Runtime与武装，End急停，完成后退出。'
     # 复用发布包入口注入本机SourceContext；不读取或输出任何凭据内容。
     $process = Start-Process -FilePath $entrypoint -WorkingDirectory $package -WindowStyle Normal -PassThru
@@ -179,7 +285,7 @@ if ($Mode -in @('Validate', 'Launch')) {
     Write-Json (Join-Path $run 'launch.json') $launch
     return
 }
-Assert-Stopped
+if ($Profile -eq 'HudStop') { Assert-Stopped }
 $launchPath = Join-Path $run 'launch.json'
 if (-not (Test-Path -LiteralPath $launchPath)) {
     Write-Json (Join-Path $run 'automatic-summary.json') ([ordered]@{
@@ -189,7 +295,18 @@ if (-not (Test-Path -LiteralPath $launchPath)) {
     return
 }
 $launch = Read-Json $launchPath
-if (-not $launch.entrypoint_pid -or -not $launch.ended_utc) { throw '启动入口记录尚未结束，无法回收；入口退出不代表UI或实机测试完成。' }
+if ($Profile -eq 'HudStop') {
+    if (-not $launch.entrypoint_pid -or -not $launch.ended_utc) { throw '启动入口记录尚未结束，无法回收；入口退出不代表UI或实机测试完成。' }
+} elseif ($null -ne $launch.worker_identity) {
+    if ((Get-XenBoundProcessState $launch.worker_identity) -ceq 'running') {
+        throw '本Run绑定Worker仍运行，请用户停止并退出后回收；脚本不会代停。'
+    }
+} else { Assert-Stopped }
+if ($Profile -eq 'Soak' -and $null -ne $launch.PSObject.Properties['replacement_worker_identity'] -and
+    $null -ne $launch.replacement_worker_identity -and
+    (Get-XenBoundProcessState $launch.replacement_worker_identity) -ceq 'running') {
+    throw '本Run已记录重启Worker且仍运行，请用户退出后回收；不能拼接会话。'
+}
 $collected = @()
 $hasMetadata = $null -ne $launch.PSObject.Properties['before_file_metadata']
 $beforeByPath = @{}
@@ -213,11 +330,33 @@ foreach ($file in @(Get-ReportFiles)) {
     }
     $collected += Get-Identity $target
 }
-Write-Json (Join-Path $run 'automatic-summary.json') ([ordered]@{
+$automatic = [ordered]@{
     schema = 1; task_id = $taskId; execution_status = 'ENTRYPOINT_EXITED'; entrypoint_exit_code = $launch.exit_code
     collected_files = $collected; physical_effect_verified = $false; human_observation_required = $true
     collection_basis = $(if ($hasMetadata) { 'LENGTH_OR_WRITE_TIME_CHANGED' } else { 'LEGACY_WRITE_TIME_FALLBACK' })
     reports_may_contain_other_runs = $true
-    config_changed_during_ui = ((Get-Identity $configPath).sha256 -cne $task.snapshot_sha256)
-})
+    config_changed_during_ui = (-not (Test-Path -LiteralPath $configPath) -or
+        (Get-Identity $configPath).sha256 -cne $task.snapshot_sha256)
+}
+if ($Profile -eq 'Soak') {
+    $unchanged = $identities.Count -eq @($task.identities).Count
+    if ($unchanged) {
+        for ($i = 0; $i -lt $identities.Count; ++$i) {
+            if ($identities[$i].path -ine $task.identities[$i].path -or
+                $identities[$i].sha256 -cne $task.identities[$i].sha256) { $unchanged = $false }
+        }
+    }
+    $resourcePath = Join-Path $run 'resources/summary.json'
+    $resource = if (Test-Path -LiteralPath $resourcePath) { Read-Json $resourcePath } else { $null }
+    $automatic.soak = Get-XenSoakRecoveryState $launch $resource $unchanged
+    $automatic.execution_status = $launch.supervision_status
+    $automatic.resource_attachments = @()
+    foreach ($name in @('summary.json','samples.csv','summary.partial.json','samples.partial.csv')) {
+        $attachment = Join-Path (Join-Path $run 'resources') $name
+        if (Test-Path -LiteralPath $attachment -PathType Leaf) {
+            $automatic.resource_attachments += Get-Identity $attachment
+        }
+    }
+}
+Write-Json (Join-Path $run 'automatic-summary.json') $automatic
 Write-Output "回收$($collected.Count)份新增或变化文件；完整日志可能含其他Run，人工效果未判定。"

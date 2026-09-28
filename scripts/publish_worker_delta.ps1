@@ -13,6 +13,7 @@
     [switch]$IncludeRecoilMigrationScripts,
     [switch]$IncludeSourceSessionScript,
     [switch]$IncludeHudAcceptanceScript,
+    [switch]$IncludeSoakAcceptanceTools,
     [string]$SourceContextExecutable = '',
     [string]$SshIdentityFile = (Join-Path $env:USERPROFILE '.ssh\xen_foxos_ed25519'),
     [string]$KnownHostsFile = (Join-Path $env:USERPROFILE '.ssh\known_hosts'),
@@ -21,6 +22,10 @@
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if ($IncludeSoakAcceptanceTools) {
+    $IncludeHudAcceptanceScript = $true
+    $IncludeSourceSessionScript = $true
+}
 Import-Module (Join-Path $PSScriptRoot 'path_safety.psm1') -Force
 $localRoot = (Resolve-Path -LiteralPath $PackageRoot).ProviderPath.TrimEnd('\')
 $remoteRoot = (Resolve-Path -LiteralPath $DestinationRoot).ProviderPath.TrimEnd('\')
@@ -83,7 +88,8 @@ try {
         -SourceContextExecutable $SourceContextExecutable -IncludeLauncher:$IncludeLauncher -IncludeRecoilTools:$IncludeRecoilTools `
         -IncludeRecoilMigrationScripts:$IncludeRecoilMigrationScripts `
         -IncludeSourceSessionScript:$IncludeSourceSessionScript `
-        -IncludeHudAcceptanceScript:$IncludeHudAcceptanceScript
+        -IncludeHudAcceptanceScript:$IncludeHudAcceptanceScript `
+        -IncludeSoakAcceptanceTools:$IncludeSoakAcceptanceTools
     $ownedStages.Add([pscustomobject]@{ parent = (Split-Path -Parent $localRoot); name = $stageName })
     $null = Resolve-XenDirectChildPath $localRoot $stageName '移入主机包前暂存'
     [IO.Directory]::Move($generated, $localStage)
@@ -102,6 +108,9 @@ try {
     if ($SourceContextExecutable) { $relativeFiles += 'tools/source/xen_source_context.exe' }
     if ($IncludeSourceSessionScript) { $relativeFiles += 'tools/source/start_source_context_session.ps1' }
     if ($IncludeHudAcceptanceScript) { $relativeFiles += 'tools/acceptance/invoke_hud_stop_acceptance.ps1' }
+    if ($IncludeSoakAcceptanceTools) {
+        $relativeFiles += @('tools/acceptance/measure_process_resources.ps1', 'tools/acceptance/soak_acceptance_support.ps1')
+    }
     $baseManifest = Get-Content -LiteralPath (Join-Path $localRoot 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     foreach ($relative in $relativeFiles) {
         if ($relative -ceq 'manifest.json') { continue }

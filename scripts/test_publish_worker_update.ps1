@@ -52,11 +52,15 @@ try {
     Write-UpdateFixture (Join-Path $sourceRoot 'fixture.txt') 'worker source'
     Write-UpdateFixture (Join-Path $sourceRoot 'scripts/start_source_context_session.ps1') 'updated-source-session-script'
     Write-UpdateFixture (Join-Path $sourceRoot 'scripts/invoke_hud_stop_acceptance.ps1') 'updated-hud-acceptance-script'
+    foreach ($tool in @('measure_process_resources.ps1', 'soak_acceptance_support.ps1')) {
+        Write-UpdateFixture (Join-Path $sourceRoot "scripts/$tool") "updated-$tool"
+    }
     foreach ($tool in @('import_recoil_profiles.py', 'migrate_legacy_recoil_profiles.py', 'invoke_recoil_legacy_acceptance.ps1')) {
         Write-UpdateFixture (Join-Path $sourceRoot "scripts/$tool") "updated-$tool"
     }
     & $git -C $sourceRoot add fixture.txt scripts/start_source_context_session.ps1
     & $git -C $sourceRoot add scripts/invoke_hud_stop_acceptance.ps1
+    & $git -C $sourceRoot add scripts/measure_process_resources.ps1 scripts/soak_acceptance_support.ps1
     & $git -C $sourceRoot add scripts/import_recoil_profiles.py scripts/migrate_legacy_recoil_profiles.py scripts/invoke_recoil_legacy_acceptance.ps1
     & $git -C $sourceRoot -c user.name=XenTest -c user.email=xen-test@example.invalid commit --quiet -m '发布夹具'
     if ($LASTEXITCODE -ne 0) { throw 'fixture git commit failed' }
@@ -110,6 +114,9 @@ try {
     $published = Get-Content -LiteralPath (Join-Path $parameters.OutputDirectory 'manifest.json') -Raw | ConvertFrom-Json
     $evidenceRelative = 'tools/acceptance/WORKER-UPDATE.json'
     $evidence = Get-Content -LiteralPath (Join-Path $parameters.OutputDirectory $evidenceRelative) -Raw | ConvertFrom-Json
+    foreach ($tool in @('measure_process_resources.ps1', 'soak_acceptance_support.ps1')) {
+        Assert-UpdateTest (-not (Test-Path -LiteralPath (Join-Path $parameters.OutputDirectory "tools/acceptance/$tool"))) '默认发布不补入长稳工具'
+    }
     Assert-UpdateTest ($published.git_commit -ceq $commit) '候选提交绑定新 Worker'
     Assert-UpdateTest ($evidence.base_package.git_commit -ceq ('a' * 40)) '保留基包提交'
     Assert-UpdateTest ($evidence.base_package.manifest_sha256 -ieq $baseHash) '保留基包清单身份'
@@ -233,8 +240,20 @@ try {
     $deltaParameters.SourceContextExecutable = Join-Path $buildRoot 'Release\xen_source_context.exe'
     $deltaParameters.IncludeRecoilTools = $true
     $deltaParameters.IncludeRecoilMigrationScripts = $true
-    $deltaParameters.IncludeSourceSessionScript = $true
-    $deltaParameters.IncludeHudAcceptanceScript = $true
+    $deltaParameters.IncludeSoakAcceptanceTools = $true
+    # 干净且构建身份匹配的缺文件反例，不能因git脏拒绝而假测缺文件门。
+    foreach ($tool in @('measure_process_resources.ps1', 'soak_acceptance_support.ps1')) {
+        & $git -C $sourceRoot rm --quiet "scripts/$tool"
+        & $git -C $sourceRoot -c user.name=XenTest -c user.email=xen-test@example.invalid commit --quiet -m '缺失长稳工具夹具'
+        $identity.git_commit = (& $git -C $sourceRoot rev-parse HEAD).Trim()
+        Write-UpdateFixture $identityPath ($identity | ConvertTo-Json)
+        $missingSoak = $deltaParameters.Clone()
+        $missingSoak.OutputDirectory = Join-Path $runRoot "missing-$tool"
+        Assert-UpdateReject $missingSoak "长稳工具组缺少 $tool 必须拒绝"
+        & $git -C $sourceRoot checkout --quiet $commit
+        $identity.git_commit = $commit
+        Write-UpdateFixture $identityPath ($identity | ConvertTo-Json)
+    }
     foreach ($tool in @('xen_recoil_calibration.exe', 'xen_recoil_tuner.exe')) {
         $missingTool = $deltaParameters.Clone()
         $missingTool.OutputDirectory = Join-Path $runRoot "missing-$tool"
@@ -255,7 +274,8 @@ try {
     Write-UpdateFixture (Join-Path $baseRoot 'config.ini') 'user changed configuration after original publication'
     Write-UpdateFixture (Join-Path $baseRoot 'cache/model-workspace/settings.json') '{"user_changed":true}'
     & $publisher @deltaParameters
-    Assert-UpdateTest (@(Get-ChildItem -LiteralPath $deltaOutput -Recurse -File).Count -eq 11) '差量只生成 Worker、选中桥接及启动脚本、两个压枪工具、三个迁移验收脚本、HUD 验收脚本、来源证据和清单'
+    Assert-UpdateTest (@(Get-ChildItem -LiteralPath $deltaOutput -Recurse -File).Count -eq 13) '差量只生成选定Worker/工具、长稳两脚本及其依赖、来源证据和清单'
+    Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $deltaOutput 'tools/source/start_source_context_session.ps1') -Raw) -ceq 'updated-source-session-script') '长稳开关自动纳入源启动依赖脚本'
     Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $deltaOutput 'tools/acceptance/invoke_hud_stop_acceptance.ps1') -Raw) -ceq 'updated-hud-acceptance-script') '显式开关从当前源码补入 HUD 验收脚本'
     Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $deltaOutput 'tools/recoil/migrate_legacy_recoil_profiles.py') -Raw) -ceq 'updated-migrate_legacy_recoil_profiles.py') '新增迁移入口来自当前源码'
     Assert-UpdateTest (-not (Test-Path -LiteralPath (Join-Path $baseRoot 'tools/recoil/migrate_legacy_recoil_profiles.py'))) '生成阶段不修改基包新增入口'
@@ -266,7 +286,8 @@ try {
     foreach ($relative in @('runtimes/nvidia/Xen.exe', 'runtimes/nvidia/xen_recoil_calibration.exe',
         'runtimes/nvidia/xen_recoil_tuner.exe', 'tools/source/xen_source_context.exe', 'tools/source/start_source_context_session.ps1',
         'tools/recoil/import_recoil_profiles.py', 'tools/recoil/migrate_legacy_recoil_profiles.py', 'tools/recoil/invoke_recoil_legacy_acceptance.ps1',
-        'tools/acceptance/invoke_hud_stop_acceptance.ps1', 'tools/acceptance/WORKER-UPDATE.json', 'manifest.json')) {
+        'tools/acceptance/invoke_hud_stop_acceptance.ps1', 'tools/acceptance/measure_process_resources.ps1',
+        'tools/acceptance/soak_acceptance_support.ps1', 'tools/acceptance/WORKER-UPDATE.json', 'manifest.json')) {
         $oldPath = Join-Path $baseRoot $relative
         $oldHash = if (Test-Path -LiteralPath $oldPath) { (Get-FileHash -LiteralPath $oldPath).Hash.ToLowerInvariant() } else { '' }
         $deltaEntries += [ordered]@{ path = $relative; old_sha256 = $oldHash
@@ -279,6 +300,16 @@ try {
     [ordered]@{ schema = 1; runtime = 'nvidia'; files = $deltaEntries; protected_files = $protected } |
         ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $deltaStage 'delta.json') -Encoding UTF8
     $apply = Join-Path $PSScriptRoot 'apply_worker_delta.ps1'
+    $packetPath = Join-Path $deltaStage 'delta.json'
+    $goodPacket = [IO.File]::ReadAllText($packetPath)
+    $badPacket = $goodPacket | ConvertFrom-Json
+    $badPacket.files += [pscustomobject]@{ path='tools/acceptance/arbitrary.ps1'; old_sha256=''; new_sha256=('0'*64) }
+    Write-UpdateFixture $packetPath ($badPacket | ConvertTo-Json -Depth 10)
+    $unknownToolRejected = $false
+    try { & $apply -PackageRoot $baseRoot -StageName $deltaName -CheckOnly } catch { $unknownToolRejected = $true }
+    Assert-UpdateTest $unknownToolRejected '长稳白名单不授予任意验收脚本路径'
+    Assert-UpdateTest ((Get-FileHash -LiteralPath $baseManifestPath).Hash -ceq $baseHash) '非法长稳载荷拒绝时基包未改变'
+    Write-UpdateFixture $packetPath $goodPacket
     function Get-Process { param($Name, $ErrorAction); [pscustomobject]@{ Path = $null } }
     $runningRejected = $false
     try { & $apply -PackageRoot $baseRoot -StageName $deltaName -CheckOnly } catch {
@@ -331,9 +362,17 @@ try {
     Assert-UpdateTest ($hudIdentity.Count -eq 1 -and $hudIdentity[0].git_commit -ceq $commit) 'HUD 验收脚本绑定源码提交'
     $hudDefault = $deltaParameters.Clone()
     $hudDefault.Remove('IncludeHudAcceptanceScript')
+    $hudDefault.Remove('IncludeSoakAcceptanceTools')
     $hudDefault.OutputDirectory = Join-Path $runRoot 'hud-default-omitted'
     & $publisher @hudDefault
     Assert-UpdateTest (-not (Test-Path -LiteralPath (Join-Path $hudDefault.OutputDirectory 'tools/acceptance/invoke_hud_stop_acceptance.ps1'))) '既有 HUD 验收脚本未指定开关不进入差量'
+    foreach ($tool in @('measure_process_resources.ps1', 'soak_acceptance_support.ps1')) {
+        $relative = "tools/acceptance/$tool"
+        Assert-UpdateTest (-not (Test-Path -LiteralPath (Join-Path $hudDefault.OutputDirectory $relative))) '默认差量不重传已存在长稳工具'
+        Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $baseRoot $relative) -Raw) -ceq "updated-$tool") '长稳工具已原子补入'
+        $toolIdentity = @($deltaEvidence.updated_components | Where-Object { $_.path -ceq $relative })
+        Assert-UpdateTest ($toolIdentity.Count -eq 1 -and $toolIdentity[0].git_commit -ceq $commit) '长稳工具来源绑定同提交'
+    }
     $toolIdentity = @($deltaEvidence.updated_components | Where-Object { $_.path -ceq 'tools/source/xen_source_context.exe' })
     Assert-UpdateTest ($toolIdentity.Count -eq 1 -and $toolIdentity[0].git_commit -ceq $commit) '桥接工具绑定同提交身份'
     foreach ($tool in @('xen_recoil_calibration.exe', 'xen_recoil_tuner.exe')) {

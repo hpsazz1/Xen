@@ -492,6 +492,17 @@ PT检查另需 `weights`、`trusted_weights=true` 和可选 `expected_sha256`，
 
 其余专项入口位于 [scripts/](scripts/)。脚本是参数和证据格式的事实源；不要长期维护一次性脚本。
 
+长稳使用 `invoke_hud_stop_acceptance.ps1 -Profile Soak` 的 Prepare、Validate、Launch、Recover
+四阶段入口。Prepare 冻结包身份和连续 Runtime 目标时长，默认60分钟；如需不同目标，应在 Prepare
+时指定 `-RuntimeDurationSeconds`，后续阶段不能改写计划。由用户在前台执行该 Run 的 `TASK.md`
+中唯一 Launch 命令，保留 `-AllowPhysicalOutput` 和专用确认串。看到资源采集就绪后再启动 Runtime，
+完成连续运行后先停止 Runtime，再退出 Worker 界面；计时提示只按资源就绪时间计算。
+Recover 收集证据，连续 Runtime 时长、全程统计、资源趋势与人工体验仍需分别复核，不自动判定长稳通过。
+
+向既有主辅日常包投递长稳工具时，`publish_worker_delta.ps1 -IncludeSoakAcceptanceTools`
+显式纳入验收入口、资源采集器、共享监督脚本和 source-session 启动脚本，绑定同一次源码提交；
+不需要更新 source 可执行文件。差量发布逐端保留配置，准备 Run 本身不会启动真实输出。
+
 资源采集需要明确的 PID、完整映像路径和 UTC 启动时间，并写入全新目录。默认每5秒采样、
 持续60分钟；完成时长按首末有效采样跨度计算。CPU以单逻辑核100%计，分母使用紧邻CPU读取的
 单调时间，内存与线程等属性按顺序读取。只有最终 `summary.json` 的

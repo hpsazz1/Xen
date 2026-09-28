@@ -1,4 +1,5 @@
-﻿param(
+﻿# XEN_ACCEPTANCE_LAUNCH_RECEIPT_SCHEMA=1
+param(
     [Parameter(Mandatory = $true)][ValidateSet('Source', 'Launcher', 'Probe')][string]$Mode,
     [Parameter(Mandatory = $true)][string]$Executable,
     [Parameter(Mandatory = $true)][string]$CredentialDirectory,
@@ -12,6 +13,57 @@
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Assert-LauncherReceiptPath([string]$Path) {
+    if ($Path -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+\\)') {
+        throw 'Launcher回执必须为完整文件系统路径。'
+    }
+    $full = [IO.Path]::GetFullPath($Path)
+    if ([IO.Path]::GetFileName($full) -cne 'launcher-identity.json' -or
+        -not [IO.Directory]::Exists([IO.Path]::GetDirectoryName($full)) -or
+        [IO.File]::Exists($full) -or [IO.Directory]::Exists($full)) { throw 'Launcher回执目标无效或已存在。' }
+    for ($part = $full; $part; $part = [IO.Path]::GetDirectoryName($part)) {
+        if ((Test-Path -LiteralPath $part) -and
+            ((Get-Item -LiteralPath $part -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'Launcher回执路径不允许重解析点。'
+        }
+    }
+    return $full
+}
+
+function Write-LauncherReceipt([Diagnostics.Process]$Process, [string]$Path) {
+    $path = Assert-LauncherReceiptPath $Path
+    $wait = [Diagnostics.Stopwatch]::StartNew()
+    $image = $null
+    while (-not $image) {
+        $Process.Refresh()
+        if ($Process.HasExited) { throw 'Launcher在身份回执前已退出。' }
+        try { $image = $Process.MainModule.FileName }
+        catch { if ($wait.ElapsedMilliseconds -ge 3000) { throw } }
+        if (-not $image) {
+            if ($wait.ElapsedMilliseconds -ge 3000) { throw 'Launcher映像身份读取超时。' }
+            Start-Sleep -Milliseconds 25
+        }
+    }
+    $start = $Process.StartTime.ToUniversalTime()
+    $identity = [ordered]@{
+        schema = 1; process_id = $Process.Id
+        executable_path = [IO.Path]::GetFullPath($image)
+        start_time_utc = $start.ToString('o'); start_time_utc_ticks = $start.Ticks.ToString()
+        session_id = $Process.SessionId; recorded_utc = [datetime]::UtcNow.ToString('o')
+    }
+    $temporary = $path + '.partial'
+    $stream = New-Object IO.FileStream($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes(($identity | ConvertTo-Json))
+        $stream.Write($bytes, 0, $bytes.Length)
+    } finally { $stream.Dispose() }
+    [IO.File]::Move($temporary, $path)
+}
+
+function Remove-LauncherReceiptEnvironment([Diagnostics.ProcessStartInfo]$StartInfo) {
+    $StartInfo.EnvironmentVariables.Remove('XEN_ACCEPTANCE_LAUNCH_RECEIPT')
+}
 
 function Get-SourceListenerOwner {
     param([string]$Address, [int]$ListenPort)
@@ -125,12 +177,19 @@ if ($Mode -eq 'Source') {
 }
 $plainBytes = $null
 $childInfo = New-Object Diagnostics.ProcessStartInfo
+$launcherReceipt = [Environment]::GetEnvironmentVariable('XEN_ACCEPTANCE_LAUNCH_RECEIPT')
+if ($launcherReceipt) {
+    if ($Mode -ne 'Launcher') { throw '验收身份回执仅允许Launcher模式。' }
+    $launcherReceipt = Assert-LauncherReceiptPath $launcherReceipt
+}
 try {
     $scopeValue = [Security.Cryptography.DataProtectionScope]::$Scope
     $plainBytes = [Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($credentialPath), $null, $scopeValue)
     $childInfo.FileName = $binaryPath
     $childInfo.WorkingDirectory = Split-Path -Parent $binaryPath
     $childInfo.UseShellExecute = $false
+    # 仅Source-session消费公开回执路径；Launcher及其Worker不继承此验收环境。
+    Remove-LauncherReceiptEnvironment $childInfo
     $childInfo.EnvironmentVariables['XEN_SOURCE_CONTEXT_TOKEN'] = [Text.Encoding]::UTF8.GetString($plainBytes)
     if ($Mode -ne 'Launcher') {
         $action = if ($Mode -eq 'Source' -and $null -eq $reusePid) { '--enable' } else { '--probe' }
@@ -146,6 +205,7 @@ try {
         $childInfo.StandardErrorEncoding = [Text.Encoding]::UTF8
     }
     $child = [Diagnostics.Process]::Start($childInfo)
+    if ($Mode -eq 'Launcher' -and $launcherReceipt) { Write-LauncherReceipt $child $launcherReceipt }
     if ($Mode -eq 'Probe' -or $null -ne $reusePid) {
         $stdoutTask = $child.StandardOutput.ReadToEndAsync()
         $stderrTask = $child.StandardError.ReadToEndAsync()

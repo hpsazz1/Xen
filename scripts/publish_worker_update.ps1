@@ -15,11 +15,17 @@
     [switch]$IncludeRecoilMigrationScripts,
     [switch]$IncludeSourceSessionScript,
     [switch]$IncludeHudAcceptanceScript,
+    [switch]$IncludeSoakAcceptanceTools,
     [switch]$ChangesOnly
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if ($IncludeSoakAcceptanceTools) {
+    # 长稳入口依赖这两个既有脚本，显式选中工具组时一并更新；不选源工具EXE。
+    $IncludeHudAcceptanceScript = $true
+    $IncludeSourceSessionScript = $true
+}
 Import-Module (Join-Path $PSScriptRoot 'path_safety.psm1') -Force
 
 function Read-UpdateJson([string]$Path) {
@@ -167,6 +173,19 @@ if ($IncludeHudAcceptanceScript) {
     }
 }
 $recoilScriptHashes = @{}
+$soakScriptHashes = @{}
+if ($IncludeSoakAcceptanceTools) {
+    foreach ($tool in @('measure_process_resources.ps1', 'soak_acceptance_support.ps1')) {
+        $relative = "tools/acceptance/$tool"
+        $overrides[$relative] = Resolve-UpdateFile (Join-Path $sourceRoot "scripts/$tool")
+        $soakScriptHashes[$relative] = (Get-FileHash -LiteralPath $overrides[$relative] -Algorithm SHA256).Hash.ToLowerInvariant()
+        if (-not $records.ContainsKey($relative)) {
+            $record = [pscustomobject][ordered]@{ path = $relative; runtime = ''; size = 0; sha256 = ''; source = '' }
+            $manifest.files = @($manifest.files) + @($record)
+            $records[$relative] = $record
+        }
+    }
+}
 if ($IncludeRecoilMigrationScripts) {
     foreach ($tool in @('import_recoil_profiles.py', 'migrate_legacy_recoil_profiles.py', 'invoke_recoil_legacy_acceptance.ps1')) {
         $relative = "tools/recoil/$tool"
@@ -292,6 +311,11 @@ try {
     if ($IncludeHudAcceptanceScript) {
         $updateEvidence.updated_components += [ordered]@{
             runtime = ''; path = $hudScriptRelative; git_commit = $commit.ToLowerInvariant(); sha256 = $hudScriptHash
+        }
+    }
+    foreach ($relative in @($soakScriptHashes.Keys | Sort-Object)) {
+        $updateEvidence.updated_components += [ordered]@{
+            runtime = ''; path = $relative; git_commit = $commit.ToLowerInvariant(); sha256 = $soakScriptHashes[$relative]
         }
     }
     foreach ($relative in @($recoilToolHashes.Keys | Sort-Object)) {
