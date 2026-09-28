@@ -499,6 +499,11 @@ PT检查另需 `weights`、`trusted_weights=true` 和可选 `expected_sha256`，
 完成连续运行后先停止 Runtime，再退出 Worker 界面；计时提示只按资源就绪时间计算。
 Recover 收集证据，连续 Runtime 时长、全程统计、资源趋势与人工体验仍需分别复核，不自动判定长稳通过。
 
+Aim 尚未发送时错过输出时限，只取消当前帧并重置控制状态，下一张新鲜观测重新校验；
+不会补发旧命令，也不会延长观测或设备等待期限。共享输出故障、实际发送失败和反馈账本异常仍保持
+原有禁止输出规则。报告中的处理成功数不能代表持续物理输出成功；`final_snapshot.aim_dispatch_rejections`
+独立保留整场拒绝计数及首末事件，区分进入前过期、等待截止、取得锁后过期、计算后过期和共享故障。
+
 向既有主辅日常包投递长稳工具时，`publish_worker_delta.ps1 -IncludeSoakAcceptanceTools`
 显式纳入验收入口、资源采集器、共享监督脚本和 source-session 启动脚本，绑定同一次源码提交；
 不需要更新 source 可执行文件。差量发布逐端保留配置，准备 Run 本身不会启动真实输出。

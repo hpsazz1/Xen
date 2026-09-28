@@ -3,9 +3,27 @@
 
 #include <cmath>
 #include <iostream>
+#include <future>
 #include <opencv2/imgproc.hpp>
 
 namespace {
+// 仅内存回执，无设备构造、连接或输入订阅。
+class SlotFakeMouse final : public IMouseController {
+public:
+    unsigned calls = 0;
+    bool open() noexcept override { return true; }
+    void close() noexcept override {}
+    MouseStatus status() const noexcept override { return MouseStatus::READY; }
+    std::string last_error() const override { return {}; }
+    bool poll_input(InputSnapshot&) noexcept override { return false; }
+    MouseMoveReceipt move(const MouseMoveCommand&) noexcept override {
+        ++calls;
+        MouseMoveReceipt receipt;
+        receipt.succeeded = true;
+        receipt.backend_completed_at = std::chrono::steady_clock::now();
+        return receipt;
+    }
+};
 std::string weapon_payload(const char* state, int ammo, const char* name = "weapon_ak47", int health = 100,
         const char* player_id = "76561198000000000", std::uint64_t timestamp = 1700000000) {
     return std::string(R"({"provider":{"appid":730,"steamid":"76561198000000000","timestamp":)") +
@@ -288,6 +306,178 @@ int main() {
         delayed.control_at = start + std::chrono::milliseconds(2);
         expect(runtime::detail::aim_output_slot_deadline(delayed, std::chrono::milliseconds(5)) ==
                    start + std::chrono::milliseconds(7), "较短事务预算仍限制输出等待，不能被帧龄预算放大");
+    }
+    {
+        using Clock = std::chrono::steady_clock;
+        using namespace std::chrono_literals;
+        using namespace runtime::detail;
+        const auto fresh_frame = [] (std::uint64_t sequence) {
+            AimFrame frame;
+            frame.sequence = sequence;
+            frame.captured_at = frame.control_at = Clock::now();
+            frame.lock_active = true;
+            frame.roi_width = frame.roi_height = 320;
+            frame.control_center_x = frame.control_center_y = 160;
+            frame.detections = {{180, 120, 220, 200, 0.95f, 0}};
+            return frame;
+        };
+        for (bool occupied : {false, true}) {
+            SafetyGate gate;
+            gate.set_input_health(true);
+            expect(gate.arm(), "时隙回归必须建立健康武装前置");
+            gate.set_hold(true);
+            AutoStopOutputArbiter arbiter;
+            auto frame = fresh_frame(400);
+            AimOutputSlot rejected;
+            if (occupied) {
+                auto owner = arbiter.try_enter_cleanup();
+                expect(owner.owns_lock(), "超时回归必须实际持有共享事务锁");
+                auto waiter = std::async(std::launch::async, [&] {
+                    frame = fresh_frame(400);
+                    return acquire_aim_output_slot(frame, gate, arbiter, 5ms);
+                });
+                rejected = waiter.get();
+                owner.unlock();
+            } else {
+                frame.captured_at -= 101ms;
+                rejected = acquire_aim_output_slot(frame, gate, arbiter, 305ms);
+            }
+            expect(!rejected.guard.owns_lock() && !frame.lock_active &&
+                (rejected.rejection.reason == AimDispatchRejection::ENTRY_DEADLINE_EXPIRED ||
+                    (occupied && rejected.rejection.reason == AimDispatchRejection::WAIT_DEADLINE_EXPIRED)),
+                "旧观察与真实锁超期须分类拒绝且当前帧禁发");
+            expect(gate.can_dispatch() && !gate.visual_output_blocked() && !gate.emergency_stopped(),
+                "单帧时隙超期不得锁存视觉阻断或制造急停");
+            expect(rejected.reset_aim_only, "普通时限拒绝仅重置Aim控制状态，不请求源世代重建");
+            auto next = fresh_frame(401);
+            auto resumed = acquire_aim_output_slot(next, gate, arbiter, 305ms);
+            expect(resumed.guard.owns_lock() && aim_frame_dispatch_allowed(next, gate.can_dispatch()),
+                "时限拒绝后新观察必须重新获得真实事务门，无需重新武装");
+            SlotFakeMouse mouse;
+            AimConfig resumed_config;
+            resumed_config.min_confirmed_hits = 1;
+            resumed_config.deadzone_pixels = 0;
+            resumed_config.smoothing = 1;
+            Aim resumed_aim(resumed_config);
+            const auto result = resumed_aim.process(next);
+            expect(result.has_command, "恢复帧须通过公开Aim生成实际非零命令");
+            if (result.has_command && resumed.guard.owns_lock() &&
+                    aim_frame_dispatch_allowed(next, gate.can_dispatch()) &&
+                    aim_output_fresh_before_send(next, gate, resumed, Clock::now())) {
+                const auto receipt = mouse.move({result.command.dx_counts, result.command.dy_counts});
+                expect(resumed_aim.record_backend_completed_command(result.command.sequence,
+                    receipt.backend_completed_at, result.command.dx_counts, result.command.dy_counts),
+                    "恢复帧Fake输出须通过真实Aim完成回执");
+            }
+            expect(mouse.calls == 1, "普通拒绝后的新鲜帧须实际经过Fake输出一次");
+            AimDispatchRejectionSummary summary;
+            record_aim_dispatch_rejection(summary, rejected.rejection);
+            record_aim_dispatch_rejection(summary, resumed.rejection);
+            expect(summary.total == 1 && summary.first.sequence == 400 && summary.last.sequence == 400 &&
+                summary.first.reason == rejected.rejection.reason && summary.first.wait_ms >= 0 &&
+                summary.first.observation_age_ms >= 0,
+                "拒绝累计须保留原帧与原因，不把随后成功写为拒绝");
+        }
+        for (bool during_wait : {false, true}) {
+            SafetyGate gate;
+            gate.set_input_health(true); gate.arm(); gate.set_hold(true);
+            AutoStopOutputArbiter arbiter;
+            auto frame = fresh_frame(500);
+            AimOutputSlot rejected;
+            if (during_wait) {
+                auto owner = arbiter.try_enter_cleanup();
+                std::promise<void> started;
+                auto ready = started.get_future();
+                auto waiter = std::async(std::launch::async, [&] {
+                    started.set_value();
+                    return acquire_aim_output_slot(frame, gate, arbiter, 305ms);
+                });
+                ready.wait();
+                arbiter.latch_output_fault();
+                owner.unlock();
+                rejected = waiter.get();
+            } else {
+                arbiter.latch_output_fault();
+                rejected = acquire_aim_output_slot(frame, gate, arbiter, 305ms);
+            }
+            expect(!rejected.guard.owns_lock() && rejected.rejection.reason == AimDispatchRejection::OUTPUT_FAULT &&
+                gate.emergency_stopped() && !gate.can_dispatch(), "共享未知输出仍须急停，不能按瞬时丢帧恢复");
+            expect(!rejected.reset_aim_only, "硬故障不能误归类为Aim局部恢复");
+            auto next = fresh_frame(501);
+            auto refused = acquire_aim_output_slot(next, gate, arbiter, 305ms);
+            expect(!refused.guard.owns_lock() && !gate.arm(), "新观察不得清除共享故障或重新武装");
+            expect(arbiter.try_enter_cleanup().owns_lock(), "硬故障仍须保留设备清理入口");
+        }
+        SafetyGate gate;
+        gate.set_input_health(true); gate.arm(); gate.set_hold(true);
+        AutoStopOutputArbiter arbiter;
+        auto frame = fresh_frame(600);
+        AimConfig feedback_config;
+        feedback_config.min_confirmed_hits = 1;
+        feedback_config.deadzone_pixels = 0;
+        feedback_config.smoothing = 1;
+        feedback_config.counts_per_pixel_x = feedback_config.counts_per_pixel_y = 1;
+        feedback_config.max_counts_per_frame = 100;
+        feedback_config.enable_delay_compensation = true;
+        feedback_config.control_delay_ms = 15;
+        Aim feedback(feedback_config);
+        Aim completion_witness(feedback_config);
+        auto slot = acquire_aim_output_slot(frame, gate, arbiter, 305ms);
+        expect(slot.guard.owns_lock(), "计算后过期回归必须先实际获锁");
+        const auto calculated = feedback.process(frame);
+        const auto witness_command = completion_witness.process(frame);
+        expect(calculated.has_command, "计算后过期回归须存在真实Aim预计算命令");
+        const auto expired_at = slot.deadline + 1ns;
+        expect(!aim_output_fresh_before_send(frame, gate, slot, expired_at) && !frame.lock_active &&
+            slot.rejection.reason == AimDispatchRejection::COMPUTE_DEADLINE_EXPIRED,
+            "计算跨deadline必须拒绝本帧发送");
+        expect(feedback.record_backend_completed_command(calculated.command.sequence, expired_at, 0, 0),
+            "计算超期未发送仍须以零完成原位结算，不能留下虚构库存");
+        expect(witness_command.has_command && completion_witness.record_backend_completed_command(
+            witness_command.command.sequence, expired_at, 0, 0),
+            "独立库存见证必须接受同一未发送命令的零完成记录");
+        slot.guard.unlock();
+        finish_aim_output_slot(feedback, slot);
+        frame = fresh_frame(601);
+        frame.captured_at = expired_at + 1ms;
+        frame.control_at = frame.captured_at;
+        auto resumed = acquire_aim_output_slot(frame, gate, arbiter, 305ms);
+        const auto after = feedback.process(frame);
+        const auto unreset_after = completion_witness.process(frame);
+        expect(after.control.pending_net_x_counts == 0 && unreset_after.control.pending_net_x_counts == 0,
+            "超期零回执本身不得形成净库存，不能仅靠后续reset掩盖未发送命令");
+        expect(resumed.guard.owns_lock() && gate.can_dispatch(), "计算超期后的新帧同样须保留恢复资格");
+        resumed.guard.unlock();
+        gate.block_visual_output();
+        auto blocked_frame = fresh_frame(602);
+        auto blocked = acquire_aim_output_slot(blocked_frame, gate, arbiter, 305ms);
+        expect(!blocked.guard.owns_lock() && gate.visual_output_blocked(),
+            "瞬时拒绝恢复不得清除其他原因已建立的视觉硬阻断");
+
+        RuntimeObservationClock observation_clock;
+        CameraMotionEstimator camera;
+        Aim local_aim(feedback_config);
+        std::uint64_t epoch = 0;
+        const auto observed_at = Clock::now() - 200ms;
+        for (int i = 0; i < 3; ++i) {
+            CapturedFrame captured;
+            captured.width = captured.height = captured.source_width = captured.source_height = 320;
+            captured.bgr = texture;
+            captured.timing.sequence = 700 + i;
+            captured.timing.captured_at = observed_at + i * 4ms;
+            auto prepared = prepare_aim_frame(captured, {}, observation_clock, camera, true);
+            if (i == 0) epoch = prepared.frame.observation_epoch;
+            else expect(!prepared.reset_aim && prepared.frame.observation_epoch == epoch &&
+                    prepared.frame.background_motion_x.status == AimBackgroundMotionStatus::VALID,
+                "普通时限拒绝后的连续图像必须保持观察世代和背景测量，不自造Trigger换源");
+            SafetyGate local_gate;
+            local_gate.set_input_health(true); local_gate.arm(); local_gate.set_hold(true);
+            AutoStopOutputArbiter local_arbiter;
+            auto expired = acquire_aim_output_slot(prepared.frame, local_gate, local_arbiter, 305ms);
+            expect(expired.reset_aim_only, "连续观察回归必须真实经过旧帧拒绝");
+            local_aim.process(prepared.frame);
+            finish_aim_output_slot(local_aim, expired);
+        }
     }
     for (bool frame_permission : {false, true}) {
         for (bool current_permission : {false, true}) {

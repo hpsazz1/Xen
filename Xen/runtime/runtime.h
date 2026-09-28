@@ -244,7 +244,37 @@ struct RuntimePreviewFrame {
     AimTargetSnapshot target;
 };
 
+enum class AimDispatchRejection {
+    NONE,
+    ENTRY_DEADLINE_EXPIRED,
+    WAIT_DEADLINE_EXPIRED,
+    ACQUIRED_DEADLINE_EXPIRED,
+    COMPUTE_DEADLINE_EXPIRED,
+    OUTPUT_FAULT,
+};
+
+struct AimDispatchRejectionRecord {
+    std::uint64_t sequence = 0;
+    AimDispatchRejection reason = AimDispatchRejection::NONE;
+    double wait_ms = 0.0;
+    double observation_age_ms = 0.0;
+    bool uses_source_time = false;
+};
+
+// 当前 Runtime 会话累计，独立于处理成功数及有界逐帧报告。
+struct AimDispatchRejectionSummary {
+    std::uint64_t total = 0;
+    std::uint64_t entry_deadline_expired = 0;
+    std::uint64_t wait_deadline_expired = 0;
+    std::uint64_t acquired_deadline_expired = 0;
+    std::uint64_t compute_deadline_expired = 0;
+    std::uint64_t output_fault = 0;
+    AimDispatchRejectionRecord first;
+    AimDispatchRejectionRecord last;
+};
+
 struct RuntimeSnapshot {
+    AimDispatchRejectionSummary aim_dispatch_rejections;
     std::shared_ptr<const input_training::Snapshot> training;
     AutoStopSnapshot auto_stop;
     TriggerSnapshot trigger;

@@ -449,6 +449,14 @@ void test_report_summary_and_atomic_files() {
     final_snapshot.capture_roi_height = 320;
     final_snapshot.source_pixels_per_pixel_x = 1.0;
     final_snapshot.source_pixels_per_pixel_y = 1.0;
+    final_snapshot.aim_dispatch_rejections.total = 2;
+    final_snapshot.aim_dispatch_rejections.entry_deadline_expired = 1;
+    final_snapshot.aim_dispatch_rejections.compute_deadline_expired = 1;
+    final_snapshot.aim_dispatch_rejections.first = {1,
+        AimDispatchRejection::ENTRY_DEADLINE_EXPIRED, 0.0, 120.0, true};
+    final_snapshot.aim_dispatch_rejections.last = {5,
+        AimDispatchRejection::COMPUTE_DEADLINE_EXPIRED,
+        std::numeric_limits<double>::infinity(), 101.0, false};
     DebugCoverageSummary coverage;
     coverage.available = true;
     coverage.warmup_start_overwritten_frames = 1;
@@ -496,6 +504,15 @@ void test_report_summary_and_atomic_files() {
     const std::string json_text(
         (std::istreambuf_iterator<char>(json)),
         std::istreambuf_iterator<char>());
+    expect(json_text.find("\"aim_dispatch_rejections\": {\"schema\": 1") != std::string::npos &&
+               json_text.find("\"entry_deadline_expired\": 1") != std::string::npos &&
+               json_text.find("\"compute_deadline_expired\": 1") != std::string::npos &&
+               json_text.find("\"first\": {\"sequence\": \"1\"") != std::string::npos &&
+               json_text.find("\"reason\": \"ENTRY_DEADLINE_EXPIRED\"") != std::string::npos &&
+               json_text.find("\"observation_age_ms\": 120") != std::string::npos &&
+               json_text.find("\"wait_ms\": null") != std::string::npos &&
+               csv_text.find("# final_aim_dispatch_rejections,") != std::string::npos,
+           "输出拒绝独立累计并保留已离开尾窗的首次事件，不由处理成功数覆盖");
     const std::size_t sample_header_start =
         csv_text.find("sequence,capture_ms");
     const std::size_t sample_header_end =
@@ -1905,6 +1922,8 @@ void test_session_aggregate_boundaries_and_batching() {
     expect(report.start(config, error), "空报告启动");
     expect(report.finalize(snapshot, error), "空报告封口");
     const auto empty = report_text(config.json_path);
+    expect(empty.find("\"first\": null, \"last\": null") != std::string::npos,
+           "没有输出拒绝时不生成虚假的首次或末次故障事件");
     expect(empty.find("\"origin_control_steady_ns\":null") != std::string::npos &&
                empty.find("\"windows\":[]") != std::string::npos &&
                aggregate_section(empty).find("\"p95\":null") != std::string::npos,

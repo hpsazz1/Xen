@@ -1,6 +1,8 @@
 #ifndef RUNTIME_AIM_FRAME_INTERNAL_H
 #define RUNTIME_AIM_FRAME_INTERNAL_H
 
+#include <limits>
+#include "auto_stop/auto_stop_worker.h"
 #include "runtime/camera_motion_internal.h"
 #include "runtime/runtime_internal.h"
 #include "runtime/weapon_context_internal.h"
@@ -71,6 +73,78 @@ inline bool aim_frame_dispatch_allowed(const AimFrame& frame, bool current_permi
 inline std::chrono::steady_clock::time_point aim_output_slot_deadline(
         const AimFrame& frame, std::chrono::milliseconds backend_budget) noexcept {
     return std::min(frame.control_at + backend_budget, frame.captured_at + AimFrame::kObservationHorizon);
+}
+
+struct AimOutputSlot {
+    std::unique_lock<std::timed_mutex> guard;
+    std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
+    AimDispatchRejectionRecord rejection;
+    bool reset_aim_only = false;
+};
+
+inline void reject_aim_output(AimFrame& frame, SafetyGate& gate, AimOutputSlot& slot,
+        AimDispatchRejection reason, std::chrono::steady_clock::time_point now) noexcept {
+    slot.rejection.sequence = frame.sequence;
+    slot.rejection.reason = reason;
+    slot.rejection.observation_age_ms = std::chrono::duration<double, std::milli>(now - frame.captured_at).count();
+    frame.lock_active = false;
+    if (reason == AimDispatchRejection::OUTPUT_FAULT) gate.emergency_stop();
+    // 普通时限拒绝只约束本观察；既有硬阻断既不新增，也不清除。
+    else slot.reset_aim_only = true;
+}
+
+inline void finish_aim_output_slot(Aim& aim, const AimOutputSlot& slot) noexcept {
+    // 必须在本帧未发送回执结算后调用。拒绝旧帧不是图像源切换，
+    // 不能重置 CameraMotionEstimator 或重建 Trigger 观察世代。
+    if (slot.reset_aim_only) aim.reset();
+}
+
+// 同一准入入口供 Runtime 与无设备回归使用；锁仍覆盖计算和回执。
+inline AimOutputSlot acquire_aim_output_slot(AimFrame& frame, SafetyGate& gate,
+        AutoStopOutputArbiter& arbiter, std::chrono::milliseconds backend_budget) noexcept {
+    AimOutputSlot slot;
+    if (!aim_frame_dispatch_allowed(frame, gate.can_dispatch())) return slot;
+    slot.deadline = aim_output_slot_deadline(frame, backend_budget);
+    const auto started = std::chrono::steady_clock::now();
+    OutputArbiterRejection reason = OutputArbiterRejection::NONE;
+    slot.guard = arbiter.enter_aim_until(slot.deadline, &reason);
+    const auto finished = std::chrono::steady_clock::now();
+    slot.rejection.wait_ms = std::chrono::duration<double, std::milli>(finished - started).count();
+    if (!slot.guard.owns_lock() || finished > slot.deadline) {
+        const auto classified = reason == OutputArbiterRejection::OUTPUT_FAULT
+            ? AimDispatchRejection::OUTPUT_FAULT
+            : started >= slot.deadline ? AimDispatchRejection::ENTRY_DEADLINE_EXPIRED
+            : slot.guard.owns_lock() ? AimDispatchRejection::ACQUIRED_DEADLINE_EXPIRED
+            : AimDispatchRejection::WAIT_DEADLINE_EXPIRED;
+        reject_aim_output(frame, gate, slot, classified, finished);
+    }
+    return slot;
+}
+
+inline bool aim_output_fresh_before_send(AimFrame& frame, SafetyGate& gate,
+        AimOutputSlot& slot, std::chrono::steady_clock::time_point now) noexcept {
+    if (now <= slot.deadline) return true;
+    reject_aim_output(frame, gate, slot, AimDispatchRejection::COMPUTE_DEADLINE_EXPIRED, now);
+    return false;
+}
+
+inline void record_aim_dispatch_rejection(AimDispatchRejectionSummary& summary,
+        const AimDispatchRejectionRecord& record) noexcept {
+    if (record.reason == AimDispatchRejection::NONE) return;
+    const auto increment = [](std::uint64_t& value) {
+        if (value != (std::numeric_limits<std::uint64_t>::max)()) ++value;
+    };
+    if (summary.total == 0) summary.first = record;
+    increment(summary.total);
+    summary.last = record;
+    switch (record.reason) {
+    case AimDispatchRejection::ENTRY_DEADLINE_EXPIRED: increment(summary.entry_deadline_expired); break;
+    case AimDispatchRejection::WAIT_DEADLINE_EXPIRED: increment(summary.wait_deadline_expired); break;
+    case AimDispatchRejection::ACQUIRED_DEADLINE_EXPIRED: increment(summary.acquired_deadline_expired); break;
+    case AimDispatchRejection::COMPUTE_DEADLINE_EXPIRED: increment(summary.compute_deadline_expired); break;
+    case AimDispatchRejection::OUTPUT_FAULT: increment(summary.output_fault); break;
+    default: break;
+    }
 }
 
 // Runtime 与离线验证共用实际组装入口。measure_background 的 false 仅供

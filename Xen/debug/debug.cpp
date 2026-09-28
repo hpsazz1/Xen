@@ -710,8 +710,46 @@ void append_json_coverage(
     output << "  },\n";
 }
 
+std::string aim_dispatch_rejections_json(const AimDispatchRejectionSummary& summary) {
+    const auto reason_name = [](AimDispatchRejection reason) {
+        switch (reason) {
+        case AimDispatchRejection::ENTRY_DEADLINE_EXPIRED: return "ENTRY_DEADLINE_EXPIRED";
+        case AimDispatchRejection::WAIT_DEADLINE_EXPIRED: return "WAIT_DEADLINE_EXPIRED";
+        case AimDispatchRejection::ACQUIRED_DEADLINE_EXPIRED: return "ACQUIRED_DEADLINE_EXPIRED";
+        case AimDispatchRejection::COMPUTE_DEADLINE_EXPIRED: return "COMPUTE_DEADLINE_EXPIRED";
+        case AimDispatchRejection::OUTPUT_FAULT: return "OUTPUT_FAULT";
+        default: return "NONE";
+        }
+    };
+    std::ostringstream output;
+    output << std::setprecision(9);
+    const auto record = [&](const AimDispatchRejectionRecord& value) {
+        if (summary.total == 0) { output << "null"; return; }
+        output << "{\"sequence\": \"" << value.sequence << "\", \"reason\": \""
+               << reason_name(value.reason) << "\", \"wait_ms\": ";
+        if (std::isfinite(value.wait_ms)) output << value.wait_ms; else output << "null";
+        output << ", \"observation_age_ms\": ";
+        if (std::isfinite(value.observation_age_ms)) output << value.observation_age_ms;
+        else output << "null";
+        output << ", \"uses_source_time\": " << bool_name(value.uses_source_time) << '}';
+    };
+    output << "{\"schema\": 1, \"scope\": \"runtime_cumulative\", \"total\": " << summary.total
+           << ", \"entry_deadline_expired\": " << summary.entry_deadline_expired
+           << ", \"wait_deadline_expired\": " << summary.wait_deadline_expired
+           << ", \"acquired_deadline_expired\": " << summary.acquired_deadline_expired
+           << ", \"compute_deadline_expired\": " << summary.compute_deadline_expired
+           << ", \"output_fault\": " << summary.output_fault << ", \"first\": ";
+    record(summary.first);
+    output << ", \"last\": ";
+    record(summary.last);
+    output << '}';
+    return output.str();
+}
+
 void append_csv_snapshot(std::ostringstream& output,
                          const RuntimeSnapshot& snapshot) {
+    output << "# final_aim_dispatch_rejections,"
+           << csv_escape(aim_dispatch_rejections_json(snapshot.aim_dispatch_rejections)) << '\n';
     output
         << "# final_runtime_state," << runtime_state_name(snapshot.state) << '\n'
         << "# final_capture_status,"
@@ -793,6 +831,8 @@ void append_json_snapshot(std::ostringstream& output,
                           const RuntimeSnapshot& snapshot) {
     output
         << "  \"final_snapshot\": {\n"
+        << "    \"aim_dispatch_rejections\": "
+        << aim_dispatch_rejections_json(snapshot.aim_dispatch_rejections) << ",\n"
         << "    \"runtime_state\": \"" << runtime_state_name(snapshot.state)
         << "\",\n    \"capture_status\": \""
         << capture_status_name(snapshot.capture_status)

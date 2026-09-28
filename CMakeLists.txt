@@ -1632,10 +1632,10 @@ if(BUILD_TESTING)
     add_test(NAME runtime_camera_motion_tests COMMAND runtime_camera_motion_tests)
 
     add_executable(runtime_aim_frame_tests
-        tests/runtime_aim_frame_tests.cpp Xen/runtime/camera_motion.cpp)
+        tests/runtime_aim_frame_tests.cpp Xen/runtime/camera_motion.cpp Xen/runtime/runtime_queue.cpp)
     target_include_directories(runtime_aim_frame_tests PRIVATE
         ${PROJECT_SOURCE_DIR}/Xen ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(runtime_aim_frame_tests PRIVATE aim weapon ${OpenCV_LIBS})
+    target_link_libraries(runtime_aim_frame_tests PRIVATE aim weapon auto_stop_worker ${OpenCV_LIBS})
     xen_deploy_runtime_dlls(runtime_aim_frame_tests OPENCV)
     add_test(NAME runtime_aim_frame_tests COMMAND runtime_aim_frame_tests)
 

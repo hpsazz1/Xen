@@ -140,6 +140,21 @@ struct Runtime::Impl {
         }
     }
 
+    void record_aim_rejection(runtime::detail::AimOutputSlot& slot, bool uses_source_time) {
+        slot.rejection.uses_source_time = uses_source_time;
+        bool first = false;
+        {
+            std::lock_guard lock(snapshot_mutex);
+            first = current_snapshot.aim_dispatch_rejections.total == 0;
+            runtime::detail::record_aim_dispatch_rejection(
+                current_snapshot.aim_dispatch_rejections, slot.rejection);
+        }
+        // 累计及首末记录保留每次拒绝；热路径只在会话首次拒绝时提示。
+        if (first) LOG_WARN("runtime", "Aim本帧输出拒绝：seq={}，reason={}，wait_ms={}，age_ms={}",
+            slot.rejection.sequence, static_cast<int>(slot.rejection.reason),
+            slot.rejection.wait_ms, slot.rejection.observation_age_ms);
+    }
+
     void set_state(RuntimeState state) noexcept {
         try {
             std::lock_guard<std::mutex> lock(snapshot_mutex);
@@ -905,23 +920,18 @@ struct Runtime::Impl {
                 if (config.recoil.enabled && !config.recoil.mixed_aim) aim_frame.lock_active = false;
                 // 在计算前等待正在执行的短事务；辅助动作计时不占通道。
                 // 不先算好命令再等锁，也不把正常短事务竞争当作零执行继续推进控制。
-                std::unique_lock<std::timed_mutex> output_guard;
-                auto slot_deadline = std::chrono::steady_clock::time_point::max();
+                runtime::detail::AimOutputSlot output_slot;
                 if (runtime::detail::aim_frame_dispatch_allowed(aim_frame, safety_gate.can_dispatch()) && output_arbiter) {
                     const int timeout_ms = config.mouse.backend == MouseBackend::MAKCU
                         ? config.mouse.makcu_command_timeout_ms : config.mouse.kmbox_command_timeout_ms;
-                    slot_deadline = runtime::detail::aim_output_slot_deadline(
-                        aim_frame, std::chrono::milliseconds(timeout_ms + 5));
-                    OutputArbiterRejection rejection = OutputArbiterRejection::NONE;
-                    output_guard = output_arbiter->enter_aim_until(slot_deadline, &rejection);
-                    if (!output_guard.owns_lock() || std::chrono::steady_clock::now() > slot_deadline) {
-                        if (rejection == OutputArbiterRejection::OUTPUT_FAULT) safety_gate.emergency_stop();
-                        else safety_gate.block_visual_output();
-                        aim_reset_requested.store(true, std::memory_order_release);
-                        aim_frame.lock_active = false;
-                        set_error("Aim输出等待超过观测时效、事务预算或共享输出故障");
-                        LOG_ERROR("runtime", "Aim输出时隙失败：seq={}，reason={}",
-                            aim_frame.sequence, static_cast<int>(rejection));
+                    output_slot = runtime::detail::acquire_aim_output_slot(
+                        aim_frame, safety_gate, *output_arbiter, std::chrono::milliseconds(timeout_ms + 5));
+                    if (output_slot.rejection.reason != AimDispatchRejection::NONE) {
+                        record_aim_rejection(output_slot, frame->timing.source_time_timing_valid);
+                        if (output_slot.rejection.reason == AimDispatchRejection::OUTPUT_FAULT) {
+                            aim_reset_requested.store(true, std::memory_order_release);
+                            set_error("Aim共享输出故障，已急停");
+                        }
                     }
                 }
                 const auto control_weapon_session = sample_aim_weapon_session();
@@ -959,7 +969,7 @@ struct Runtime::Impl {
                     bool dispatch_allowed = runtime::detail::aim_frame_dispatch_allowed(
                         aim_frame, safety_gate.can_dispatch(), frame_weapon_session, dispatch_weapon_session) &&
                         (!config.recoil.enabled || config.recoil.mixed_aim);
-                    if (output_arbiter) dispatch_allowed = dispatch_allowed && output_guard.owns_lock() &&
+                    if (output_arbiter) dispatch_allowed = dispatch_allowed && output_slot.guard.owns_lock() &&
                         aim_frame.recoil_y_owned == output_arbiter->recoil_y_owned();
                     if (dispatch_allowed && config.recoil.enabled) {
                         dispatch_allowed = motion_ledger->revision() == aim_frame.external_motion.revision &&
@@ -968,12 +978,10 @@ struct Runtime::Impl {
                     auto mouse_backend_completed =
                         std::chrono::steady_clock::now();
                     MouseMoveReceipt mouse_receipt;
-                    if (dispatch_allowed && mouse_backend_completed > slot_deadline) {
+                    if (dispatch_allowed && !runtime::detail::aim_output_fresh_before_send(
+                            aim_frame, safety_gate, output_slot, mouse_backend_completed)) {
                         dispatch_allowed = false;
-                        safety_gate.block_visual_output();
-                        aim_reset_requested.store(true, std::memory_order_release);
-                        set_error("Aim输出计算超过观测时效或事务预算");
-                        LOG_ERROR("runtime", "Aim发送前时效失效：seq={}", aim_frame.sequence);
+                        record_aim_rejection(output_slot, frame->timing.source_time_timing_valid);
                     }
                     if (dispatch_allowed) {
                         const auto mouse_started = mouse_backend_completed;
@@ -1073,7 +1081,8 @@ struct Runtime::Impl {
                     }
                 }
                 // 预览、遥测及下一帧图像处理不占后端时隙。
-                if (output_guard.owns_lock()) output_guard.unlock();
+                if (output_slot.guard.owns_lock()) output_slot.guard.unlock();
+                runtime::detail::finish_aim_output_slot(*aim, output_slot);
             } else {
                 aim_result.status = AimStatus::NOT_RUN;
                 camera_motion.reset();
