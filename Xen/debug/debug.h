@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -133,6 +134,8 @@ struct DebugReportSummary {
 bool debug_sample_succeeded(
     const RuntimePipelineSample& sample) noexcept;
 
+namespace xen::debug::detail { class SessionStatistics; }
+
 class DebugReport {
 public:
     DebugReport();
@@ -157,6 +160,7 @@ private:
         bool aim_lock_active, std::uint64_t sequence) noexcept;
     bool remove_aim_lock_marker() noexcept;
 
+    std::unique_ptr<xen::debug::detail::SessionStatistics> session_statistics_;
     DebugReportConfig config_;
     std::vector<RuntimePipelineSample> samples_;
     // 满容量后指向最旧样本；导出前一次归序，避免采集时逐帧搬移。

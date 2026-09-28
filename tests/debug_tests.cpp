@@ -5,9 +5,11 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <random>
 #include <sstream>
@@ -846,6 +848,10 @@ void test_report_pair_publish_failure_preserves_previous_pair() {
     const std::string committed_json(
         (std::istreambuf_iterator<char>(committed_json_stream)),
         std::istreambuf_iterator<char>());
+    expect(committed_json.find("\"ingested_samples\":10") != std::string::npos &&
+               committed_json.find("\"successful_samples\":9") != std::string::npos &&
+               committed_json.find("\"failed_samples\":1") != std::string::npos,
+           "发布失败重试与继续摄入不能把已聚合样本重复计入");
     expect(committed_csv.find("# session_id,\"new-session\"") !=
                    std::string::npos &&
                committed_json.find("\"session_id\": \"new-session\"") !=
@@ -1726,6 +1732,217 @@ void test_trigger_startup_and_final_metadata() {
     expect(cleanup_owned_debug_pair_test_root(owned, error), "Trigger测试只清理本轮owned根");
 }
 
+
+std::string report_text(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(file)), {});
+}
+
+void test_session_aggregate_survives_tail_eviction() {
+    OwnedDebugPairTestRoot owned;
+    std::string error;
+    expect(create_owned_debug_pair_test_root(owned, error), "全程统计测试创建独占目录");
+    if (owned.path.empty()) return;
+    DebugReportConfig config;
+    config.csv_path = (owned.path / "aggregate.csv").string();
+    config.json_path = (owned.path / "aggregate.json").string();
+    config.max_samples = 2;
+    std::vector<RuntimePipelineSample> samples;
+    for (std::uint64_t i = 1; i <= 10005; ++i) {
+        auto sample = make_sample(i, 3.125, true);
+        sample.frame_timing.control_steady_valid = true;
+        sample.frame_timing.control_steady_ns = static_cast<std::int64_t>(i) * 8000000;
+        sample.profile.mouse_backend_completion_timing_valid = true;
+        sample.profile.capture_to_mouse_backend_completion_ms = 7.125;
+        sample.profile.control_to_mouse_backend_completion_ms = 2.125;
+        if (i == 1) { sample.mouse_sent = true; sample.mouse_status = MouseStatus::SEND_FAILED; }
+        samples.push_back(sample);
+    }
+    DebugReport report;
+    expect(report.start(config, error), "全程统计启动");
+    report.ingest(samples);
+    RuntimeSnapshot final_snapshot;
+    final_snapshot.processed_frames = samples.size();
+    expect(report.finalize(final_snapshot, error), "全程统计封口");
+    const auto json = report_text(config.json_path);
+    expect(report.summary().failed_samples == 0 && report.summary().sample_count == 2,
+           "旧尾窗继续只统计最后两条成功样本");
+    expect(json.find("\"scope\":\"all_ingested_samples\"") != std::string::npos &&
+               json.find("\"ingested_samples\":10005") != std::string::npos &&
+               json.find("\"successful_samples\":10004") != std::string::npos &&
+               json.find("\"failed_samples\":1") != std::string::npos &&
+               json.find("\"mouse_sent_not_ready\":1") != std::string::npos,
+           "早期Mouse失败不能因10k尾环淘汰或Runtime failed=0而消失");
+    expect(json.find("\"p95\":{\"lower_ms\":3,\"upper_ms\":3.25}") != std::string::npos &&
+               json.find("\"p99\":{\"lower_ms\":7,\"upper_ms\":7.25}") != std::string::npos &&
+               json.find("\"p95\":{\"lower_ms\":2,\"upper_ms\":2.25}") != std::string::npos,
+           "三种全程时延必须返回真实秩所在桶区间");
+    expect(json.find("\"max_control_gap_ns\":\"8000000\"") != std::string::npos &&
+               json.find("\"minute_index\":1") != std::string::npos &&
+               json.find("\"partial\":true") != std::string::npos,
+           "按源样本控制时间跨分钟且末窗标记不完整分钟");
+    expect(report.start(config, error), "同实例第二次启动");
+    report.ingest(std::span<const RuntimePipelineSample>(samples.data() + 1, 1));
+    expect(report.finalize(final_snapshot, error), "第二次统计封口");
+    const auto reset_json = report_text(config.json_path);
+    expect(reset_json.find("\"ingested_samples\":1,") != std::string::npos &&
+               reset_json.find("\"mouse_sent_not_ready\":0") != std::string::npos,
+           "重新start清空旧全程统计");
+    expect(cleanup_owned_debug_pair_test_root(owned, error), "全程统计只清理独占目录");
+}
+
+
+std::string aggregate_section(const std::string& json) {
+    const auto begin = json.find("  \"session_aggregate\":");
+    const auto end = json.find("  \"minute_trend\":", begin);
+    expect(begin != std::string::npos && end != std::string::npos, "全程JSON节点必须存在");
+    return begin == std::string::npos || end == std::string::npos ? "" : json.substr(begin, end - begin);
+}
+
+void test_session_aggregate_boundaries_and_batching() {
+    OwnedDebugPairTestRoot owned;
+    std::string error;
+    expect(create_owned_debug_pair_test_root(owned, error), "统计边界创建独占目录");
+    if (owned.path.empty()) return;
+    DebugReportConfig config;
+    config.csv_path = (owned.path / "edges.csv").string();
+    config.json_path = (owned.path / "edges.json").string();
+    config.max_samples = 1;
+    std::vector<RuntimePipelineSample> samples;
+    for (std::uint64_t i = 1; i <= 100; ++i) {
+        auto sample = make_sample(i, i * .25, true);
+        sample.frame_timing.control_steady_valid = true;
+        sample.frame_timing.control_steady_ns = 100 + static_cast<std::int64_t>(i - 1) * 1000000;
+        sample.profile.mouse_backend_completion_timing_valid = false;
+        samples.push_back(sample);
+    }
+    DebugReport report;
+    RuntimeSnapshot snapshot;
+    expect(report.start(config, error), "桶界启动");
+    report.ingest(samples);
+    expect(report.finalize(snapshot, error), "桶界封口");
+    const auto batched = report_text(config.json_path);
+    const auto aggregate_begin = batched.find("  \"session_aggregate\":");
+    const auto aggregate_end = batched.find("  \"minute_trend\":");
+    std::size_t bucket_position = aggregate_begin;
+    int histogram_count = 0;
+    for (const std::uint64_t expected_count : {100ULL, 0ULL, 0ULL}) {
+        bucket_position = batched.find("\"bucket_counts\":[", bucket_position);
+        expect(bucket_position != std::string::npos && bucket_position < aggregate_end,
+               "每项全程时延必须导出可合并桶");
+        if (bucket_position == std::string::npos || bucket_position >= aggregate_end) break;
+        bucket_position += std::string("\"bucket_counts\":[").size();
+        const auto end = batched.find(']', bucket_position);
+        std::string values = batched.substr(bucket_position, end - bucket_position);
+        std::replace(values.begin(), values.end(), ',', ' ');
+        std::istringstream input(values);
+        std::uint64_t total = 0, value = 0;
+        std::size_t size = 0;
+        while (input >> value) { total += value; ++size; }
+        expect(size == 4097 && total == expected_count,
+               "4097桶含overflow且sum必须等于对应valid_samples");
+        bucket_position = end;
+        ++histogram_count;
+    }
+    expect(histogram_count == 3 &&
+               batched.find("\"bucket_counts\":[", aggregate_end) == std::string::npos,
+           "仅全程三项导出桶，分钟行不得复制桶扩大容量");
+    expect(batched.find("\"p95\":{\"lower_ms\":23.5,\"upper_ms\":23.75}") != std::string::npos &&
+               batched.find("\"p99\":{\"lower_ms\":24.5,\"upper_ms\":24.75}") != std::string::npos &&
+               batched.find("\"valid_samples\":0,\"missing_samples\":100") != std::string::npos,
+           "边界归上闭桶，缺失backend时间不填零，最近秩独立于桶实现");
+    expect(report.start(config, error), "单样本启动");
+    for (const auto& sample : samples) report.ingest(std::span(&sample, 1));
+    expect(report.finalize(snapshot, error), "单样本封口");
+    expect(report_text(config.json_path) == batched, "相同样本分批与逐条全报告字节等价");
+
+    samples.resize(11);
+    const std::array<double, 11> values{0, .25, std::nextafter(.25, 1.0), 1024, 1024.25,
+        std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(), -1, 3.1, 3.2, 3.3};
+    const std::array<std::int64_t, 11> times{100, 60000000099LL, 60000000100LL,
+        60000000101LL, 180000000100LL, 180000000101LL, 60000000100LL,
+        180000000100LL, 180000000101LL, 180000000102LL, 180000000103LL};
+    const std::array<std::uint64_t, 11> sequences{1, 2, 2, 1, 8, 9, 10, 11, 12, 13, 14};
+    for (std::size_t i = 0; i < samples.size(); ++i) {
+        samples[i].sequence = sequences[i];
+        samples[i].profile.total_ms = values[i];
+        samples[i].frame_timing.control_steady_ns = times[i];
+        samples[i].frame_timing.control_steady_valid = i != 5;
+    }
+    expect(report.start(config, error), "非法值启动");
+    report.ingest(samples);
+    snapshot.debug_samples_dropped = 7;
+    expect(report.finalize(snapshot, error), "非法值最后只留有限样本封口");
+    const auto json = report_text(config.json_path);
+    expect(json.find("\"valid_samples\":8,\"missing_samples\":0,\"invalid_samples\":3,\"overflow_samples\":1") != std::string::npos &&
+               json.find("\"p99\":{\"lower_ms\":1024,\"upper_ms\":null,\"overflow\":true}") != std::string::npos,
+           "NaN/Inf/负时延不进桶，超1024不伪装有限分位上界");
+    expect(json.find("\"invalid_time_samples\":1,\"regressed_time_samples\":1") != std::string::npos &&
+               json.find("\"duplicate_sequences\":1,\"regressed_sequences\":1") != std::string::npos &&
+               json.find("\"empty_minutes\":1") != std::string::npos &&
+               json.find("\"complete\":false") != std::string::npos &&
+               json.find("\"runtime_samples_dropped_lifetime\":7") != std::string::npos,
+           "批内分钟边界、空窗、非法/回退时间与序号必须显式标出且保留Runtime丢样作用域");
+    expect(aggregate_section(json).find("\"ingested_samples\":11") != std::string::npos,
+           "无效时钟只影响分钟归属，不能丢弃已摄入全程计数");
+    samples.resize(3);
+    for (std::size_t i = 0; i < samples.size(); ++i) {
+        samples[i] = make_sample(i + 1, i < 2 ? (std::numeric_limits<double>::max)() : 1.0, true);
+        samples[i].frame_timing.control_steady_valid = true;
+        samples[i].frame_timing.control_steady_ns = static_cast<std::int64_t>(i) + 100;
+        samples[i].profile.mouse_backend_completion_timing_valid = true;
+        samples[i].profile.capture_to_mouse_backend_completion_ms = i == 0 ? -1.0 : 2.0;
+        samples[i].profile.control_to_mouse_backend_completion_ms = i == 0
+            ? std::numeric_limits<double>::quiet_NaN() : 1.0;
+    }
+    expect(report.start(config, error), "累加溢出启动");
+    report.ingest(samples);
+    expect(report.finalize(snapshot, error), "累加溢出有限尾样封口");
+    const auto overflow = aggregate_section(report_text(config.json_path));
+    expect(overflow.find("\"arithmetic_overflow\":true,\"mean_ms\":null") != std::string::npos &&
+               overflow.find("\"valid_samples\":2,\"missing_samples\":0,\"invalid_samples\":1") != std::string::npos,
+           "有限巨量累加溢出不能写Inf均值，backend两时延独立拒绝非法值");
+    expect(report.start(config, error), "空报告启动");
+    expect(report.finalize(snapshot, error), "空报告封口");
+    const auto empty = report_text(config.json_path);
+    expect(empty.find("\"origin_control_steady_ns\":null") != std::string::npos &&
+               empty.find("\"windows\":[]") != std::string::npos &&
+               aggregate_section(empty).find("\"p95\":null") != std::string::npos,
+           "无样本不制造完整分钟、零时延或分位数");
+    expect(cleanup_owned_debug_pair_test_root(owned, error), "统计边界只清理独占目录");
+}
+
+void test_session_aggregate_minute_capacity() {
+    OwnedDebugPairTestRoot owned;
+    std::string error;
+    expect(create_owned_debug_pair_test_root(owned, error), "分钟容量创建独占目录");
+    if (owned.path.empty()) return;
+    DebugReportConfig config;
+    config.csv_path = (owned.path / "minutes.csv").string();
+    config.json_path = (owned.path / "minutes.json").string();
+    config.max_samples = 1;
+    DebugReport report;
+    expect(report.start(config, error), "分钟容量启动");
+    for (std::uint64_t i = 0; i < 1442; ++i) {
+        auto sample = make_sample(i + 1, 4.0, true);
+        sample.frame_timing.control_steady_valid = true;
+        sample.frame_timing.control_steady_ns = 100 + static_cast<std::int64_t>(i) * 60000000000LL;
+        report.ingest(std::span(&sample, 1));
+    }
+    RuntimeSnapshot snapshot;
+    expect(report.finalize(snapshot, error), "分钟容量封口");
+    const auto json = report_text(config.json_path);
+    const auto trend = json.substr(json.find("  \"minute_trend\":"));
+    expect(aggregate_section(json).find("\"ingested_samples\":1442") != std::string::npos &&
+               trend.find("\"windows_omitted\":2") != std::string::npos &&
+               trend.find("\"complete\":false") != std::string::npos &&
+               trend.find("\"minute_index\":0,") == std::string::npos &&
+               trend.find("\"minute_index\":2,") != std::string::npos &&
+               trend.find("\"minute_index\":1441,") != std::string::npos,
+           "分钟只留1440行且显式截断，全程总体不随分钟环丢失");
+    expect(cleanup_owned_debug_pair_test_root(owned, error), "分钟容量只清理独占目录");
+}
+
 } // namespace
 
 int main() {
@@ -1734,6 +1951,9 @@ int main() {
     log_config.enable_file = false;
     log_config.enable_ringbuf = false;
     Log::init(log_config);
+    test_session_aggregate_survives_tail_eviction();
+    test_session_aggregate_boundaries_and_batching();
+    test_session_aggregate_minute_capacity();
     test_report_summary_and_atomic_files();
     test_report_pair_publish_failure_preserves_previous_pair();
     test_report_keeps_last_samples_across_batches_and_restarts();

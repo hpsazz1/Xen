@@ -2235,6 +2235,9 @@ if(BUILD_TESTING)
         "${PROJECT_SOURCE_DIR}/scripts/test_publish_worker_update.ps1"
         -ManifestValidator "$<TARGET_FILE:release_contract_tests>"
         -TestRoot "${CMAKE_BINARY_DIR}/worker-update-tests")
+    xen_add_windows_powershell_test(process_resource_sampling_tests
+        "${PROJECT_SOURCE_DIR}/scripts/test_measure_process_resources.ps1"
+        -EvidenceParent "${CMAKE_BINARY_DIR}/process-resource-sampling-tests")
     xen_add_windows_powershell_test(recoil_legacy_acceptance_tests
         "${PROJECT_SOURCE_DIR}/scripts/test_recoil_legacy_acceptance.ps1"
         -TestRoot "${CMAKE_BINARY_DIR}/recoil-legacy-acceptance-tests")

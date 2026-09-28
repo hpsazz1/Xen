@@ -485,11 +485,19 @@ PT检查另需 `weights`、`trusted_weights=true` 和可选 `expected_sha256`，
 | [scripts/prepare_mouse_effect_probe_a.ps1](scripts/prepare_mouse_effect_probe_a.ps1) | 固化 A 级 X-only Physical Run；只 Prepare，不启动设备或 sidecar |
 | [scripts/prepare_mouse_effect_probe_a2_s1.ps1](scripts/prepare_mouse_effect_probe_a2_s1.ps1) | 固化 A2 S1 的自动 KMBOX 活性括号与零命令基线；只 Prepare，不执行 Physical Launch |
 | [scripts/benchmark_runtime.ps1](scripts/benchmark_runtime.ps1) | Runtime 正式基准与原子报告 |
+| [scripts/measure_process_resources.ps1](scripts/measure_process_resources.ps1) | 绑定既有进程身份，只读采集 CPU、内存、句柄和线程趋势 |
 | [scripts/test_tensorrt.ps1](scripts/test_tensorrt.ps1) | TensorRT 专项正确性与变化输入验证 |
 | [scripts/test_directml.ps1](scripts/test_directml.ps1) | DirectML 独立构建与专项验证 |
 | [scripts/test_openvino.ps1](scripts/test_openvino.ps1) | OpenVINO 独立构建与专项验证 |
 
 其余专项入口位于 [scripts/](scripts/)。脚本是参数和证据格式的事实源；不要长期维护一次性脚本。
+
+资源采集需要明确的 PID、完整映像路径和 UTC 启动时间，并写入全新目录。默认每5秒采样、
+持续60分钟；完成时长按首末有效采样跨度计算。CPU以单逻辑核100%计，分母使用紧邻CPU读取的
+单调时间，内存与线程等属性按顺序读取。只有最终 `summary.json` 的
+`resource_capture_completed=true` 配合完整 `samples.csv` 表示资源采样完成；`partial` 文件表示
+未完成。进程退出、身份变化或写入失败分别记录。该脚本仅观察已有进程，资源结果与Runtime成功、
+时延和真实操作效果分别判断。
 
 `XenMouseEffectProbeCompositeSeal --study-scheduler <绝对新目录>` 提供独立的无鼠标输出调度诊断。
 它先冻结采样协议，在 300/325/350 微秒 guard 上各记录 10 个 42-event 批次，再选择全部观测达标的
@@ -509,6 +517,12 @@ run UUID、completion semantic 与 peer/test boundary；正式脚本只在完整
 loopback/in-memory fake 不与真实设备报告合并，并始终显式记录 `physical_effect_observed=false`。
 Runtime 报告 schema 18 将原始 source sequence/timecode/timestamp、映射后的 source、capture、
 Aim observation 和 control 时刻及各自有效性绑定到实际处理帧；缺失值保持无效，不用本地序号补齐。
+报告的原始逐帧表和原有时延摘要仍是有界尾窗。JSON 的 `session_aggregate` 另保存全部已摄入样本的
+成功/失败计数，以及处理、采集到后端完成、控制到后端完成三项时延；成功口径包含实际发送时的鼠标
+后端状态。`minute_trend` 保存最多1440个分钟摘要，窗口省略、无效时间和采集异常分别标记。
+新增分位数是0.25毫秒固定桶的上下界，超过1024毫秒时上界为空；原尾窗精确分位数保持原语义。
+Runtime丢样仍需单独核对，全部已摄入不等于全部Runtime帧；模型重载产生的分段须按同次Runtime
+合并计数和桶，不能平均各段P95。报告在正常结束时落盘，异常退出缺报告按证据不完整处理。
 这些 64 位标识、绝对时刻和 source clock session 在 JSON 中使用十进制字符串，CSV 保留整数文本，
 避免解析器经过浮点数时损失相邻帧身份。`steady_ns` 只可在当前 Runtime 会话内比较；原始源时间
 沿用 Capture 单位，源时钟 session 不等于 NDI 发送端身份，以上字段不提供曝光或设备应用位移证据。

@@ -8,6 +8,7 @@
 #endif
 
 #include "debug/debug.h"
+#include "debug/session_statistics_internal.h"
 #include "debug/recoil_report.h"
 #include "debug/auxiliary_report.h"
 
@@ -1200,9 +1201,12 @@ bool DebugReport::start(const DebugReportConfig& config,
             aim_lock_state_active_ = false;
             remove_aim_lock_marker();
         }
+        // 进入重置后任何分配失败都必须保持inactive，禁止旧聚合状态混入新会话。
+        active_ = false;
         config_ = config;
         samples_.clear();
         samples_.reserve(config.max_samples);
+        session_statistics_ = std::make_unique<xen::debug::detail::SessionStatistics>();
         sample_head_ = 0;
         summary_ = {};
         report_samples_dropped_ = 0;
@@ -1218,6 +1222,7 @@ bool DebugReport::start(const DebugReportConfig& config,
         return true;
     } catch (...) {
         remove_aim_lock_marker();
+        active_ = false;
         set_error(error, "Debug 报告初始化时发生未知异常");
         return false;
     }
@@ -1226,6 +1231,9 @@ bool DebugReport::start(const DebugReportConfig& config,
 void DebugReport::ingest(
         std::span<const RuntimePipelineSample> samples) noexcept {
     if (!active_) return;
+    // 聚合器无分配且不抛出；即使原始留样失败，已交付的全程计数仍完整。
+    for (const auto& sample : samples) session_statistics_->observe(sample);
+    std::size_t retained = 0;
     try {
         for (const auto& sample : samples) {
             update_aim_lock_marker(
@@ -1237,9 +1245,11 @@ void DebugReport::ingest(
             } else {
                 samples_.push_back(sample);
             }
+            ++retained;
         }
     } catch (...) {
-        // 诊断报告不能影响 Runtime；本批次剩余样本直接丢弃。
+        session_statistics_->record_raw_ingest_failure(samples.size() - retained);
+        // 原始留样未提交的余批单列，不冒充Runtime丢样或报告正常尾窗省略。
     }
 }
 
@@ -1294,6 +1304,9 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
         if (config_.trigger_config) {
             csv << "# trigger," << csv_escape(trigger_metadata_json(*config_.trigger_config, final_snapshot)) << '\n';
         }
+        csv << "# session_aggregate_schema,1\n"
+            << "# session_aggregate_scope,all_ingested_samples\n"
+            << "# session_aggregate_detail,json_session_aggregate_and_minute_trend\n";
         append_csv_snapshot(csv, final_snapshot);
         append_csv_coverage(csv, summary_.coverage);
         append_csv_timing(csv, "capture", summary_.capture);
@@ -1884,6 +1897,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
         if (config_.trigger_config) {
             json << "  \"trigger\": " << trigger_metadata_json(*config_.trigger_config, final_snapshot) << ",\n";
         }
+        session_statistics_->write_json(json, final_snapshot);
         append_json_coverage(json, summary_.coverage);
         append_json_queue_depth(json, summary_.ndi_video_queue_depth);
         append_json_snapshot(json, final_snapshot);
