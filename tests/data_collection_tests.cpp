@@ -116,20 +116,33 @@ int wmain(int argc, wchar_t** argv) {
         for (int i = 0; i < 10000; ++i) collector.offer(frame, {}, DetectionStatus::SUCCESS, 7);
         observer.join();
         expect(collector.snapshot().dropped == stopped_drops, "关闭后持续送帧无锁丢弃计数");
-        config.max_samples = 1;
         expect(collector.start(config, error), "停止后可重开");
         expect(collector.snapshot().session_directory != session, "新会话不覆盖旧数据");
+        for (int sample = 0; sample < 305; ++sample) {
+            ++frame.timing.sequence;
+            manual(collector, frame, {}, DetectionStatus::SUCCESS);
+        }
+        expect(collector.snapshot().saved == 305 && !collector.snapshot().paused &&
+               collector.snapshot().error.empty(), "持续采集超过旧300张上限");
+        const auto policy = read(collector.snapshot().session_directory / "session.json")["policy"];
+        expect(policy.value("continuous", false) && !policy.contains("max_samples") &&
+               !policy.contains("max_bytes"), "新会话明确连续采集且不宣称累计配额");
+        collector.set_paused(true);
+        collector.set_paused(false);
         manual(collector, frame, {}, DetectionStatus::SUCCESS);
-        expect(collector.snapshot().saved == 1 && collector.snapshot().paused, "数量硬上限");
+        expect(collector.snapshot().saved == 306, "超过旧上限后仍可暂停并继续");
         collector.stop();
-        config.max_samples = 300;
-        config.max_bytes = 1;
-        expect(collector.start(config, error), "小磁盘配额启动");
+        expect(collector.start(config, error), "真实写入失败场景启动");
+        const auto failed_session = collector.snapshot().session_directory;
+        // 用目录占用待写JSON路径，确定性触发实际文件写入失败，不耗满用户磁盘。
+        std::filesystem::create_directory(failed_session / "samples/1.pending");
         manual(collector, frame, {}, DetectionStatus::SUCCESS);
-        expect(collector.snapshot().saved == 0 && collector.snapshot().paused, "磁盘预算拒绝提交");
-        expect(std::filesystem::is_empty(collector.snapshot().session_directory / "images") && std::filesystem::is_empty(collector.snapshot().session_directory / "samples"), "预算拒绝在任何样本文件落盘之前");
+        expect(collector.snapshot().saved == 0 && collector.snapshot().paused &&
+               !collector.snapshot().error.empty(), "取消配额后真实写入失败仍暂停且不虚报成功");
+        expect(!std::filesystem::exists(failed_session / "samples/1.json"), "写入失败没有提交标记");
+        collector.set_paused(false);
+        expect(collector.snapshot().paused, "写入故障不能由继续按钮掩盖");
         collector.stop();
-        config.max_bytes = 1024 * 1024;
         expect(collector.start(config, error), "GPU 拒绝场景启动");
         frame.storage = CapturedFrameStorage::D3D11_BGRA8;
         for (int attempt = 0; attempt < 100 && !collector.snapshot().paused; ++attempt) {

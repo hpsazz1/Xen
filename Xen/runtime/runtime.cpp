@@ -4,6 +4,7 @@
 #include "runtime/runtime_internal.h"
 #include "runtime/weapon_context_internal.h"
 #include "runtime/aim_frame_internal.h"
+#include "runtime/collection_frame_internal.h"
 #include "runtime/input_training_internal.h"
 #include "auto_stop/auto_stop_worker.h"
 #include "trigger/trigger_worker.h"
@@ -803,6 +804,7 @@ struct Runtime::Impl {
         std::uint64_t last_sequence = 0;
         runtime::detail::RuntimeObservationClock observation_clock;
         runtime::detail::CameraMotionEstimator camera_motion;
+        runtime::detail::CollectionFrameGate collection_frame_gate;
         runtime::detail::AimWeaponSessionGate aim_weapon_session;
         const auto sample_aim_weapon_session = [this, &aim_weapon_session] {
             // 函数实参不保证从左到右求值；必须先读状态，再取用于有效期检查的时间。
@@ -1098,7 +1100,14 @@ struct Runtime::Impl {
                     : std::span<const Detection>(detections);
             // 本帧输出已经完成，采集只复制被选中的同帧像素，不等待编码/磁盘。
             // 此开销位于service尾部，仍会影响下一帧服务时间，不能称作零开销。
-            if (data_collector) {
+            const auto collection_source = config.source_context.enabled
+                ? source_context_client.snapshot() : source_context::SourceContextSnapshot{};
+            const bool collect_frame = collection_frame_gate.accept(
+                config.source_context.enabled, collection_source, frame->timing,
+                std::chrono::steady_clock::now(),
+                config.capture.backend == CaptureBackend::NDI &&
+                    !config.capture.ndi_clock_sync_url.empty());
+            if (data_collector && collect_frame) {
                 data_collector->offer(*frame, preview_detections,
                     profile.detector.status, frame_detector_generation);
             }

@@ -145,6 +145,28 @@ struct Fixture {
     }
     void fire() { mouse->held=true; worker.publish(observation()); }
 };
+void measurement_epoch_keeps_held_permission() {
+    Fixture f;
+    expect(f.start(false, 200, 1000, 100), "观察重建Worker回归启动");
+    f.fire();
+    expect(until([&] { return f.worker.firing_signal().confirmed_down; }),
+        "观察重建前须经Fake后端确认旧DOWN");
+    auto rebuilt = observation(2); rebuilt->epoch = 2;
+    f.worker.publish(rebuilt);
+    expect(until([&] { return f.mouse->count(false) >= 1; }),
+        "新测量世代必须经Fake后端释放旧按钮");
+    std::uint64_t sequence = 3;
+    expect(until([&] {
+        auto current = observation(sequence++); current->epoch = 2;
+        f.worker.publish(current);
+        return f.mouse->count(true) >= 2;
+    }), "侧键始终按住时新测量世代应在旧UP后恢复实际Fake DOWN");
+    expect(f.mouse->held && !f.worker.snapshot().faulted,
+        "恢复不能依赖测试伪造侧键松开，也不能清理掉硬故障");
+    f.worker.stop();
+    expect(!f.mouse->dirty, "测量重建回归收尾必须确认按钮释放");
+}
+
 void cycle_resume_after_safe_up() {
     for (int mode = 0; mode < 7; ++mode) {
         auto mouse = std::make_shared<Mouse>();
@@ -912,6 +934,7 @@ void exception_uses_bounded_cleanup() {
 
 }
 int main() {
+    measurement_epoch_keeps_held_permission();
     deferred_down_revalidates_and_cancels();
     withdraw_unsent_rejects_backend_debt();
     stationary_stop_bypass_and_revalidation();

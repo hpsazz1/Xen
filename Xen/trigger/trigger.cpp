@@ -288,7 +288,9 @@ TriggerDecision TriggerController::observe(const TriggerObservation& observation
     observation_failure_ = TriggerReason::NONE;
     const bool geometry_changed = roi_width_ != observation.roi_width || roi_height_ != observation.roi_height ||
         center_x_ != observation.center_x || center_y_ != observation.center_y;
-    if (!same_epoch && state_.observation_epoch != 0) release_seen_ = false;
+    // 测量世代只隔离候选与停稳证据，不代表可信输入会话重新开始。
+    // 健康松键资格由 permission/context 的真实取消维护，不能因相机重建抹除。
+    const bool rebuilt_epoch = !same_epoch && state_.observation_epoch != 0;
     const auto previous_id = state_.candidate_id;
     const bool had_candidate = candidate_valid_;
     if (!same_epoch || geometry_changed || now >= observation_expires_) candidate_valid_ = false;
@@ -297,6 +299,8 @@ TriggerDecision TriggerController::observe(const TriggerObservation& observation
     center_x_ = observation.center_x; center_y_ = observation.center_y;
     roi_width_ = observation.roi_width; roi_height_ = observation.roi_height;
     observation_expires_ = observation.observed_at + (max_age - observation.uncertainty);
+    if (rebuilt_epoch && (state_.button_may_be_down || state_.stop_request_id != 0))
+        return release(TriggerReason::TARGET_CHANGED, now);
     if (!select_candidate(observation, now)) return release(TriggerReason::NO_CANDIDATE, now);
     if (had_candidate && state_.candidate_id != previous_id && (state_.button_may_be_down || state_.stop_request_id))
         return release(TriggerReason::TARGET_CHANGED, now);

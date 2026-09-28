@@ -3947,14 +3947,15 @@ struct Overlay::Impl {
         workspace_button("开始采集", "开始新的素材会话。必须已运行 CPU 画面 Runtime、模型未在重载、核对类别且没有后台作业；不会启动 Runtime。采集期间保持类别与模型代一致。", Action::START_COLLECTION,
             idle && cpu_running && settings.class_schema_confirmed, actions);
         ImGui::SameLine();
-        workspace_button(collection.paused ? "继续采集" : "暂停采集", "暂停时不接收新素材；继续使用当前会话和已有预算。", collection.paused ? Action::RESUME_COLLECTION : Action::PAUSE_COLLECTION,
+        workspace_button(collection.paused ? "继续采集" : "暂停采集", "暂停时不接收新素材；继续使用当前会话。", collection.paused ? Action::RESUME_COLLECTION : Action::PAUSE_COLLECTION,
             collection.active && !workspace.job_running && (collection.paused ? cpu_running : true), actions);
         ImGui::SameLine();
         workspace_button("结束采集", "结束当前素材会话并完成已排队写入；不停止 Runtime。", Action::STOP_COLLECTION, collection.active, actions);
-        workspace_button("标记下一帧", "请求保存下一张有效 CPU 帧；不发送键鼠输入，仍受磁盘和队列预算约束。", Action::MARK_SAMPLE,
+        workspace_button("标记下一帧", "请求保存下一张有效 CPU 帧；不发送键鼠输入，仍受有界缓存和队列约束。", Action::MARK_SAMPLE,
             collection.active && !collection.paused && cpu_running, actions);
         ImGui::SameLine();
         workspace_button("打开数据目录", "打开配置的原始素材根目录，查看采集会话与图片。后台作业和导出结果请使用训练页的打开当前作业。", Action::OPEN_DATA_DIRECTORY, !settings.root_directory.empty(), actions);
+        ImGui::TextWrapped("持续采集不设数量或累计磁盘配额；结束采集前持续保存候选，实际写盘失败会暂停并显示错误。");
         ImGui::TextWrapped("状态：%s%s", collection.active ? "采集中" : "未采集", collection.paused ? "（已暂停）" : "");
         ImGui::Text("保存 %llu   排队 %llu   丢弃 %llu   去重 %llu",
             static_cast<unsigned long long>(collection.saved), static_cast<unsigned long long>(collection.queued),
@@ -3973,10 +3974,6 @@ struct Overlay::Impl {
             ImGui::BeginDisabled(settings.schema_model_sha256.empty());
             ImGui::Checkbox("##collection_schema_confirmed", &settings.class_schema_confirmed);
             ImGui::EndDisabled();
-            form_row("最多样本 / 张", "每个采集会话的保存预算；达到预算后停止接收新样本，避免一直采集。");
-            ImGui::InputInt("##collection_max_samples", &settings.max_samples);
-            form_row("磁盘预算 / MiB", "每个会话的写入预算；1 MiB 为 1048576 字节。预算不足时不继续写入新样本。");
-            ImGui::InputInt("##collection_max_disk", &settings.max_disk_mib);
             form_row("候选间隔 / ms", "按需检查候选画面的最小时间间隔；近重复画面仍会被过滤，不代表定时必存。");
             ImGui::InputInt("##collection_interval", &settings.interval_ms);
             form_row("探索间隔 / ms", "为模型完全漏检的画面保留有限探索机会；无框图片仍是待审核样本，不能自动确认负样本。");

@@ -14,9 +14,7 @@ struct Config {
     std::filesystem::path root_directory;
     std::vector<std::string> class_names;
     std::string model_path;
-    std::uint64_t max_samples = 300;
-    // PNG 与样本 JSON 的写入预算；不含固定 session.json 和文件系统元数据。
-    std::uint64_t max_bytes = 1024ULL * 1024 * 1024;
+    // 连续保存到用户结束或真实写入失败；只约束瞬时缓存和队列。
     int interval_ms = 1000;
     float novelty_threshold = 0.04f;
     int exploration_interval_ms = 10000;

@@ -607,7 +607,110 @@ void blocked_status_does_not_alternate_with_observations() {
         c.snapshot().reason == TriggerReason::DELAY, "有效新帧清除旧时序失败并重新驻留");
 }
 
+void observation_epoch_preserves_healthy_hold() {
+    // 相机测量重建只淘汰旧观测，不撤销此前健康释放建立的输入许可。
+    TriggerController qualifying; arm(qualifying);
+    qualifying.observe(frame(1), permit(), at(1));
+    const auto old_candidate = qualifying.snapshot().candidate_id;
+    auto rebuilt = frame(10, 2); rebuilt.epoch = 2;
+    auto decision = qualifying.observe(rebuilt, permit(), at(10));
+    expect(decision.snapshot.reason == TriggerReason::DELAY &&
+        decision.snapshot.candidate_id != old_candidate,
+        "观察epoch变化须重新驻留，但持续健康按住不得变WAIT_RELEASE");
+    expect(qualifying.tick(permit(), at(29)).button_action == TriggerButtonAction::NONE &&
+        qualifying.tick(permit(), at(30)).button_action == TriggerButtonAction::DOWN,
+        "重建后的新候选须等待完整驻留且无需松键即可发下一枪");
+
+    auto cfg = config(); cfg.shot_interval_ms = 40;
+    TriggerController held; arm(held, cfg);
+    held.observe(frame(1), permit(), at(1));
+    auto down = held.tick(permit(), at(21));
+    expect(down.button_action == TriggerButtonAction::DOWN, "epoch交接须先产生旧DOWN");
+    ack(held, down, 22);
+    rebuilt = frame(23, 2); rebuilt.epoch = 2;
+    auto up = held.observe(rebuilt, permit(), at(23));
+    expect(up.button_action == TriggerButtonAction::UP && up.snapshot.reason == TriggerReason::TARGET_CHANGED,
+        "观察重建必须先释放旧按钮事务，不能沿用旧HELD");
+    expect(held.tick(permit(), at(24)).button_action != TriggerButtonAction::DOWN,
+        "旧UP确认前新观察不得发DOWN");
+    ack(held, up, 25);
+    rebuilt = frame(50, 3); rebuilt.epoch = 2;
+    held.observe(rebuilt, permit(), at(50));
+    expect(held.tick(permit(), at(69)).button_action == TriggerButtonAction::NONE &&
+        held.tick(permit(), at(70)).button_action == TriggerButtonAction::DOWN,
+        "旧UP已确认后仍持续按住，可按新候选完整驻留恢复");
+
+    auto stop_cfg = config(); stop_cfg.require_stop = true; stop_cfg.fire_delay_ms = 0;
+    TriggerController stopped; arm(stopped, stop_cfg);
+    auto p = permit(); p.next_stop_request_id = 41;
+    auto request = stopped.observe(frame(1), p, at(1));
+    expect(request.stop_action == TriggerStopAction::REQUEST && request.stop_request_id == 41,
+        "epoch交接须先建立旧观察停稳请求");
+    rebuilt = frame(2, 2); rebuilt.epoch = 2;
+    p.stop_request_id = 41; p.stop_observation_epoch = 1;
+    p.stop_observed_qualified = true; p.stop_expires_at = p.stop_release_deadline = at(100);
+    auto canceled = stopped.observe(rebuilt, p, at(2));
+    expect(canceled.stop_action == TriggerStopAction::CANCEL && canceled.stop_request_id == 41 &&
+        canceled.button_action == TriggerButtonAction::NONE,
+        "epoch变化不得复用旧停稳证据，必须取消旧请求");
+    rebuilt = frame(3, 3); rebuilt.epoch = 2; p.next_stop_request_id = 42;
+    request = stopped.observe(rebuilt, p, at(3));
+    expect(request.stop_action == TriggerStopAction::REQUEST && request.stop_request_id == 42,
+        "持续按住应为新观察重新申请停稳，而非锁死等待松键");
+    expect(stopped.tick(p, at(4)).button_action == TriggerButtonAction::NONE,
+        "旧epoch停稳结果不能授权新请求");
+    p.stop_request_id = 42; p.stop_observation_epoch = 2;
+    expect(stopped.tick(p, at(5)).button_action == TriggerButtonAction::DOWN,
+        "新观察及新停稳证据共同合格后可恢复DOWN");
+
+    for (int invalidation = 0; invalidation < 5; ++invalidation) {
+        TriggerController safety; arm(safety);
+        safety.observe(frame(1), permit(), at(1));
+        auto unsafe = permit();
+        if (invalidation == 0) unsafe.healthy = false;
+        if (invalidation == 1) unsafe.focused = false;
+        if (invalidation == 2) unsafe.armed = false;
+        if (invalidation == 3) unsafe.physical_left_down = true;
+        if (invalidation == 4) unsafe.enabled = false;
+        safety.tick(unsafe, at(2));
+        rebuilt = frame(3, 2); rebuilt.epoch = 2;
+        expect(safety.observe(rebuilt, permit(), at(3)).snapshot.reason == TriggerReason::WAIT_RELEASE,
+            "真实输入/焦点/武装/人工接管/停用取消不能借新观察epoch恢复");
+    }
+    TriggerController trust;
+    expect(trust.configure(config()), "信任反例配置");
+    auto trusted = context_permit(1, true, false);
+    trusted.context.trust_generation = 7; trusted.context.session_trusted = true;
+    trust.tick(trusted, at(0)); trusted.held = true;
+    trust.observe(frame(1), trusted, at(1));
+    trusted.context.trust_generation = 8;
+    trust.tick(trusted, at(2));
+    rebuilt = frame(3, 2); rebuilt.epoch = 2;
+    expect(trust.observe(rebuilt, trusted, at(3)).snapshot.reason == TriggerReason::WAIT_RELEASE,
+        "真实weapon trust变化仍要求健康松键，测量重建不能授权");
+
+    TriggerController startup;
+    expect(startup.configure(config()), "启动持键反例配置");
+    startup.observe(frame(1), permit(), at(1));
+    rebuilt = frame(2, 2); rebuilt.epoch = 2;
+    expect(startup.observe(rebuilt, permit(), at(2)).snapshot.reason == TriggerReason::WAIT_RELEASE,
+        "启动未见健康松键时新观察epoch不能制造输入许可");
+
+    TriggerController unknown; arm(unknown, cfg);
+    unknown.observe(frame(1), permit(), at(1));
+    down = unknown.tick(permit(), at(21)); ack(unknown, down, 22);
+    rebuilt = frame(23, 2); rebuilt.epoch = 2;
+    up = unknown.observe(rebuilt, permit(), at(23));
+    expect(up.button_action == TriggerButtonAction::UP, "未知UP反例必须实际产生清理事务");
+    ack(unknown, up, 24, TriggerReceiptStatus::UNKNOWN);
+    rebuilt = frame(25, 3); rebuilt.epoch = 3;
+    const auto faulted = unknown.observe(rebuilt, permit(), at(25));
+    expect(faulted.snapshot.faulted && faulted.button_action != TriggerButtonAction::DOWN,
+        "UP结果未知时任何新观察epoch都不得绕过按钮债务故障");
+}
+
 int main() {
+    observation_epoch_preserves_healthy_hold();
     randomized_action_timing();
     roi_clipped_detection_bounds();
     acknowledged_single_shot_can_leave_trigger_region();

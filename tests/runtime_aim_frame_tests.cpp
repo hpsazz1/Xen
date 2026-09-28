@@ -1,4 +1,5 @@
 #include "runtime/aim_frame_internal.h"
+#include "runtime/collection_frame_internal.h"
 #include "weapon/weapon_internal.h"
 
 #include <cmath>
@@ -50,6 +51,50 @@ int main() {
     config.control_delay_ms = 15;
     Aim aim(config);
     const auto start = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+    {
+        runtime::detail::CollectionFrameGate gate;
+        source_context::SourceContextSnapshot source;
+        FrameTiming timing;
+        timing.source_time_timing_valid = true;
+        timing.source_time_at = start;
+        expect(gate.accept(false, source, timing, start), "未配置来源上下文保留通用采集行为");
+        expect(!gate.accept(true, source, timing, start), "来源不可用不采集界面");
+        source.available = true;
+        source.focused = false;
+        source.session_id = 1;
+        expect(!gate.accept(true, source, timing, start), "游戏失焦不采集");
+        source.focused = true;
+        auto now = start + std::chrono::milliseconds(10);
+        expect(!gate.accept(true, source, timing, now), "恢复焦点不接收此前排队画面");
+        timing.source_time_at = now + std::chrono::milliseconds(1);
+        now += std::chrono::milliseconds(2);
+        expect(gate.accept(true, source, timing, now), "焦点稳定后新帧无需按键或检测框即可采集");
+        timing.source_clock_uncertainty_ms = 2.0;
+        expect(!gate.accept(true, source, timing, now), "源时间不确定区间跨过聚焦边界时不得采集");
+        timing.source_clock_uncertainty_ms = -1.0;
+        expect(!gate.accept(true, source, timing, now), "无效时间不确定度不得通过采集门");
+        timing.source_clock_uncertainty_ms = 0.0;
+        timing.source_time_timing_valid = false;
+        expect(!gate.accept(true, source, timing, now), "无法对齐来源时间不冒充游戏新帧");
+        timing.source_time_timing_valid = true;
+        source.session_id = 2;
+        expect(!gate.accept(true, source, timing, now), "来源会话更换丢弃旧画面");
+        timing.source_time_at = now + std::chrono::milliseconds(1);
+        expect(!gate.accept(true, source, timing, now), "未来来源时间不能通过采集门");
+        now += std::chrono::milliseconds(2);
+        expect(gate.accept(true, source, timing, now), "新会话新帧恢复采集");
+        source.available = false;
+        expect(!gate.accept(true, source, timing, now), "上下文失效立即关闭采集门");
+        source.available = true;
+        now += std::chrono::milliseconds(2);
+        expect(!gate.accept(true, source, timing, now), "同一会话失信后也重新隔离积压帧");
+        timing.source_time_timing_valid = false;
+        timing.captured_at = now + std::chrono::milliseconds(1);
+        now += std::chrono::milliseconds(2);
+        expect(gate.accept(true, source, timing, now, false), "无源映射后端保留本机新帧采集");
+        timing.captured_at = start;
+        expect(!gate.accept(true, source, timing, now, false), "无源映射后端也拒绝本机积压旧帧");
+    }
     for (int i = 0; i < 3; ++i) {
         CapturedFrame captured;
         captured.width = captured.height = 320;

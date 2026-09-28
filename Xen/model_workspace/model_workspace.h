@@ -36,8 +36,6 @@ struct Settings {
     std::string review_manifest;
     std::string prelabels_path;
     std::string device = "0";
-    int max_samples = 300;
-    int max_disk_mib = 1024;
     int interval_ms = 1000;
     int exploration_interval_ms = 10000;
     int epochs = 30;

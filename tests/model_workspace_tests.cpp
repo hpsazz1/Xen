@@ -148,6 +148,26 @@ int main(int argc, char** argv) {
     expect(workspace.execute(Action::START_COLLECTION, settings, true, false, utf8(model)),
            "已确认相同模型身份可创建采集会话，不启动Runtime");
     workspace.execute(Action::STOP_COLLECTION, settings, false, false, "");
+    expect(workspace.execute(Action::SAVE_SETTINGS, settings, false, false, ""), "保存已核实模型身份");
+    {
+        const auto settings_path = root / "cache/model-workspace/settings.json";
+        nlohmann::json legacy;
+        { std::ifstream stream(settings_path); stream >> legacy; }
+        legacy["max_samples"] = 0;
+        legacy["max_disk_mib"] = 0;
+        { std::ofstream stream(settings_path); stream << legacy; }
+        model_workspace::Workspace reopened(collector);
+        model_workspace::Settings restored;
+        expect(reopened.initialize(root, restored, error), "兼容读取旧配额字段");
+        expect(reopened.execute(Action::START_COLLECTION, restored, true, false, utf8(model)),
+               "旧数量和磁盘配额不再阻止采集");
+        reopened.execute(Action::STOP_COLLECTION, restored, false, false, "");
+        expect(reopened.execute(Action::SAVE_SETTINGS, restored, false, false, ""), "新设置保存成功");
+        nlohmann::json saved;
+        { std::ifstream stream(settings_path); stream >> saved; }
+        expect(!saved.contains("max_samples") && !saved.contains("max_disk_mib"),
+               "新设置移除已停用配额");
+    }
     { std::ofstream file(model, std::ios::app); file << "changed"; }
     expect(!workspace.execute(Action::START_COLLECTION, settings, true, false, utf8(model)),
            "同路径模型变化使类别确认失效");

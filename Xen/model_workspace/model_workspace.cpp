@@ -202,8 +202,7 @@ Json settings_json(const Settings& value, const fs::path& data_root) {
         {"weights_path", value.weights_path}, {"dataset_path", value.dataset_path},
         {"model_path", value.model_path}, {"review_manifest", value.review_manifest},
         {"prelabels_path", value.prelabels_path},
-        {"device", value.device}, {"max_samples", value.max_samples},
-        {"max_disk_mib", value.max_disk_mib}, {"interval_ms", value.interval_ms},
+        {"device", value.device}, {"interval_ms", value.interval_ms},
         {"exploration_interval_ms", value.exploration_interval_ms},
         {"epochs", value.epochs}, {"image_size", value.image_size},
         {"batch_size", value.batch_size}};
@@ -407,7 +406,7 @@ bool Workspace::initialize(const fs::path& data_root, Settings& settings,
             XEN_DATA_SETTING(dataset_path); XEN_DATA_SETTING(model_path);
             XEN_DATA_SETTING(review_manifest); XEN_DATA_SETTING(device);
             XEN_DATA_SETTING(prelabels_path);
-            XEN_DATA_SETTING(max_samples); XEN_DATA_SETTING(max_disk_mib);
+            // 旧设置的数量/磁盘配额字段作为未知键兼容忽略，连续采集不再使用。
             XEN_DATA_SETTING(interval_ms); XEN_DATA_SETTING(exploration_interval_ms);
             XEN_DATA_SETTING(epochs); XEN_DATA_SETTING(image_size); XEN_DATA_SETTING(batch_size);
 #undef XEN_DATA_SETTING
@@ -556,8 +555,6 @@ bool Workspace::execute(Action action, const Settings& settings,
             check(runtime_running, "请先在概览启动Runtime，再开始图片采集");
             check(!gpu_frames, "当前GPU纹理路径不支持图片采集，请停止后选择CPU图像路径");
             check(impl_->collector != nullptr, "图片采集模块未接入");
-            check(settings.max_samples > 0 && settings.max_disk_mib > 0 &&
-                  settings.max_disk_mib <= 102400, "采集数量或磁盘预算无效");
             data_collection::Config config;
             config.root_directory = checked_path(path_from(settings.root_directory));
             config.class_names = names_from(settings);
@@ -568,8 +565,6 @@ bool Workspace::execute(Action action, const Settings& settings,
                                  checked_path(path_from(active_model_path))) &&
                   sha256(path_from(active_model_path)) == settings.schema_model_sha256,
                   "当前模型与类别确认身份不同，请重新检查ONNX并确认类别");
-            config.max_samples = static_cast<std::uint64_t>(settings.max_samples);
-            config.max_bytes = static_cast<std::uint64_t>(settings.max_disk_mib) * 1024 * 1024;
             config.interval_ms = settings.interval_ms;
             config.exploration_interval_ms = settings.exploration_interval_ms;
             std::string error;

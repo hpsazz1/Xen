@@ -21,6 +21,7 @@
 #include <cstring>
 #include <fstream>
 #include <mutex>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <thread>
@@ -145,11 +146,9 @@ struct Collector::Impl {
         const auto text = record.dump(2);
         {
             std::lock_guard lock(mutex);
-            if (encoded.size() + text.size() > config.max_bytes - state.bytes) {
-                fail("采集磁盘预算已满");
-                ++state.dropped;
-                return;
-            }
+            const auto remaining = std::numeric_limits<std::uint64_t>::max() - state.bytes;
+            if (encoded.size() > remaining || text.size() > remaining - encoded.size())
+                throw std::runtime_error("采集字节计数溢出");
         }
         write_file(image_pending, encoded.data(), encoded.size());
         write_file(record_pending, text.data(), text.size());
@@ -189,7 +188,7 @@ bool Collector::start(const Config& config, std::string& error) noexcept {
     stop();
     try {
         if (config.root_directory.empty() || config.model_path.empty() || config.class_names.empty() ||
-            !config.max_samples || !config.max_bytes || !config.queue_capacity || config.queue_capacity > 64 ||
+            !config.queue_capacity || config.queue_capacity > 64 ||
             config.buffer_bytes < (config.queue_capacity + 1) * 3 || config.buffer_bytes > 512ULL * 1024 * 1024 ||
             config.interval_ms < 0 || config.exploration_interval_ms <= 0 ||
             !std::isfinite(config.novelty_threshold) || config.novelty_threshold <= 0 || config.novelty_threshold > 1 ||
@@ -227,13 +226,13 @@ bool Collector::start(const Config& config, std::string& error) noexcept {
         std::filesystem::create_directory(p.state.session_directory / "images");
         std::filesystem::create_directory(p.state.session_directory / "samples");
         Json session = {{"schema_version", 1}, {"session_id", p.session_id}, {"class_names", config.class_names}, {"model_path", utf8(std::filesystem::absolute(model_path))}, {"model_sha256", model_hash},
-            {"policy", {{"version", 1}, {"max_samples", config.max_samples}, {"max_bytes", config.max_bytes}, {"interval_ms", config.interval_ms}, {"novelty_threshold", config.novelty_threshold}, {"exploration_interval_ms", config.exploration_interval_ms}, {"exploration_rule", "uniform_interval_0.5_to_1.5_independent_of_detections"}, {"exploration_seed", p.config.exploration_seed}, {"uncertain_confidence", config.uncertain_confidence}, {"queue_capacity", config.queue_capacity}, {"buffer_bytes", config.buffer_bytes}}}};
+            {"policy", {{"version", 2}, {"continuous", true}, {"interval_ms", config.interval_ms}, {"novelty_threshold", config.novelty_threshold}, {"exploration_interval_ms", config.exploration_interval_ms}, {"exploration_rule", "uniform_interval_0.5_to_1.5_independent_of_detections"}, {"exploration_seed", p.config.exploration_seed}, {"uncertain_confidence", config.uncertain_confidence}, {"queue_capacity", config.queue_capacity}, {"buffer_bytes", config.buffer_bytes}}}};
         const auto text = session.dump(2);
         write_file(p.state.session_directory / "session.pending", text.data(), text.size());
         std::filesystem::rename(p.state.session_directory / "session.pending", p.state.session_directory / "session.json");
         p.worker = std::thread([&p] { p.run(); });
         p.state.active = true;
-        LOG_INFO("Data", "采集会话已启动：{}，样本上限 {}", p.session_id, config.max_samples);
+        LOG_INFO("Data", "连续采集会话已启动：{}", p.session_id);
         p.enabled.store(true, std::memory_order_release);
         error.clear();
         return true;
@@ -250,7 +249,7 @@ void Collector::stop() noexcept {
 }
 void Collector::set_paused(bool paused) noexcept {
     std::lock_guard lock(impl_->mutex);
-    if (!paused && (!impl_->state.error.empty() || impl_->accepted >= impl_->config.max_samples)) return;
+    if (!paused && !impl_->state.error.empty()) return;
     impl_->state.paused = paused;
 }
 void Collector::request_sample() noexcept {
@@ -316,6 +315,10 @@ void Collector::offer(const CapturedFrame& frame, std::span<const Detection> det
         slot.source_width = frame.source_width; slot.source_height = frame.source_height;
         slot.encoded_width = frame.encoded_width; slot.encoded_height = frame.encoded_height;
         slot.scale_x = frame.source_pixels_per_pixel_x; slot.scale_y = frame.source_pixels_per_pixel_y;
+        if (p.accepted == std::numeric_limits<std::uint64_t>::max()) {
+            p.fail("采集样本序号耗尽");
+            return;
+        }
         slot.status = status; slot.generation = generation; slot.id = ++p.accepted;
         slot.reason = manual ? "manual" : exploration ? "exploration" : uncertain ? "uncertain" : "novel";
         slot.occupied = true;
@@ -327,7 +330,6 @@ void Collector::offer(const CapturedFrame& frame, std::span<const Detection> det
         std::copy(detections.begin(), detections.end(), p.previous_detections.begin());
         p.have_previous = true;
         if (exploration) p.next_exploration = now + std::chrono::milliseconds(std::uniform_int_distribution<std::int64_t>(std::max(1, p.config.exploration_interval_ms / 2), static_cast<std::int64_t>(p.config.exploration_interval_ms) + p.config.exploration_interval_ms / 2)(p.random));
-        if (p.accepted >= p.config.max_samples) p.fail("采集数量预算已满");
         p.ready.notify_one();
     } catch (...) { p.fail("采集候选处理失败"); ++p.state.dropped; }
 }
