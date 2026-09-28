@@ -353,13 +353,19 @@ public:
             direction_transition = direction_transition || (cycle_resume && config.use_counterpulse_timing && !force_fault);
             ordinary_transition = ordinary_transition || direction_transition;
             const bool session_transition = !force_fault && normal_cancellation();
-            if (session_transition && mouse->left_button_cleanup_required()) {
-                // 先撤销估计资格让Trigger抬键；未知UP由共享故障/有界清理处理。
+            if (!force_fault && !stopping.load() && independent && manual_fire_id.load() == 0 &&
+                mouse->left_button_cleanup_required()) {
+                // 松许可/End同样先撤销估计资格，等待Trigger确认UP；未知UP仍由共享故障处理。
                 // 等待时不占仲裁器，否则会阻止负责UP的worker完成清理。
+                { std::lock_guard<std::mutex> lock(mutex); estimated_id = 0; }
                 release_reservation();
                 return false;
             }
-            if (session_transition) { ordinary_transition = true; cycle_resume = false; }
+            if (session_transition) {
+                ordinary_transition = true; cycle_resume = false;
+                // 发送前复核也可发现正常武器变化；不能遗留已撤销请求的连续持键锁存。
+                target_consumed = false;
+            }
             // 点射归还等待ACK时仍保留目标代际，避免中途丢失目标被误算成恢复失败。
             const bool track_cleanup = (cycle_resume || direction_transition) && independent && manual_fire_id.load() == 0 && !force_fault;
             { std::lock_guard<std::mutex> lock(mutex);

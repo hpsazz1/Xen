@@ -18,12 +18,16 @@ def read_generated_json(path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--executable', default=os.environ.get('XEN_COUNTERPULSE_EXE'))
+    parser.add_argument('--powershell-executable')
+    parser.add_argument('--windows-powershell-executable')
     args = parser.parse_args()
     script = Path(__file__).resolve().parents[1] / 'scripts' / 'invoke_auto_stop_counterpulse.ps1'
-    shell = shutil.which('pwsh') or shutil.which('powershell')
-    assert shell, '需要PowerShell执行入口回归'
+    shell = args.powershell_executable or shutil.which('pwsh') or shutil.which('powershell')
+    assert shell and Path(shell).is_file(), '需要PowerShell执行入口回归'
     # 子程序切换代码页后，父Shell不能继续用缓存的GBK写UTF-8控制台。
-    legacy = shutil.which('powershell.exe')
+    legacy = args.windows_powershell_executable or shutil.which('powershell.exe')
+    if args.windows_powershell_executable:
+        assert Path(legacy).is_file(), '配置的Windows PowerShell不存在'
     if legacy:
         command = "[Console]::OutputEncoding=[Text.Encoding]::GetEncoding(936); & '" + str(script).replace("'", "''") + "' -Mode Launch -RunDirectory 'C:/missing-counterpulse-regression'"
         encoded = subprocess.run([legacy, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command],

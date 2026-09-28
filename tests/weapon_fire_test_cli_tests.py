@@ -12,12 +12,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--executable', type=Path, required=True)
     parser.add_argument('--script', type=Path)
+    parser.add_argument('--powershell-executable')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     script = args.script or root / 'scripts/invoke_weapon_fire_test.ps1'
     engine = root / 'scripts/invoke_auto_stop_counterpulse.ps1'
-    shell = shutil.which('powershell.exe')
-    assert shell, '需要Windows PowerShell'
+    shell = args.powershell_executable or shutil.which('powershell.exe')
+    assert shell and Path(shell).is_file(), '需要Windows PowerShell'
     with tempfile.TemporaryDirectory(prefix='xen-weapon-fire-') as temp:
         folder = Path(temp)
         config = folder / 'test.ini'

@@ -767,6 +767,35 @@ void target_change_returns_before_next_brake(bool hud_reference = false, bool ai
     require(!mouse->cleanup_during_shot && mouse->moves == 0, "归还始终位于LEFT清债之后，且不得发送鼠标位移");
     std::cout << (hud_reference ? "HUD" : "H40") << "：换目标UP确认归还与新制动组合证据通过\n";
 }
+void weapon_change_during_admission(bool hud_reference) {
+    auto mouse = std::make_shared<FakeMouse>();
+    auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+    std::atomic<std::uint64_t> next_id{0};
+    AutoStopWorker stop(mouse, arbiter, [] { return true; }, [&] { return ++next_id; }, [] { return true; }, [&] {
+        // 精确置于请求分配后、发送前复核；模拟同一可信GSI会话在准入快照后换武器。
+        const bool changed = next_id.load() != 0;
+        return AutoStopWeaponContext{true, true, changed ? 2u : 1u,
+            changed ? "deagle" : "ak47", 1, true};
+    });
+    AutoStopConfig config{true, 5};
+    config.cycle_enabled = true; config.experimental_hud_model = hud_reference;
+    mouse->physical(0, false);
+    require(stop.start(config), "准入窗口武器切换启动");
+    until([&] { return mouse->drained(); });
+    mouse->physical(2, true);
+    const auto deadline = Clock::now() + 1200ms;
+    while (Clock::now() < deadline && stop.estimated_completion_id() == 0) {
+        stop.publish_tracking_target(Clock::now() + 300ms);
+        stop.publish_target(Clock::now() + 300ms);
+        std::this_thread::sleep_for(1ms);
+    }
+    const auto completion = stop.estimated_completion_id();
+    const auto state = stop.snapshot();
+    stop.stop();
+    require(completion > 1 && state.requests >= 2 && state.canceled >= 1 && !state.recovery_pending,
+        "发送前普通武器变化须撤销旧准入并允许持续持键的新请求");
+    require(mouse->released(), "准入窗口测试结束归还键盘");
+}
 void aim_random_release_lifecycle(bool lose_target, bool emergency) {
     auto mouse = std::make_shared<FakeMouse>();
     auto arbiter = std::make_shared<AutoStopOutputArbiter>();
@@ -804,8 +833,16 @@ void aim_random_release_lifecycle(bool lose_target, bool emergency) {
     require(first.sampled_release_interval_ms >= 120 && first.sampled_release_interval_ms <= 180,
         "组合必须实际启用随机时序并锁存本发松开间隔");
     const auto previous_stop = first.estimated_stop_request_id;
+    const auto cleanups_before = mouse->cleanups.load();
+    mouse->hold_up_ack = true;
     if (emergency) armed = false; // 与Runtime End撤销公共许可的worker边界一致，不代按实体键。
     else if (!lose_target) mouse->allow(false);
+    until([&] { publish(!lose_target); return mouse->up_waiting.load(); });
+    std::this_thread::sleep_for(15ms);
+    const bool retained_before_ack = mouse->cleanups == cleanups_before &&
+        !mouse->cleanup_during_shot.load();
+    mouse->hold_up_ack = false;
+    require(retained_before_ack, "丢目标、松键或End的UP ACK未到前禁止归还方向");
     until([&] {
         publish(!lose_target);
         return mouse->released() && !trigger.snapshot().button_may_be_down && stop.estimated_completion_id() == 0;
@@ -887,6 +924,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--hud-reference") {
+            weapon_change_during_admission(true);
             target_change_returns_before_next_brake(true);
             held_direction_after_overlap_requires_completed_brake(true);
             target_loss_lifecycle(false, true);
@@ -896,6 +934,7 @@ int main(int argc, char** argv) {
             std::cout << "HUD实验组合专项通过：AD、目标消失、持续键武器恢复及UP ACK后等待\n";
             return 0;
         }
+        weapon_change_during_admission(false);
         target_change_returns_before_next_brake();
         for (const char* item : {"weapon_knife", "weapon_hegrenade"}) gsi_session_recovery(item);
         held_direction_after_overlap_requires_completed_brake();

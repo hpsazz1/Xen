@@ -1,4 +1,4 @@
-﻿param([string]$TestRoot = (Join-Path $PSScriptRoot '..\cache\worker-update-tests'), [string]$ManifestValidator = '')
+﻿param([string]$TestRoot = (Join-Path $PSScriptRoot '..\cache\worker-update-tests'), [string]$ManifestValidator = '', [string]$GitExecutable = 'git')
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'path_safety.psm1') -Force
@@ -46,7 +46,7 @@ try {
     }
     $sourceRoot = Join-Path $runRoot 'source'
     New-Item -ItemType Directory -Path $sourceRoot | Out-Null
-    $git = (Get-Command git -ErrorAction Stop).Source
+    $git = (Get-Command $GitExecutable -ErrorAction Stop).Source
     & $git -C $sourceRoot init --quiet
     if ($LASTEXITCODE -ne 0) { throw 'fixture git init failed' }
     Write-UpdateFixture (Join-Path $sourceRoot 'fixture.txt') 'worker source'

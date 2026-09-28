@@ -294,7 +294,7 @@ void test_producer_roundtrips_background_pair_and_consumption() {
             {"usable_patch_count", 2},
         };
     }
-    // 两边相反的观测不能因背景有效就宣称 observer 已消费；同一原目标只改宽度。
+    // 对称宽度变化保留相同中心位移；独立背景应与刚体对照给出相同 observer 测量。
     samples[3]["box_width"] = 60.0;
     samples[5]["background_motion_x"]["sequence"] = "9007199254740993";
     samples[7]["background_motion_x"]["captured_at_ns"] =
@@ -311,6 +311,33 @@ void test_producer_roundtrips_background_pair_and_consumption() {
            "背景 roundtrip 配置必须可写: " + error);
     write_text(reference_path, "independent background test reference\n");
     write_text(binary_path, "producer background test identity\n");
+    const auto produce_control_rows = [&](const json& control_plan, const char* name) {
+        const auto control_plan_path = root / (std::string(name) + ".json");
+        const auto control_output = root / name;
+        write_text(control_plan_path, control_plan.dump(2) + "\n");
+        aim_production_red::ProduceResult control_result;
+        const bool ok = aim_production_red::produce_output_off_bundle(
+            {control_plan_path, config_path, reference_path, binary_path, control_output},
+            control_result, error);
+        expect(ok, std::string("背景消费独立对照必须生成: ") + name + " " + error);
+        json rows = json::array();
+        if (!ok) return rows;
+        const auto control_manifest = json::parse(read_text(control_result.manifest_path));
+        std::istringstream input(read_text(control_output /
+            control_manifest["traces"][0]["relative_path"].get<std::string>()));
+        std::string control_line;
+        while (std::getline(input, control_line)) rows.push_back(json::parse(control_line));
+        return rows;
+    };
+    auto rigid_plan = plan;
+    rigid_plan["blocks"][0]["samples"][3]["box_width"] = 20.0;
+    const auto rigid_rows = produce_control_rows(rigid_plan, "rigid-control");
+    auto missing_plan = plan;
+    missing_plan["blocks"][0]["samples"][3].erase("background_motion_x");
+    const auto missing_rows = produce_control_rows(missing_plan, "missing-control");
+    expect(rigid_rows.size() == samples.size() && missing_rows.size() == samples.size(),
+           "刚体及缺背景对照必须覆盖相同原生帧序列");
+    if (rigid_rows.size() != samples.size() || missing_rows.size() != samples.size()) return;
     write_text(plan_path, plan.dump(2) + "\n");
     aim_production_red::ProduceResult result;
     const bool produced = aim_production_red::produce_output_off_bundle(
@@ -341,8 +368,26 @@ void test_producer_roundtrips_background_pair_and_consumption() {
                    "VALID 真零必须真正进入公开 Aim，不能仅报告回显或当成 MISSING");
         }
         if (index == 3) {
-            expect(control["background_motion_use"] == "OBSERVATION_UNAVAILABLE",
-                   "左右边异向时不能把有效背景标记为 observer 已消费");
+            const auto& rigid = rigid_rows[index]["controller_x"];
+            const auto& missing = missing_rows[index]["controller_x"];
+            const auto& box = row["observed_box"];
+            const auto& rigid_box = rigid_rows[index]["observed_box"];
+            const auto& previous_box = rigid_rows[index - 1]["observed_box"];
+            expect((box[0].get<double>() - previous_box[0].get<double>()) *
+                       (box[2].get<double>() - previous_box[2].get<double>()) < 0.0 &&
+                       std::fabs(box[0].get<double>() + box[2].get<double>() -
+                           rigid_box[0].get<double>() - rigid_box[2].get<double>()) < 0.00001,
+                   "对照必须实际覆盖左右异向且中心位移相同，不能因模拟相机反馈差异失去可比性");
+            const double velocity = control["observer_target_velocity_counts_per_second"];
+            expect(control["background_motion_use"] == "CONSUMED" &&
+                       rigid["background_motion_use"] == "CONSUMED" &&
+                       std::fabs(control["observer_camera_motion_source_pixels"].get<double>() + 0.25) < 0.00001 &&
+                       std::fabs(velocity - rigid["observer_target_velocity_counts_per_second"].get<double>()) < 0.00001 &&
+                       std::fabs(velocity - rigid_rows[index - 1]["controller_x"]["observer_target_velocity_counts_per_second"].get<double>()) > 0.00001,
+                   "异向边的对称宽度变化必须消费同源背景，observer 更新应与同历史刚体中心位移一致");
+            expect(missing["background_motion_use"] == "MISSING" &&
+                       std::fabs(velocity - missing["observer_target_velocity_counts_per_second"].get<double>()) > 0.00001,
+                   "有效背景必须改变 observer 后态，不能仅回显 CONSUMED 或沿用无背景模型");
         }
         if (index == 4 || index == 5 || index == 7) {
             expect(control["background_motion_use"] == "PAIR_MISMATCH",

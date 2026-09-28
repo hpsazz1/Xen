@@ -1285,6 +1285,12 @@ if(BUILD_TESTING)
     if(NOT XEN_POWERSHELL7_EXECUTABLE)
         message(FATAL_ERROR "PowerShell 7 executable not found: pwsh")
     endif()
+    set(XEN_WINDOWS_POWERSHELL
+        "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe")
+    if(NOT EXISTS "${XEN_WINDOWS_POWERSHELL}")
+        message(FATAL_ERROR
+            "Windows PowerShell 5 executable not found: ${XEN_WINDOWS_POWERSHELL}")
+    endif()
     find_program(XEN_PYTHON_EXECUTABLE NAMES python python3)
     if(NOT XEN_PYTHON_EXECUTABLE)
         message(FATAL_ERROR "Python executable not found: python or python3")
@@ -1744,7 +1750,9 @@ if(BUILD_TESTING)
     target_include_directories(auto_stop_preroll_tests PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
     add_test(NAME auto_stop_preroll_tests COMMAND auto_stop_preroll_tests)
     add_test(NAME auto_stop_counterpulse_cli_tests COMMAND "${XEN_PYTHON_EXECUTABLE}"
-        "${PROJECT_SOURCE_DIR}/tests/auto_stop_counterpulse_cli_tests.py" --executable "$<TARGET_FILE:auto_stop_counterpulse>")
+        "${PROJECT_SOURCE_DIR}/tests/auto_stop_counterpulse_cli_tests.py" --executable "$<TARGET_FILE:auto_stop_counterpulse>"
+        --powershell-executable "${XEN_POWERSHELL7_EXECUTABLE}"
+        --windows-powershell-executable "${XEN_WINDOWS_POWERSHELL}")
     add_test(NAME auto_stop_impacts_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/auto_stop_impacts_tests.py")
     add_test(NAME auto_stop_hud_analysis_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}"
@@ -1925,12 +1933,6 @@ if(BUILD_TESTING)
     target_link_libraries(app_startup_tests PRIVATE app_startup app_release)
     add_test(NAME app_startup_tests COMMAND app_startup_tests)
 
-    set(XEN_WINDOWS_POWERSHELL
-        "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe")
-    if(NOT EXISTS "${XEN_WINDOWS_POWERSHELL}")
-        message(FATAL_ERROR
-            "Windows PowerShell 5 executable not found: ${XEN_WINDOWS_POWERSHELL}")
-    endif()
     add_test(NAME mouse_effect_probe_prbs_design_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_prbs_design_tests.py")
@@ -2243,6 +2245,7 @@ if(BUILD_TESTING)
         -TestRoot "${CMAKE_BINARY_DIR}/release-bundle-tests")
     xen_add_windows_powershell_test(publish_worker_update_tests
         "${PROJECT_SOURCE_DIR}/scripts/test_publish_worker_update.ps1"
+        -GitExecutable "${GIT_EXECUTABLE}"
         -ManifestValidator "$<TARGET_FILE:release_contract_tests>"
         -TestRoot "${CMAKE_BINARY_DIR}/worker-update-tests")
     xen_add_windows_powershell_test(process_resource_sampling_tests
@@ -2437,7 +2440,8 @@ endif()
 
 if(BUILD_TESTING)
     add_test(NAME weapon_fire_test_cli_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
-        "${PROJECT_SOURCE_DIR}/tests/weapon_fire_test_cli_tests.py" --executable "$<TARGET_FILE:auto_stop_counterpulse>")
+        "${PROJECT_SOURCE_DIR}/tests/weapon_fire_test_cli_tests.py" --executable "$<TARGET_FILE:auto_stop_counterpulse>"
+        --powershell-executable "${XEN_WINDOWS_POWERSHELL}")
     # 同一专项一次构建依赖图，避免逐目标重复运行运行库部署前置步骤。
     add_custom_target(debug_workspace_validation DEPENDS xen_app auto_stop_counterpulse
         debug_workspace_ui_preview debug_runner_tests debug_session_tests debug_panel_tests recoil_editor_job_tests
