@@ -11,11 +11,10 @@
 </head>
 <body>
 <h1>素材审核</h1>
-<p>① 按原因筛选并查看框；② 勾选本页样本批量确认，疑难图点击放大调整；③ 填写审核者并导出，回 Xen「采集」页选择并导入决策文件。<br>自动建议不是已审核标签；空框可能漏检。页面不联网、不改原图，关闭前请导出草稿。导入决策文件可恢复进度。</p>
+<p>① 按原因筛选并查看框；② 勾选本页样本批量确认，疑难图点击放大调整；③ 导出结果，回 Xen「采集」页选择并导入决策文件。<br>自动建议不是已审核标签；空框可能漏检。页面不联网、不改原图，关闭前请导出草稿。导入决策文件可恢复进度。</p>
 <details><summary>标注规则：活体、负样本与倒地</summary><p>所有可见活体按原四类标注；遮挡、蹲低不等于死亡。确认已死亡的尸体不标为目标：整图无活体时可确认困难负样本，同框有活体时只标活体。倒地过渡或生死不明请参考前后图片；无法确定时排除并保留原图待复核。UI、菜单、损坏或域外图片应排除，不能当游戏负样本。页面不会根据姿态自动判死，也不会新增类别。预测一致也不等于正确；同一模型的 PT 与 ONNX 不构成独立验证。头框与身体框可合法包含，不按重叠直接删除。</p></details>
 <div id="message" class="notice" role="status">正在读取报告…</div>
 <div class="bar">
-<label>审核者 <input id="reviewer" placeholder="姓名或代号" maxlength="120"></label>
 <button id="export">导出决策 / 草稿</button><label>恢复草稿 <input id="import" type="file" accept=".json,application/json"></label>
 <span id="progress"></span><span id="summary" class="meta"></span>
 </div>
@@ -95,8 +94,7 @@ const XenReviewCore = (() => {
     if (state !== 'EXCLUDED' && changes.some(s => !loaded.has(key(s))))
       fail('所选图片尚未全部加载成功，请等待图片显示并逐页查看；读取失败时不能确认正负样本');
   }
-  function exportDraft(data, reviewer, decisions) {
-    if (!text(reviewer.trim())) fail('请填写审核者');
+  function exportDraft(data, decisions) {
     if (!decisions.size) fail('尚未明确处理任何样本');
     const lookup = new Map(data.samples.map(s => [key(s),s]));
     const samples = [...decisions.values()].map(d => {
@@ -104,10 +102,10 @@ const XenReviewCore = (() => {
       if (!source || source.image_sha256 !== d.image_sha256 || source.base_review_token !== d.base_review_token) fail('决策身份不匹配');
       return decision(source,d.state,d.detections,data.class_names);
     });
-    return {schema_version:1,format:'xen-native-review-v1',class_names:clone(data.class_names),reviewer:reviewer.trim(),root_identity:data.root_identity,samples};
+    return {schema_version:1,format:'xen-native-review-v1',class_names:clone(data.class_names),root_identity:data.root_identity,samples};
   }
   function importDraft(data, draft) {
-    if (draft.schema_version !== 1 || draft.format !== 'xen-native-review-v1' || draft.root_identity !== data.root_identity || JSON.stringify(draft.class_names) !== JSON.stringify(data.class_names) || !text(draft.reviewer?.trim()) || !Array.isArray(draft.samples)) fail('草稿与本报告的根目录身份、类别或格式不一致');
+    if (draft.schema_version !== 1 || draft.format !== 'xen-native-review-v1' || draft.root_identity !== data.root_identity || JSON.stringify(draft.class_names) !== JSON.stringify(data.class_names) || !Array.isArray(draft.samples)) fail('草稿与本报告的根目录身份、类别或格式不一致');
     const lookup = new Map(data.samples.map(s => [key(s),s]));
     const next = new Map();
     for (const d of draft.samples) {
@@ -172,7 +170,6 @@ if (typeof globalThis !== 'undefined') globalThis.XenReviewCore = XenReviewCore;
   const names={UNKNOWN:'未审核',VERIFIED_POSITIVE:'已确认正样本',VERIFIED_NEGATIVE:'已确认负样本',EXCLUDED:'已排除'};
   const el=(tag,text)=>{const e=document.createElement(tag);if(text!==undefined)e.textContent=text;return e;};
   const option=(value,label)=>{const e=el('option',label);e.value=value;return e;};
-  $('reviewer').value=typeof data.reviewer==='string'?data.reviewer:'';
   const duplicateGroups=C.duplicateGroups(data.samples);
   const groupLabels=new Map(duplicateGroups.map(g=>[g.value,g.label]));
   $('group').append(option('','全部'));
@@ -253,8 +250,8 @@ if (typeof globalThis !== 'undefined') globalThis.XenReviewCore = XenReviewCore;
   $('close-detail').onclick=closeDetail;$('detail').oncancel=e=>{e.preventDefault();closeDetail();};
   function commitDetail(state){safely(()=>{if(!imageReady)throw new Error('请先加载图片');const d=C.decision(active,state,draft,data.class_names);if(active.state!=='UNKNOWN'&&!confirm('此图已有审核，确认更新？'))return;decisions.set(C.key(active),d);dirty=false;$('detail').close();active=null;render();message('此图已明确处理，请导出保存。');});}
   $('detail-positive').onclick=()=>commitDetail('VERIFIED_POSITIVE');$('detail-negative').onclick=()=>commitDetail('VERIFIED_NEGATIVE');$('detail-exclude').onclick=()=>commitDetail('EXCLUDED');
-  $('export').onclick=()=>safely(()=>{const result=C.exportDraft(data,$('reviewer').value,decisions);const url=URL.createObjectURL(new Blob([JSON.stringify(result,null,2)],{type:'application/json'}));const a=el('a');a.href=url;a.download='review-decisions.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message('已请求下载 review-decisions.json。请回 Xen 采集页选择该文件并导入；页面导出不等于已经导入。');});
-  $('import').onchange=async()=>{const f=$('import').files[0];if(!f)return;try{if(f.size>32*1024*1024)throw new Error('草稿文件超过32MiB，拒绝读取');const parsed=JSON.parse(await f.text()),next=C.importDraft(data,parsed);if(decisions.size&&!confirm('用导入草稿替换本页未导出的处理记录？'))return;decisions=next;$('reviewer').value=parsed.reviewer;refreshRows();message(`已恢复 ${next.size} 项明确决定，未覆盖报告原件。`);}catch(e){message(e.message,true);}finally{$('import').value='';}};
+  $('export').onclick=()=>safely(()=>{const result=C.exportDraft(data,decisions);const url=URL.createObjectURL(new Blob([JSON.stringify(result,null,2)],{type:'application/json'}));const a=el('a');a.href=url;a.download='review-decisions.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message('已请求下载 review-decisions.json。请回 Xen 采集页选择该文件并导入；页面导出不等于已经导入。');});
+  $('import').onchange=async()=>{const f=$('import').files[0];if(!f)return;try{if(f.size>32*1024*1024)throw new Error('草稿文件超过32MiB，拒绝读取');const parsed=JSON.parse(await f.text()),next=C.importDraft(data,parsed);if(decisions.size&&!confirm('用导入草稿替换本页未导出的处理记录？'))return;decisions=next;refreshRows();message(`已恢复 ${next.size} 项明确决定，未覆盖报告原件。`);}catch(e){message(e.message,true);}finally{$('import').value='';}};
   window.addEventListener('beforeunload',e=>{if(decisions.size||dirty){e.preventDefault();e.returnValue='';}});
   render();message('报告已就绪。优先复核异常样本；批量操作只作用于当前页勾选项。');
 })();

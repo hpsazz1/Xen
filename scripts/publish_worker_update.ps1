@@ -1,6 +1,6 @@
 ﻿param(
     [Parameter(Mandatory = $true)][string]$BasePackagePath,
-    [Parameter(Mandatory = $true)][string]$BuildDirectory,
+    [string]$BuildDirectory = '',
     [Parameter(Mandatory = $true)][ValidateSet('nvidia', 'directml', 'openvino')][string]$Runtime,
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
     [string]$RepositoryRoot = (Split-Path -Parent $PSScriptRoot),
@@ -17,11 +17,20 @@
     [switch]$IncludeHudAcceptanceScript,
     [switch]$IncludeSoakAcceptanceTools,
     [switch]$IncludeModelDataReview,
+    [switch]$ModelDataReviewOnly,
     [switch]$ChangesOnly
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if ($ModelDataReviewOnly) {
+    if (-not $ChangesOnly -or $IncludeLauncher -or $IncludeRecoilTools -or $IncludeRecoilMigrationScripts -or
+        $IncludeSourceSessionScript -or $IncludeHudAcceptanceScript -or $IncludeSoakAcceptanceTools -or
+        $SourceContextExecutable -or $ConfigPath -or $WorkspaceSettingsPath -or $PackageNotesPath -or $ManualAcceptancePath) {
+        throw '仅审核资源模式只能生成两项审核资源的差量。'
+    }
+    $IncludeModelDataReview = $true
+}
 if ($IncludeSoakAcceptanceTools) {
     # 长稳入口依赖这两个既有脚本，显式选中工具组时一并更新；不选源工具EXE。
     $IncludeHudAcceptanceScript = $true
@@ -63,9 +72,10 @@ function Resolve-UpdatePayload([string]$Root, [string]$Relative, [bool]$CheckPat
 }
 
 $baseRoot = (Resolve-Path -LiteralPath $BasePackagePath).ProviderPath.TrimEnd('\')
-$buildRoot = (Resolve-Path -LiteralPath $BuildDirectory).ProviderPath.TrimEnd('\')
+$buildRoot = ''
+if (-not $ModelDataReviewOnly) { $buildRoot = (Resolve-Path -LiteralPath $BuildDirectory).ProviderPath.TrimEnd('\') }
 $sourceRoot = (Resolve-Path -LiteralPath $RepositoryRoot).ProviderPath.TrimEnd('\')
-foreach ($root in @($baseRoot, $buildRoot, $sourceRoot)) {
+foreach ($root in @($baseRoot, $sourceRoot) + @($buildRoot | Where-Object { $_ })) {
     Assert-XenNoReparsePathChain $root '输入目录' -RequireExistingLeaf
     if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw '输入根必须为目录。' }
 }
@@ -84,6 +94,7 @@ $commit = (& $GitExecutable -C $sourceRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-fA-F]{40}$') { throw '无法核对源码提交。' }
 $dirty = @(& $GitExecutable -C $sourceRoot status --porcelain)
 if ($LASTEXITCODE -ne 0 -or $dirty.Count -ne 0) { throw '发布构建源码必须干净。' }
+if (-not $ModelDataReviewOnly) {
 $identityPath = Join-Path $buildRoot 'xen-build-identity.json'
 $identity = Read-UpdateJson $identityPath
 $identityHash = (Get-FileHash -LiteralPath $identityPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -96,6 +107,7 @@ if ($identity.schema -ne 1 -or $identity.git_dirty -isnot [bool] -or
 $workerPath = Resolve-UpdateFile (Join-Path $buildRoot 'Release\Xen.exe')
 $workerHash = (Get-FileHash -LiteralPath $workerPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $workerLength = (Get-Item -LiteralPath $workerPath).Length
+}
 $sourceToolRelative = 'tools/source/xen_source_context.exe'
 $sourceToolPath = ''
 $sourceToolHash = ''
@@ -152,7 +164,8 @@ foreach ($route in $manifest.runtimes) {
         $records[[string]$route.executable].runtime -cne $route.id) { throw '基包 Worker 归属无效。' }
 }
 $workerRelative = "runtimes/$Runtime/Xen.exe"
-$overrides = @{ $workerRelative = $workerPath }
+$overrides = @{}
+if (-not $ModelDataReviewOnly) { $overrides[$workerRelative] = $workerPath }
 $sourceScriptRelative = 'tools/source/start_source_context_session.ps1'
 $sourceScriptHash = ''
 if ($IncludeSourceSessionScript) {
@@ -278,6 +291,9 @@ try {
             if ($recoilScriptHashes.ContainsKey($relative) -and $sourceHash -cne $recoilScriptHashes[$relative]) {
                 throw '压枪迁移脚本在发布期间变化。'
             }
+            if ($modelReviewHashes.ContainsKey($relative) -and $sourceHash -cne $modelReviewHashes[$relative]) {
+                throw '审核资源在发布期间变化。'
+            }
             $record.size = [long]$length
             $record.sha256 = $sourceHash
             $record.source = if ($relative -in @($workerRelative, $sourceToolRelative, $sourceScriptRelative, $hudScriptRelative) -or $recoilToolHashes.ContainsKey($relative) -or $recoilScriptHashes.ContainsKey($relative)) { "$source@$commit" } else { $source }
@@ -293,9 +309,10 @@ try {
     if ($LASTEXITCODE -ne 0 -or $finalCommit -cne $commit) { throw '源码提交在发布期间变化。' }
     $finalDirty = @(& $GitExecutable -C $sourceRoot status --porcelain)
     if ($LASTEXITCODE -ne 0 -or $finalDirty.Count -ne 0 -or
-        (Get-FileHash -LiteralPath $identityPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $identityHash) {
+        (-not $ModelDataReviewOnly -and (Get-FileHash -LiteralPath $identityPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $identityHash)) {
         throw '源码或构建身份在发布期间变化。'
     }
+    if (-not $ModelDataReviewOnly) {
     $baseIdentity = [ordered]@{
         path = $baseRoot; git_commit = [string]$manifest.git_commit; manifest_sha256 = $baseManifestHash
     }
@@ -362,6 +379,10 @@ try {
     $manifest.files = @($manifest.files | Where-Object {
         ([string]$_.path).Replace('\', '/') -ine $evidenceRelative
     }) + @($evidenceRecord)
+    } else {
+        # 保留包与 Worker 的原始构建身份，仅资源来源记录当前提交。
+        foreach ($relative in $overrides.Keys) { $records[$relative].source = "$($overrides[$relative])@$commit" }
+    }
     $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $incoming 'manifest.json') -Encoding UTF8
     $null = Read-UpdateJson (Join-Path $incoming 'manifest.json')
     $null = Resolve-XenDirectChildPath $outputParent $incomingName '改名前暂存目录'
@@ -369,7 +390,9 @@ try {
     if (Test-Path -LiteralPath $outputPath) { throw '正式目录在发布期间出现，拒绝覆盖。' }
     Rename-Item -LiteralPath $incoming -NewName $outputName
     $ownedIncoming = $false
-    if ($ChangesOnly) {
+    if ($ModelDataReviewOnly) {
+        Write-Host "仅审核资源差量暂存已准备：$outputPath"
+    } elseif ($ChangesOnly) {
         Write-Host "单 Worker 差量暂存已准备：$outputPath"
     } else {
         Write-Host "单 Worker 继承包已准备：$outputPath"

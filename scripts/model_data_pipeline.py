@@ -288,12 +288,12 @@ def review_export(ctx):
     (output / "obj.names").write_text("\n".join(names) + "\n", encoding="utf-8")
     (output / "train.txt").write_text("\n".join(paths) + "\n", encoding="utf-8")
     (output / "obj.data").write_text(f"classes = {len(names)}\ntrain = train.txt\nnames = obj.names\nbackup = backup/\n", encoding="utf-8")
-    write_json(output / "review.json", dict(schema_version=SCHEMA, class_names=names, reviewer="", samples=entries))
+    write_json(output / "review.json", dict(schema_version=SCHEMA, class_names=names, samples=entries))
     with zipfile.ZipFile(output / "cvat_yolo.zip", "w", zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(output.rglob("*")):
             if path.is_file() and path.name not in {"cvat_yolo.zip", "review.json"}:
                 archive.write(path, path.relative_to(output).as_posix())
-    return dict(output=str(output), review_manifest=str(output / "review.json"), samples=len(entries), instruction="在 CVAT 审核后将 YOLO txt 放回对应路径；填写 reviewer，并逐图设置 VERIFIED_POSITIVE/VERIFIED_NEGATIVE/EXCLUDED，再导入 review.json。UNKNOWN 不会被导入。")
+    return dict(output=str(output), review_manifest=str(output / "review.json"), samples=len(entries), instruction="在 CVAT 审核后将 YOLO txt 放回对应路径；逐图设置 VERIFIED_POSITIVE/VERIFIED_NEGATIVE/EXCLUDED，再导入 review.json。UNKNOWN 不会被导入。")
 
 
 def stable_json_hash(value):
@@ -450,7 +450,7 @@ def review_curate(ctx):
     summary = dict(original_count=len(entries), exact_unique_count=len(exact),
                    near_duplicate_group_count=len(near_groups),
                    near_duplicate_scope="最近64个不同图像代表的缩略图提示；不是独立场景数量")
-    payload = dict(schema_version=SCHEMA, class_names=names, reviewer="", summary=summary,
+    payload = dict(schema_version=SCHEMA, class_names=names, summary=summary,
                    root_identity=review_root_identity(ctx.job["root"], names), samples=entries)
     report = dict(payload, policy=dict(version=1, low_confidence=0.5, overlap_iou=0.7,
                                       match_iou=0.5, position_iou=0.8, near_thumbnail_mad=2,
@@ -510,8 +510,8 @@ def import_labels(ctx):
     job.pop("session", None)
     names, samples = load_samples(Context(job, cancel=ctx.cancel))
     manifest = read_json(manifest_path)
-    if manifest.get("schema_version") != SCHEMA or manifest.get("class_names") != names or (not isinstance(manifest.get("reviewer"), str) or not manifest["reviewer"].strip()):
-        raise PipelineError("审核 manifest schema 不匹配或未填写 reviewer")
+    if manifest.get("schema_version") != SCHEMA or manifest.get("class_names") != names:
+        raise PipelineError("审核 manifest schema 或类别不匹配")
     native = manifest.get("format") == "xen-native-review-v1"
     if manifest.get("format") not in (None, "xen-native-review-v1"):
         raise PipelineError("未知审核格式")
@@ -546,7 +546,7 @@ def import_labels(ctx):
         if not accepted:
             raise PipelineError("没有明确人工审核的样本；UNKNOWN 不能训练")
         ctx.check()
-        return append_review_revision(directory, names, manifest["reviewer"], manifest_path, accepted)
+        return append_review_revision(directory, names, manifest.get("reviewer", ""), manifest_path, accepted)
 
 
 def check_leakage(entries):

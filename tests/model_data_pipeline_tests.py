@@ -54,7 +54,6 @@ class PipelineTests(unittest.TestCase):
         output = self.base / "review"
         pipeline.review_export(self.context("review_export", output=str(output)))
         manifest = pipeline.read_json(output / "review.json")
-        manifest["reviewer"] = "专项测试审核员"
         for item in manifest["samples"]:
             item["state"] = "VERIFIED_POSITIVE" if item["sample_id"] == "1" else "VERIFIED_NEGATIVE"
         pipeline.write_json(output / "review.json", manifest)

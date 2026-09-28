@@ -363,6 +363,42 @@ try {
     & $apply -PackageRoot $baseRoot -StageName $deltaName
     Remove-Item Function:Get-Process
     Assert-ProductionManifest $baseRoot -MutableFilesMayDiffer
+    $reviewName = ".worker-delta-$([guid]::NewGuid().ToString('N'))"
+    $reviewOutput = Join-Path $runRoot $reviewName
+    $reviewParameters = @{ BasePackagePath = $baseRoot; Runtime = 'nvidia'; RepositoryRoot = $sourceRoot
+        GitExecutable = $git; OutputDirectory = $reviewOutput; ChangesOnly = $true; ModelDataReviewOnly = $true }
+    $forbiddenReview = $reviewParameters.Clone()
+    $forbiddenReview.IncludeLauncher = $true
+    Assert-UpdateReject $forbiddenReview '仅审核资源模式拒绝混入二进制'
+    & $publisher @reviewParameters
+    Assert-UpdateTest (@(Get-ChildItem -LiteralPath $reviewOutput -Recurse -File).Count -eq 3) '无构建目录生成两资源和manifest'
+    $reviewManifest = Get-Content -LiteralPath (Join-Path $reviewOutput 'manifest.json') -Raw | ConvertFrom-Json
+    foreach ($tool in @('model_data_pipeline.py', 'model_data_review.html')) {
+        $reviewRecord = @($reviewManifest.files | Where-Object { $_.path -ceq "tools/model-data/$tool" })
+        Assert-UpdateTest ($reviewRecord.Count -eq 1 -and $reviewRecord[0].source.EndsWith("@$commit")) '仅审核资源的manifest来源绑定当前源码提交'
+    }
+    $priorReviewManifest = Get-Content -LiteralPath (Join-Path $baseRoot 'manifest.json') -Raw | ConvertFrom-Json
+    Assert-UpdateTest ($reviewManifest.git_commit -ceq $priorReviewManifest.git_commit) '仅审核资源保留包构建提交'
+    $reviewStage = Join-Path $baseRoot $reviewName
+    [IO.Directory]::Move($reviewOutput, $reviewStage)
+    $reviewEntries = @()
+    foreach ($relative in @('tools/model-data/model_data_pipeline.py', 'tools/model-data/model_data_review.html', 'manifest.json')) {
+        $reviewEntries += [ordered]@{ path = $relative
+            old_sha256 = (Get-FileHash -LiteralPath (Join-Path $baseRoot $relative)).Hash.ToLowerInvariant()
+            new_sha256 = (Get-FileHash -LiteralPath (Join-Path $reviewStage $relative)).Hash.ToLowerInvariant() }
+    }
+    [ordered]@{ schema = 1; runtime = 'nvidia'; model_data_review_only = $true; files = $reviewEntries; protected_files = $protected } |
+        ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $reviewStage 'delta.json') -Encoding UTF8
+    $oldWorkerEvidence = [IO.File]::ReadAllText((Join-Path $baseRoot 'tools/acceptance/WORKER-UPDATE.json'))
+    # 独占锁证明仅资源发布完全不读取或重哈希既有 Worker。
+    function Get-Process { param($Name, $ErrorAction); return @() }
+    $workerGuard = [IO.File]::Open((Join-Path $baseRoot 'runtimes/nvidia/Xen.exe'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+    try {
+        & $apply -PackageRoot $baseRoot -StageName $reviewName -CheckOnly
+        & $apply -PackageRoot $baseRoot -StageName $reviewName
+    } finally { $workerGuard.Dispose(); Remove-Item Function:Get-Process }
+    Assert-UpdateTest ([IO.File]::ReadAllText((Join-Path $baseRoot 'tools/acceptance/WORKER-UPDATE.json')) -ceq $oldWorkerEvidence) '审核资源差量保留Worker构建证据'
+    Assert-ProductionManifest $baseRoot -MutableFilesMayDiffer
     Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $baseRoot 'tools/source/xen_source_context.exe') -Raw) -ceq 'updated-source-context-fixture') '选中桥接工具已更新'
     Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $baseRoot 'tools/source/start_source_context_session.ps1') -Raw) -ceq 'updated-source-session-script') '选中源启动脚本已更新'
     $deltaEvidence = Get-Content -LiteralPath (Join-Path $baseRoot 'tools/acceptance/WORKER-UPDATE.json') -Raw -Encoding UTF8 | ConvertFrom-Json

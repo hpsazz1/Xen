@@ -12,6 +12,11 @@ if ($StageName -notmatch '^\.worker-delta-[0-9a-f]{32}$') { throw '差量暂存�
 $packet = Get-Content -LiteralPath (Join-Path $stage 'delta.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($packet.schema -ne 1 -or $packet.runtime -notin @('nvidia', 'directml', 'openvino')) { throw '差量协议无效。' }
 $workerRelative = "runtimes/$($packet.runtime)/Xen.exe"
+$reviewOnly = $false
+if ($packet.PSObject.Properties.Name -contains 'model_data_review_only') {
+    if ($packet.model_data_review_only -isnot [bool]) { throw '审核资源差量标志无效。' }
+    $reviewOnly = $packet.model_data_review_only
+}
 $recoilTools = @("runtimes/$($packet.runtime)/xen_recoil_calibration.exe", "runtimes/$($packet.runtime)/xen_recoil_tuner.exe")
 $allowed = @($workerRelative, 'tools/acceptance/WORKER-UPDATE.json',
     'tools/model-data/model_data_pipeline.py', 'tools/model-data/model_data_review.html',
@@ -21,6 +26,7 @@ $allowed = @($workerRelative, 'tools/acceptance/WORKER-UPDATE.json',
     'tools/source/xen_source_context.exe', 'tools/source/start_source_context_session.ps1', 'XenLauncher.exe', 'manifest.json',
     'tools/recoil/import_recoil_profiles.py', 'tools/recoil/migrate_legacy_recoil_profiles.py',
     'tools/recoil/invoke_recoil_legacy_acceptance.ps1') + $recoilTools
+if ($reviewOnly) { $allowed = @('tools/model-data/model_data_pipeline.py', 'tools/model-data/model_data_review.html', 'manifest.json') }
 function Resolve-DeltaFile([string]$Base, [string]$Relative) {
     if ($Relative -cnotin $allowed -and $Relative -cnotin @('config.ini', 'cache/model-workspace/settings.json')) {
         throw '差量文件不在允许集合。'
@@ -48,6 +54,7 @@ function Assert-WorkerStopped {
         }
     }
     # 同时拒绝不能独占打开的目标 Worker，避免未列入进程快照的已加载映像。
+    if ($reviewOnly) { return }
     $worker = Resolve-DeltaFile $root $workerRelative
     $handle = [IO.File]::Open($worker, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
     $handle.Dispose()
@@ -72,12 +79,28 @@ foreach ($entry in $packet.files) {
         throw "差量新文件或既有基线 SHA 不一致：$($entry.path)"
     }
 }
-foreach ($required in @($workerRelative, 'manifest.json', 'tools/acceptance/WORKER-UPDATE.json')) {
+$requiredFiles = @($workerRelative, 'manifest.json', 'tools/acceptance/WORKER-UPDATE.json')
+if ($reviewOnly) { $requiredFiles = $allowed }
+foreach ($required in $requiredFiles) {
     if (-not $seen.Contains($required)) { throw '差量缺少必需载荷。' }
 }
 $manifest = Get-Content -LiteralPath (Join-Path $stage 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 if (@($manifest.PSObject.Properties.Name).Count -ne 5 -or $manifest.schema -ne 1 -or $manifest.product -cne 'Xen') {
     throw '差量 manifest 不符合生产五字段合同。'
+}
+if ($reviewOnly) {
+    $oldManifest = Get-Content -LiteralPath (Join-Path $root 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($manifest.git_commit -cne $oldManifest.git_commit -or
+        (ConvertTo-Json -InputObject @($manifest.runtimes) -Depth 20 -Compress) -cne
+        (ConvertTo-Json -InputObject @($oldManifest.runtimes) -Depth 20 -Compress)) {
+        throw '审核资源差量不得改变 Worker 构建身份或运行时路由。'
+    }
+    $oldInherited = @($oldManifest.files | Where-Object { $_.path -cnotin $allowed })
+    $newInherited = @($manifest.files | Where-Object { $_.path -cnotin $allowed })
+    if ((ConvertTo-Json -InputObject $oldInherited -Depth 20 -Compress) -cne
+        (ConvertTo-Json -InputObject $newInherited -Depth 20 -Compress)) {
+        throw '审核资源差量不得修改其他文件记录。'
+    }
 }
 foreach ($entry in $packet.files) {
     if ($entry.path -ceq 'manifest.json') { continue }
@@ -124,7 +147,7 @@ try {
         if ((Get-DeltaHash $target) -cne $entry.new_sha256) { throw '差量替换后 SHA 回读失败。' }
     }
     Assert-ProtectedFiles
-    Write-Host 'Worker 差量本地替换完成；用户配置及工作区设置保持原字节。'
+    Write-Host '差量本地替换完成；用户配置及工作区设置保持原字节。'
 } catch {
     for ($index = $applied.Count - 1; $index -ge 0; $index--) {
         $entry = $applied[$index]

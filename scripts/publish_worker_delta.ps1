@@ -1,6 +1,6 @@
 ﻿param(
     [Parameter(Mandatory = $true)][string]$PackageRoot,
-    [Parameter(Mandatory = $true)][string]$BuildDirectory,
+    [string]$BuildDirectory = '',
     [Parameter(Mandatory = $true)][ValidateSet('nvidia', 'directml', 'openvino')][string]$Runtime,
     [Parameter(Mandatory = $true)][string]$DestinationRoot,
     [Parameter(Mandatory = $true)][string]$RemotePackageRoot,
@@ -15,6 +15,7 @@
     [switch]$IncludeHudAcceptanceScript,
     [switch]$IncludeSoakAcceptanceTools,
     [switch]$IncludeModelDataReview,
+    [switch]$ModelDataReviewOnly,
     [string]$SourceContextExecutable = '',
     [string]$SshIdentityFile = (Join-Path $env:USERPROFILE '.ssh\xen_foxos_ed25519'),
     [string]$KnownHostsFile = (Join-Path $env:USERPROFILE '.ssh\known_hosts'),
@@ -23,6 +24,7 @@
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if ($ModelDataReviewOnly) { $IncludeModelDataReview = $true }
 if ($IncludeSoakAcceptanceTools) {
     $IncludeHudAcceptanceScript = $true
     $IncludeSourceSessionScript = $true
@@ -69,7 +71,7 @@ function Write-PublishPacket([string]$Stage, [string]$Target, [string[]]$Relativ
     foreach ($relative in @('config.ini', 'cache/model-workspace/settings.json')) {
         $protected += [ordered]@{ path = $relative; sha256 = Get-PublishHash (Join-Path $Target $relative) }
     }
-    [ordered]@{ schema = 1; runtime = $Runtime; files = $files; protected_files = $protected } |
+    [ordered]@{ schema = 1; runtime = $Runtime; model_data_review_only = [bool]$ModelDataReviewOnly; files = $files; protected_files = $protected } |
         ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $Stage 'delta.json') -Encoding UTF8
 }
 function Invoke-RemoteApply([bool]$CheckOnly) {
@@ -91,12 +93,13 @@ try {
         -IncludeSourceSessionScript:$IncludeSourceSessionScript `
         -IncludeHudAcceptanceScript:$IncludeHudAcceptanceScript `
         -IncludeSoakAcceptanceTools:$IncludeSoakAcceptanceTools `
-        -IncludeModelDataReview:$IncludeModelDataReview
+        -IncludeModelDataReview:$IncludeModelDataReview -ModelDataReviewOnly:$ModelDataReviewOnly
     $ownedStages.Add([pscustomobject]@{ parent = (Split-Path -Parent $localRoot); name = $stageName })
     $null = Resolve-XenDirectChildPath $localRoot $stageName '移入主机包前暂存'
     [IO.Directory]::Move($generated, $localStage)
     $ownedStages.Add([pscustomobject]@{ parent = $localRoot; name = $stageName })
     $relativeFiles = @("runtimes/$Runtime/Xen.exe", 'tools/acceptance/WORKER-UPDATE.json', 'manifest.json')
+    if ($ModelDataReviewOnly) { $relativeFiles = @('manifest.json') }
     if ($IncludeLauncher) { $relativeFiles += 'XenLauncher.exe' }
     if ($IncludeRecoilTools) {
         $relativeFiles += @("runtimes/$Runtime/xen_recoil_calibration.exe", "runtimes/$Runtime/xen_recoil_tuner.exe")
@@ -160,7 +163,8 @@ try {
         }
     }
     $completed = $true
-    Write-Host '主辅机 Worker 差量更新完成；未复制未变化 Worker、模型、DLL，未覆盖用户配置。'
+    if ($ModelDataReviewOnly) { Write-Host '主辅机审核资源差量更新完成；仅两项资源及 manifest，未读取或传输 Worker、模型、DLL。' }
+    else { Write-Host '主辅机 Worker 差量更新完成；未复制未变化 Worker、模型、DLL，未覆盖用户配置。' }
 } finally {
     Write-Progress -Activity 'SMB 传输变化 Worker 与说明' -Completed
     foreach ($owned in $ownedStages) {

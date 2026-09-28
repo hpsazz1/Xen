@@ -23,7 +23,7 @@ class ReviewTests(unittest.TestCase):
         for item in items:
             item['state'] = 'VERIFIED_POSITIVE' if item['detections'] else 'VERIFIED_NEGATIVE'
         return dict(format='xen-native-review-v1', schema_version=1, class_names=self.names,
-                    reviewer='测试审核员', root_identity=report['root_identity'], samples=items)
+                    root_identity=report['root_identity'], samples=items)
 
     def apply(self, manifest):
         path = self.base / 'decisions.json'
