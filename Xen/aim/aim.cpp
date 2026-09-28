@@ -3025,6 +3025,19 @@ struct Aim::Impl {
                 current_horizontal_aim_x(track) - center_x,
                 track.aim_y - center_y);
         };
+        const auto within_active_range = [&](const Track& track) {
+            // 当前实测框已进入圆内时，贴脸截断造成的高位瞄点不应阻止接管。
+            // 滑行轨迹仍按瞄点判门，不能凭旧大框延续额外控制资格。
+            if (!track.predicted && track.matched_observation_valid) {
+                const float nearest_x = std::clamp(center_x,
+                    track.matched_observation_x1, track.matched_observation_x2);
+                const float nearest_y = std::clamp(center_y,
+                    track.matched_observation_y1, track.matched_observation_y2);
+                return std::hypot(nearest_x - center_x, nearest_y - center_y) <=
+                    active_range_radius;
+            }
+            return range_distance(track) <= active_range_radius;
+        };
 
         Track* current = nullptr;
         for (auto& track : tracks) {
@@ -3061,7 +3074,7 @@ struct Aim::Impl {
             // 外推分数暂时更优就切换锁定。动态范围仅筛选挑战者和控制，
             // 所有轨迹仍已在前序观测/估计阶段完整更新。
             if (!track.predicted &&
-                range_distance(track) <= active_range_radius &&
+                within_active_range(track) &&
                 value < best_score) {
                 best = &track;
                 best_score = value;
@@ -3074,12 +3087,12 @@ struct Aim::Impl {
             leading_frames = 0;
             if (best) {
                 range_allows_control =
-                    range_distance(*best) <= active_range_radius;
+                    within_active_range(*best);
             }
             return best;
         }
         range_allows_control =
-            range_distance(*current) <= active_range_radius;
+            within_active_range(*current);
         if (!best || best->id == current->id || switch_cooldown > 0 ||
             best_score >= current_score * (1.0f - config.switch_margin)) {
             leading_track_id = 0;
@@ -3098,7 +3111,7 @@ struct Aim::Impl {
             leading_frames = 0;
             switch_cooldown = config.switch_cooldown_frames;
             range_allows_control =
-                range_distance(*best) <= active_range_radius;
+                within_active_range(*best);
             return best;
         }
         return current;

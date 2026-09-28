@@ -4238,6 +4238,70 @@ void test_prediction_lead_can_leave_box_with_bounded_distance() {
     }
 }
 
+void test_close_observed_boxes_intersect_control_range() {
+    AimConfig config;
+    config.person_class_ids = {0, 2};
+    config.head_class_ids = {1, 3};
+    config.acquisition_range_percent = 90.0f;
+    config.body_aim_height_ratio = 0.16f;
+    config.body_aim_range_percent = 50.0f;
+    const auto base = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    const auto observe = [&](Aim& aim, const std::vector<Detection>& detections) {
+        AimResult result;
+        for (int index = 0; index < 2; ++index) {
+            auto frame = make_frame(index + 1, base + std::chrono::milliseconds(index * 10));
+            frame.lock_active = true;
+            frame.detections = detections;
+            result = aim.process(frame);
+        }
+        return result;
+    };
+
+    // 本场采集 1301 的完整检测帧；重复两帧仅用于确认轨迹，不伪称原现场连续帧。
+    const Detection sample1301{0.0f, 0.0f, 114.0f, 281.0f, 0.3740234375f, 2};
+    Aim single(config);
+    const auto first = observe(single, {sample1301});
+    expect(first.has_target && first.range_allows_control && first.control.evaluated,
+           "真实完整帧1301：贴脸身体与范围圆相交时，瞄点在圆外仍须允许控制");
+    if (first.has_target) {
+        expect(std::fabs(first.target.base_aim_x - 57.0f) < 0.001f &&
+                   std::fabs(first.target.base_aim_y - 44.96f) < 0.001f,
+               "范围几何修复不得把真实帧1301的瞄点改成框边缘");
+    }
+    auto lost = make_frame(3, base + std::chrono::milliseconds(20));
+    lost.lock_active = true;
+    const auto coast = single.process(lost);
+    expect(!coast.range_allows_control && !coast.has_command,
+           "丢失观测的旧大框不得继续借助框相交取得圆外控制资格");
+
+    Aim pair(config);
+    const auto second = observe(pair, {
+        {0.0f, 0.0f, 56.40625f, 206.25f, 0.381591796875f, 2},
+        {226.0f, 1.25f, 320.0f, 278.5f, 0.30224609375f, 2}});
+    expect(second.has_target && second.range_allows_control && second.control.evaluated,
+           "真实完整帧1563：两个部分可见身体的瞄点均出圆，仍须从相交框选择目标");
+
+    // 1074 的单框隔离反例；完整帧另有圈内身体，不能据此声称当时整体无目标。
+    Aim containing(config);
+    expect(observe(containing, {{134.25f, 0.0f, 320.0f, 191.25f, 0.361572265625f, 2}})
+               .range_allows_control,
+           "真实框1074：身体已覆盖准星时不能仅因高位瞄点在圆外而拒绝");
+
+    Aim tangent(config);
+    expect(observe(tangent, {{304.0f, 150.0f, 320.0f, 200.0f, 0.9f, 2}}).range_allows_control,
+           "身体框与范围圆相切时应允许控制");
+    for (const auto& rejected : std::vector<Detection>{
+            {305.0f, 150.0f, 319.0f, 200.0f, 0.9f, 2},
+            {270.0f, 270.0f, 320.0f, 320.0f, 0.9f, 2},
+            {0.0f, 0.0f, 114.0f, 281.0f, 0.09f, 2},
+            {0.0f, 0.0f, 114.0f, 281.0f, 0.9f, 99}}) {
+        Aim negative(config);
+        const auto result = observe(negative, {rejected});
+        expect(!result.has_target && !result.range_allows_control && !result.has_command,
+               "范围完全分离、角落不相交、弱置信度与未选类别必须继续拒绝");
+    }
+}
+
 void test_dynamic_control_range_does_not_reduce_observation() {
     AimConfig config;
     config.min_confirmed_hits = 1;
@@ -17581,6 +17645,7 @@ int main() {
     test_loss_prediction_does_not_compound_time();
     test_observation_age_adds_bounded_lead();
     test_prediction_lead_can_leave_box_with_bounded_distance();
+    test_close_observed_boxes_intersect_control_range();
     test_dynamic_control_range_does_not_reduce_observation();
     test_prediction_hysteresis_avoids_crosshair_oscillation();
     test_delayed_prediction_reentry_uses_elapsed_time();

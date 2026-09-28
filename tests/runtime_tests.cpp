@@ -162,6 +162,59 @@ void test_auto_stop_permits_follow_actual_aim_selection() {
         "准星离开当前有效目标只撤销首次准入，仍保留跟踪期限");
 }
 
+void test_close_target_auto_stop_admission_keeps_crosshair_gate() {
+    using Clock = std::chrono::steady_clock;
+    using namespace std::chrono_literals;
+    AimConfig config;
+    config.person_class_ids = {0, 2};
+    config.head_class_ids = {1, 3};
+    config.min_confirmed_hits = 2;
+    config.acquisition_range_percent = 90.0f;
+    config.body_aim_height_ratio = 0.16f;
+    config.body_aim_range_percent = 50.0f;
+    const auto check = [&](Detection detection, bool contains_crosshair) {
+        Aim aim(config);
+        AimFrame frame;
+        frame.roi_width = frame.roi_height = 320;
+        frame.control_center_x = frame.control_center_y = 160;
+        frame.observation_epoch = 1;
+        frame.lock_active = false;
+        frame.detections = {detection};
+        AimResult selected;
+        // 重复真实检测框确认轨迹，属于离线合成连续输入，不是原现场连续帧。
+        for (int index = 0; index < 2; ++index) {
+            frame.sequence = index + 1;
+            frame.captured_at = Clock::time_point{1s} + index * 10ms;
+            frame.control_at = frame.captured_at + 1ms;
+            selected = aim.process(frame);
+        }
+        FrameTiming timing;
+        timing.source_time_timing_valid = true;
+        timing.source_clock_uncertainty_ms = 1.0;
+        timing.source_time_at = frame.captured_at;
+        timing.sequence = frame.sequence;
+        const auto permits = runtime::detail::auto_stop_target_permits(
+            frame, selected, config, timing, frame.control_at);
+        // lock_active=false仍计算候选命令；物理发送由Runtime另行门禁，不能要求has_command=false。
+        expect(selected.status == AimStatus::SUCCESS && selected.has_target && !frame.lock_active,
+            "未持Aim键时真实Aim仍须获取近距目标，急停许可不应依赖锁定状态");
+        expect(permits.tracking_until > frame.control_at,
+            "近距框与FOV相交后应建立有效目标保持期限");
+        if (contains_crosshair) {
+            expect(permits.admission_until > frame.control_at && permits.reason == AutoStopBlockReason::NONE,
+                "1074单框覆盖准星，不能因高位瞄点出圈阻止首次急停准入");
+        } else {
+            expect(permits.admission_until == Clock::time_point{} &&
+                       permits.reason == AutoStopBlockReason::CROSSHAIR_OUTSIDE_TARGET,
+                "1301完整帧只与FOV相交但不含准星，仍不得取得首次急停准入");
+        }
+    };
+    // 1074完整帧另有圈内候选，此处仅隔离覆盖准星的大框。
+    check({134.25f, 0.0f, 320.0f, 191.25f, 0.361572265625f, 2}, true);
+    // 1301完整检测帧仅此身体框。
+    check({0.0f, 0.0f, 114.0f, 281.0f, 0.3740234375f, 2}, false);
+}
+
 void test_processed_frame_timing_evidence_preserves_raw_identity() {
     using Clock = std::chrono::steady_clock;
     const auto at = [](std::int64_t ns) {
@@ -752,6 +805,7 @@ void test_runtime_preview_held_slots_and_reset() {
 
 int main() {
     test_auto_stop_permits_follow_actual_aim_selection();
+    test_close_target_auto_stop_admission_keeps_crosshair_gate();
     {
         auto catalog = weapon::default_timing_catalog();
         weapon::WeaponSnapshot current;
