@@ -1,4 +1,5 @@
 #include "aim/aim.h"
+#include "aim_consumer_contract_support.h"
 #include "aim_integral_motion_support_fixture.h"
 #include <algorithm>
 #include <chrono>
@@ -8,7 +9,10 @@
 namespace {
 int failures = 0;
 void expect(bool value, const char* message) {
-    if (!value) { ++failures; std::cerr << "失败：" << message << '\n'; }
+    if (!value) {
+        ++failures;
+        std::cerr << "失败：" << message << '\n';
+    }
 }
 auto at(std::int64_t ns) {
     return std::chrono::steady_clock::time_point{
@@ -28,7 +32,9 @@ void actual_integral_tail(bool mirror, bool ambiguous_motion = false) {
     config.enable_delay_compensation = true;
     config.enable_prediction = false;
     Aim aim(config);
+    aim_consumer_contract_support::RejectedBackgroundPair paired(config);
     int checked = 0;
+    AimFrame last;
     float previous_left = 0.0f, previous_right = 0.0f;
     const int direction = mirror ? 1 : -1;
     for (const auto& s : aim_integral_motion_support_fixture::kSamples) {
@@ -60,6 +66,8 @@ void actual_integral_tail(bool mirror, bool ambiguous_motion = false) {
         }
         previous_left = f.detections[0].x1;
         previous_right = f.detections[0].x2;
+        last = f;
+        paired.process(f, at(s.backend_ns), expect);
         const auto r = aim.process(f);
         expect(r.status == AimStatus::SUCCESS, "实际最小化输入须正常处理");
         expect(std::isfinite(r.control.history_adjusted_x_counts) &&
@@ -78,7 +86,7 @@ void actual_integral_tail(bool mirror, bool ambiguous_motion = false) {
         expect(std::hypot(static_cast<float>(r.command.dx_counts),
                           static_cast<float>(r.command.dy_counts)) <= 14.0f,
                "换向更新不得突破二维物理上限");
-        if (!mirror) expect(r.command.dy_counts == s.expected_y, "X修复保持原Y请求");
+
         if (s.sequence != 1974 && s.sequence != 1976) continue;
         ++checked;
         const float error = r.target.base_aim_x - f.control_center_x;
@@ -105,24 +113,21 @@ void actual_integral_tail(bool mirror, bool ambiguous_motion = false) {
                        direction * r.control.filtered_integral_x_counts < 0.0f &&
                        r.control.proportional_x_counts == 0.0f,
                    "旧侧积分与当前运动估计相反，不能把位置残留当同向维护");
-            expect(direction * r.control.filtered_x_counts <= 0.0f &&
-                       std::fabs(r.control.filtered_x_counts) < 0.5f &&
-                       std::fabs(r.control.filtered_x_counts) <=
-                           std::fabs(error) / (0.2216375f / config.counts_per_pixel_x) + .0003f,
-                   "旧向积分尾部仍受当前位置额度限制，不能独自补一count");
-            if (ambiguous_motion) {
-                expect(r.command.dx_counts == 0 &&
-                           r.control.target_motion_maintenance_x_counts == 0.0f &&
-                           r.control.modelled_response_x_counts == 0.0f,
-                       "无共同运动支持时保持原零输出保护");
-            } else {
-                expect(direction * r.control.target_motion_maintenance_x_counts > 0.0f &&
-                           direction * r.command.dx_counts > 0 &&
-                           std::fabs(r.control.shaped_x_counts -
-                               r.control.filtered_x_counts -
-                               r.control.modelled_response_x_counts) < 0.0003f,
-                       "实际反向维护必须来自fresh运动预算，与受限PI净合成");
-            }
+            const float nominal = r.control.observer_target_velocity_x_counts_per_second *
+            r.control.controller_dt_ms / 1000.0f;
+            expect(r.control.residual_role_x && r.control.residual_background_role_x &&
+                       r.control.modelled_response_x_counts * nominal >= 0 &&
+                       std::fabs(r.control.modelled_response_x_counts) <= std::fabs(nominal) + .001f,
+                   "死区位置P与世界维护分离，实际M只消费observer步预算");
+            expect(r.command.dx_counts == std::lround(r.control.shaped_x_counts +
+                   r.control.residual_before_quantization_x_counts),
+                   "旧积分尾与当前反馈净合成后只作一次含余额量化");
+            if (ambiguous_motion)
+                expect(std::fabs(r.control.target_motion_maintenance_x_counts) < .001f,
+                       "撤销当前世界位移后不能伪造当前几何维护预算");
+            else
+                expect(direction * r.control.target_motion_maintenance_x_counts > 0,
+                       "真实运动负控必须保留非零当前几何预算");
         } else {
             expect(direction * error > config.deadzone_pixels,
                    "下一纠正须有死区外新侧误差");
@@ -132,10 +137,13 @@ void actual_integral_tail(bool mirror, bool ambiguous_motion = false) {
         std::cout << "mirror=" << mirror << " seq=" << s.sequence
                   << " error=" << error << " q=" << r.command.dx_counts << '\n';
     }
+    aim_consumer_contract_support::settle_static_tail(aim, last, expect);
     expect(checked == 2, "必须覆盖旧向尾部和后续有效纠正");
 }
 }
 int main() {
+    for (int direction : {-1, 0, 1})
+        aim_consumer_contract_support::vertical_closed_loop(direction, expect);
     actual_integral_tail(false);
     actual_integral_tail(true);
     actual_integral_tail(false, true);

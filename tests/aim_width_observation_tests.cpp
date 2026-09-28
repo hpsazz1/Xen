@@ -111,4 +111,3 @@ int run_aim_width_observation_tests() {
     if (cases != 24) ++failures;
     return failures;
 }
-

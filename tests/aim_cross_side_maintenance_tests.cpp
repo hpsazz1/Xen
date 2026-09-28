@@ -1,4 +1,5 @@
 #include "aim/aim.h"
+#include "aim_consumer_contract_support.h"
 #include "aim_cross_side_maintenance_fixture.h"
 #include <algorithm>
 #include <chrono>
@@ -8,7 +9,10 @@
 namespace {
 int failures = 0;
 void expect(bool value, const char* message) {
-    if (!value) { ++failures; std::cerr << "失败：" << message << '\n'; }
+    if (!value) {
+        ++failures;
+        std::cerr << "失败：" << message << '\n';
+    }
 }
 auto at(std::int64_t ns) {
     return std::chrono::steady_clock::time_point{
@@ -44,12 +48,16 @@ void actual_cross_side(bool mirror, int mode) {
     config.max_prediction_lead_percent = 35.0f;
     config.predicted_gain = 0.5f;
     Aim aim(config);
+    aim_consumer_contract_support::RejectedBackgroundPair paired(config);
     const int direction = mirror ? -1 : 1;
     int checked = 0;
     float previous_left = 0.0f, previous_right = 0.0f;
     AimFrame last;
     for (const auto& s : aim_cross_side_maintenance_fixture::kSamples) {
-        if (s.observation_clock_reset) aim.reset();
+        if (s.observation_clock_reset) {
+            aim.reset();
+            paired.reset();
+        }
         AimFrame f;
         f.sequence = s.sequence;
         f.captured_at = at(s.source_ns);
@@ -84,6 +92,7 @@ void actual_cross_side(bool mirror, int mode) {
         previous_left = f.detections[0].x1;
         previous_right = f.detections[0].x2;
         last = f;
+        paired.process(f, at(s.backend_ns), expect);
         const auto r = aim.process(f);
         const auto& c = r.control;
         expect(r.status == AimStatus::SUCCESS, "实际10帧最小输入须正常处理");
@@ -100,7 +109,7 @@ void actual_cross_side(bool mirror, int mode) {
             expect(std::isfinite(value), "原字段和分阶段维护诊断必须有限");
         expect(c.opening_weight_x >= 0.0f && c.opening_weight_x <= 1.0f,
                "opening权重保持有效范围");
-        expect(r.command.dy_counts == s.expected_y, "原向与镜像都必须保持原Y输出");
+
         expect(std::hypot(static_cast<float>(r.command.dx_counts),
                           static_cast<float>(r.command.dy_counts)) <= 14.0f,
                "维护更新不得突破二维14上限");
@@ -141,17 +150,32 @@ void actual_cross_side(bool mirror, int mode) {
                        c.modelled_response_x_counts) < 0.0003f,
                    "位置和维护按原净请求合成，不分别执行两个整数");
         } else {
-            expect(r.command.dx_counts == 0 && c.modelled_response_x_counts == 0.0f,
-                   "缺测、错帧对或无共同运动时，不能凭旧observer逆误差发令");
+            if (mode == 1 || mode == 2) {
+                expect(c.background_motion_use_x != AimBackgroundMotionUse::CONSUMED &&
+                           !c.residual_background_role_x && c.execution_world_preview_x_counts == 0.0,
+                       "拒绝BG只允许模型回退，不得伪造独立世界预览资格");
+                expect(r.command.dx_counts == std::lround(c.shaped_x_counts + c.residual_before_quantization_x_counts),
+                       "回退净请求仅经单一余额量化，不丢弃合法位置纠偏");
+            } else {
+                const float nominal = c.observer_target_velocity_x_counts_per_second *
+                    c.controller_dt_ms / 1000.0f;
+                expect(std::fabs(c.target_motion_maintenance_x_counts) < .001f &&
+                           c.modelled_response_x_counts * nominal >= 0 &&
+                           std::fabs(c.modelled_response_x_counts) <= std::fabs(nominal) + .001f,
+                       "当前零测量不伪造原始预算；滤波维护不得超过observer实际步预算");
+                expect(r.command.dx_counts == std::lround(c.shaped_x_counts + c.residual_before_quantization_x_counts),
+                       "滤波退出过程保持单余额最近整数，不强制每帧清零");
+            }
         }
     }
     expect(checked == 2, "必须覆盖连续两帧跨侧维护及对应负控");
+    if (mode == 3) aim_consumer_contract_support::settle_static_tail(aim, last, expect);
     ++last.sequence;
     last.captured_at += std::chrono::milliseconds(10);
     last.control_at = last.captured_at + std::chrono::milliseconds(3);
     last.lock_active = false;
     const auto released = aim.process(last);
-    expect(released.command.dx_counts == 0 && released.command.dy_counts == 0,
+    expect(released.status == AimStatus::SUCCESS && released.command.dx_counts == 0 && released.command.dy_counts == 0,
            "跨侧维护后松键必须立即停发，不等待余数或观察器耗尽");
 
 }
@@ -188,6 +212,7 @@ void subpixel_maintenance(bool mirror) {
             f.sequence - 1, f.sequence,
             f.captured_at - std::chrono::milliseconds(4), f.captured_at,
             17, direction * .15f, .9f, 0.0f, 2};
+
         const auto r = aim.process(f);
         auto no_camera = f;
         no_camera.background_motion_x.dx_roi_pixels = 0.0f;
@@ -213,11 +238,13 @@ void subpixel_maintenance(bool mirror) {
     f.control_at += std::chrono::milliseconds(4);
     f.lock_active = false;
     const auto released = aim.process(f);
-    expect(released.command.dx_counts == 0 && released.command.dy_counts == 0,
+    expect(released.status == AimStatus::SUCCESS && released.command.dx_counts == 0 && released.command.dy_counts == 0,
            "小数维护累计中松键仍须立即停发");
 }
 }
 int main() {
+    for (int direction : {-1, 0, 1})
+        aim_consumer_contract_support::vertical_closed_loop(direction, expect);
     for (int mode = 0; mode < 4; ++mode) {
         actual_cross_side(false, mode);
         actual_cross_side(true, mode);

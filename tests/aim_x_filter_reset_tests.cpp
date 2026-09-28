@@ -1,4 +1,5 @@
 #include "aim/aim.h"
+#include "aim_consumer_contract_support.h"
 #include "aim_x_filter_reset_fixture.h"
 #include <algorithm>
 #include <chrono>
@@ -8,7 +9,10 @@
 namespace {
 int failures = 0;
 void expect(bool value, const char* message) {
-    if (!value) { ++failures; std::cerr << "失败：" << message << '\n'; }
+    if (!value) {
+        ++failures;
+        std::cerr << "失败：" << message << '\n';
+    }
 }
 auto at(std::int64_t ns) {
     return std::chrono::steady_clock::time_point{
@@ -28,8 +32,10 @@ void actual_crossing(bool mirror, bool ambiguous_motion = false) {
     config.enable_delay_compensation = true;
     config.enable_prediction = false;
     Aim aim(config);
+    aim_consumer_contract_support::RejectedBackgroundPair paired(config);
     int checked = 0;
-    float reset_request = 0.0f;
+    AimFrame last;
+
     float previous_left = 0.0f, previous_right = 0.0f;
     const int direction = mirror ? 1 : -1;
     for (const auto& s : aim_x_filter_reset_fixture::kSamples) {
@@ -62,6 +68,8 @@ void actual_crossing(bool mirror, bool ambiguous_motion = false) {
         }
         previous_left = f.detections[0].x1;
         previous_right = f.detections[0].x2;
+        last = f;
+        paired.process(f, at(s.backend_ns), expect);
         const auto r = aim.process(f);
         expect(r.status == AimStatus::SUCCESS, "实际最小化输入须正常处理");
         expect(std::isfinite(r.control.history_adjusted_x_counts) &&
@@ -80,7 +88,7 @@ void actual_crossing(bool mirror, bool ambiguous_motion = false) {
         expect(std::hypot(static_cast<float>(r.command.dx_counts),
                           static_cast<float>(r.command.dy_counts)) <= 14.0f,
                "换向更新不得突破二维物理上限");
-        if (!mirror) expect(r.command.dy_counts == s.expected_y, "X修复保持原Y请求");
+
         if (s.sequence < 7625 || s.sequence > 7627) continue;
         ++checked;
         const float error = r.target.base_aim_x - f.control_center_x;
@@ -98,55 +106,27 @@ void actual_crossing(bool mirror, bool ambiguous_motion = false) {
                        r.control.target_motion_maintenance_x_counts *
                            r.control.observer_target_velocity_x_counts_per_second > 0.0f,
                    "实际逆误差维护须获observer同向支持且不超过当前中心步预算");
-        if (s.sequence == 7625) {
-            expect(direction * r.command.dx_counts < 0,
-                   "过零前须存在旧向命令，不能退化成无历史夹具");
-        } else {
-            expect(r.control.evaluated && r.target.matched_observation_valid &&
-                       r.control.background_motion_use_x == AimBackgroundMotionUse::CONSUMED &&
-                       direction * error > config.deadzone_pixels,
-                   "过零后须有新鲜同帧背景与死区外反侧误差");
-            if (s.sequence == 7626) {
-                reset_request = r.control.history_adjusted_x_counts;
-                expect(r.command.dx_counts == 0, "清理旧向记忆当帧仍必须经过零输出");
-                expect(r.control.filter_reset_x &&
-                           r.control.pre_eligibility_filtered_x_counts == 0.0f &&
-                           r.control.filtered_integral_x_counts == 0.0f &&
-                           direction * r.control.history_adjusted_x_counts > 0.0f,
-                       "账本区分合法滤波输入、清理当帧零状态与末段下一步seed");
-            } else {
-                const float expected_filtered =
-                    reset_request * config.smoothing * (1.0f - config.smoothing) +
-                    r.control.history_adjusted_x_counts * config.smoothing;
-                expect(std::fabs(r.control.pre_eligibility_filtered_x_counts -
-                                 expected_filtered) < 0.0003f,
-                       "Reset当帧的合法输入必须完整进入下一帧滤波，不得丢掉seed");
-                expect(direction * r.control.filtered_x_counts > 0.0f,
-                       "位置纠偏份额仍须朝新侧误差");
-                if (ambiguous_motion) {
-                    expect(direction * r.command.dx_counts > 0 &&
-                               direction * r.control.modelled_response_x_counts >= 0.0f,
-                           "无共同运动支持时，原首新向纠偏不得被丢弃或无据抵消");
-                } else {
-                    // 前缀自身命令会改变模型回退状态；维护按本分支实际观察器
-                    // 方向验证。位置seed由上方独立断言，不拿固定净整数代替。
-                    expect(r.control.modelled_response_x_counts *
-                               r.control.observer_target_velocity_x_counts_per_second >= 0.0f &&
-                               std::fabs(r.control.modelled_response_x_counts -
-                                   r.control.target_motion_maintenance_x_counts) < 0.0003f &&
-                               std::fabs(r.control.shaped_x_counts -
-                                   r.control.filtered_x_counts -
-                                   r.control.modelled_response_x_counts) < 0.0003f &&
-                               r.command.dx_counts * r.control.shaped_x_counts >= 0.0f &&
-                               std::fabs(r.command.dx_counts - r.control.shaped_x_counts -
-                                   r.control.residual_before_quantization_x_counts) <= 0.5003f,
-                           "实际维护按本分支方向净合成舍入，不强行执行独立PI整数");
-                }
-                expect(!r.control.filter_reset_x &&
-                           direction * r.control.pre_eligibility_filtered_x_counts > 0.0f,
-                       "账本必须在下一帧显示新向滤波状态，不沿用清理帧标记");
-            }
+        if (s.sequence != 7625)
+            expect(r.control.residual_role_x && r.control.residual_background_role_x && !r.control.filter_reset_x,
+                   "同源有效角色跨源误差换侧连续，不把兼容Reset当实际控制合同");
+        expect(r.control.proportional_x_counts * error >= 0.0f,
+               "源位置P不得因滤波历史反转源误差方向");
+        const float nominal = r.control.observer_target_velocity_x_counts_per_second *
+            r.control.controller_dt_ms / 1000.0f;
+        expect(r.control.modelled_response_x_counts * nominal >= 0 &&
+                   std::fabs(r.control.modelled_response_x_counts) <= std::fabs(nominal) + .001f,
+               "实际M按observer步预算分配，不能把限额前几何预算当作已接受M");
+        expect(r.command.dx_counts == std::lround(r.control.shaped_x_counts +
+                   r.control.residual_before_quantization_x_counts),
+               "源换侧后仍按本分支单余额量化，不能强迫首帧整数过零或非零");
+        if (s.sequence == 7626) {
+            expect(direction * error > config.deadzone_pixels && direction * r.command.dx_counts > 0,
+                   "当前夹具必须实际产生死区外新向纠正，避免全零假绿");
         }
+        if (s.sequence == 7627 && !ambiguous_motion)
+            expect(std::fabs(r.control.shaped_x_counts - r.control.filtered_x_counts -
+                       r.control.modelled_response_x_counts) < .0003f,
+                   "实际维护与已报告PI净合成，不能分别量化");
         std::cout << "mirror=" << mirror << " seq=" << s.sequence
                   << " error=" << error << " q=" << r.command.dx_counts
                   << " pi=" << r.control.filtered_x_counts
@@ -155,10 +135,13 @@ void actual_crossing(bool mirror, bool ambiguous_motion = false) {
                   << " shaped=" << r.control.shaped_x_counts
                   << " residual=" << r.control.residual_before_quantization_x_counts << '\n';
     }
-    expect(checked == 3, "必须完整覆盖过零前、零帧与后续新向更新");
+    aim_consumer_contract_support::settle_static_tail(aim, last, expect);
+    expect(checked == 3, "必须完整覆盖过零前、换侧帧与后续新向更新");
 }
 }
 int main() {
+    for (int direction : {-1, 0, 1})
+        aim_consumer_contract_support::vertical_closed_loop(direction, expect);
     actual_crossing(false);
     actual_crossing(true);
     actual_crossing(false, true);

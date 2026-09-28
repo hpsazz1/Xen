@@ -1,4 +1,5 @@
 #include "aim/aim.h"
+#include "aim_consumer_contract_support.h"
 #include "aim_opening_maintenance_fixture.h"
 #include <algorithm>
 #include <chrono>
@@ -8,7 +9,10 @@
 namespace {
 int failures = 0;
 void expect(bool value, const char* message) {
-    if (!value) { ++failures; std::cerr << "失败：" << message << '\n'; }
+    if (!value) {
+        ++failures;
+        std::cerr << "失败：" << message << '\n';
+    }
 }
 auto at(std::int64_t ns) {
     return std::chrono::steady_clock::time_point{
@@ -44,11 +48,16 @@ void actual_opening_maintenance(bool mirror, bool ambiguous_motion = false) {
     config.max_prediction_lead_percent = 35.0f;
     config.predicted_gain = 0.5f;
     Aim aim(config);
+    aim_consumer_contract_support::RejectedBackgroundPair paired(config);
     const int direction = mirror ? -1 : 1;
     int checked = 0;
+    AimFrame last;
     float previous_left = 0.0f, previous_right = 0.0f;
     for (const auto& s : aim_opening_maintenance_fixture::kSamples) {
-        if (s.observation_clock_reset) aim.reset();
+        if (s.observation_clock_reset) {
+            aim.reset();
+            paired.reset();
+        }
         AimFrame f;
         f.sequence = s.sequence;
         f.captured_at = at(s.source_ns);
@@ -79,6 +88,8 @@ void actual_opening_maintenance(bool mirror, bool ambiguous_motion = false) {
         }
         previous_left = f.detections[0].x1;
         previous_right = f.detections[0].x2;
+        last = f;
+        paired.process(f, at(s.backend_ns), expect);
         const auto r = aim.process(f);
         const auto& c = r.control;
         expect(r.status == AimStatus::SUCCESS, "实际15帧最小输入须正常处理");
@@ -95,7 +106,7 @@ void actual_opening_maintenance(bool mirror, bool ambiguous_motion = false) {
             expect(std::isfinite(value), "原字段和分阶段维护诊断必须有限");
         expect(c.opening_weight_x >= 0.0f && c.opening_weight_x <= 1.0f,
                "opening权重保持有效范围");
-        expect(r.command.dy_counts == s.expected_y, "原向与镜像都必须保持原Y输出");
+
         expect(std::hypot(static_cast<float>(r.command.dx_counts),
                           static_cast<float>(r.command.dy_counts)) <= 14.0f,
                "维护更新不得突破二维14上限");
@@ -117,19 +128,19 @@ void actual_opening_maintenance(bool mirror, bool ambiguous_motion = false) {
                    "图像收拢的原opening判定不受世界运动维护改变");
             if (ambiguous_motion) {
                 std::cout << "closing mirror=" << mirror << " q=" << r.command.dx_counts
-                          << " pi=" << c.filtered_x_counts << " add=" << c.modelled_response_x_counts
+                          << " raw=" << c.target_motion_maintenance_x_counts << " nominal=" << c.observer_target_velocity_x_counts_per_second * c.controller_dt_ms / 1000.0f << " role=" << c.residual_background_role_x << " pi=" << c.filtered_x_counts << " add=" << c.modelled_response_x_counts
                           << " shaped=" << c.shaped_x_counts << " residual=" << c.residual_before_quantization_x_counts
                           << " error=" << r.target.base_aim_x - f.control_center_x << '\n';
                 expect((c.reverse_translation_raw_left_x_roi_pixels - f.background_motion_x.dx_roi_pixels) *
                            (c.reverse_translation_raw_right_x_roi_pixels - f.background_motion_x.dx_roi_pixels) <= 0.0f,
                        "负控必须实际消除校正双边的共同方向");
-                const float position_headroom = std::fabs(r.target.base_aim_x - f.control_center_x) *
-                    f.source_pixels_per_roi_pixel_x / (0.2216375f / config.counts_per_pixel_x);
                 expect(direction * r.command.dx_counts < 0 &&
-                           std::fabs(c.filtered_x_counts + c.modelled_response_x_counts) <= position_headroom + 0.0003f &&
+                           c.residual_background_role_x &&
+                           c.modelled_response_x_counts * c.observer_target_velocity_x_counts_per_second >= 0 &&
+                           std::fabs(c.modelled_response_x_counts) <= std::fabs(c.observer_target_velocity_x_counts_per_second * c.controller_dt_ms / 1000.0f) + .001f &&
                            std::fabs(r.command.dx_counts - c.shaped_x_counts -
                                c.residual_before_quantization_x_counts) <= 0.5003f,
-                       "无当前共同运动时仍受原位置额度约束，净整数只含本分支舍入余额");
+                       "当前测量归零只撤销几何预算，实际滤波M守observer步预算与单余额量化");
             } else {
                 const float left = c.reverse_translation_raw_left_x_roi_pixels -
                     f.background_motion_x.dx_roi_pixels;
@@ -157,10 +168,13 @@ void actual_opening_maintenance(bool mirror, bool ambiguous_motion = false) {
                    "3172同向追赶不能仍被纯位置额度压在两个counts以内");
         }
     }
+    aim_consumer_contract_support::settle_static_tail(aim, last, expect);
     expect(checked == 2, "必须覆盖收拢负控和同向追赶主帧");
 }
 }
 int main() {
+    for (int direction : {-1, 0, 1})
+        aim_consumer_contract_support::vertical_closed_loop(direction, expect);
     actual_opening_maintenance(false);
     actual_opening_maintenance(true);
     actual_opening_maintenance(false, true);

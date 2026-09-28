@@ -58,7 +58,11 @@ float seed(Aim& aim,int direction) {
         r=aim.process(frame(i,150.0f+direction*i,190.0f+direction*i,0));
         if(i>0) valid(r,"seed",AimBackgroundMotionUse::CONSUMED);
     }
-    close(v(r),direction*124.998093f,"已知同一非零前态");
+    // 独立固定plant与8ms Tustin：首个测量从零端点开始，后续为恒定1px刚体平移。
+    const double measurement = direction / .5215 / .008;
+    double expected = measurement / 3.0;
+    for (int i = 2; i <= 16; ++i) expected = expected / 3.0 + 2.0 * measurement / 3.0;
+    close(v(r), static_cast<float>(expected), "独立刚体平移seed须符合plant与source时间递推");
     return v(r);
 }
 void covariance() {
@@ -243,8 +247,8 @@ void actual_camera_domain(bool mirror) {
                           static_cast<float>(r.command.dy_counts)) <= 14.0f,
                "维护更新不得突破二维14上限");
         const float error = r.target.base_aim_x - f.control_center_x;
-        expect(c.filtered_x_counts * error >= 0.0f,
-               "位置PI仍须朝当前固定base误差方向");
+        expect(c.proportional_x_counts * error >= 0.0f,
+               "源位置P仍朝源误差，执行P/R允许按各自职责纠偏");
         if (error == 0.0f)
             expect(r.command.dx_counts == 0, "精确零误差不产生X命令");
         if (r.command.dx_counts * error < 0.0f) {
@@ -256,10 +260,10 @@ void actual_camera_domain(bool mirror) {
                        !c.filter_reset_x && f.background_motion_x.sequence == f.sequence &&
                        f.background_motion_x.captured_at == f.captured_at &&
                        f.background_motion_x.previous_sequence == s.previous_sequence &&
-                       left * right > 0.0f && left * r.command.dx_counts > 0.0f &&
+                       (left + right) * r.command.dx_counts > 0.0f &&
                        c.observer_target_velocity_x_counts_per_second * r.command.dx_counts > 0.0f &&
                        c.modelled_response_x_counts * r.command.dx_counts > 0.0f,
-                   "净请求跨误差侧必须有同源双边及observer支持的实际维护，不能绕过PI保护");
+                   "净请求跨误差侧须有同源中心平移、observer及实际M支持，不能伪造反向职责");
         }
         if (r.has_command)
             expect(aim.record_backend_completed_command(f.sequence, at(s.backend_ns),
@@ -287,7 +291,9 @@ void interval_covariance() {
             std::array<std::array<float, 4>, 2> velocities{};
             for (int branch = 0; branch < 2; ++branch) {
                 Aim aim(config());
-                seed(aim, direction);
+                const float before = seed(aim, direction);
+                float expected_velocity = before;
+                float previous_measurement = direction / .5215f / .008f;
                 float left = 150.0f + 16 * direction;
                 float right = 190.0f + 16 * direction;
                 const float camera = branch ? 3.0f : 0.0f;
@@ -301,16 +307,17 @@ void interval_covariance() {
                     close(r.control.reverse_translation_raw_right_x_roi_pixels - camera,
                           half_width, "两分支世界右界相同");
                     valid(r, "区间观测", AimBackgroundMotionUse::CONSUMED);
-                    if (half_width == 2.0f)
-                        close(v(r), direction * 124.998093f, "区间包含先验时必须保留前态");
-                    if (half_width == .2f)
-                        expect(std::fabs(v(r)) < 100.0f, "区间排除先验时必须收缩旧幅度");
-                    expect(r.control.modelled_response_x_counts *
-                               (r.target.base_aim_x - 160.0f) >= -.0001f,
-                           "跨零区间不授权无共同证据的逆误差维护");
+                    expected_velocity = expected_velocity / 3.0f + previous_measurement / 3.0f;
+                    previous_measurement = 0.0f;
+                    close(v(r), expected_velocity,
+                          "对称形变中心零运动须按独立Tustin消退旧向速度");
+                    expect(r.control.modelled_response_x_counts * v(r) >= 0.0f &&
+                               std::fabs(r.control.modelled_response_x_counts) <=
+                                   std::fabs(v(r) * r.control.controller_dt_ms / 1000.0f) + .003f,
+                           "形变后的实际维护只可来自正在衰减的旧运动状态，不得增幅或反向");
                     velocities[branch][j] = v(r);
-                    expect(direction * v(r) > 0 && std::fabs(v(r)) < 125.0f,
-                           "歧义区间只约束旧向幅度，不凭空宣布世界已反向");
+                    expect(direction * v(r) > 0 && std::fabs(v(r)) < std::fabs(before),
+                           "零中心形变消退旧速度但不能凭空宣布真实反向");
                 }
             }
             for (int j = 0; j < 4; ++j)
@@ -396,8 +403,8 @@ void actual_world_interval(bool mirror) {
                           static_cast<float>(r.command.dy_counts)) <= 14.0f,
                "维护更新不得突破二维14上限");
         const float error = r.target.base_aim_x - f.control_center_x;
-        expect(c.filtered_x_counts * error >= 0.0f,
-               "位置PI仍须朝当前固定base误差方向");
+        expect(c.proportional_x_counts * error >= 0.0f,
+               "源位置P仍朝源误差，执行P/R允许按各自职责纠偏");
         if (error == 0.0f)
             expect(r.command.dx_counts == 0, "精确零误差不产生X命令");
         if (r.command.dx_counts * error < 0.0f) {
@@ -409,10 +416,10 @@ void actual_world_interval(bool mirror) {
                        !c.filter_reset_x && f.background_motion_x.sequence == f.sequence &&
                        f.background_motion_x.captured_at == f.captured_at &&
                        f.background_motion_x.previous_sequence == s.previous_sequence &&
-                       left * right > 0.0f && left * r.command.dx_counts > 0.0f &&
+                       (left + right) * r.command.dx_counts > 0.0f &&
                        c.observer_target_velocity_x_counts_per_second * r.command.dx_counts > 0.0f &&
                        c.modelled_response_x_counts * r.command.dx_counts > 0.0f,
-                   "净请求跨误差侧必须有同源双边及observer支持的实际维护，不能绕过PI保护");
+                   "净请求跨误差侧须有同源中心平移、observer及实际M支持，不能伪造反向职责");
         }
         if (r.has_command)
             expect(aim.record_backend_completed_command(f.sequence, at(s.backend_ns),
@@ -432,16 +439,40 @@ void actual_world_interval(bool mirror) {
     expect(checked == 5, "实际1546..50五帧区间信息必须全部覆盖");
 }
 
+void camera_only() {
+    for (int direction : {-1, 1}) {
+        Aim aim(config());
+        int checked = 0;
+        for (int i = 0; i < 30; ++i) {
+            const float camera = direction * .5f;
+            auto f = frame(i, 140.0f + camera * i, 180.0f + camera * i, camera);
+            f.source_pixels_per_roi_pixel_x = 1.75f;
+            const auto r = aim.process(f);
+            if (i == 0) continue;
+            ++checked;
+            valid(r, "独立纯相机平移", AimBackgroundMotionUse::CONSUMED);
+            close(r.control.observer_camera_motion_x_source_pixels, camera * 1.75f,
+                  "相机校正必须转换source单位而非沿用ROI单位");
+            close(v(r), 0.0f, "图像刚体平移等于camera时静止世界不能漂移");
+            close(r.control.modelled_response_x_counts, 0.0f,
+                  "纯camera不能伪造独立目标维护，位置输出仍按原职责");
+        }
+        expect(checked == 29, "纯相机平移必须覆盖非空同源序列");
+    }
+}
+
 void opposed_guard() {
     Aim aim(config());const float before=seed(aim,1);
     const auto r=aim.process(frame(17,165,207,-.89f));
     valid(r,"opposed",AimBackgroundMotionUse::CONSUMED);
-    close(v(r),before,"世界区间包含先验时仍保持observer前态");row("opposed",0,-.89f,r);
+    const float measurement = .89f / .5215f / .008f;
+    close(v(r), before / 3.0f + (1.0f / .5215f / .008f + measurement) / 3.0f,
+          "已知形变叠加camera的中心测量须修正先验而非区间冻结");row("opposed",0,-.89f,r);
 }
 }
 int main() {
     std::cout<<std::setprecision(9)<<"scenario,row,input_bg,use,velocity,effective_camera,raw_left,raw_right,evidence,delayed_q,control_dt_ms,qx,qy\n";
     interval_covariance();actual_world_interval(false);actual_world_interval(true);
-    covariance();fallback_contract();opposed_guard();reversed_world_covariance();actual_camera_domain(false);actual_camera_domain(true);
+    camera_only();covariance();fallback_contract();opposed_guard();reversed_world_covariance();actual_camera_domain(false);actual_camera_domain(true);
     std::cout<<"failures,"<<failures<<'\n';return failures?1:0;
 }
