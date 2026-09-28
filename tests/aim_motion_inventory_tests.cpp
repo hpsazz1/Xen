@@ -118,8 +118,10 @@ void actual_motion_reversal(bool mirror) {
                    "误差和观测运动已同向，旧向库存仍在且本帧不是Reset");
             expect(direction * c.target_motion_maintenance_x_counts > 0.0f,
                    "已消费同帧背景的同向维护预算不能整项消失");
-            expect(direction * r.command.dx_counts > 0,
-                   "2508必须响应实际新向运动，不能等待旧库存耗尽才启动");
+            // 前史可改变量化余额；库存期间的累计响应由独立延迟ACK反事实验证。
+            expect(r.command.dx_counts == std::lround(c.shaped_x_counts +
+                       c.residual_before_quantization_x_counts),
+                   "2508须保持最近整数契约，合法亚半count请求允许本帧零输出");
         } else if (s.sequence == 2510) {
             // 仅约束这条实际Reset样本，不宣称所有Reset都必须把M或总输出置零。
             expect(c.filter_reset_x && r.command.dx_counts == 0,
@@ -138,6 +140,129 @@ void actual_motion_reversal(bool mirror) {
                   << " error=" << error << " q=" << r.command.dx_counts << '\n';
     }
     expect(checked == 4, "必须覆盖旧向请求、新向维护、原Reset和后续纠正");
+}
+
+// 软件回执时相反事实：只延迟自身已生成命令；不代表真实物理闭环。
+void delayed_own_receipt_preserves_maintenance(bool mirror) {
+    AimConfig config;
+    config.person_class_ids = {0, 2};
+    config.head_class_ids = {1, 3};
+    config.high_confidence = 0.25f;
+    config.low_confidence = 0.1f;
+    config.min_confirmed_hits = 2;
+    config.max_lost_frames = 8;
+    config.min_iou = 0.1f;
+    config.max_center_distance = 0.25f;
+    config.switch_margin = 0.2f;
+    config.switch_confirm_frames = 3;
+    config.switch_cooldown_frames = 5;
+    config.acquisition_range_percent = 90.0f;
+    config.body_aim_height_ratio = 0.35f;
+    config.body_aim_range_percent = 50.0f;
+    config.deadzone_pixels = 1.5f;
+    config.smoothing = 0.475f;
+    config.counts_per_pixel_x = 0.425f;
+    config.counts_per_pixel_y = 0.4f;
+    config.max_counts_per_frame = 14.0f;
+    config.enable_delay_compensation = true;
+    config.control_delay_ms = 15.0f;
+    config.max_delay_compensation_ms = 44.0f;
+    config.max_delay_compensation_percent = 15.0f;
+    config.enable_prediction = false;
+    config.max_prediction_lead_percent = 35.0f;
+    config.predicted_gain = 0.5f;
+    Aim aim(config);
+    const int direction = mirror ? -1 : 1;
+    int delayed_x = 0, delayed_y = 0;
+    bool delayed_valid = false;
+    int window_frames = 0, window_commands = 0;
+    float window_float = 0, first_residual = 0, previous_remaining = 0;
+    bool previous_window = false, checked_final_balance = false;
+    for (const auto& s : aim_motion_inventory_fixture::kSamples) {
+        if (s.observation_clock_reset) aim.reset();
+        AimFrame f;
+        f.sequence = s.sequence;
+        f.captured_at = at(s.source_ns);
+        f.control_at = at(s.control_ns);
+        f.roi_width = s.roi_width;
+        f.roi_height = s.roi_height;
+        f.control_center_x = s.center_x;
+        f.control_center_y = s.center_y;
+        f.source_pixels_per_roi_pixel_x = s.scale_x;
+        f.source_pixels_per_roi_pixel_y = s.scale_y;
+        f.lock_active = s.lock_active;
+        f.observation_epoch = s.epoch;
+        for (int i = 0; i < s.count; ++i) {
+            auto d = s.detections[static_cast<std::size_t>(i)];
+            if (mirror) {
+                const float left = d.x1;
+                d.x1 = 2.0f * s.center_x - d.x2;
+                d.x2 = 2.0f * s.center_x - left;
+            }
+            f.detections.push_back(d);
+        }
+        f.background_motion_x = {s.status, s.previous_sequence, s.background_sequence,
+            at(s.previous_ns), at(s.background_ns), s.background_epoch,
+            mirror ? -s.bg_dx : s.bg_dx, s.response, s.disagreement, s.patches};
+        const auto r = aim.process(f);
+        const auto& c = r.control;
+        expect(r.status == AimStatus::SUCCESS, "公有接口须正常处理");
+        // 只延迟本分支已实际生成的2504命令，至2507处理完才报告ACK。
+        if (s.sequence == 2504 && r.has_command) {
+            delayed_x = r.command.dx_counts;
+            delayed_y = r.command.dy_counts;
+            delayed_valid = true;
+            expect(direction * delayed_x < 0, "本分支必须自己产生旧向命令");
+        } else if (r.has_command) {
+            expect(aim.record_backend_completed_command(f.sequence, at(s.backend_ns),
+                       r.command.dx_counts, r.command.dy_counts), "当前回执匹配自身命令");
+        }
+        if (s.sequence == 2507) {
+            expect(delayed_valid, "必须有可延迟的自身命令");
+            expect(aim.record_backend_completed_command(2504, f.control_at, delayed_x, delayed_y),
+                   "到期才报告旧命令ACK，不提前注入未来回执");
+        }
+        const float error = r.target.base_aim_x - f.control_center_x;
+        const float old_inventory =
+            (c.pending_absolute_x_counts - direction * c.pending_net_x_counts) * 0.5f;
+        // 此受控窗口用原死区边界限定纯维护阶段；不要求某一固定位次q非零。
+        const bool in_window = direction * error > 0 &&
+            std::fabs(error) <= config.deadzone_pixels &&
+            direction * c.observer_target_velocity_x_counts_per_second > 0 && old_inventory > 0 &&
+            c.background_motion_use_x == AimBackgroundMotionUse::CONSUMED && !c.filter_reset_x;
+        if (in_window) {
+            if (window_frames == 0) first_residual = c.residual_before_quantization_x_counts;
+            if (previous_window)
+                expect(std::fabs(c.residual_before_quantization_x_counts - previous_remaining) < 0.00003f,
+                       "同向连续请求必须继承上一步舍入余额");
+            const float nominal =
+                c.observer_target_velocity_x_counts_per_second * c.controller_dt_ms / 1000.0f;
+            expect(c.controller_dt_ms > 0 && std::fabs(nominal) < config.max_counts_per_frame,
+                   "真实controller dt及未饱和维护前置");
+            expect(std::fabs(c.modelled_response_x_counts - nominal) < 0.00003f,
+                   "旧向库存不得撤销已观测同向M份额");
+            expect(direction * c.shaped_x_counts + 0.00003f >= direction * c.modelled_response_x_counts,
+                   "纯维护窗口实际shaped不得取消已接受M");
+            const float total = c.shaped_x_counts + c.residual_before_quantization_x_counts;
+            expect(r.command.dx_counts == std::lround(total),
+                   "每帧遵守最近整数，合法亚半count可为零");
+            previous_remaining = total - r.command.dx_counts;
+            window_float += c.shaped_x_counts;
+            window_commands += r.command.dx_counts;
+            ++window_frames;
+            expect(std::fabs(first_residual + window_float - window_commands - previous_remaining) < 0.00003f,
+                   "累计量化守恒");
+        } else if (previous_window && !c.filter_reset_x && direction * c.shaped_x_counts > 0) {
+            expect(std::fabs(c.residual_before_quantization_x_counts - previous_remaining) < 0.00003f,
+                   "窗口结束余额仍保留到下一合法同向帧");
+            checked_final_balance = true;
+        }
+        previous_window = in_window;
+    }
+    expect(window_frames >= 2 && checked_final_balance,
+           "旧库存同源纯维护窗口必须非空并覆盖累计及后继");
+    expect(direction * window_commands > 0,
+           "旧库存仍存在时必须已产生累计有效新向响应");
 }
 
 // 独立位置职责反例：Y几何固定，首次保Y向量cap可由公开X请求精确还原。
@@ -268,6 +393,8 @@ void observed_position_share(bool background, bool mirror,
 int main() {
     actual_motion_reversal(false);
     actual_motion_reversal(true);
+    delayed_own_receipt_preserves_maintenance(false);
+    delayed_own_receipt_preserves_maintenance(true);
     for (const bool mirror : {false, true}) {
         observed_position_share(true, mirror, 12.0f, 14.0f);
         observed_position_share(true, mirror, 60.0f, 2.0f);

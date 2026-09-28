@@ -14436,6 +14436,12 @@ void test_variable_real_cadence_prediction_closes_public_point_error() {
     int direction_violations = 0;
     float public_error_abs_sum = 0.0f;
     float command_sum = 0.0f;
+    int zero_position_residual_frames = 0;
+    int accepted_residual_frames = 0;
+    int residual_budget_violations = 0;
+    int residual_conservation_violations = 0;
+    double requested_residual_sum = 0.0;
+    double accepted_residual_sum = 0.0;
 
     for (int index = 0; index < kFrameCount; ++index) {
         const int interval_us = kFrameIntervalsMicroseconds[
@@ -14480,6 +14486,33 @@ void test_variable_real_cadence_prediction_closes_public_point_error() {
         }
         if (index < kSettledFrame || !result.target.lead_active) continue;
 
+        // 只观察执行P及其滤波尾项均已归零、动态R完整落在M预算内的样本。
+        // 排除闭合导数扣减后，源位置积分仍可补偿模型失配，实际PI不能随P资格消失。
+        constexpr float kRoleTolerance = 0.0001f;
+        const auto& control = result.control;
+        const float residual_request = control.filtered_integral_x_counts;
+        const float position_tail = control.pre_eligibility_filtered_x_counts - residual_request;
+        const float maintenance = control.modelled_response_x_counts;
+        if (control.residual_background_role_x &&
+            std::fabs(control.execution_proportional_x_counts) <= kRoleTolerance &&
+            std::fabs(position_tail) <= kRoleTolerance &&
+            (result.target.aim_x - frame.control_center_x) *
+                control.error_derivative_x_source_pixels_per_second >= 0.0f &&
+            std::fabs(residual_request) > kRoleTolerance &&
+            residual_request * maintenance > 0.0f &&
+            std::fabs(residual_request) < std::fabs(maintenance) &&
+            std::fabs(maintenance) + std::fabs(residual_request) < config.max_counts_per_frame) {
+            ++zero_position_residual_frames;
+            const float accepted_residual = control.shaped_x_counts - maintenance;
+            if (accepted_residual * residual_request > 0.0f) ++accepted_residual_frames;
+            if (std::fabs(accepted_residual) > std::fabs(maintenance) + kRoleTolerance)
+                ++residual_budget_violations;
+            if (std::fabs(accepted_residual - residual_request) > kRoleTolerance)
+                ++residual_conservation_violations;
+            requested_residual_sum += residual_request;
+            accepted_residual_sum += accepted_residual;
+        }
+
         ++active_frames;
         command_sum += static_cast<float>(command_x);
         const float public_error_x =
@@ -14500,6 +14533,19 @@ void test_variable_real_cadence_prediction_closes_public_point_error() {
         }
     }
 
+    expect(zero_position_residual_frames > 0 &&
+               accepted_residual_frames == zero_position_residual_frames &&
+               residual_budget_violations == 0 &&
+               residual_conservation_violations == 0 &&
+               std::fabs(accepted_residual_sum - requested_residual_sum) <=
+                   0.0001 * zero_position_residual_frames,
+           "119Hz执行P归零时，预算内动态R必须实际进入shaped-M并保持份额守恒，样本/接受/超预算/失配=" +
+               std::to_string(zero_position_residual_frames) + "/" +
+               std::to_string(accepted_residual_frames) + "/" +
+               std::to_string(residual_budget_violations) + "/" +
+               std::to_string(residual_conservation_violations) + "，请求/接受总量=" +
+               std::to_string(requested_residual_sum) + "/" +
+               std::to_string(accepted_residual_sum));
     expect(active_frames >= 500,
            "119 Hz 变周期回归必须覆盖稳定 prediction 活动窗口");
     const float mean_public_error = public_error_abs_sum /

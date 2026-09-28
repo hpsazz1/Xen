@@ -5446,15 +5446,34 @@ struct Aim::Impl {
                 }
             }
         }
-        // 独立背景且启用延迟补偿时，PI只纠正已计入世界预览/在途库存的
-        // 执行位置，运动由下方M承担。关闭补偿时没有完整世界预览，保留
-        // 原反馈职责；缺测仍用源位置方向。抑制份额由既有anti-windup回写。
+        // P沿执行误差纠偏；R仍含源位置积分，不能随执行P归零整份丢弃。
+        // 独立背景下只在已有|M|内补回同运动方向或同源误差方向的份额，
+        // 防止旧反向积分抵消当前两种证据。微小M不能授权大幅静态积分。
+        // 缺测和关闭补偿保持原反馈职责；不从ACK或背景差在线学习plant。
         const float residual_position_direction = background_role
             ? (residual_position_request > 0.0f ? 1.0f : (residual_position_request < 0.0f ? -1.0f : 0.0f))
             : x_error_direction;
-        const float residual_eligible_pi = background_role && !config.enable_delay_compensation
+        const float projected_pi = residual_position_direction *
+            std::max(0.0f, residual_position_direction * filtered_x);
+        float residual_eligible_pi = background_role && !config.enable_delay_compensation
             ? filtered_x
-            : residual_position_direction * std::max(0.0f, residual_position_direction * filtered_x);
+            : projected_pi;
+        float residual_eligible_p = tracking_filtered_proportional_x *
+            (filtered_x != 0.0f ? residual_eligible_pi / filtered_x : 1.0f);
+        if (residual_role && background_role && config.enable_delay_compensation) {
+            const float projected_p = residual_position_direction *
+                std::max(0.0f, residual_position_direction * tracking_filtered_proportional_x);
+            const float separated_pi = projected_p + tracking_filtered_integral_x;
+            const float extra_pi = separated_pi - projected_pi;
+            const bool supported_direction =
+                extra_pi * nominal_request > 0.0f || extra_pi * error_x > 0.0f;
+            const float support = supported_direction
+                ? std::min(1.0f, std::fabs(nominal_request) / std::fabs(extra_pi))
+                : 0.0f;
+            residual_eligible_pi += support * extra_pi;
+            // PI与P按同一接受比例分配，R的抗饱和只跟踪自身剩余份额。
+            residual_eligible_p += support * (projected_p - residual_eligible_p);
+        }
         if (residual_role) {
             applied_maintenance_request_x = nominal_request;
             motion_compensated_x = residual_eligible_pi + nominal_request;
@@ -5462,8 +5481,7 @@ struct Aim::Impl {
         const float allocation_total_before_cap = motion_compensated_x;
         const float allocation_m_before_cap = residual_role ? nominal_request : 0.0f;
         const float floating_position_before_cap = residual_role
-            ? tracking_filtered_proportional_x *
-                (filtered_x != 0.0f ? residual_eligible_pi / filtered_x : 1.0f)
+            ? residual_eligible_p
             : (current_position_filtered_x != 0.0f
                 ? (diagnostics.background_motion_use_x == AimBackgroundMotionUse::CONSUMED &&
                         x_filter_update != FilterUpdate::Reset
