@@ -99,12 +99,22 @@ void rigid_contract(bool variable) {
         close(jitter[i].control.error_derivative_x_source_pixels_per_second,
               constant[i].control.error_derivative_x_source_pixels_per_second,
               name+" 同源位移的误差斜率不受到达抖动污染 row"+std::to_string(i));
-    const std::array<float,4> golden=variable
-        ?std::array<float,4>{125.0f/3,275.0f/3,325.0f/3,1075.0f/9}
-        :std::array<float,4>{62.5f,93.75f,109.375f,117.1875f};
+    // 固定source px/count=.5215；控制增益不再改变observer单位。
+    // 独立输入125 source px/s；BG沿既定8ms时间常数作双线性递推。
+    std::array<float,4> golden{};
+    const double measurement=125.0/.5215;
+    double prior=0,prior_measurement=0;
+    const int intervals[]{4,12,8,16};
+    for (int i=0;i<4;++i) {
+        const double dt=variable?intervals[i]:8;
+        const double w=dt/(16+dt);
+        prior=(1-2*w)*prior+w*(prior_measurement+measurement);
+        golden[i]=static_cast<float>(prior);
+        prior_measurement=measurement;
+    }
     for (int i=1;i<=4;++i) {
-        close(velocity(constant[i]),golden[i-1],name+" 手算观测合同 constant row"+std::to_string(i));
-        close(velocity(jitter[i]),golden[i-1],name+" 手算观测合同 jitter row"+std::to_string(i));
+        close(velocity(constant[i]),golden[i-1],name+" 固定plant单位与双线性观测合同 constant row"+std::to_string(i));
+        close(velocity(jitter[i]),golden[i-1],name+" 固定plant单位与双线性观测合同 jitter row"+std::to_string(i));
     }
 }
 void prior_contract() {
@@ -142,14 +152,15 @@ void fallback_contract() {
     for(int i=1;i<=16;++i) {
         const auto& c=missing[i].control;
         expect(c.background_motion_use_x==AimBackgroundMotionUse::MISSING,"MISSING 状态明确");
-        const float dt=c.controller_dt_ms/1000;
-        const float measured=(c.reverse_translation_raw_left_x_roi_pixels-c.observer_camera_motion_x_source_pixels)/dt;
+        constexpr int source_intervals[]{4,12,8,16};
+        const float dt=source_intervals[(i-1)%4]/1000.0f;
+        const float measured=(c.reverse_translation_raw_left_x_roi_pixels-c.observer_camera_motion_x_source_pixels)/.5215f/dt;
         const float expected=velocity(missing[i-1])+dt/(0.008f+dt)*(measured-velocity(missing[i-1]));
-        close(velocity(missing[i]),expected,"MISSING保持控制dt的既有更新合同");
+        close(velocity(missing[i]),expected,"MISSING合法模型pair按完整source dt更新");
     }
 }
 void step_and_full_interval_contract() {
-    // 前16次都是1 px/8 ms，用已知非零前态检出只换分母却遗漏alpha。
+    // 前16次都是1 px/8 ms，用已知非零前态检出双线性测量历史或源时基错误。
     for (int variant=0;variant<4;++variant) {
         Aim aim(config());
         float before=0;
@@ -173,9 +184,9 @@ void step_and_full_interval_contract() {
         const auto r=aim.process(f);
         usable(r,"step/full interval",true);
         close(r.control.controller_dt_ms,variant==3?50.0f:static_cast<float>(control_dt_ms),"controller dt 仍按原合同clamp");
-        const float expected=variant<2?(before+250.0f)*0.5f:
-            variant==2?(8.0f*before+0.5f*125.0f)/8.5f:(8.0f*before+60.0f*125.0f)/68.0f;
-        close(velocity(r),expected,variant<2?"刚体速度阶跃的8ms alpha使用观测间隔":"完整原始观测间隔不得套用控制dt clamp");
+        const double w=source_dt_ms/(16.0+source_dt_ms);
+        const float expected=static_cast<float>((1-2*w)*before+w*(125.0/.5215+(variant<2?250.0:125.0)/.5215));
+        close(velocity(r),expected,variant<2?"刚体速度阶跃的双线性更新使用观测间隔":"完整原始观测间隔不得套用控制dt clamp");
         trace("step_or_unclamped_"+std::to_string(variant),17,source_dt_ms,r);
     }
 }

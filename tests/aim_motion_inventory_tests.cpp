@@ -47,7 +47,10 @@ void actual_motion_reversal(bool mirror) {
     Aim aim(config);
     const int direction = mirror ? -1 : 1;
     int checked = 0;
-    float reset_shaped_x = 0.0f;
+    float previous_remaining = 0.0f;
+    float window_sum = 0.0f;
+    int window_commands = 0;
+    int window_frames = 0;
     for (const auto& s : aim_motion_inventory_fixture::kSamples) {
         if (s.observation_clock_reset) aim.reset();
         AimFrame f;
@@ -101,6 +104,26 @@ void actual_motion_reversal(bool mirror) {
             expect(aim.record_backend_completed_command(f.sequence, at(s.backend_ns),
                        r.command.dx_counts, r.command.dy_counts),
                    "每个分支只能确认自身产生的命令");
+        if (s.sequence >= 2508) {
+            const float total = c.shaped_x_counts + c.residual_before_quantization_x_counts;
+            expect(c.residual_role_x && !c.filter_reset_x && direction * c.shaped_x_counts > 0.0f,
+                   "同源运动换侧后须保持连续残差角色及非空新向净请求");
+            if (window_frames == 0) {
+                expect(c.residual_before_quantization_x_counts == 0.0f,
+                       "新向连续请求不得继承旧方向的舍入余额");
+            } else {
+                expect(std::fabs(c.residual_before_quantization_x_counts - previous_remaining) < 0.00003f,
+                       "新向连续请求须继承前帧合法舍入余额，不得按历史帧号清理");
+            }
+            expect(r.command.dx_counts == std::lround(total),
+                   "连续新向净请求遵循最近整数舍入");
+            window_sum += c.shaped_x_counts;
+            window_commands += r.command.dx_counts;
+            previous_remaining = total - r.command.dx_counts;
+            expect(std::fabs(window_sum - window_commands - previous_remaining) < 0.00003f,
+                   "连续新向净请求累计守恒，不得丢失亚整数请求");
+            ++window_frames;
+        }
         if (s.sequence != 2507 && s.sequence != 2508 &&
             s.sequence != 2510 && s.sequence != 2511) continue;
         ++checked;
@@ -109,37 +132,69 @@ void actual_motion_reversal(bool mirror) {
                    c.background_motion_use_x == AimBackgroundMotionUse::CONSUMED,
                "核心行为必须建立在有效目标和同源帧对背景上");
         if (s.sequence == 2507) {
-            expect(direction * error < 0.0f && direction * r.command.dx_counts < 0,
-                   "实际前缀须先形成旧误差侧非零请求及其库存");
-        } else if (s.sequence == 2508) {
+            expect(direction * error < 0.0f && std::fabs(error) < config.deadzone_pixels,
+                   "前缀必须经过旧误差侧死区，不强制亚像素误差产生整数命令");
+        }
+        if (s.sequence >= 2510) {
+            expect(direction * error > config.deadzone_pixels,
+                   "后继必须覆盖死区外新向纠偏，不以静止或零请求规避累计响应");
+        }
+        if (s.sequence == 2508) {
             expect(direction * error > 0.0f &&
                        direction * c.observer_target_velocity_x_counts_per_second > 0.0f &&
-                       direction * c.pending_net_x_counts < 0.0f && !c.filter_reset_x,
-                   "误差和观测运动已同向，旧向库存仍在且本帧不是Reset");
-            expect(direction * c.target_motion_maintenance_x_counts > 0.0f,
-                   "已消费同帧背景的同向维护预算不能整项消失");
-            // 前史可改变量化余额；库存期间的累计响应由独立延迟ACK反事实验证。
-            expect(r.command.dx_counts == std::lround(c.shaped_x_counts +
-                       c.residual_before_quantization_x_counts),
-                   "2508须保持最近整数契约，合法亚半count请求允许本帧零输出");
-        } else if (s.sequence == 2510) {
-            // 仅约束这条实际Reset样本，不宣称所有Reset都必须把M或总输出置零。
-            expect(c.filter_reset_x && r.command.dx_counts == 0,
-                   "2510必须保持原实际Reset零X结果");
-            expect(c.residual_before_quantization_x_counts == 0.0f,
-                   "Reset是量化累计区间边界，不继承旧净请求的舍入余额");
-            reset_shaped_x = c.shaped_x_counts;
-        } else {
-            expect(std::fabs(c.residual_before_quantization_x_counts - reset_shaped_x) < 0.0003f,
-                   "Reset帧合法维护的新余数必须保留到下一步，不能连续清除");
-            expect(!c.filter_reset_x && direction * error > config.deadzone_pixels &&
-                       direction * r.command.dx_counts > 0,
-                   "2511须继续正常新向纠正，不得在Reset之后再次停发");
+                       direction * c.target_motion_maintenance_x_counts > 0.0f,
+                   "换侧后的同源观测须支持非空新向维护，不能因旧库存整项撤销");
         }
         std::cout << "mirror=" << mirror << " seq=" << s.sequence
                   << " error=" << error << " q=" << r.command.dx_counts << '\n';
     }
-    expect(checked == 4, "必须覆盖旧向请求、新向维护、原Reset和后续纠正");
+    expect(checked == 4 && window_frames == 5 && direction * window_commands > 0,
+           "必须覆盖旧侧死区及连续五帧新向请求且累计实际响应非零");
+    expect(std::fabs(previous_remaining) > 0.00003f,
+           "公开reset对照必须从非空旧量化余额开始");
+    aim.reset();
+    Aim fresh(config);
+    int reacquired_frames = 0;
+    int new_balance_frames = 0;
+    for (int index = 0; index < 12; ++index) {
+        AimFrame frame;
+        frame.sequence = 2600 + index;
+        frame.captured_at = at(aim_motion_inventory_fixture::kSamples.back().source_ns) +
+            std::chrono::milliseconds(8 * (index + 1));
+        frame.control_at = frame.captured_at + std::chrono::milliseconds(1);
+        frame.roi_width = frame.roi_height = 320;
+        frame.control_center_x = frame.control_center_y = 160.0f;
+        frame.lock_active = true;
+        const float x = 160.0f + direction * 8.0f;
+        frame.detections = {{x - 20.0f, 139.0f, x + 20.0f, 199.0f, .95f, 0}};
+        const auto warm = aim.process(frame);
+        const auto cold = fresh.process(frame);
+        expect(warm.status == cold.status && warm.has_target == cold.has_target &&
+                   warm.has_command == cold.has_command &&
+                   warm.command.dx_counts == cold.command.dx_counts &&
+                   warm.command.dy_counts == cold.command.dy_counts &&
+                   warm.control.proportional_x_counts == cold.control.proportional_x_counts &&
+                   warm.control.feedforward_x_counts == cold.control.feedforward_x_counts &&
+                   warm.control.modelled_response_x_counts == cold.control.modelled_response_x_counts &&
+                   warm.control.execution_unseen_command_x_counts == cold.control.execution_unseen_command_x_counts &&
+                   warm.control.residual_before_quantization_x_counts == cold.control.residual_before_quantization_x_counts,
+               "公开reset必须隔离旧P/R/M、库存和余额，重新获取与全新实例一致");
+        if (warm.control.evaluated) {
+            if (reacquired_frames++ == 0)
+                expect(warm.control.residual_before_quantization_x_counts == 0.0f,
+                       "reset后首个有效控制不继承旧舍入余额");
+            if (std::fabs(warm.control.residual_before_quantization_x_counts) > .00003f)
+                ++new_balance_frames;
+        }
+        if (warm.has_command)
+            expect(aim.record_backend_completed_command(frame.sequence, frame.control_at,
+                       warm.command.dx_counts, warm.command.dy_counts), "reset实例只确认自身命令");
+        if (cold.has_command)
+            expect(fresh.record_backend_completed_command(frame.sequence, frame.control_at,
+                       cold.command.dx_counts, cold.command.dy_counts), "全新实例只确认自身命令");
+    }
+    expect(reacquired_frames > 1 && new_balance_frames > 0,
+           "reset后须实际重新获取并形成新余额，不能每帧清理或始终无目标");
 }
 
 // 软件回执时相反事实：只延迟自身已生成命令；不代表真实物理闭环。
