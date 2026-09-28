@@ -188,10 +188,10 @@ void require_tooltip(const RenderCapture& capture, const char* expected) {
     throw std::runtime_error("没有当帧可见的生产帮助浮层");
 }
 
-void require_page_table(const char* table_name) {
+void require_page_table(const char* table_name, ImGuiID scope = 0) {
     auto* context = ImGui::GetCurrentContext();
     for (auto* window : context->Windows) {
-        auto* table = context->Tables.GetByKey(window->GetID(table_name));
+        auto* table = context->Tables.GetByKey(scope ? ImHashStr(table_name, 0, scope) : window->GetID(table_name));
         if (table && table->LastFrameActive == context->FrameCount) return;
     }
     throw std::runtime_error("导航未到达预期生产页面，拒绝保存误导截图");
@@ -417,16 +417,18 @@ int wmain(int argc, wchar_t** argv) {
         ImGui::SetScrollY(content, 0);
         ImGui::SetScrollY(stop_panel, 0);
         frame(); frame();
-        require(capture.text.find("阻断原因：源帧时钟映射无效") != std::string::npos &&
-                capture.text.find("源机时钟服务不可用或映射尚未建立") != std::string::npos,
-                "运行中急停阻断及排查提示必须进入生产界面");
+        require(capture.text.find("会话：待命") != std::string::npos &&
+                capture.text.find("当前条件：源帧时钟映射无效") != std::string::npos,
+                "运行中急停会话状态及阻断条件必须进入生产界面");
         require(stop_panel->Scroll.y == 0 && content->Scroll.y == 0,
                 "急停阻断首屏证据不得滚动后截取");
         save_window(capture, output / "auxiliary-blocked.png");
         runtime = original_runtime;
         frame(); frame();
+        ImGuiID content_scope = 0;
         auto focus_item = [&](const char* label, ImGuiWindow* window, const char* table = nullptr) {
-            const auto id = table ? ImHashStr(label, 0, window->GetID(table)) : window->GetID(label);
+            const auto scope = window == content && content_scope ? content_scope : window->ID;
+            const auto id = ImHashStr(label, 0, table ? ImHashStr(table, 0, scope) : scope);
             input.down = false; input.focus_window = window; input.focus_id = id; frame();
             auto* context = ImGui::GetCurrentContext();
             require(context->NavId == id && context->NavIdIsAlive,
@@ -479,7 +481,7 @@ int wmain(int argc, wchar_t** argv) {
         ImGui::SetScrollY(content, 0); frame(); frame();
         save_window(capture, output / "auxiliary-side-button.png");
         focus_item("暂停本次会话", preview_window("auto_stop_panel"));
-        require_tooltip(capture, "预计完成不是观察停稳");
+        require_tooltip(capture, "暂停会释放当前接管；恢复仅接受新请求。");
         save_window(capture, output / "auxiliary-stop-help.png");
         auto* trigger_panel = preview_window("trigger_panel");
         ImGui::ScrollToRect(content, trigger_panel->Rect(), ImGuiScrollFlags_AlwaysCenterY);
@@ -494,6 +496,10 @@ int wmain(int argc, wchar_t** argv) {
         ImGui::SetScrollY(content, 0); frame(); frame();
         focus_item("弹道工具", content, "debug_tabs");
         input.down = true; frame(); input.down = false; frame(); frame();
+        // 校准流程位于编辑器之前，先滚到末尾使高级入口进入当帧可导航区域。
+        // BeginTabItem 会将选项卡 ID 压栈，编辑器控件不再使用 content 根 ID。
+        content_scope = ImHashStr("弹道工具", 0, content->GetID("debug_tabs"));
+        ImGui::SetScrollY(content, content->ScrollMax.y); frame(); frame();
         focus_item("高级：曲线编辑与数据集优化", content);
         require_tooltip(capture, "不会自动加载、激活或执行曲线");
         save_window(capture, output / "recoil-editor-help.png");
@@ -504,7 +510,7 @@ int wmain(int argc, wchar_t** argv) {
         ImGui::GetIO().AddInputCharactersUTF8("ui-only-candidate.json"); frame();
         activate_view_item("加载文件");
         focus_item("还原草稿", content);
-        require_page_table("recoil_tuning");
+        require_page_table("recoil_tuning", content_scope);
         require(capture.text.find("ui_only_candidate") != std::string::npos, "临时曲线未载入生产编辑预览");
         require_tooltip(capture, "将内存草稿恢复到本次加载的基线");
         save_window(capture, output / "recoil-editor.png");
@@ -530,6 +536,7 @@ int wmain(int argc, wchar_t** argv) {
               std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
           require(after == fixture_text, "UI预览修改了磁盘曲线"); }
         select_page(7);
+        content_scope = 0;
         content = preview_window("content");
         ImGui::SetScrollY(content, 0); frame(); frame();
         require_page_table("mouse_form");

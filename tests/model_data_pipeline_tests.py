@@ -80,6 +80,40 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(pipeline.read_json(status)["result"]["samples"], 6)
 
+    def test_yolo_border_boxes_survive_production_round_trip(self):
+        # 实际冻结失败样本17：x2=44.78125，独立十位小数舍入使左边界约为-5e-11。
+        side = 320
+        edge = 44.78125
+        boxes = [dict(class_id=0, x1=0, y1=20, x2=edge, y2=80),
+                 dict(class_id=0, x1=side-edge, y1=20, x2=side, y2=80),
+                 dict(class_id=0, x1=20, y1=0, x2=80, y2=edge),
+                 dict(class_id=0, x1=20, y1=side-edge, x2=80, y2=side)]
+        label = self.base / "edges.txt"
+        label.write_text(pipeline.yolo_text(boxes, side, side), encoding="utf-8")
+        actual = pipeline.read_labels(label, side, side, self.names)
+        self.assertEqual(len(actual), 4)
+        for before, after in zip(boxes, actual):
+            for key in ("x1", "y1", "x2", "y2"):
+                self.assertAlmostEqual(before[key], after[key], delta=side*1e-10)
+
+    def test_yolo_outside_rounding_budget_is_rejected_on_each_edge(self):
+        label = self.base / "outside.txt"
+        for cx, cy in ((0.0999999998, 0.5), (0.9000000002, 0.5),
+                       (0.5, 0.0999999998), (0.5, 0.9000000002),
+                       (-0.1, 0.5), (1.1, 0.5)):
+            with self.subTest(cx=cx, cy=cy):
+                label.write_text(f"0 {cx:.10f} {cy:.10f} 0.2 0.2\n", encoding="utf-8")
+                with self.assertRaisesRegex(pipeline.PipelineError, "归一化坐标越界"):
+                    pipeline.read_labels(label, 320, 320, self.names)
+
+    def test_frozen_edge_annotations_validate_after_export(self):
+        sample_path = self.root / "session-0" / "samples" / "1.json"
+        sample = pipeline.read_json(sample_path)
+        sample["detections"] = [dict(class_id=0, x1=0, y1=4, x2=8.95625, y2=38)]
+        pipeline.write_json(sample_path, sample)
+        dataset = self.freeze()
+        self.assertEqual(pipeline.validate_dataset(dataset)["counts"], dict(train=2, val=2, test=2))
+
     def test_unknown_cannot_be_negative(self):
         with self.assertRaisesRegex(pipeline.PipelineError, "至少需要"):
             pipeline.export_dataset(self.context("export", output=str(self.base / "dataset")))

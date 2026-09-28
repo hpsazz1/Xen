@@ -136,7 +136,10 @@ def read_labels(path, width, height, names):
             cx, cy, w, h = map(float, fields[1:])
         except ValueError as exc:
             raise PipelineError("YOLO 标签坐标无效") from exc
-        if not all(math.isfinite(v) for v in (cx, cy, w, h)) or not (0 < w <= 1 and 0 < h <= 1 and 0 <= cx-w/2 and cx+w/2 <= 1.000000001 and 0 <= cy-h/2 and cy+h/2 <= 1.000000001):
+        # 导出对中心和宽高分别保留10位小数：边界误差至多(0.5+0.25)*1e-10。
+        # 另留少量二进制浮点运算误差；四边采用同一预算，随后裁回图片边界。
+        edge_tolerance = 7.5e-11 + 4 * math.ulp(1.0)
+        if not all(math.isfinite(v) for v in (cx, cy, w, h)) or not (0 < w <= 1 and 0 < h <= 1 and -edge_tolerance <= cx-w/2 and cx+w/2 <= 1+edge_tolerance and -edge_tolerance <= cy-h/2 and cy+h/2 <= 1+edge_tolerance):
             raise PipelineError("YOLO 归一化坐标越界")
         boxes.append(dict(class_id=int(fields[0]), x1=max(0, (cx-w/2)*width), y1=max(0, (cy-h/2)*height), x2=min(width, (cx+w/2)*width), y2=min(height, (cy+h/2)*height)))
     return boxes_checked(boxes, width, height, names)
