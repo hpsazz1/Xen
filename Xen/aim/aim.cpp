@@ -4502,10 +4502,10 @@ struct Aim::Impl {
             float camera_motion_evidence_weight =
                 use == AimBackgroundMotionUse::CONSUMED
                 ? 1.0f : model_camera_evidence_weight;
-            // 两条横边提供当前位移范围；把同一模型的先验相对位移投影
-            // 到范围内，避免近零单边把仍有依据的维护运动强拉向零。
-            // 区间跨零仍能约束旧估计的幅度，不能因相机平移改变 raw
-            // 符号就丢弃它；区间内先验保持，运动方向授权仍由下游判断。
+            // 独立背景下用双边中心位移分离对称形变，不能让旧先验在
+            // 宽度区间内自保，否则目标停止后仍可能保留虚假的世界运动。
+            // 模型回退仍按原边缘区间约束先验；中心观测不证明单边遮挡
+            // 是真实平移，位置锚点和下游方向资格继续承担各自职责。
             // 只用于 observer 测量，不改变位置/相位使用的共同边位移。
             // 有效背景与 raw 位移属于同一观测帧对，速度估计按该帧对的
             // 时间推进。控制步时长仍由下游 PI、M 和输出独立使用。
@@ -4526,10 +4526,11 @@ struct Aim::Impl {
                         tracking_plant_pixels_per_count_x * dt *
                             tracking_target_velocity_counts_per_second_x +
                         camera_motion_x * camera_motion_evidence_weight;
-                    observer_common_motion_x = std::clamp(
-                        prior_relative_motion_x,
-                        std::min(raw_left_motion_x, raw_right_motion_x),
-                        std::max(raw_left_motion_x, raw_right_motion_x));
+                    observer_common_motion_x = use == AimBackgroundMotionUse::CONSUMED
+                        ? 0.5f * raw_left_motion_x + 0.5f * raw_right_motion_x
+                        : std::clamp(prior_relative_motion_x,
+                            std::min(raw_left_motion_x, raw_right_motion_x),
+                            std::max(raw_left_motion_x, raw_right_motion_x));
                 }
                 return (observer_common_motion_x -
                         camera_motion_x * camera_motion_evidence_weight) /

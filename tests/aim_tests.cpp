@@ -36,6 +36,7 @@
 #include <vector>
 
 int run_aim_feedback_budget_tests();
+int run_aim_width_observation_tests();
 
 namespace {
 
@@ -14474,7 +14475,7 @@ void test_real_cadence_prediction_closes_public_point_error() {
                "，方向违规=" + std::to_string(direction_violations));
 }
 
-void test_variable_real_cadence_prediction_closes_public_point_error() {
+void test_variable_real_cadence_prediction_closes_public_point_error(bool animate = true) {
     constexpr int kFrameCount = 900;
     constexpr int kSettledFrame = 300;
     // 最新真实 Run 约 119 Hz，单帧间隔会跨越 8 ms 门槛。固定世界速度
@@ -14537,9 +14538,9 @@ void test_variable_real_cadence_prediction_closes_public_point_error() {
         world_target_x += kWorldVelocityPixelsPerSecond *
             static_cast<float>(interval_us) / 1000000.0f;
 
-        const float animation_x = 0.35f * std::sin(index * 0.73f);
+        const float animation_x = animate ? 0.35f * std::sin(index * 0.73f) : 0.0f;
         const float animation_width =
-            40.0f + 3.0f * std::sin(index * 0.51f);
+            40.0f + (animate ? 3.0f * std::sin(index * 0.51f) : 0.0f);
         AimFrame frame = make_frame(
             static_cast<std::uint64_t>(index + 1),
             base + elapsed);
@@ -14612,7 +14613,9 @@ void test_variable_real_cadence_prediction_closes_public_point_error() {
         }
     }
 
-    expect(zero_position_residual_frames > 0 &&
+    // 动画可使执行P持续非零；用同配置、同节奏的刚体分支保证角色窗口非空。
+    // 两分支都检查实际出现的角色窗口，原动画的全部性能门仍保留。
+    expect((animate || zero_position_residual_frames > 0) &&
                accepted_residual_frames == zero_position_residual_frames &&
                residual_budget_violations == 0 &&
                residual_conservation_violations == 0 &&
@@ -17597,6 +17600,7 @@ int main() {
     test_delayed_closed_loop_holds_moving_base_point(true);
     test_current_deadzone_crossing_preserves_x_maintenance_state();
     failures += run_aim_feedback_budget_tests();
+    failures += run_aim_width_observation_tests();
     test_deadzone_state_settles_with_noise_and_release();
     test_delayed_pose_closed_loop_keeps_tracking_pi_continuous();
     test_vertical_shape_noise_does_not_stutter_horizontal_tracking();
@@ -17653,6 +17657,7 @@ int main() {
     test_long_delay_prediction_distributes_horizontal_hold_command();
     test_real_cadence_prediction_closes_public_point_error();
     test_variable_real_cadence_prediction_closes_public_point_error();
+    test_variable_real_cadence_prediction_closes_public_point_error(false);
     test_prediction_lead_is_stable_across_bursty_frame_intervals();
     test_prediction_release_offset_is_slew_limited();
     test_prediction_pullback_hold_releases_after_real_reversal();

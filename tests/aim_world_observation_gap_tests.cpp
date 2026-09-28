@@ -1,3 +1,4 @@
+#include "aim_consumer_contract_support.h"
 #include "aim/aim.h"
 #include "aim_world_observation_gap_fixture.h"
 #include <algorithm>
@@ -243,38 +244,6 @@ void startup_model_oracle() {
     }
     expect(checked==79 && expected>0,"模型oracle必须覆盖非空启动及非零速度");
 }
-void vertical_closed_loop(int direction) {
-    AimConfig config;
-    config.min_confirmed_hits=1; config.body_aim_height_ratio=1.0f/3.0f;
-    config.acquisition_range_percent=100; config.enable_prediction=false;
-    config.enable_delay_compensation=false; config.counts_per_pixel_y=.4f;
-    config.deadzone_pixels=1.5f; config.max_counts_per_frame=14;
-    Aim aim(config);
-    float error=direction*8.0f;
-    int moved=0;
-    float tail_peak=0;
-    int tail_commands=0;
-    for(int i=0;i<400;++i) {
-        AimFrame f; f.sequence=i+1; f.observation_epoch=91; f.lock_active=true;
-        f.captured_at=f.control_at=at(50000000000LL+5000000LL*i);
-        f.roi_width=f.roi_height=320; f.control_center_x=f.control_center_y=160;
-        f.detections.push_back({136,120+error,184,240+error,.95f,0});
-        const auto r=aim.process(f);
-        expect(r.status==AimStatus::SUCCESS && r.has_target && r.command.dx_counts==0 && std::abs(r.command.dy_counts)<=14,
-               "独立Y闭环固定X中心，不能有跨轴输出或越界");
-        if(direction==0) expect(r.command.dy_counts==0,"双轴精确中心的静止负控不得凭空发Y");
-        const int q=r.has_command?r.command.dy_counts:0;
-        if(q) ++moved;
-        if(r.has_command) expect(aim.record_backend_completed_command(f.sequence,f.control_at,0,q),"Y闭环仅应用自身命令");
-        error-=q*.4f;
-        if(i>=300) {
-            tail_peak=std::max(tail_peak,std::fabs(error));
-            tail_commands+=std::abs(q);
-        }
-    }
-    expect(tail_peak<=config.deadzone_pixels+.001f && tail_commands==0 && (direction==0 || moved>0),
-           "独立Y闭环须实际纠正并收敛原几何死区，不能以全零输出假绿");
-}
 } // namespace
 int main() {
     for (int mode = 0; mode < 4; ++mode) { actual_gap(false, mode); actual_gap(true, mode); }
@@ -293,7 +262,7 @@ int main() {
             expect(seen[mode][0][i].y==seen[mode][1][i].y,
                    "纯X镜像不能改变相同Y输入的输出");
     }
-    startup_model_oracle(); vertical_closed_loop(-1); vertical_closed_loop(1); vertical_closed_loop(0);
+    startup_model_oracle(); aim_consumer_contract_support::vertical_closed_loop(-1, expect); aim_consumer_contract_support::vertical_closed_loop(1, expect); aim_consumer_contract_support::vertical_closed_loop(0, expect);
     std::cout << "失败数：" << failures << '\n';
     return failures == 0 ? 0 : 1;
 }

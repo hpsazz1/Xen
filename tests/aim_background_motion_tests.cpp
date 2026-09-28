@@ -308,10 +308,11 @@ bool same_prediction_output(const AimResult& a, const AimResult& b) {
            a.command.dy_counts == b.command.dy_counts;
 }
 
-void prediction_does_not_consume_background() {
+void prediction_consumes_only_valid_background() {
     auto c = config();
     c.enable_prediction = true;
-    Aim measured(c), missing(c);
+    Aim measured(c), missing(c), invalid(c);
+    int consumed = 0, distinct_world = 0, locked_out = 0;
     for (int index = 1; index <= 32; ++index) {
         auto f = frame(index);
         f.background_motion_x.dx_roi_pixels = index % 2 ? 9.0f : -7.0f;
@@ -321,13 +322,30 @@ void prediction_does_not_consume_background() {
         const auto a = measured.process(f);
         f.background_motion_x.status = AimBackgroundMotionStatus::MISSING;
         const auto b = missing.process(f);
-        expect(a.control.background_motion_use_x == AimBackgroundMotionUse::NOT_EVALUATED,
-               "prediction路径不得消费有效背景或修改其世界运动状态");
-        expect(same_prediction_output(a, b),
-               "prediction的全部确定性公开输出必须与缺失背景逐字段相同");
+        f.background_motion_x.status = AimBackgroundMotionStatus::LOW_TEXTURE;
+        auto bad = invalid.process(f);
+        // 拒绝原因允许不同；其余确定性公开行为必须完全等价于缺失背景。
+        bad.control.background_motion_use_x = b.control.background_motion_use_x;
+        expect(same_prediction_output(bad, b), "prediction非法背景不得污染缺失背景回退行为");
+        expect(a.target.base_aim_x == b.target.base_aim_x && a.target.base_aim_y == b.target.base_aim_y &&
+               a.target.track_id == b.target.track_id && a.target.matched_observation_x1 == b.target.matched_observation_x1 &&
+               a.target.matched_observation_x2 == b.target.matched_observation_x2,
+               "背景仅校正运动，不得改写当前观测锚点与身份");
+        if (f.lock_active && index > 1) {
+            expect(a.control.background_motion_use_x == AimBackgroundMotionUse::CONSUMED,
+                   "prediction必须消费合法同源背景");
+            expect(std::fabs(a.control.observer_camera_motion_x_source_pixels - f.background_motion_x.dx_roi_pixels) < 0.001f,
+                   "prediction背景源位移只换算一次");
+            ++consumed;
+            if (a.control.observer_target_velocity_x_counts_per_second != b.control.observer_target_velocity_x_counts_per_second) ++distinct_world;
+        } else {
+            ++locked_out;
+            expect(a.control.background_motion_use_x != AimBackgroundMotionUse::CONSUMED, "首帧或松键不能消费背景对");
+        }
     }
+    expect(consumed == 27 && locked_out == 5 && distinct_world > 0,
+           "prediction消费、回退差分和松键覆盖不得为空");
 }
-
 } // namespace
 
 int main() {
@@ -336,7 +354,7 @@ int main() {
     head_semantics_recover_on_the_next_pair();
     geometry_epoch_rejects_old_pair_and_recovers();
     finite_overflow_does_not_poison_later_frames();
-    prediction_does_not_consume_background();
+    prediction_consumes_only_valid_background();
     if (failures) { std::cerr << "背景输入合同失败数: " << failures << '\n'; return 1; }
     std::cout << "背景输入合同全部通过。\n";
 }

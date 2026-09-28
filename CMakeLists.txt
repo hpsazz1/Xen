@@ -1497,7 +1497,8 @@ if(BUILD_TESTING)
 
     add_executable(aim_tests
         tests/aim_tests.cpp
-        tests/aim_feedback_budget_tests.cpp)
+        tests/aim_feedback_budget_tests.cpp
+        tests/aim_width_observation_tests.cpp)
     target_link_libraries(aim_tests PRIVATE aim log)
     xen_deploy_runtime_dlls(aim_tests OPENCV)
     add_test(NAME aim_tests COMMAND aim_tests)
