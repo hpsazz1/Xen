@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from PIL import Image
+import numpy as np
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "model_data_pipeline.py"
 spec = importlib.util.spec_from_file_location("model_data_pipeline", SCRIPT)
@@ -251,6 +252,7 @@ class PipelineTests(unittest.TestCase):
 
     def test_successful_training_and_baseline_evaluation_orchestration(self):
         dataset = self.freeze()
+        frozen_files = {p: p.read_bytes() for p in dataset.rglob("*") if p.is_file()}
         weight = self.base / "local.pt"
         weight.write_bytes(b"trusted-test-fixture")
         captured = {}
@@ -268,6 +270,8 @@ class PipelineTests(unittest.TestCase):
 
             def train(self, **kwargs):
                 captured["train"] = kwargs
+                data_root = Path(pipeline.read_json(kwargs["data"])["path"])
+                (data_root / "labels" / "train.cache").write_bytes(b"trainer-cache")
                 run = Path(kwargs["project"]) / "run"
                 (run / "weights").mkdir(parents=True)
                 self.trainer = types.SimpleNamespace(epoch=0, stop=False, save_dir=run)
@@ -286,8 +290,10 @@ class PipelineTests(unittest.TestCase):
 
             def val(self, **kwargs):
                 captured.setdefault("evaluations", []).append(kwargs)
+                data_root = Path(pipeline.read_json(kwargs["data"])["path"])
+                (data_root / "labels" / "test.cache").write_bytes(b"validator-cache")
                 self.callbacks["on_val_batch_end"](None)
-                return types.SimpleNamespace(results_dict={"metrics/mAP50-95(B)": 0.75}, summary=lambda: [dict(Class="person", Recall=0.9)])
+                return types.SimpleNamespace(results_dict={"metrics/mAP50-95(B)": np.float32(0.75)}, summary=lambda: [dict(Class=np.str_("person"), Instances=np.int64(2), Recall=np.float32(0.9), nested=[np.uint64(3), np.bool_(True)])])
 
             def predict(self, **kwargs):
                 captured.setdefault("predictions", []).append(kwargs)
@@ -303,6 +309,7 @@ class PipelineTests(unittest.TestCase):
             card = pipeline.read_json(result["candidate_card"])
             self.assertEqual(card["state"], "CANDIDATE_NOT_ACTIVATED")
             self.assertEqual(card["test_evaluation"], "NOT_EXECUTED")
+            pipeline.validate_dataset(dataset)
             evaluation = self.base / "evaluation"
             self.assertEqual(pipeline.execute(self.job("evaluate", model=result["candidate"], baseline_model=result["candidate"], dataset=str(dataset), output=str(evaluation)), status), 0)
             measured = pipeline.read_json(status)["result"]
@@ -314,12 +321,49 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(report["fixed_threshold_per_class"][0]["recall"], 1.0)
             self.assertEqual(report["fixed_threshold_per_class"][0]["tp"], 1)
             self.assertEqual(report["background_fp_per_frame"], 0)
+            self.assertEqual(report["per_class"][0]["Instances"], 2)
+            self.assertEqual(report["per_class"][0]["nested"], [3, True])
+            self.assertEqual(report["baseline"]["per_class"][0]["Instances"], 2)
         self.assertFalse(captured["export"]["nms"])
         self.assertFalse(captured["export"]["dynamic"])
         self.assertEqual(captured["export"]["opset"], 17)
         self.assertEqual(len(captured["evaluations"]), 2)
         self.assertTrue(all(v["split"] == "test" and v["conf"] == 0.001 for v in captured["evaluations"]))
         self.assertTrue(all(v["conf"] == 0.25 for v in captured["predictions"]))
+        self.assertEqual({p: p.read_bytes() for p in dataset.rglob("*") if p.is_file()}, frozen_files)
+        pipeline.validate_dataset(dataset)
+        self.assertTrue(Path(captured["train"]["data"]).is_relative_to(output))
+        self.assertTrue(all(Path(v["data"]).is_relative_to(evaluation) for v in captured["evaluations"]))
+
+    def test_evaluation_cache_stays_outside_frozen_dataset_even_on_failure(self):
+        dataset = self.freeze()
+        frozen_files = {p: p.read_bytes() for p in dataset.rglob("*") if p.is_file()}
+        model_path = self.base / "model.onnx"
+        model_path.write_bytes(b"fixture")
+        output = self.base / "evaluation"
+        class Validator:
+            names = ["person"]
+            def add_callback(self, *_): pass
+            def val(self, **kwargs):
+                data_root = Path(pipeline.read_json(kwargs["data"])["path"])
+                (data_root / "labels" / "test.cache").write_bytes(b"cache-before-failure")
+                raise RuntimeError("validator fixture stopped")
+        with patch.object(pipeline, "load_yolo", return_value=Validator()):
+            with self.assertRaisesRegex(RuntimeError, "fixture stopped"):
+                pipeline.evaluate(self.context("evaluate", model=str(model_path), dataset=str(dataset), output=str(output)))
+        self.assertEqual({p: p.read_bytes() for p in dataset.rglob("*") if p.is_file()}, frozen_files)
+        pipeline.validate_dataset(dataset)
+
+    def test_evaluation_metrics_reject_nonfinite_and_unknown_objects(self):
+        for value in (float("nan"), float("inf"), np.float32("nan"), np.float64("-inf"),
+                      np.complex64(1+2j), np.array([1]), object(), {1: "invalid key"}):
+            with self.subTest(value=type(value).__name__):
+                with self.assertRaises(pipeline.PipelineError):
+                    pipeline.evaluation_json_value({"nested": [value]})
+        normalized = pipeline.evaluation_json_value({"count": np.int64(2**60), "ratio": np.float32(0.25)})
+        self.assertIs(type(normalized["count"]), int)
+        self.assertEqual(normalized["count"], 2**60)
+        self.assertIs(type(normalized["ratio"]), float)
 
     def test_train_orchestration_and_checkpoint_cancellation(self):
         dataset = self.freeze()
@@ -406,6 +450,9 @@ class PipelineTests(unittest.TestCase):
             def train(self, **kwargs):
                 observed["resume"] = kwargs["resume"]
                 self.trainer = kwargs["trainer"](kwargs)
+                observed["data"] = self.trainer.args.data
+                data_root = Path(pipeline.read_json(self.trainer.args.data)["path"])
+                (data_root / "labels" / "train.cache").write_bytes(b"resumed-trainer-cache")
                 self.trainer.resume_training(self.ckpt)
                 observed["seed_best"] = self.trainer.best.read_bytes()
                 (self.trainer.best.parent / "last.pt").write_bytes(b"epoch-1")
@@ -423,6 +470,8 @@ class PipelineTests(unittest.TestCase):
             result = pipeline.train(self.context("train", weights=str(last), dataset=str(dataset), output=str(output), resume=True, epochs=3, **self.trust(last)))
         self.assertTrue(observed["resume"])
         self.assertTrue(observed["native_check_resume"])
+        self.assertTrue(Path(observed["data"]).is_relative_to(output))
+        pipeline.validate_dataset(dataset)
         self.assertEqual(observed["optimizer"], {"state": "kept"})
         self.assertEqual(observed["start_epoch"], 1)
         self.assertEqual(observed["seed_best"], b"historical-best")

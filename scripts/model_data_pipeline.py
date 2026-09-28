@@ -822,6 +822,24 @@ def detection_trainer_class():
     return DetectionTrainer
 
 
+def working_dataset(ctx, dataset, manifest, output):
+    """训练器会在标签旁写缓存；仅向作业独占副本传递数据，冻结白名单保持严格。"""
+    working = output / "working-dataset"
+    working.mkdir(exist_ok=False)
+    for item in manifest["samples"]:
+        ctx.check()
+        for key in ("image", "label"):
+            source = contained(dataset, item[key])
+            destination = contained(working, item[key])
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            # 不能硬链接：第三方若写回图片/标签，不得改变冻结版本。
+            shutil.copyfile(source, destination)
+            if sha256(destination) != item[f"{key}_sha256"]:
+                raise PipelineError("工作数据副本与冻结文件 SHA-256 不一致")
+    write_json(working / "data.yaml", dict(path=str(working), train="images/train", val="images/val", test="images/test", names=manifest["class_names"]))
+    return working
+
+
 def train(ctx):
     check_pt_trust(ctx.job.get("weights", ""), ctx.job)
     dataset = Path(ctx.job["dataset"]).resolve()
@@ -850,6 +868,7 @@ def train(ctx):
         if checkpoint["epoch"] != source["checkpoint"]["epoch"] or model_names(model) != manifest["class_names"]:
             raise PipelineError("续训 checkpoint 的 epoch/类别与原作业不一致")
     output = ctx.output()
+    work_data = working_dataset(ctx, dataset, manifest, output)
     config = dict(schema_version=SCHEMA, job=ctx.job, dataset_sha256=sha256(dataset / "dataset.json"), class_names=manifest["class_names"], effective_training=dict(epochs=epochs, imgsz=imgsz, batch=batch, device=device), weights_sha256=sha256(ctx.job["weights"]), versions=versions(), started_at=now(), resume_from=source["output"] if source else None)
     write_json(output / "config.json", config)
     cancelled = False
@@ -884,8 +903,8 @@ def train(ctx):
     ctx.check()
     resume_options = {}
     if source:
-        resume_options = dict(resume=True, trainer=redirected_resume_trainer(detection_trainer_class(), output, dataset, source["best"]))
-    result = model.train(data=str(dataset / "data.yaml"), epochs=epochs, imgsz=imgsz, batch=batch, device=device, project=str(output), name="run", exist_ok=False, workers=0, seed=0, deterministic=True, pretrained=False, amp=False, save=True, save_period=1, plots=False, val=True, patience=20, **resume_options)
+        resume_options = dict(resume=True, trainer=redirected_resume_trainer(detection_trainer_class(), output, work_data, source["best"]))
+    result = model.train(data=str(work_data / "data.yaml"), epochs=epochs, imgsz=imgsz, batch=batch, device=device, project=str(output), name="run", exist_ok=False, workers=0, seed=0, deterministic=True, pretrained=False, amp=False, save=True, save_period=1, plots=False, val=True, patience=20, **resume_options)
     ctx.check()
     run_dir = Path(model.trainer.save_dir)
     best, last = run_dir / "weights" / "best.pt", run_dir / "weights" / "last.pt"
@@ -906,6 +925,28 @@ def train(ctx):
     return dict(output=str(output), candidate=str(onnx_path.resolve()), candidate_card=str(output / "candidate.json"), state=card["state"], onnx=str(onnx_path.resolve()))
 
 
+def evaluation_json_value(value):
+    """仅接受指标的标准JSON结构和NumPy数值标量，不把未知对象字符串化。"""
+    import numpy as np
+    if isinstance(value, np.generic):
+        if value.dtype.kind not in "biufU":
+            raise PipelineError("评估指标含不支持的 NumPy 标量")
+        value = value.item()
+    if value is None or type(value) in (bool, int, str):
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise PipelineError("评估指标必须为有限数值")
+        return value
+    if type(value) is list:
+        return [evaluation_json_value(item) for item in value]
+    if type(value) is dict:
+        if any(type(key) is not str for key in value):
+            raise PipelineError("评估指标对象键必须为字符串")
+        return {key: evaluation_json_value(item) for key, item in value.items()}
+    raise PipelineError("评估指标含不支持的对象类型")
+
+
 def evaluate(ctx):
     for key in ("model", "baseline_model"):
         if ctx.job.get(key):
@@ -921,6 +962,8 @@ def evaluate(ctx):
         raise PipelineError("评价 conf 必须为 0..1")
     output = ctx.output()
 
+    work_data = working_dataset(ctx, dataset, manifest, output)
+
     def overlap(left, right):
         intersection = max(0, min(left[2], right[2])-max(left[0], right[0])) * max(0, min(left[3], right[3])-max(left[1], right[1]))
         union = (left[2]-left[0])*(left[3]-left[1]) + (right[2]-right[0])*(right[3]-right[1]) - intersection
@@ -935,7 +978,7 @@ def evaluate(ctx):
             ctx.check()
         model.add_callback("on_val_batch_end", check_batch)
         # mAP 使用同一低置信门槛构建曲线；背景误报另用固定部署候选门槛。
-        result = model.val(data=str(dataset / "data.yaml"), split=split, imgsz=imgsz, conf=0.001, iou=0.7, batch=ctx.job.get("batch", 8), device=ctx.job.get("device", "cpu"), project=str(output), name=name, plots=False, save_json=False, workers=0)
+        result = model.val(data=str(work_data / "data.yaml"), split=split, imgsz=imgsz, conf=0.001, iou=0.7, batch=ctx.job.get("batch", 8), device=ctx.job.get("device", "cpu"), project=str(output), name=name, plots=False, save_json=False, workers=0)
         ctx.check()
         negative_frames = false_positive_frames = false_positives = 0
         fixed = [dict(class_id=i, name=name, tp=0, fp=0, fn=0) for i, name in enumerate(manifest["class_names"])]
@@ -943,7 +986,7 @@ def evaluate(ctx):
             if item["split"] != split:
                 continue
             ctx.check()
-            predictions = model.predict(source=str(dataset / item["image"]), conf=confidence, iou=0.7, imgsz=imgsz, device=ctx.job.get("device", "cpu"), verbose=False, save=False)
+            predictions = model.predict(source=str(work_data / item["image"]), conf=confidence, iou=0.7, imgsz=imgsz, device=ctx.job.get("device", "cpu"), verbose=False, save=False)
             rows = predictions[0].boxes.data.cpu().tolist()
             truth = read_labels(dataset / item["label"], item["width"], item["height"], manifest["class_names"])
             unmatched = set(range(len(truth)))
@@ -981,6 +1024,7 @@ def evaluate(ctx):
     model_path = Path(ctx.job["model"]).resolve()
     contract = onnx_contract(model_path, len(manifest["class_names"]), imgsz) if model_path.suffix.lower() == ".onnx" else None
     report.update(model=str(model_path), dataset=str(dataset), class_names=manifest["class_names"], task="detect", input_size=imgsz, passed_compatibility=contract is not None, contract=contract, baseline=baseline, comparison=comparison)
+    report = evaluation_json_value(report)
     write_json(output / "evaluation.json", report)
     return dict(output=str(output), evaluation=str(output / "evaluation.json"), model=str(model_path), model_sha256=report["model_sha256"], dataset=str(dataset), dataset_sha256=report["dataset_sha256"], class_names=manifest["class_names"], task="detect", input_size=imgsz, passed_compatibility=contract is not None, metrics=report["metrics"], comparison=comparison)
 
