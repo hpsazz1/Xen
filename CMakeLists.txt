@@ -1092,7 +1092,11 @@ add_custom_target(model_workspace_tools
     COMMAND ${CMAKE_COMMAND} -E make_directory
         "${XEN_MODEL_TOOLS_OUTPUT}/tools/model-data"
         "${XEN_MODEL_TOOLS_OUTPUT}/tools/recoil"
+        "${XEN_MODEL_TOOLS_OUTPUT}/tools/source"
         "${XEN_MODEL_TOOLS_OUTPUT}/assets/recoil"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${PROJECT_SOURCE_DIR}/scripts/start_source_context_session.ps1"
+        "${XEN_MODEL_TOOLS_OUTPUT}/tools/source"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${PROJECT_SOURCE_DIR}/scripts/model_data_pipeline.py"
         "${PROJECT_SOURCE_DIR}/scripts/model_data_review.html"

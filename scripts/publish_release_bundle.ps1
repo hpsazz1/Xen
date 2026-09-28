@@ -32,6 +32,7 @@ $sourceToolNames = @(
     "xen_source_context.exe", "XenClockSource.exe", "XenSender.exe",
     "XenCaptureEvidence.exe", "XenAutoStopCapture.exe")
 $repositoryPayload = [ordered]@{
+    "tools/source/start_source_context_session.ps1" = "scripts/start_source_context_session.ps1"
     "tools/model-data/model_data_pipeline.py" = "scripts/model_data_pipeline.py"
     "tools/model-data/model_data_review.html" = "scripts/model_data_review.html"
     "tools/model-data/model_training_environment.py" = "scripts/model_training_environment.py"

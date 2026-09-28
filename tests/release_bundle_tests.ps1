@@ -112,6 +112,7 @@ try {
     New-Item -ItemType Directory -Path $repository | Out-Null
     Write-Utf8 (Join-Path $repository "tracked.txt") "fixture"
     $fixturePayload = [ordered]@{
+        "tools/source/start_source_context_session.ps1" = "scripts/start_source_context_session.ps1"
         "tools/model-data/model_data_pipeline.py" = "scripts/model_data_pipeline.py"
         "tools/model-data/model_data_review.html" = "scripts/model_data_review.html"
         "tools/model-data/model_training_environment.py" = "scripts/model_training_environment.py"
@@ -224,12 +225,15 @@ try {
             Assert-PreflightFailure "missing-tuner-$(Split-Path -Leaf $build)" "xen_recoil_tuner.exe"
         } finally { [IO.File]::WriteAllBytes($path, $originalBytes) }
     }
-    $payloadPath = Join-Path $nvidia "Release/tools/model-data/model_data_pipeline.py"
-    $payloadBytes = [IO.File]::ReadAllBytes($payloadPath)
-    try {
-        Write-Utf8 $payloadPath "stale built script"
-        Assert-PreflightFailure "stale-script" "与当前版本不同"
-    } finally { [IO.File]::WriteAllBytes($payloadPath, $payloadBytes) }
+    foreach ($relative in @("tools/model-data/model_data_pipeline.py",
+            "tools/source/start_source_context_session.ps1")) {
+        $payloadPath = Join-Path $nvidia "Release/$relative"
+        $payloadBytes = [IO.File]::ReadAllBytes($payloadPath)
+        try {
+            Write-Utf8 $payloadPath "stale built script"
+            Assert-PreflightFailure ("stale-" + $relative.Replace('/', '-')) "与当前版本不同"
+        } finally { [IO.File]::WriteAllBytes($payloadPath, $payloadBytes) }
+    }
 
     $layoutPath = Join-Path $nvidia "Release/xen-release-layout.json"
     $layoutText = Get-Content -LiteralPath $layoutPath -Raw -Encoding utf8
@@ -511,6 +515,17 @@ try {
         if ($record.Count -ne 1 -or -not (Test-Path -LiteralPath (Join-Path $output $relative) -PathType Leaf)) {
             throw "必需工具/资源没有唯一进入完整发布清单：$relative"
         }
+    }
+    $sourceSessionRelative = "tools/source/start_source_context_session.ps1"
+    $sourceSessionRecord = @($manifest.files | Where-Object { $_.path -eq $sourceSessionRelative })[0]
+    $sourceSessionSource = Join-Path $repository "scripts/start_source_context_session.ps1"
+    $sourceSessionHash = (Get-FileHash -LiteralPath $sourceSessionSource -Algorithm SHA256).Hash
+    if ($sourceSessionRecord.sha256 -ne $sourceSessionHash -or
+        (Get-FileHash -LiteralPath (Join-Path $output $sourceSessionRelative) -Algorithm SHA256).Hash -ne $sourceSessionHash) {
+        throw "源会话脚本必须与当前源码及发布清单SHA一致"
+    }
+    if (Test-Path -LiteralPath (Join-Path $output "Start-Xen.cmd")) {
+        throw "完整包不得生成带有目标机凭据绑定的启动封装"
     }
     foreach ($prefix in @("", "tools/source/", "runtimes/nvidia/", "runtimes/directml/", "runtimes/openvino/")) {
         foreach ($name in $fixtureCrtNames) {
