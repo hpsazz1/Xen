@@ -4,9 +4,16 @@
 #include <chrono>
 #include <cmath>
 #include <iostream>
+#include <vector>
 
 namespace {
 int failures = 0;
+struct Observation {
+    float velocity;
+    int x;
+    int y;
+};
+std::vector<Observation> seen[4][2];
 void expect(bool value, const char* message) {
     if (!value) { ++failures; std::cerr << "失败：" << message << '\n'; }
 }
@@ -80,7 +87,11 @@ void actual_gap(bool mirror, int mode) {
             f.background_motion_x = {};
         if (mode == 2 && (s.sequence == 4216 || s.sequence == 4218)) {
             f.background_motion_x.status = AimBackgroundMotionStatus::VALID;
+            f.background_motion_x.usable_patch_count = 2;
+            f.background_motion_x.min_response = .9f;
+            f.background_motion_x.disagreement_roi_pixels = 0.0f;
             --f.background_motion_x.previous_sequence;
+            f.background_motion_x.dx_roi_pixels = mirror ? -1000.0f : 1000.0f;
         }
         last = f;
         const auto r = aim.process(f);
@@ -99,7 +110,7 @@ void actual_gap(bool mirror, int mode) {
             expect(std::isfinite(value), "原字段和分阶段维护诊断必须有限");
         expect(c.opening_weight_x >= 0.0f && c.opening_weight_x <= 1.0f,
                "opening权重保持有效范围");
-        expect(r.command.dy_counts == s.expected_y, "原向与镜像都必须保持原Y输出");
+        seen[mode][mirror].push_back({c.observer_target_velocity_x_counts_per_second,r.command.dx_counts,r.command.dy_counts});
         expect(std::hypot(static_cast<float>(r.command.dx_counts),
                           static_cast<float>(r.command.dy_counts)) <= 14.0f,
                "维护更新不得突破二维14上限");
@@ -111,17 +122,18 @@ void actual_gap(bool mirror, int mode) {
         if (mode == 3) {
             expect(c.background_motion_use_x != AimBackgroundMotionUse::CONSUMED,
                    "启动负控整段没有世界观测");
-            expect(std::fabs(velocity - direction * s.startup_velocity) <=
-                       .003f + .00003f * std::fabs(s.startup_velocity),
-                   "从未获得世界观测时必须保留冻结基线模型更新");
             if (velocity != 0.0f) ++startup_nonzero;
         } else {
             if (s.sequence == 4216 || s.sequence == 4218) {
                 ++checked;
+                if (mode == 2)
+                    expect(c.background_motion_use_x == AimBackgroundMotionUse::PAIR_MISMATCH,
+                           "其余字段合法的错误帧对必须明确PAIR_MISMATCH");
                 expect(observed_world && c.background_motion_use_x != AimBackgroundMotionUse::CONSUMED,
                        "实际缺口必须位于有效世界观测之后");
-                expect(std::fabs(velocity - previous_velocity) < .003f,
-                       "缺少世界测量不能用backend模型伪观测改写已有目标速度");
+                if (s.sequence == 4216)
+                    expect(std::fabs(velocity - previous_velocity) > .003f,
+                           "合法非零模型区间必须接管基础维护，不能永久冻结最后BG速度");
                 if (mode == 0)
                     expect(s.status == AimBackgroundMotionStatus::INCONSISTENT,
                            "原实际缺口保留INCONSISTENT测量状态");
@@ -135,8 +147,8 @@ void actual_gap(bool mirror, int mode) {
                            c.reverse_translation_raw_right_x_roi_pixels == 0.0f,
                        "实际重复内容仍作为有效零位移测量，不无限冻结静止证据");
                 expect(std::fabs(velocity) < std::fabs(previous_velocity) &&
-                           std::fabs(velocity - previous_velocity * .008f / (.008f + dt)) < .003f,
-                       "有效零观测继续按原source时间与8ms滤波更新");
+                           std::fabs(velocity - previous_velocity * .016f / (.016f + dt)) < .003f,
+                       "有效零观测在缺口后按source时间重建8ms双线性端点");
             }
         }
         if (c.background_motion_use_x == AimBackgroundMotionUse::CONSUMED) observed_world = true;
@@ -196,9 +208,92 @@ void actual_gap(bool mirror, int mode) {
            "松键清除来源状态后，同目标缺BG重按必须从零恢复原相机模型更新");
 
 }
+void startup_model_oracle() {
+    AimConfig config;
+    config.min_confirmed_hits=1; config.body_aim_height_ratio=1.0f/3.0f;
+    config.enable_delay_compensation=true; config.control_delay_ms=15;
+    config.counts_per_pixel_x=.425f; config.counts_per_pixel_y=.4f;
+    config.acquisition_range_percent=100; config.enable_prediction=false;
+    Aim aim(config);
+    float expected=0, previous_left=0;
+    int checked=0;
+    for(int i=0;i<80;++i) {
+        AimFrame f;
+        f.sequence=i+1; f.observation_epoch=81; f.lock_active=true;
+        f.captured_at=at(30000000000LL+5000000LL*i);
+        f.control_at=f.captured_at+std::chrono::milliseconds(i%2?1:2);
+        f.roi_width=f.roi_height=320; f.control_center_x=f.control_center_y=160;
+        const float left=116.0f+.4f*i;
+        f.detections.push_back({left,120,left+48,240,.95f,0});
+        const auto r=aim.process(f);
+        expect(r.status==AimStatus::SUCCESS && r.has_target,"模型oracle输入处理成功且目标有效");
+        if(i) {
+            const float measurement=(left-previous_left)/.5215f/.005f;
+            expected+=.005f/(.008f+.005f)*(measurement-expected);
+            expect(std::fabs(r.control.observer_target_velocity_x_counts_per_second-expected)<.03f,
+                   "无BG零应用的已知同源平移须匹配独立source-dt模型递推");
+            expect(r.control.background_motion_use_x!=AimBackgroundMotionUse::CONSUMED &&
+                   std::fabs(r.control.observer_camera_motion_x_source_pixels)<.0001f,
+                   "零应用模型不能伪造camera或世界观测资格");
+            ++checked;
+        }
+        if(r.has_command) expect(aim.record_backend_completed_command(f.sequence,f.control_at,0,0),
+                                 "模型oracle每条已产生请求只确认合法零应用");
+        previous_left=left;
+    }
+    expect(checked==79 && expected>0,"模型oracle必须覆盖非空启动及非零速度");
 }
+void vertical_closed_loop(int direction) {
+    AimConfig config;
+    config.min_confirmed_hits=1; config.body_aim_height_ratio=1.0f/3.0f;
+    config.acquisition_range_percent=100; config.enable_prediction=false;
+    config.enable_delay_compensation=false; config.counts_per_pixel_y=.4f;
+    config.deadzone_pixels=1.5f; config.max_counts_per_frame=14;
+    Aim aim(config);
+    float error=direction*8.0f;
+    int moved=0;
+    float tail_peak=0;
+    int tail_commands=0;
+    for(int i=0;i<400;++i) {
+        AimFrame f; f.sequence=i+1; f.observation_epoch=91; f.lock_active=true;
+        f.captured_at=f.control_at=at(50000000000LL+5000000LL*i);
+        f.roi_width=f.roi_height=320; f.control_center_x=f.control_center_y=160;
+        f.detections.push_back({136,120+error,184,240+error,.95f,0});
+        const auto r=aim.process(f);
+        expect(r.status==AimStatus::SUCCESS && r.has_target && r.command.dx_counts==0 && std::abs(r.command.dy_counts)<=14,
+               "独立Y闭环固定X中心，不能有跨轴输出或越界");
+        if(direction==0) expect(r.command.dy_counts==0,"双轴精确中心的静止负控不得凭空发Y");
+        const int q=r.has_command?r.command.dy_counts:0;
+        if(q) ++moved;
+        if(r.has_command) expect(aim.record_backend_completed_command(f.sequence,f.control_at,0,q),"Y闭环仅应用自身命令");
+        error-=q*.4f;
+        if(i>=300) {
+            tail_peak=std::max(tail_peak,std::fabs(error));
+            tail_commands+=std::abs(q);
+        }
+    }
+    expect(tail_peak<=config.deadzone_pixels+.001f && tail_commands==0 && (direction==0 || moved>0),
+           "独立Y闭环须实际纠正并收敛原几何死区，不能以全零输出假绿");
+}
+} // namespace
 int main() {
     for (int mode = 0; mode < 4; ++mode) { actual_gap(false, mode); actual_gap(true, mode); }
+    for(int mode=1;mode<=2;++mode) for(int mirror=0;mirror<2;++mirror) {
+        expect(seen[0][mirror].size()==29 && seen[mode][mirror].size()==29,"无效BG配对不能为空");
+        for(std::size_t i=0;i<std::min(seen[0][mirror].size(),seen[mode][mirror].size());++i) {
+            const auto a=seen[0][mirror][i], b=seen[mode][mirror][i];
+            expect(a.x==b.x && a.y==b.y && std::fabs(a.velocity-b.velocity)<.003f,
+                   "同X上下文下三种拒绝BG须走相同模型回退，保持Y而非匹配旧整数表");
+        }
+    }
+    for(int mode=0;mode<4;++mode) {
+        expect(seen[mode][0].size()==29 && seen[mode][1].size()==29,
+               "每种来源模式均须完整覆盖原向与镜像");
+        for(std::size_t i=0;i<std::min(seen[mode][0].size(),seen[mode][1].size());++i)
+            expect(seen[mode][0][i].y==seen[mode][1][i].y,
+                   "纯X镜像不能改变相同Y输入的输出");
+    }
+    startup_model_oracle(); vertical_closed_loop(-1); vertical_closed_loop(1); vertical_closed_loop(0);
     std::cout << "失败数：" << failures << '\n';
     return failures == 0 ? 0 : 1;
 }
