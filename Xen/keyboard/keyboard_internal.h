@@ -12,11 +12,12 @@ namespace keyboard::detail {
 struct KeyboardEventState {
     bool aim_hold_active = false;
     std::array<bool,256> debug_blocked_until_release{};
+    std::array<bool,256> anomaly_blocked_until_release{};
     std::array<bool, 256> previous_key_active{};
 };
 
 struct KeyboardEventPollResult {
-    std::array<KeyboardEvent, 4> events{};
+    std::array<KeyboardEvent, 5> events{};
     std::size_t count = 0;
 };
 
@@ -68,6 +69,14 @@ inline KeyboardEventPollResult update_keyboard_events(
             KeyboardEventType::RUNTIME_TOGGLE, true};
     }
     if (debug_pressed) result.events[result.count++] = {KeyboardEventType::DEBUG_TEST,true};
+    bool anomaly_pressed = false;
+    for (const int key : config.anomaly_mark_virtual_keys) {
+        const auto index = static_cast<std::size_t>(key);
+        if (!key_active[index]) state.anomaly_blocked_until_release[index] = false;
+        if (key_active[index] && !state.previous_key_active[index] &&
+            !state.anomaly_blocked_until_release[index]) anomaly_pressed = true;
+    }
+    if (anomaly_pressed) result.events[result.count++] = {KeyboardEventType::ANOMALY_MARK, true};
     state.aim_hold_active = aim_hold_active;
     state.previous_key_active = key_active;
     return result;

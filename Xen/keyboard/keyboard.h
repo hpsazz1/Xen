@@ -20,6 +20,7 @@ enum class KeyboardEventType {
     EMERGENCY_STOP,
     RUNTIME_TOGGLE,
     DEBUG_TEST,
+    ANOMALY_MARK,
 };
 
 struct KeyboardConfig {
@@ -28,6 +29,7 @@ struct KeyboardConfig {
     std::vector<int> runtime_toggle_virtual_keys{0x77}; // VK_F8
     bool debug_test_enabled = false;
     std::vector<int> debug_test_virtual_keys{};
+    std::vector<int> anomaly_mark_virtual_keys{0x78}; // VK_F9，仅标记诊断
 };
 
 // 空集合表示该功能未绑定；集合内任意键均可生效。所有已绑定的全局语义
@@ -48,9 +50,13 @@ inline bool valid_keyboard_config(const KeyboardConfig& config) noexcept {
         if (key == 1 || key == 0x57 || key == 0x41 || key == 0x53 || key == 0x44)
             return false; // 调试启动键不能兼作左键测试动作。
     }
+    for (const int key : config.anomaly_mark_virtual_keys) {
+        if (key == 1 || key == 'W' || key == 'A' || key == 'S' || key == 'D') return false;
+    }
     return claim(config.aim_hold_virtual_keys) &&
            claim(config.emergency_virtual_keys) &&
-           claim(config.runtime_toggle_virtual_keys) && claim(config.debug_test_virtual_keys);
+           claim(config.runtime_toggle_virtual_keys) && claim(config.debug_test_virtual_keys) &&
+           claim(config.anomaly_mark_virtual_keys);
 }
 
 struct KeyboardEvent {

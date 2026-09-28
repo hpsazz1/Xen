@@ -8,6 +8,7 @@
 #include "config/config.h"
 #include "crash/crash.h"
 #include "debug/debug.h"
+#include "debug/session_archive.h"
 #include "debug_session/debug_session.h"
 #include "keyboard/keyboard.h"
 #include "log/log.h"
@@ -212,6 +213,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         append_message(app_message, "全局快捷键初始化失败");
     }
     DebugReport debug_report;
+    SessionArchive session_archive;
+    bool session_archive_active = false;
+    std::uint64_t archive_trigger_after_event = 0;
+    auto archive_trigger_poll = std::chrono::steady_clock::time_point{};
+    bool archive_drain_failed = false;
     bool debug_session_active = false;
     bool detector_reload_pending = false;
     bool release_restart_requested = false;
@@ -236,15 +242,38 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         return startup_boundary.finish(0);
     }
 
-    const auto drain_debug_samples = [&]() noexcept {
-        if (!runtime.drain_pipeline_samples(pending_debug_samples)) return;
+    const auto drain_debug_samples = [&](bool final_drain = false) noexcept {
+        pending_debug_samples.clear();
+        if (!runtime.drain_pipeline_samples(pending_debug_samples)) {
+            if (!archive_drain_failed) {
+                LOG_WARN("app", "Runtime样本读取失败，归档覆盖存在未确定缺口；不会重交旧帧。");
+                if (session_archive_active) session_archive.mark("样本读取失败：覆盖缺口待核实");
+                if (session_archive_active) session_archive.note_gap("样本读取失败：覆盖缺口待核实");
+            }
+            archive_drain_failed = true;
+            pending_debug_samples.clear();
+        }
         if (debug_session_active) {
             debug_report.ingest(pending_debug_samples);
+        }
+        if (session_archive_active) {
+            auto archive_snapshot = runtime.snapshot();
+            const auto now = std::chrono::steady_clock::now();
+            if (final_drain || now - archive_trigger_poll >= std::chrono::milliseconds(100)) {
+                archive_snapshot.trigger_execution_log = runtime.trigger_execution_log(archive_trigger_after_event);
+                archive_trigger_poll = now;
+            }
+            if (session_archive.submit(pending_debug_samples, archive_snapshot) &&
+                !archive_snapshot.trigger_execution_log.events.empty()) {
+                archive_trigger_after_event = archive_snapshot.trigger_execution_log.events.back().sequence;
+            }
         }
         pending_debug_samples.clear();
     };
     const auto finish_debug_report = [&]() noexcept {
-        drain_debug_samples();
+        drain_debug_samples(true);
+        session_archive.stop();
+        session_archive_active = false;
         if (!debug_session_active) return;
         std::string report_error;
         auto final_snapshot = runtime.snapshot();
@@ -289,6 +318,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         std::string report_error;
         debug_session_active = debug_report.start(
             report_config, report_error);
+        SessionArchiveConfig archive_config;
+        archive_config.directory = "cache/runtime/" + segment_id + "-archive";
+        archive_config.report_config = report_config;
+        archive_config.trigger_sequence_baseline = archive_trigger_after_event;
+        std::string archive_error;
+        session_archive_active = session_archive.start(archive_config, archive_error);
+        archive_trigger_poll = {};
+        if (!session_archive_active) LOG_WARN("app", "全程归档未启动: {}", archive_error);
         if (!debug_session_active) {
             LOG_WARN("app", "Debug 报告未启动: {}", report_error);
         }
@@ -336,6 +373,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         debug_segment = 0;
         debug_recoil_after_command = 0;
         debug_trigger_after_event = 0;
+        archive_trigger_after_event = 0;
+        archive_drain_failed = false;
         detector_reload_pending = false;
         debug_session_active = start_debug_report(runtime.snapshot());
         app_message = debug_session_active
@@ -346,7 +385,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         if (runtime_stop_job.valid()) return;
         detector_reload_pending = false;
         const auto state = runtime.snapshot().state;
-        if (state == RuntimeState::STOPPED && !debug_session_active) {
+        if (state == RuntimeState::STOPPED && !debug_session_active && !session_archive_active) {
             app_message = "Runtime 已停止。";
             return;
         }
@@ -408,10 +447,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         const auto preview = snapshot.preview_enabled
             ? runtime.preview_frame()
             : nullptr;
+        const auto archive_status = session_archive.status();
         const bool overlay_rendered = overlay.render(
             snapshot, preview, model_catalog, backend_catalog,
             config, workspace_settings, model_workspace.poll(&workspace_settings), app_message, actions, &keyboard_poll,
-            debug_workspace.snapshot().get());
+            debug_workspace.snapshot().get(), &archive_status);
         if (!startup_boundary.observe_overlay_render(
                 overlay_rendered,
                 overlay.last_error())) {
@@ -432,6 +472,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             app::detail::debug_emergency_requested(keyboard_routing.emergency_pressed, actions.runtime_intents);
         const bool runtime_toggle_pressed =
             keyboard_routing.runtime_toggle_pressed;
+        if ((actions.anomaly_mark_requested || keyboard_routing.anomaly_mark_pressed) && !runtime_stop_job.valid()) {
+            app_message = session_archive.mark(actions.anomaly_mark_requested ? "界面标记" : "快捷键标记")
+                ? "异常已标记，继续游玩即可；归档将关联前后各30秒数据。"
+                : "异常标记未保存，请检查归档状态。";
+        }
         if (actions.debug_plan_edited) debug_workspace.invalidate_repeat();
 
         if (actions.preview_enabled_changed &&

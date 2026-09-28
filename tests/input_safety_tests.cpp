@@ -439,6 +439,14 @@ int main() {
             "绑定捕获期间不能启动调试测试");
         expect(runtime.snapshot().state == RuntimeState::STOPPED && !runtime.snapshot().output_armed,
             "调试快捷键事件不能直接启动或武装生产Runtime");
+        poll.events = {{KeyboardEventType::ANOMALY_MARK,true}};
+        const auto marked = app::detail::route_keyboard_events(runtime,poll,false);
+        expect(marked.anomaly_mark_pressed && !marked.runtime_toggle_pressed && !marked.debug_test_pressed &&
+                   !marked.emergency_pressed && runtime.snapshot().state == RuntimeState::STOPPED &&
+                   !runtime.snapshot().output_armed,
+            "异常标记只通知App，不改变运行或输出状态");
+        expect(!app::detail::route_keyboard_events(runtime,poll,true).anomaly_mark_pressed,
+            "绑定捕获不得生成异常标记");
     }
     test_startup_loss_and_recovery();
     test_failure_cache_and_new_release();

@@ -23,6 +23,19 @@ void manual(data_collection::Collector& collector, CapturedFrame& frame, std::sp
     while (collector.snapshot().manual_pending && std::chrono::steady_clock::now() < deadline);
     settle(collector);
 }
+void automatic(data_collection::Collector& collector, CapturedFrame& frame,
+               std::span<const Detection> detections, bool allowed = true) {
+    const auto before = collector.snapshot();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    do {
+        collector.offer(frame, detections, DetectionStatus::SUCCESS, 7, allowed);
+        settle(collector);
+        const auto after = collector.snapshot();
+        if (after.saved != before.saved || after.filtered != before.filtered ||
+            after.duplicates != before.duplicates) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    } while (std::chrono::steady_clock::now() < deadline);
+}
 }
 int make_fixture(const std::filesystem::path& root) {
     try {
@@ -72,6 +85,48 @@ int wmain(int argc, wchar_t** argv) {
         config.exploration_interval_ms = 60000;
         data_collection::Collector collector;
         std::string error;
+        {
+            data_collection::Collector quality;
+            expect(quality.start(config, error), "采集质量回归启动");
+            CapturedFrame candidate;
+            candidate.width = candidate.height = 32;
+            candidate.bgr = cv::Mat::zeros(32, 32, CV_8UC3);
+            automatic(quality, candidate, {});
+            expect(quality.snapshot().saved == 0 && quality.snapshot().filtered == 1,
+                   "自动纯黑转场被过滤且可见");
+            manual(quality, candidate, {}, DetectionStatus::SUCCESS);
+            expect(quality.snapshot().saved == 1, "手动可保留纯黑诊断样本");
+            quality.stop();
+            expect(quality.start(config, error), "暗光负样本启动");
+            candidate.bgr.setTo(cv::Scalar(2, 2, 2));
+            candidate.bgr.at<cv::Vec3b>(17, 17) = {4, 4, 4};
+            automatic(quality, candidate, {});
+            expect(quality.snapshot().saved == 1, "暗光有纹理无框探索样本仍保留");
+            candidate.bgr.setTo(cv::Scalar(180, 100, 40));
+            automatic(quality, candidate, {});
+            expect(quality.snapshot().saved == 1 && quality.snapshot().filtered == 1,
+                   "移动墙面空框不再每秒novel入库");
+            const Detection pair[] = {{1, 2, 10, 15, .8f, 0}, {20, 20, 30, 31, .8f, 0}};
+            automatic(quality, candidate, pair, false);
+            expect(quality.snapshot().saved == 1 && quality.snapshot().filtered == 2,
+                   "已确认非采集场景拒绝自动有框样本");
+            quality.request_sample();
+            while (quality.snapshot().manual_pending)
+                quality.offer(candidate, pair, DetectionStatus::SUCCESS, 7, false);
+            settle(quality);
+            expect(quality.snapshot().saved == 2, "手动绕过场景资格过滤");
+            const Detection reversed[] = {pair[1], pair[0]};
+            automatic(quality, candidate, reversed);
+            expect(quality.snapshot().saved == 2 && quality.snapshot().duplicates > 0,
+                   "相同检测集合换序不会制造新样本");
+            quality.stop();
+            expect(quality.start(config, error), "纯白转场启动");
+            candidate.bgr.setTo(cv::Scalar(255, 255, 255));
+            automatic(quality, candidate, pair);
+            expect(quality.snapshot().saved == 0 && quality.snapshot().filtered == 1,
+                   "纯白转场即使误检也自动过滤");
+            quality.stop();
+        }
         expect(collector.start(config, error), "启动成功");
         CapturedFrame frame;
         frame.width = frame.height = 32;

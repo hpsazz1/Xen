@@ -10,6 +10,8 @@
 #include "model_workspace/model_workspace.h"
 #include "debug_session/debug_session.h"
 
+struct SessionArchiveStatus;
+
 struct OverlayActions {
     debug_session::Action debug_action = debug_session::Action::NONE;
     debug_session::Request debug_request;
@@ -20,6 +22,7 @@ struct OverlayActions {
     model_workspace::Action workspace_action = model_workspace::Action::NONE;
     bool start_requested = false;
     bool stop_requested = false;
+    bool anomaly_mark_requested = false;
     bool reload_detector_requested = false;
     bool refresh_models_requested = false;
     bool save_config_requested = false;
@@ -66,7 +69,8 @@ public:
                 const std::string& app_message,
                 OverlayActions& actions,
                 const KeyboardPollResult* keyboard_poll = nullptr,
-                const debug_session::Snapshot* debug_snapshot = nullptr) noexcept;
+                const debug_session::Snapshot* debug_snapshot = nullptr,
+                const SessionArchiveStatus* archive_status = nullptr) noexcept;
     bool close_requested() const noexcept;
     bool background_busy() const noexcept;
     void poll_background() noexcept;

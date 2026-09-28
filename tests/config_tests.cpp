@@ -255,6 +255,7 @@ void test_round_trip() {
     source.keyboard.runtime_toggle_virtual_keys = {0x77, 0x04};
     source.keyboard.debug_test_enabled = true;
     source.keyboard.debug_test_virtual_keys = {0x79,0x7A};
+    source.keyboard.anomaly_mark_virtual_keys = {0x78};
     source.log.global_level = LogLevel::WARN;
     source.log.enable_console = false;
     source.log.enable_file = false;
@@ -328,6 +329,7 @@ void test_round_trip() {
            loaded.mouse.makcu_command_timeout_ms == 120 &&
            loaded.keyboard.debug_test_enabled == source.keyboard.debug_test_enabled &&
            loaded.keyboard.debug_test_virtual_keys == source.keyboard.debug_test_virtual_keys &&
+           loaded.keyboard.anomaly_mark_virtual_keys == source.keyboard.anomaly_mark_virtual_keys &&
            loaded.keyboard.aim_hold_virtual_keys ==
                source.keyboard.aim_hold_virtual_keys &&
            loaded.keyboard.emergency_virtual_keys ==
@@ -835,6 +837,18 @@ void test_legacy_keyboard_config() {
                loaded.keyboard.runtime_toggle_virtual_keys ==
                    std::vector<int>{118} && !loaded.keyboard.debug_test_enabled && loaded.keyboard.debug_test_virtual_keys.empty(),
            "旧版单键配置必须迁移为单元素绑定集合");
+    expect(loaded.keyboard.anomaly_mark_virtual_keys == std::vector<int>{0x78},
+           "旧配置无冲突时默认F9标记");
+    expect(write_file_bytes(path, "[detector]\nmodel_path=model.onnx\n[keyboard]\naim_hold_virtual_keys=120\n"),
+           "写入已占用F9旧配置");
+    expect(load_app_config(path.string(), loaded, error) &&
+               loaded.keyboard.aim_hold_virtual_keys == std::vector<int>{120} &&
+               loaded.keyboard.anomaly_mark_virtual_keys.empty(),
+           "旧配置F9占用时保留原绑定并禁用新增标记键");
+    expect(write_file_bytes(path, "[detector]\nmodel_path=model.onnx\n[keyboard]\nanomaly_mark_virtual_keys=\n"),
+           "写入显式禁用标记键配置");
+    expect(load_app_config(path.string(), loaded, error) && loaded.keyboard.anomaly_mark_virtual_keys.empty(),
+           "显式清空标记键不得恢复默认F9");
     std::error_code ignored;
     std::filesystem::remove(path, ignored);
 }
@@ -983,6 +997,13 @@ void test_invalid_config() {
     expect(!validate_app_config(config,error), "调试与急停释放绑定必须互斥");
     config.auto_stop.release_virtual_keys.pop_back();
     config.keyboard.debug_test_virtual_keys.clear(); config.keyboard.debug_test_enabled = false;
+    config.keyboard.anomaly_mark_virtual_keys = {0x77};
+    expect(!validate_app_config(config,error), "异常标记不能与运行切换共键");
+    config.keyboard.anomaly_mark_virtual_keys = {config.auto_stop.activation_virtual_key};
+    expect(!validate_app_config(config,error), "异常标记不能与急停允许键共键");
+    config.keyboard.anomaly_mark_virtual_keys = {'W'};
+    expect(!validate_app_config(config,error), "异常标记不能占用移动键");
+    config.keyboard.anomaly_mark_virtual_keys = {0x78};
     config.keyboard.runtime_toggle_virtual_keys = {0x77, 0x77};
     expect(!validate_app_config(config, error),
            "同一功能内重复绑定必须拒绝配置");

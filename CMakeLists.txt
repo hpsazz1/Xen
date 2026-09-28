@@ -1018,7 +1018,8 @@ target_include_directories(app_input PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(app_input PUBLIC runtime)
 
 add_library(xen_debug STATIC
-    Xen/debug/debug.cpp Xen/debug/recoil_report.cpp Xen/debug/auxiliary_report.cpp)
+    Xen/debug/debug.cpp Xen/debug/recoil_report.cpp Xen/debug/auxiliary_report.cpp
+    Xen/debug/session_archive.cpp)
 target_include_directories(xen_debug PUBLIC
     ${PROJECT_SOURCE_DIR}/Xen
     ${OpenCV_INCLUDE_DIRS})
@@ -1888,7 +1889,8 @@ if(BUILD_TESTING)
     add_test(NAME overlay_tests COMMAND overlay_tests)
 
     add_executable(hotkey_device_capture_tests tests/hotkey_device_capture_tests.cpp)
-    target_link_libraries(hotkey_device_capture_tests PRIVATE keyboard)
+    # overlay_internal.h 的状态摘要使用 Trigger 公有类型，传递其头文件依赖。
+    target_link_libraries(hotkey_device_capture_tests PRIVATE keyboard trigger)
     add_test(NAME hotkey_device_capture_tests COMMAND hotkey_device_capture_tests)
 
     # 只初始化 Overlay；没有设备/Runtime 实例，供实际窗口布局复核。
@@ -2269,6 +2271,9 @@ if(BUILD_TESTING)
         tests/debug_tests.cpp)
     target_link_libraries(debug_tests PRIVATE xen_debug log)
     add_test(NAME debug_tests COMMAND debug_tests)
+    add_executable(session_archive_tests tests/session_archive_tests.cpp)
+    target_link_libraries(session_archive_tests PRIVATE xen_debug log)
+    add_test(NAME session_archive_tests COMMAND session_archive_tests)
 
     add_executable(benchmark_tests
         tests/benchmark_tests.cpp)

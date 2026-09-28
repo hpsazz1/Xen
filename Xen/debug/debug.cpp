@@ -1149,6 +1149,7 @@ DebugReport::~DebugReport() {
 }
 
 bool DebugReport::remove_aim_lock_marker() noexcept {
+    if (!config_.enable_lock_marker) return true;
     try {
         if (config_.json_path.empty()) {
             aim_lock_marker_published_ = false;
@@ -1174,6 +1175,7 @@ bool DebugReport::remove_aim_lock_marker() noexcept {
 
 void DebugReport::update_aim_lock_marker(
         bool aim_lock_active, std::uint64_t sequence) noexcept {
+    if (!config_.enable_lock_marker) return;
     const auto now = std::chrono::steady_clock::now();
     if (!aim_lock_active) {
         const bool transition = aim_lock_state_active_;
@@ -2043,8 +2045,13 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
             json, "pipeline_service", summary_.pipeline_service, false);
         append_json_timing(
             json, "pipeline_complete", summary_.pipeline_complete, true);
-        json << "  },\n  \"samples\": [\n";
-        for (std::size_t index = 0; index < samples_.size(); ++index) {
+        json << "  },\n";
+        if (!config_.include_json_samples) {
+            json << "  \"samples_omitted\": true,\n  \"samples_csv\": \""
+                 << json_escape(std::filesystem::path(config_.csv_path).filename().string()) << "\",\n";
+        }
+        json << "  \"samples\": [\n";
+        for (std::size_t index = 0; config_.include_json_samples && index < samples_.size(); ++index) {
             const auto& sample = samples_[index];
             json << "    {\"sequence\": " << sample.sequence
                  << ", \"detection_status\": \""

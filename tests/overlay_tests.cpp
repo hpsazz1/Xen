@@ -402,6 +402,13 @@ void test_aim_and_auto_stop_hotkeys_share_without_bypassing_safety() {
             "安全急停与管线启停反向采集也不能占用瞄准、急停或扳机共键");
     }
     const std::array<int,1> debug_keys{VK_XBUTTON2};
+    const std::array<int,1> marker_keys{VK_F9};
+    for (const auto target : {Target::RUNTIME_TOGGLE,Target::EMERGENCY,Target::AIM_HOLD,Target::AUTO_STOP,Target::DEBUG_TEST})
+        expect(hotkey_binding_conflicts(target,VK_F9,runtime,aim,emergency,0,0,0,{},marker_keys),
+            "控制和测试绑定不能占用异常标记键");
+    for (const int key : std::array<int,7>{VK_LBUTTON,'W','A','S','D',VK_F8,VK_END})
+        expect(hotkey_binding_conflicts(Target::ANOMALY_MARK,key,runtime,aim,emergency,0,0,0,{},marker_keys),
+            "异常标记绑定不得与控制动作冲突");
     for (const auto target : {Target::RUNTIME_TOGGLE,Target::EMERGENCY,Target::AIM_HOLD,Target::AUTO_STOP})
         expect(hotkey_binding_conflicts(target,VK_XBUTTON2,runtime,aim,emergency,0,0,0,debug_keys),
             "反向采集其他功能不得占用已有调试测试键");

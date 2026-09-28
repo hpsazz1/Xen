@@ -7,6 +7,7 @@
 #include "overlay/recoil_panel.h"
 #include "overlay/input_training_panel.h"
 #include "overlay/debug_panel.h"
+#include "debug/session_archive.h"
 #include "weapon/weapon_catalog.h"
 
 #include "log/log.h"
@@ -81,6 +82,7 @@ enum class HotkeyBindingTarget {
     AUTO_STOP,
     AUTO_STOP_RELEASE,
     DEBUG_TEST,
+    ANOMALY_MARK,
     TRIGGER,
 };
 
@@ -3648,6 +3650,8 @@ struct Overlay::Impl {
                 return &app_config.keyboard.emergency_virtual_keys;
             case HotkeyBindingTarget::DEBUG_TEST:
                 return &app_config.keyboard.debug_test_virtual_keys;
+            case HotkeyBindingTarget::ANOMALY_MARK:
+                return &app_config.keyboard.anomaly_mark_virtual_keys;
             case HotkeyBindingTarget::AUTO_STOP_RELEASE:
                 return &app_config.auto_stop.release_virtual_keys;
             case HotkeyBindingTarget::AUTO_STOP:
@@ -3666,12 +3670,15 @@ struct Overlay::Impl {
         const auto target = current_binding == &app_config.keyboard.runtime_toggle_virtual_keys ? Target::RUNTIME_TOGGLE :
             current_binding == &app_config.keyboard.aim_hold_virtual_keys ? Target::AIM_HOLD :
             current_binding == &app_config.keyboard.emergency_virtual_keys ? Target::EMERGENCY :
+            current_binding == &app_config.keyboard.anomaly_mark_virtual_keys ? Target::ANOMALY_MARK :
             current_binding == &app_config.keyboard.debug_test_virtual_keys ? Target::DEBUG_TEST : Target::AUTO_STOP;
         return overlay::detail::hotkey_binding_conflicts(target, virtual_key,
             app_config.keyboard.runtime_toggle_virtual_keys, app_config.keyboard.aim_hold_virtual_keys,
             app_config.keyboard.emergency_virtual_keys, app_config.auto_stop.activation_virtual_key,
             app_config.trigger.hold_virtual_key, 0,
-            app_config.keyboard.debug_test_virtual_keys);
+            app_config.keyboard.debug_test_virtual_keys, app_config.keyboard.anomaly_mark_virtual_keys) ||
+            (target == Target::ANOMALY_MARK && std::find(app_config.auto_stop.release_virtual_keys.begin(),
+                app_config.auto_stop.release_virtual_keys.end(), virtual_key) != app_config.auto_stop.release_virtual_keys.end());
     }
 
     void begin_hotkey_binding(
@@ -3746,7 +3753,7 @@ struct Overlay::Impl {
                     };
                     if (key == 1 || key == VK_END || key == VK_F8 || key == 'W' || key == 'A' || key == 'S' || key == 'D' ||
                         assigned(app_config.keyboard.emergency_virtual_keys) || assigned(app_config.keyboard.runtime_toggle_virtual_keys) ||
-                        assigned(app_config.keyboard.debug_test_virtual_keys)) {
+                        assigned(app_config.keyboard.debug_test_virtual_keys) || assigned(app_config.keyboard.anomaly_mark_virtual_keys)) {
                         hotkey_capture_message = "扳机许可键不能使用左键、WASD、安全急停或运行启停键";
                     } else {
                         app_config.trigger.hold_virtual_key = key;
@@ -3779,7 +3786,8 @@ struct Overlay::Impl {
                 } else if (capture_result.type == overlay::detail::HotkeyCaptureResultType::ASSIGNED) {
                     const int key = capture_result.virtual_key;
                     if (key == 'W' || key == 'A' || key == 'S' || key == 'D' || key == app_config.auto_stop.activation_virtual_key ||
-                        std::find(app_config.keyboard.debug_test_virtual_keys.begin(),app_config.keyboard.debug_test_virtual_keys.end(),key) != app_config.keyboard.debug_test_virtual_keys.end())
+                        std::find(app_config.keyboard.debug_test_virtual_keys.begin(),app_config.keyboard.debug_test_virtual_keys.end(),key) != app_config.keyboard.debug_test_virtual_keys.end() ||
+                        std::find(app_config.keyboard.anomaly_mark_virtual_keys.begin(),app_config.keyboard.anomaly_mark_virtual_keys.end(),key) != app_config.keyboard.anomaly_mark_virtual_keys.end())
                         hotkey_capture_message = "释放键不能使用WASD、急停允许键或调试测试键";
                     else if (std::find(binding->begin(), binding->end(), key) == binding->end()) {
                         binding->push_back(key);
@@ -3818,7 +3826,7 @@ struct Overlay::Impl {
         const auto key_active = current_virtual_key_state();
         process_hotkey_capture(app_config, actions, key_active);
 
-        begin_config_panel("keyboard_panel", "全局按键", 148.0f);
+        begin_config_panel("keyboard_panel", "全局按键", 188.0f);
         if (begin_form("keyboard_form", 126.0f)) {
             render_hotkey_row(
                 "运行管线启停", "##runtime_toggle_virtual_keys",
@@ -3835,6 +3843,11 @@ struct Overlay::Impl {
                 "由当前键鼠后端监听；按下后立即锁定物理输出，但不会停止截图和检测 Runtime，释放后仍需在界面中手动复位。",
                 HotkeyBindingTarget::EMERGENCY,
                 app_config.keyboard.emergency_virtual_keys, key_active);
+            render_hotkey_row(
+                "标记异常（按下）", "##anomaly_mark_virtual_keys",
+                "由当前键鼠后端监听源端按键，默认F9；每次按下标记归档前后各30秒，不改变武装或发送输入。不能与其他功能键共用；Esc清空，保存后生效。",
+                HotkeyBindingTarget::ANOMALY_MARK,
+                app_config.keyboard.anomaly_mark_virtual_keys, key_active);
             ImGui::EndTable();
         }
         if (!hotkey_capture_message.empty()) {
@@ -3989,7 +4002,7 @@ struct Overlay::Impl {
             collection.active && !workspace.job_running && (collection.paused ? cpu_running : true), actions);
         ImGui::SameLine();
         workspace_button("结束采集", "结束当前素材会话并完成已排队写入；不停止 Runtime。", Action::STOP_COLLECTION, collection.active, actions);
-        workspace_button("标记下一帧", "请求保存下一张有效 CPU 帧；不发送键鼠输入，仍受有界缓存和队列约束。", Action::MARK_SAMPLE,
+        workspace_button("标记下一帧", "请求保存下一张有效 CPU 帧，可绕过自动质量与生存状态筛选以诊断；仍须通过已启用的来源焦点检查，不发送键鼠输入，仍受有界缓存和队列约束。", Action::MARK_SAMPLE,
             collection.active && !collection.paused && cpu_running, actions);
         ImGui::SameLine();
         workspace_button("打开数据目录", "打开配置的原始素材根目录，查看采集会话与图片。后台作业和导出结果请使用训练页的打开当前作业。", Action::OPEN_DATA_DIRECTORY, !settings.root_directory.empty(), actions);
@@ -3998,6 +4011,8 @@ struct Overlay::Impl {
         ImGui::Text("保存 %llu   排队 %llu   丢弃 %llu   去重 %llu",
             static_cast<unsigned long long>(collection.saved), static_cast<unsigned long long>(collection.queued),
             static_cast<unsigned long long>(collection.dropped), static_cast<unsigned long long>(collection.duplicates));
+        ImGui::Text("自动筛除 %llu", static_cast<unsigned long long>(collection.filtered));
+        show_help_tooltip("自动策略跳过的候选，包括非探索时的空检测、无效生存上下文及严格近黑/近白画面；与队列丢弃、去重分别计数。不能保证排除所有菜单或评分板。");
         ImGui::Text("已写入 %.2f MiB", static_cast<double>(collection.bytes) / (1024.0 * 1024.0));
         const auto session_utf8 = collection.session_directory.u8string();
         ImGui::TextWrapped("当前会话：%s", reinterpret_cast<const char*>(session_utf8.c_str()));
@@ -4153,7 +4168,8 @@ struct Overlay::Impl {
             const model_workspace::Snapshot& workspace_snapshot,
             const std::string& app_message,
             OverlayActions& actions,
-            const debug_session::Snapshot* debug_snapshot) {
+            const debug_session::Snapshot* debug_snapshot,
+            const SessionArchiveStatus* archive_status) {
         const bool can_edit = editable(snapshot) && !(debug_snapshot && debug_snapshot->busy);
         const bool can_save = can_edit ||
             (active_page == WorkspacePage::DETECTION &&
@@ -4185,6 +4201,26 @@ struct Overlay::Impl {
         render_notice(
             "detector_reload_error", snapshot.detector_reload_error,
             kDanger, kDangerSoft);
+
+        if (archive_status) {
+            ImGui::BeginDisabled(!archive_status->active);
+            if (ImGui::Button("标记异常")) actions.anomaly_mark_requested = true;
+            show_help_tooltip("标记当前时刻，归档索引关联前后各30秒的数据；无需停止Runtime。游戏中可使用异常标记快捷键（默认F9），不改变武装或发送输入。停止较早时会注明后段不足。");
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::TextWrapped("归档%s | 已保存 %llu 段 / %llu 帧 | 标记 %llu",
+                archive_status->active ? "进行中" : "已停止",
+                static_cast<unsigned long long>(archive_status->written_segments),
+                static_cast<unsigned long long>(archive_status->written_samples),
+                static_cast<unsigned long long>(archive_status->marker_count));
+            if (archive_status->dropped_samples || archive_status->trigger_events_dropped || archive_status->dropped_batches) {
+                ImGui::TextColored(rgba(kDanger), "归档缺口：帧 %llu，事件 %llu，批次 %llu",
+                    static_cast<unsigned long long>(archive_status->dropped_samples),
+                    static_cast<unsigned long long>(archive_status->trigger_events_dropped),
+                    static_cast<unsigned long long>(archive_status->dropped_batches));
+            }
+            render_notice("archive_error", archive_status->last_error, kDanger, kDangerSoft);
+        }
 
         if (show_log_panel) {
             render_log_panel();
@@ -4364,7 +4400,8 @@ bool Overlay::render(
         const std::string& app_message,
         OverlayActions& actions,
         const KeyboardPollResult* keyboard_poll,
-        const debug_session::Snapshot* debug_snapshot) noexcept {
+        const debug_session::Snapshot* debug_snapshot,
+        const SessionArchiveStatus* archive_status) noexcept {
     if (!impl_ || !impl_->initialized || impl_->present_boundary.failed()) {
         return false;
     }
@@ -4425,7 +4462,7 @@ bool Overlay::render(
         impl_->render_global_bar(snapshot, actions);
         impl_->render_workspace(
             snapshot, preview, model_catalog, backend_catalog,
-            config, workspace_settings, workspace_snapshot, app_message, actions, debug_snapshot);
+            config, workspace_settings, workspace_snapshot, app_message, actions, debug_snapshot, archive_status);
         ImGui::EndDisabled();
         const bool detection_page_active =
             impl_->active_page == WorkspacePage::DETECTION;

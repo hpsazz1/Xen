@@ -36,6 +36,8 @@ KeyboardRoutingResult route_keyboard_events(
             result.runtime_toggle_pressed = true;
         } else if (event.type == KeyboardEventType::DEBUG_TEST) {
             result.debug_test_pressed = true;
+        } else if (event.type == KeyboardEventType::ANOMALY_MARK && event.active) {
+            result.anomaly_mark_pressed = true;
         }
     }
     return result;

@@ -927,6 +927,32 @@ void receipt_time_and_event_history() {
         }
     }
     expect(down&&up, "不依赖普通Log的完整按下释放事件");
+    // 停止后事件集合固定；增量查询只返回后缀，不能消费旧报告的完整证据。
+    if (!log.events.empty()) {
+        const auto cursor_index = log.events.size() / 2;
+        const auto cursor = log.events[cursor_index].sequence;
+        const auto suffix = delayed.worker.execution_log(cursor);
+        expect(suffix.events.size() == log.events.size() - cursor_index - 1 &&
+            suffix.dropped_count == log.dropped_count, "增量事件只返回严格晚于游标的后缀");
+        for (std::size_t i = 0; i < suffix.events.size(); ++i) {
+            const auto& actual = suffix.events[i];
+            const auto& original = log.events[cursor_index + 1 + i];
+            expect(actual.sequence == original.sequence && actual.planned_at == original.planned_at &&
+                actual.button_action == original.button_action && actual.receipt_status == original.receipt_status,
+                "增量后缀保留原始事件顺序及内容");
+        }
+        if (!suffix.events.empty()) expect(suffix.first_sequence == suffix.events.front().sequence &&
+            suffix.last_sequence == log.last_sequence, "增量范围描述实际返回后缀");
+        const auto empty = delayed.worker.execution_log(log.last_sequence);
+        expect(empty.events.empty() && empty.first_sequence == 0 && empty.last_sequence == 0 &&
+            empty.dropped_count == log.dropped_count, "最后游标返回空事件及空范围");
+        const auto all = delayed.worker.execution_log();
+        const auto from_zero = delayed.worker.execution_log(0);
+        expect(all.events.size() == log.events.size() && from_zero.events.size() == log.events.size() &&
+            all.first_sequence == log.first_sequence && all.last_sequence == log.last_sequence &&
+            from_zero.first_sequence == log.first_sequence && from_zero.last_sequence == log.last_sequence,
+            "增量查询不消耗事件且默认参数仍返回完整日志");
+    }
 }
 void event_ring_is_bounded() {
     Fixture f; expect(f.start(), "事件环fixture启动");

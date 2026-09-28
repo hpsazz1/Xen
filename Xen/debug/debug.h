@@ -22,6 +22,8 @@ struct DebugReportConfig {
     std::string mouse_backend;
     std::size_t max_samples = 10000;
     bool performance_probes_enabled = false;
+    bool include_json_samples = true;
+    bool enable_lock_marker = true;
     // 调用者明确提供的本次 Runtime 启动快照；缺省不推断 Aim 默认值。
     std::optional<AimConfig> aim_config;
     // 仅由启动会话提供。缺省时报告不捏造辅助功能的配置或验证结论。

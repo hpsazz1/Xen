@@ -739,6 +739,7 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"keyboard", "emergency_virtual_keys"},
         {"keyboard", "runtime_toggle_virtual_keys"},
         {"keyboard", "debug_test_virtual_keys"},
+        {"keyboard", "anomaly_mark_virtual_keys"},
     };
     for (const auto& key : kOptionalListKeys) {
         if (has_strict_int_list(ini, key, true)) continue;
@@ -950,6 +951,12 @@ bool validate_app_config(const AppConfig& config,
             if (key == config.auto_stop.activation_virtual_key || key == config.trigger.hold_virtual_key ||
                 std::find(config.auto_stop.release_virtual_keys.begin(), config.auto_stop.release_virtual_keys.end(), key) != config.auto_stop.release_virtual_keys.end()) {
                 error = "调试测试快捷键与急停或扳机功能键冲突"; return false;
+            }
+        }
+        for (const int key : config.keyboard.anomaly_mark_virtual_keys) {
+            if (key == config.auto_stop.activation_virtual_key || key == config.trigger.hold_virtual_key ||
+                std::find(config.auto_stop.release_virtual_keys.begin(), config.auto_stop.release_virtual_keys.end(), key) != config.auto_stop.release_virtual_keys.end()) {
+                error = "异常标记快捷键与急停或扳机功能键冲突"; return false;
             }
         }
         const int stop_key = config.auto_stop.activation_virtual_key;
@@ -1435,6 +1442,19 @@ bool load_app_config(const std::string& path,
         candidate.keyboard.runtime_toggle_virtual_keys = load_virtual_keys(
             "runtime_toggle_virtual_keys", "runtime_toggle_virtual_key",
             candidate.keyboard.runtime_toggle_virtual_keys);
+        candidate.keyboard.anomaly_mark_virtual_keys = load_virtual_keys(
+            "anomaly_mark_virtual_keys", "anomaly_mark_virtual_key", {0x78});
+        // 旧配置若已占用F9，保留原功能；异常标记仍可通过界面按钮使用。
+        if (!ini.GetValue("keyboard", "anomaly_mark_virtual_keys") &&
+            !ini.GetValue("keyboard", "anomaly_mark_virtual_key")) {
+            const auto used = [](const std::vector<int>& keys) {
+                return std::find(keys.begin(), keys.end(), 0x78) != keys.end();
+            };
+            if (used(candidate.keyboard.aim_hold_virtual_keys) || used(candidate.keyboard.emergency_virtual_keys) ||
+                used(candidate.keyboard.runtime_toggle_virtual_keys) || used(candidate.keyboard.debug_test_virtual_keys) ||
+                used(candidate.auto_stop.release_virtual_keys) || candidate.auto_stop.activation_virtual_key == 0x78 ||
+                candidate.trigger.hold_virtual_key == 0x78) candidate.keyboard.anomaly_mark_virtual_keys.clear();
+        }
         candidate.runtime.profile_window = static_cast<int>(ini.GetLongValue(
             "runtime", "profile_window", candidate.runtime.profile_window));
         candidate.ui.width = static_cast<int>(ini.GetLongValue(
@@ -1663,6 +1683,7 @@ bool save_app_config(const std::string& path,
                      format_int_list(config.auto_stop.release_virtual_keys).c_str());
         ini.SetBoolValue("keyboard", "debug_test_enabled", config.keyboard.debug_test_enabled);
         ini.SetValue("keyboard", "debug_test_virtual_keys", format_int_list(config.keyboard.debug_test_virtual_keys).c_str());
+        ini.SetValue("keyboard", "anomaly_mark_virtual_keys", format_int_list(config.keyboard.anomaly_mark_virtual_keys).c_str());
         ini.SetValue(
             "keyboard", "aim_hold_virtual_keys",
             format_int_list(config.keyboard.aim_hold_virtual_keys).c_str());

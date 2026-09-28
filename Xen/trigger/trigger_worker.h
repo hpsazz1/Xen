@@ -54,7 +54,7 @@ public:
     TriggerSnapshot snapshot() const noexcept;
     TriggerFiringSignal firing_signal() const noexcept;
     // 冷路径复制有界事件环；不依赖普通Log等级，不清空其他消费者的证据。
-    TriggerExecutionLog execution_log() const;
+    TriggerExecutionLog execution_log(std::uint64_t after_sequence = 0) const;
 private:
     class Impl;
     std::unique_ptr<Impl> impl_;

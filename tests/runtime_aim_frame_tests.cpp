@@ -52,6 +52,39 @@ int main() {
     Aim aim(config);
     const auto start = std::chrono::steady_clock::now() - std::chrono::seconds(1);
     {
+        weapon::WeaponSnapshot scene;
+        const auto allowed = [&] { return runtime::detail::collection_game_context_allowed(true, scene, start); };
+        expect(runtime::detail::collection_game_context_allowed(false, scene, start), "禁用GSI保留通用自动采集");
+        expect(!allowed(), "未知游戏状态不自动采集");
+        scene.identity_match = true;
+        scene.player_playing = true;
+        scene.player_health = 100;
+        scene.game_phase = weapon::GamePhase::PREPARATION;
+        scene.received_at = start - std::chrono::milliseconds(1);
+        scene.valid_until = start + std::chrono::seconds(1);
+        scene.status = weapon::Status::NON_FIREARM;
+        expect(allowed(), "持刀准备阶段仍有采集价值且不要求枪械valid");
+        scene.game_phase = weapon::GamePhase::ACTIVE;
+        scene.status = weapon::Status::RELOADING;
+        expect(allowed(), "正式回合换弹不关闭自动采集");
+        scene.player_health = 0;
+        expect(!allowed(), "死亡不自动采集旁观画面");
+        scene.player_health.reset();
+        expect(!allowed(), "缺失血量不推定存活");
+        scene.player_health = 100;
+        scene.identity_match = false;
+        expect(!allowed(), "旁观身份不符不自动采集");
+        scene.identity_match = true;
+        scene.player_playing = false;
+        expect(!allowed(), "非游戏状态不自动采集");
+        scene.player_playing = true;
+        scene.valid_until = start;
+        expect(!allowed(), "过期状态不自动采集");
+        scene.valid_until = start + std::chrono::seconds(1);
+        scene.received_at = start + std::chrono::milliseconds(1);
+        expect(!allowed(), "未来接收时间不自动采集");
+    }
+    {
         runtime::detail::CollectionFrameGate gate;
         source_context::SourceContextSnapshot source;
         FrameTiming timing;

@@ -8,6 +8,7 @@
 #endif
 
 #include "overlay/overlay.h"
+#include "debug/session_archive.h"
 #include "log/log.h"
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -201,7 +202,7 @@ void require_page_table(const char* table_name) {
 // 仅使用合成快照渲染生产 Overlay，并保存本进程窗口；动作不被执行。
 int wmain(int argc, wchar_t** argv) {
     try {
-        require(argc >= 2, "用法：model_workspace_ui_preview.exe <截图目录> [--minimum] [--dark]");
+        require(argc >= 2, "用法：model_workspace_ui_preview.exe <截图目录> [--minimum] [--dark] [--archive-only]");
         const auto output = std::filesystem::absolute(argv[1]);
         std::filesystem::create_directories(output);
         LogConfig logs;
@@ -218,11 +219,13 @@ int wmain(int argc, wchar_t** argv) {
         config.mouse.kmbox_ip = "127.0.0.1";
         config.mouse.kmbox_uuid = "00000000";
         config.trigger.require_stop = true;
+        bool archive_only = false;
         for (int index = 2; index < argc; ++index) {
             const std::wstring_view argument(argv[index]);
             if (argument == L"--minimum") {
                 config.ui.width = kMinimumUiWidth; config.ui.height = kMinimumUiHeight;
             } else if (argument == L"--dark") config.ui.theme = UiTheme::DARK;
+            else if (argument == L"--archive-only") archive_only = true;
             else throw std::runtime_error("未知预览参数");
         }
         const auto fixture_directory = std::filesystem::temp_directory_path() /
@@ -259,6 +262,8 @@ int wmain(int argc, wchar_t** argv) {
         workspace.environment_message = "示例状态：尚未检查环境，未安装任何依赖。";
         workspace.weights_message = "示例状态：尚未确认权重来源，未读取 PT。";
         OverlayActions actions;
+        SessionArchiveStatus archive_status;
+        const SessionArchiveStatus* visible_archive = nullptr;
         KeyboardPollResult capture_input;
         capture_input.capture_state_valid = true;
         UiInput input;
@@ -284,7 +289,7 @@ int wmain(int argc, wchar_t** argv) {
         auto frame = [&] {
             require(overlay.pump_messages(), "窗口意外关闭");
             require(overlay.render(runtime, {}, {}, {}, config, settings, workspace,
-                                   "无设备 UI 验收", actions, &capture_input), "Overlay 渲染失败");
+                                   "无设备 UI 验收", actions, &capture_input, nullptr, visible_archive), "Overlay 渲染失败");
             require(!actions.start_requested && actions.runtime_intents.empty() &&
                     !actions.stop_requested && !actions.reload_detector_requested && !actions.refresh_models_requested &&
                     !actions.save_config_requested && !actions.log_level_changed && !actions.preview_enabled &&
@@ -293,6 +298,52 @@ int wmain(int argc, wchar_t** argv) {
                     "验收输入误触业务动作，停止执行");
         };
         for (int index = 0; index < 3; ++index) frame();
+        archive_status.active = true;
+        archive_status.written_segments = 37;
+        archive_status.written_samples = 44400;
+        archive_status.marker_count = 2;
+        visible_archive = &archive_status;
+        frame(); frame();
+        require(capture.text.find("标记异常") != std::string::npos &&
+            capture.text.find("归档进行中") != std::string::npos &&
+            capture.text.find("44400") != std::string::npos,
+            "全程归档状态与异常标记入口必须可见");
+        save_window(capture, output / "session-archive-running.png");
+        archive_status.active = false;
+        archive_status.dropped_samples = 12;
+        archive_status.trigger_events_dropped = 3;
+        archive_status.last_error = "合成故障：磁盘空间不足";
+        frame(); frame();
+        require(capture.text.find("归档缺口") != std::string::npos &&
+            capture.text.find("磁盘空间不足") != std::string::npos,
+            "归档丢样与写盘失败不得隐藏");
+        save_window(capture, output / "session-archive-error.png");
+        if (archive_only) {
+            std::size_t fixture_files = 0;
+            for (const auto& entry : std::filesystem::directory_iterator(fixture_directory)) {
+                require(entry.path() == fixture_path, "归档UI预览创建了非夹具文件");
+                ++fixture_files;
+            }
+            require(fixture_files == 1, "归档UI预览改变了夹具集合");
+            { std::ifstream file(fixture_path, std::ios::binary);
+              const std::string after{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+              require(after == fixture_text, "归档UI预览修改了夹具曲线"); }
+            std::ofstream result(output / "archive-ui-preview-result.txt", std::ios::binary);
+            result << "归档正常与故障场景文字断言通过；业务输出动作：0；真实输入：0。\n";
+            require(result.good(), "归档UI结果写入失败");
+            result.close();
+            ImGui::RemoveContextHook(ImGui::GetCurrentContext(), capture_hook_id);
+            ImGui::RemoveContextHook(ImGui::GetCurrentContext(), frame_hook_id);
+            ImGui::RemoveContextHook(ImGui::GetCurrentContext(), hook_id);
+            overlay.shutdown();
+            Log::shutdown();
+            require(std::filesystem::remove(fixture_path), "归档UI临时夹具文件清理失败");
+            require(std::filesystem::remove(fixture_directory), "归档UI空夹具目录清理失败");
+            std::cout << "归档UI两场景验收通过；截图仍需检查布局。\n";
+            return 0;
+        }
+        visible_archive = nullptr;
+        frame();
         auto select_page = [&](int index) {
             // 生产导航：标题 36，sidebar padding 12，每项高42＋ItemSpacing.y。
             input.position = ImVec2(70.0f, 36.0f + 12.0f + 21.0f +

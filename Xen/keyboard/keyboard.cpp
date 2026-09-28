@@ -113,6 +113,9 @@ KeyboardPollResult KeyboardListener::poll() noexcept {
                 for (const int key : impl_->config.debug_test_virtual_keys)
                     impl_->event_state.debug_blocked_until_release[static_cast<std::size_t>(key)] =
                         snapshot.virtual_keys[static_cast<std::size_t>(key)];
+                for (const int key : impl_->config.anomaly_mark_virtual_keys)
+                    impl_->event_state.anomaly_blocked_until_release[static_cast<std::size_t>(key)] =
+                        snapshot.virtual_keys[static_cast<std::size_t>(key)];
             }
             const auto polled = keyboard::detail::update_keyboard_events(
                 impl_->event_state, impl_->config, snapshot.virtual_keys);

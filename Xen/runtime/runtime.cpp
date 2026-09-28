@@ -1120,8 +1120,12 @@ struct Runtime::Impl {
                 config.capture.backend == CaptureBackend::NDI &&
                     !config.capture.ndi_clock_sync_url.empty());
             if (data_collector && collect_frame) {
+                const auto collection_weapon = config.gsi.enabled
+                    ? gsi_receiver.snapshot() : weapon::WeaponSnapshot{};
                 data_collector->offer(*frame, preview_detections,
-                    profile.detector.status, frame_detector_generation);
+                    profile.detector.status, frame_detector_generation,
+                    runtime::detail::collection_game_context_allowed(config.gsi.enabled,
+                        collection_weapon, std::chrono::steady_clock::now()));
             }
             const float control_center_x = frame->source_pixels_per_pixel_x > 0.0
                 ? static_cast<float>(
@@ -1781,11 +1785,15 @@ RecoilExecutionLog Runtime::recoil_execution_log() const {
     return impl_->current_snapshot.recoil_execution_log;
 }
 
-TriggerExecutionLog Runtime::trigger_execution_log() const {
+TriggerExecutionLog Runtime::trigger_execution_log(std::uint64_t after_sequence) const {
     if (!impl_) return {};
-    if (auto worker = impl_->trigger_worker.load()) return worker->execution_log();
+    if (auto worker = impl_->trigger_worker.load()) return worker->execution_log(after_sequence);
     std::lock_guard lock(impl_->snapshot_mutex);
-    return impl_->current_snapshot.trigger_execution_log;
+    auto result = impl_->current_snapshot.trigger_execution_log;
+    std::erase_if(result.events, [after_sequence](const auto& event) { return event.sequence <= after_sequence; });
+    result.first_sequence = result.events.empty() ? 0 : result.events.front().sequence;
+    result.last_sequence = result.events.empty() ? 0 : result.events.back().sequence;
+    return result;
 }
 
 OutputArbiterSnapshot Runtime::output_arbitration() const {

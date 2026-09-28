@@ -66,6 +66,31 @@ void side_button(int key) {
 }
 }
 int main() {
+    {
+        auto device = std::make_shared<Device>();
+        KeyboardConfig config;
+        KeyboardListener listener(config, device);
+        expect(listener.open(), "异常标记监听可打开");
+        const auto has_mark = [](const KeyboardPollResult& poll) {
+            for (const auto& event : poll.events) if (event.type == KeyboardEventType::ANOMALY_MARK) return true;
+            return false;
+        };
+        device->input.status = InputMonitorStatus::READY;
+        device->input.state_valid = true;
+        device->input.sequence = 1;
+        device->input.virtual_keys[0x78] = true;
+        expect(!has_mark(listener.poll()), "初次发现已按住F9不得补标记");
+        device->input.virtual_keys[0x78] = false; ++device->input.sequence;
+        listener.poll();
+        device->input.virtual_keys[0x78] = true; ++device->input.sequence;
+        expect(has_mark(listener.poll()), "源设备F9新边沿必须生成异常标记");
+        ++device->input.sequence;
+        expect(!has_mark(listener.poll()), "持续按住F9不得重复标记");
+        device->input.status = InputMonitorStatus::STALE; ++device->input.sequence;
+        listener.poll();
+        device->input.status = InputMonitorStatus::READY; ++device->input.sequence;
+        expect(!has_mark(listener.poll()), "失信恢复按住F9不得伪造标记边沿");
+    }
     side_button(5); side_button(6);
     return failures ? 1 : 0;
 }

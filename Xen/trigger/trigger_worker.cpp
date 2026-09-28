@@ -510,13 +510,15 @@ TriggerFiringSignal TriggerWorker::firing_signal() const noexcept {
 TriggerSnapshot TriggerWorker::snapshot() const noexcept {
     std::lock_guard lock(impl_->mutex); return impl_->state;
 }
-TriggerExecutionLog TriggerWorker::execution_log() const {
+TriggerExecutionLog TriggerWorker::execution_log(std::uint64_t after_sequence) const {
     std::lock_guard lock(impl_->mutex);
     TriggerExecutionLog result;
     result.dropped_count = impl_->dropped_count;
     result.events.reserve(impl_->event_count);
-    for (std::size_t i = 0; i < impl_->event_count; ++i)
-        result.events.push_back(impl_->events[(impl_->event_begin + i) % impl_->events.size()]);
+    for (std::size_t i = 0; i < impl_->event_count; ++i) {
+        const auto& event = impl_->events[(impl_->event_begin + i) % impl_->events.size()];
+        if (event.sequence > after_sequence) result.events.push_back(event);
+    }
     if (!result.events.empty()) {
         result.first_sequence = result.events.front().sequence;
         result.last_sequence = result.events.back().sequence;

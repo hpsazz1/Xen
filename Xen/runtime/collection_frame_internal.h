@@ -3,9 +3,21 @@
 
 #include "capture/capture.h"
 #include "source_context/source_context.h"
+#include "weapon/weapon.h"
 #include <cmath>
 
 namespace runtime::detail {
+
+// 只限制自动训练采样；普通切枪/换弹和非枪械不影响场景价值。
+inline bool collection_game_context_allowed(bool enabled,
+        const weapon::WeaponSnapshot& snapshot,
+        std::chrono::steady_clock::time_point now) noexcept {
+    if (!enabled) return true;
+    return snapshot.identity_match && snapshot.player_playing &&
+        snapshot.player_health.value_or(0) > 0 &&
+        snapshot.game_phase != weapon::GamePhase::UNKNOWN &&
+        snapshot.received_at <= now && now < snapshot.valid_until;
+}
 
 // 仅限制采集域；不依赖物理武装、按键或检测框，空场景仍可采集。
 class CollectionFrameGate {

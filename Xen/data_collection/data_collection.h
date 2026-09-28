@@ -30,6 +30,7 @@ struct Snapshot {
     std::uint64_t saved = 0;
     std::uint64_t dropped = 0;
     std::uint64_t duplicates = 0;
+    std::uint64_t filtered = 0;
     std::size_t queued = 0;
     std::uint64_t bytes = 0;
     std::filesystem::path session_directory;
@@ -47,8 +48,10 @@ public:
     void stop() noexcept;
     void set_paused(bool paused) noexcept;
     void request_sample() noexcept;
+    // automatic_allowed 只限制自动采集；人工请求仍可保存用于诊断。
     void offer(const CapturedFrame& frame, std::span<const Detection> detections,
-               DetectionStatus status, std::uint64_t detector_generation) noexcept;
+               DetectionStatus status, std::uint64_t detector_generation,
+               bool automatic_allowed = true) noexcept;
     Snapshot snapshot() const;
 private:
     struct Impl;

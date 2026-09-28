@@ -25,6 +25,7 @@
 #include <random>
 #include <stdexcept>
 #include <thread>
+#include <tuple>
 
 namespace data_collection {
 namespace {
@@ -101,6 +102,7 @@ struct Collector::Impl {
         std::uint64_t generation{}, id{};
         DetectionStatus status{};
         const char* reason = "novel";
+        bool automatic_allowed = true;
         bool occupied = false;
     };
     mutable std::mutex mutex;
@@ -133,6 +135,16 @@ struct Collector::Impl {
         const auto record_path = state.session_directory / "samples" / (sample_id + ".json");
         const auto record_pending = state.session_directory / "samples" / (sample_id + ".pending");
         cv::Mat view(slot.height, slot.width, CV_8UC3, slot.pixels.data());
+        // 只拒绝近黑/近白的完整转场；后台逐像素确认，避免缩略图漏掉小人物。
+        if (std::strcmp(slot.reason, "manual") != 0) {
+            double minimum = 0, maximum = 0;
+            cv::minMaxLoc(view.reshape(1), &minimum, &maximum);
+            if (maximum <= 1 || minimum >= 254) {
+                std::lock_guard lock(mutex);
+                ++state.filtered;
+                return;
+            }
+        }
         std::vector<unsigned char> encoded;
         if (!cv::imencode(".png", view, encoded)) throw std::runtime_error("PNG 编码失败");
         Json boxes = Json::array();
@@ -140,7 +152,7 @@ struct Collector::Impl {
         Json record = {{"schema_version", 1}, {"sample_id", sample_id}, {"session_id", session_id},
             {"image", utf8(image_relative)}, {"image_sha256", hash_bytes(encoded)}, {"width", slot.width}, {"height", slot.height},
             {"sequence", slot.timing.sequence}, {"detector_generation", slot.generation}, {"detection_status", DetectionStatusName(slot.status)},
-            {"reason", slot.reason}, {"review_state", slot.status == DetectionStatus::SUCCESS ? "PRELABELED" : "RAW"}, {"detections", boxes},
+            {"reason", slot.reason}, {"automatic_allowed", slot.automatic_allowed}, {"review_state", slot.status == DetectionStatus::SUCCESS ? "PRELABELED" : "RAW"}, {"detections", boxes},
             {"geometry", {{"roi_x", slot.roi_x}, {"roi_y", slot.roi_y}, {"source_width", slot.source_width}, {"source_height", slot.source_height}, {"encoded_width", slot.encoded_width}, {"encoded_height", slot.encoded_height}, {"source_pixels_per_pixel_x", slot.scale_x}, {"source_pixels_per_pixel_y", slot.scale_y}}},
             {"timing", {{"captured_steady_ns", nanoseconds(slot.timing.captured_at)}, {"source_sequence", slot.timing.source_sequence}, {"source_sequence_valid", slot.timing.source_sequence_valid}, {"source_timestamp", slot.timing.source_timestamp}, {"source_timestamp_valid", slot.timing.source_timestamp_valid}, {"source_time_basis", SourceTimeBasisName(slot.timing.source_time_basis)}, {"source_clock_status", SourceClockStatusName(slot.timing.source_clock_status)}}}};
         const auto text = record.dump(2);
@@ -226,7 +238,7 @@ bool Collector::start(const Config& config, std::string& error) noexcept {
         std::filesystem::create_directory(p.state.session_directory / "images");
         std::filesystem::create_directory(p.state.session_directory / "samples");
         Json session = {{"schema_version", 1}, {"session_id", p.session_id}, {"class_names", config.class_names}, {"model_path", utf8(std::filesystem::absolute(model_path))}, {"model_sha256", model_hash},
-            {"policy", {{"version", 2}, {"continuous", true}, {"interval_ms", config.interval_ms}, {"novelty_threshold", config.novelty_threshold}, {"exploration_interval_ms", config.exploration_interval_ms}, {"exploration_rule", "uniform_interval_0.5_to_1.5_independent_of_detections"}, {"exploration_seed", p.config.exploration_seed}, {"uncertain_confidence", config.uncertain_confidence}, {"queue_capacity", config.queue_capacity}, {"buffer_bytes", config.buffer_bytes}}}};
+            {"policy", {{"version", 3}, {"continuous", true}, {"interval_ms", config.interval_ms}, {"novelty_threshold", config.novelty_threshold}, {"exploration_interval_ms", config.exploration_interval_ms}, {"exploration_rule", "uniform_interval_0.5_to_1.5_independent_of_detections"}, {"empty_detection_rule", "exploration_or_manual"}, {"automatic_flat_rule", "all_channels_at_most_1_or_at_least_254"}, {"manual_bypasses_quality_filters", true}, {"exploration_seed", p.config.exploration_seed}, {"uncertain_confidence", config.uncertain_confidence}, {"queue_capacity", config.queue_capacity}, {"buffer_bytes", config.buffer_bytes}}}};
         const auto text = session.dump(2);
         write_file(p.state.session_directory / "session.pending", text.data(), text.size());
         std::filesystem::rename(p.state.session_directory / "session.pending", p.state.session_directory / "session.json");
@@ -262,7 +274,7 @@ Snapshot Collector::snapshot() const {
     result.dropped += impl_->contention_drops.load();
     return result;
 }
-void Collector::offer(const CapturedFrame& frame, std::span<const Detection> detections, DetectionStatus status, std::uint64_t generation) noexcept {
+void Collector::offer(const CapturedFrame& frame, std::span<const Detection> detections, DetectionStatus status, std::uint64_t generation, bool automatic_allowed) noexcept {
     auto& p = *impl_;
     if (!p.enabled.load(std::memory_order_acquire)) return;
     std::unique_lock lock(p.mutex, std::try_to_lock);
@@ -281,6 +293,7 @@ void Collector::offer(const CapturedFrame& frame, std::span<const Detection> det
         const bool manual = p.state.manual_pending;
         if (!manual && p.last_check != Clock::time_point{} && now - p.last_check < std::chrono::milliseconds(p.config.interval_ms)) return;
         p.last_check = now;
+        if (!manual && !automatic_allowed) { ++p.state.filtered; return; }
         std::array<unsigned char, 768> thumbnail{};
         std::size_t offset = 0;
         double difference = 0;
@@ -292,17 +305,32 @@ void Collector::offer(const CapturedFrame& frame, std::span<const Detection> det
                 difference += std::abs(static_cast<int>(value) - p.previous[offset++]);
             }
         }
-        bool geometry_changed = detections.size() != p.previous_count;
+        // 检测器输出顺序不是图像变化：规范化副本只用于比较，不改预标注原序。
+        std::array<Detection, 1024> ordered{};
+        const auto detection_count = status == DetectionStatus::SUCCESS ? detections.size() : 0;
+        std::copy_n(detections.begin(), detection_count, ordered.begin());
+        bool geometry_changed = detection_count != p.previous_count;
         bool uncertain = false;
         for (std::size_t i = 0; i < detections.size(); ++i) {
             const auto& d = detections[i];
             if (status == DetectionStatus::SUCCESS && (!std::isfinite(d.x1) || !std::isfinite(d.y1) || !std::isfinite(d.x2) || !std::isfinite(d.y2) || !std::isfinite(d.confidence) || d.x1 < 0 || d.y1 < 0 || d.x2 > frame.width || d.y2 > frame.height || d.x1 >= d.x2 || d.y1 >= d.y2 || d.confidence < 0 || d.confidence > 1 || d.class_id < 0 || static_cast<std::size_t>(d.class_id) >= p.config.class_names.size())) { p.fail("预标注类别或坐标不符合当前数据规范"); return; }
             uncertain |= d.confidence < p.config.uncertain_confidence;
-            if (i < p.previous_count) { const auto& old = p.previous_detections[i]; geometry_changed |= d.class_id != old.class_id || std::abs(d.x1-old.x1) > frame.width * 0.02f || std::abs(d.y1-old.y1) > frame.height * 0.02f || std::abs(d.x2-old.x2) > frame.width * 0.02f || std::abs(d.y2-old.y2) > frame.height * 0.02f; }
+        }
+        std::sort(ordered.begin(), ordered.begin() + detection_count,
+            [](const Detection& a, const Detection& b) {
+                return std::tie(a.class_id, a.x1, a.y1, a.x2, a.y2) <
+                       std::tie(b.class_id, b.x1, b.y1, b.x2, b.y2);
+            });
+        for (std::size_t i = 0; i < std::min(detection_count, p.previous_count); ++i) {
+            const auto& d = ordered[i];
+            const auto& old = p.previous_detections[i];
+            geometry_changed |= d.class_id != old.class_id || std::abs(d.x1-old.x1) > frame.width * 0.02f || std::abs(d.y1-old.y1) > frame.height * 0.02f || std::abs(d.x2-old.x2) > frame.width * 0.02f || std::abs(d.y2-old.y2) > frame.height * 0.02f;
         }
         const bool novel = !p.have_previous || geometry_changed || difference / (768.0 * 255.0) >= p.config.novelty_threshold;
         const bool exploration = now >= p.next_exploration;
         if (!manual && !novel && !exploration) { ++p.state.duplicates; return; }
+        // 空结果不是无效/已核验负样本；保留独立探索，不让走动墙面逐秒占满数据。
+        if (!manual && detection_count == 0 && !exploration) { ++p.state.filtered; return; }
         if (p.queue_size == p.queue.size()) { ++p.state.dropped; return; }
         auto found = std::find_if(p.slots.begin(), p.slots.end(), [](const auto& slot) { return !slot.occupied; });
         if (found == p.slots.end()) { ++p.state.dropped; return; }
@@ -320,14 +348,15 @@ void Collector::offer(const CapturedFrame& frame, std::span<const Detection> det
             return;
         }
         slot.status = status; slot.generation = generation; slot.id = ++p.accepted;
+        slot.automatic_allowed = automatic_allowed;
         slot.reason = manual ? "manual" : exploration ? "exploration" : uncertain ? "uncertain" : "novel";
         slot.occupied = true;
         p.queue[(p.queue_head + p.queue_size) % p.queue.size()] = static_cast<std::size_t>(found - p.slots.begin());
         ++p.queue_size; ++p.state.queued;
         p.state.manual_pending = false;
         p.previous = thumbnail;
-        p.previous_count = detections.size();
-        std::copy(detections.begin(), detections.end(), p.previous_detections.begin());
+        p.previous_count = detection_count;
+        std::copy_n(ordered.begin(), detection_count, p.previous_detections.begin());
         p.have_previous = true;
         if (exploration) p.next_exploration = now + std::chrono::milliseconds(std::uniform_int_distribution<std::int64_t>(std::max(1, p.config.exploration_interval_ms / 2), static_cast<std::int64_t>(p.config.exploration_interval_ms) + p.config.exploration_interval_ms / 2)(p.random));
         p.ready.notify_one();
