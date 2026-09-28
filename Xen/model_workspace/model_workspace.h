@@ -43,6 +43,7 @@ struct Settings {
     int epochs = 30;
     int image_size = 320;
     int batch_size = 8;
+    int loader_workers = 0;
 };
 
 struct Snapshot {

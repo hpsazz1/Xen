@@ -98,6 +98,12 @@ def positive_int(value, name, maximum=100000):
     return value
 
 
+def training_workers(value=0):
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 8:
+        raise PipelineError("workers 必须为 0..8 的整数")
+    return value
+
+
 def boxes_checked(boxes, width, height, names):
     checked = []
     if not isinstance(boxes, list):
@@ -791,14 +797,17 @@ def resume_source(job, dataset, manifest):
     best = weights.with_name("best.pt")
     if not best.is_file() or checkpoint.get("best_sha256") != sha256(best):
         raise PipelineError("续训需要原作业完整的 best.pt 历史最佳检查点")
-    effective = config["effective_training"]
-    for name in ("epochs", "imgsz"):
+    effective = dict(config["effective_training"])
+    effective["workers"] = training_workers(effective.get("workers", 0))
+    if "workers" in job:
+        training_workers(job["workers"])
+    for name in ("epochs", "imgsz", "workers"):
         if name in job and job[name] != effective[name]:
             raise PipelineError(f"续训必须保持原 {name}={effective[name]}；改变训练预算/尺寸请开新实验")
     return dict(output=str(original), config=config, checkpoint=checkpoint, best=best, effective=effective)
 
 
-def redirected_resume_trainer(base_class, output, dataset, source_best):
+def redirected_resume_trainer(base_class, output, dataset, source_best, workers=0):
     """v8.3.203 在 check_resume 后才创建 save_dir；保持原生状态恢复。"""
     class ResumeTrainer(base_class):
         def check_resume(self, overrides):
@@ -808,6 +817,7 @@ def redirected_resume_trainer(base_class, output, dataset, source_best):
             self.args.name = "run"
             self.args.exist_ok = False
             self.args.data = str(dataset / "data.yaml")
+            self.args.workers = workers
 
         def resume_training(self, checkpoint):
             super().resume_training(checkpoint)
@@ -850,6 +860,7 @@ def train(ctx):
     if not isinstance(resume, bool):
         raise PipelineError("resume 必须为 JSON 布尔值")
     source = resume_source(ctx.job, dataset, manifest) if resume else None
+    workers = training_workers(source["effective"]["workers"] if source else ctx.job.get("workers", 0))
     epochs = positive_int(source["effective"]["epochs"] if source else ctx.job.get("epochs", 20), "epochs", 10000)
     imgsz = positive_int(source["effective"]["imgsz"] if source else ctx.job.get("imgsz", 640), "imgsz", 4096)
     batch = positive_int(ctx.job.get("batch", 8), "batch", 1024)
@@ -869,7 +880,7 @@ def train(ctx):
             raise PipelineError("续训 checkpoint 的 epoch/类别与原作业不一致")
     output = ctx.output()
     work_data = working_dataset(ctx, dataset, manifest, output)
-    config = dict(schema_version=SCHEMA, job=ctx.job, dataset_sha256=sha256(dataset / "dataset.json"), class_names=manifest["class_names"], effective_training=dict(epochs=epochs, imgsz=imgsz, batch=batch, device=device), weights_sha256=sha256(ctx.job["weights"]), versions=versions(), started_at=now(), resume_from=source["output"] if source else None)
+    config = dict(schema_version=SCHEMA, job=ctx.job, dataset_sha256=sha256(dataset / "dataset.json"), class_names=manifest["class_names"], effective_training=dict(epochs=epochs, imgsz=imgsz, batch=batch, device=device, workers=workers), weights_sha256=sha256(ctx.job["weights"]), versions=versions(), started_at=now(), resume_from=source["output"] if source else None)
     write_json(output / "config.json", config)
     cancelled = False
     last_progress = 0.0
@@ -903,8 +914,8 @@ def train(ctx):
     ctx.check()
     resume_options = {}
     if source:
-        resume_options = dict(resume=True, trainer=redirected_resume_trainer(detection_trainer_class(), output, work_data, source["best"]))
-    result = model.train(data=str(work_data / "data.yaml"), epochs=epochs, imgsz=imgsz, batch=batch, device=device, project=str(output), name="run", exist_ok=False, workers=0, seed=0, deterministic=True, pretrained=False, amp=False, save=True, save_period=1, plots=False, val=True, patience=20, **resume_options)
+        resume_options = dict(resume=True, trainer=redirected_resume_trainer(detection_trainer_class(), output, work_data, source["best"], workers))
+    result = model.train(data=str(work_data / "data.yaml"), epochs=epochs, imgsz=imgsz, batch=batch, device=device, project=str(output), name="run", exist_ok=False, workers=workers, seed=0, deterministic=True, pretrained=False, amp=False, save=True, save_period=1, plots=False, val=True, patience=20, **resume_options)
     ctx.check()
     run_dir = Path(model.trainer.save_dir)
     best, last = run_dir / "weights" / "best.pt", run_dir / "weights" / "last.pt"
@@ -948,6 +959,7 @@ def evaluation_json_value(value):
 
 
 def evaluate(ctx):
+    workers = training_workers(ctx.job.get("workers", 0))
     for key in ("model", "baseline_model"):
         if ctx.job.get(key):
             check_pt_trust(ctx.job[key], ctx.job)
@@ -978,7 +990,7 @@ def evaluate(ctx):
             ctx.check()
         model.add_callback("on_val_batch_end", check_batch)
         # mAP 使用同一低置信门槛构建曲线；背景误报另用固定部署候选门槛。
-        result = model.val(data=str(work_data / "data.yaml"), split=split, imgsz=imgsz, conf=0.001, iou=0.7, batch=ctx.job.get("batch", 8), device=ctx.job.get("device", "cpu"), project=str(output), name=name, plots=False, save_json=False, workers=0)
+        result = model.val(data=str(work_data / "data.yaml"), split=split, imgsz=imgsz, conf=0.001, iou=0.7, batch=ctx.job.get("batch", 8), device=ctx.job.get("device", "cpu"), project=str(output), name=name, plots=False, save_json=False, workers=workers)
         ctx.check()
         negative_frames = false_positive_frames = false_positives = 0
         fixed = [dict(class_id=i, name=name, tp=0, fp=0, fn=0) for i, name in enumerate(manifest["class_names"])]

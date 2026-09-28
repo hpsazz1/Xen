@@ -42,6 +42,7 @@ void test_tool_paths(const fs::path& test_root, const char* python) {
     settings.script_path = utf8(root / bundled_relative);
     settings.python_executable = python;
     settings.environment_root = utf8(test_root / "existing environment");
+    settings.loader_workers = 2;
     expect(workspace.execute(Action::SAVE_SETTINGS, settings, false, false, ""),
            "保存包内工具及显式外部训练环境");
     const auto relocated = test_root / L"中文 新程序目录";
@@ -56,6 +57,7 @@ void test_tool_paths(const fs::path& test_root, const char* python) {
                "复制到新程序根后，包内工具不得继续指回旧程序目录");
         expect(restored.python_executable == settings.python_executable &&
                restored.environment_root == settings.environment_root &&
+               restored.loader_workers == 2 &&
                restored.root_directory == settings.root_directory,
                "程序根变化不搬移已有解释器、环境或用户数据");
     }
@@ -97,6 +99,8 @@ int main(int argc, char** argv) try {
     model_workspace::Settings settings;
     std::string error;
     expect(workspace.initialize(root, settings, error), "工作区初始化");
+    expect(settings.loader_workers == 0, "旧设置缺少加载进程时保持同步加载");
+    settings.loader_workers = 2;
     settings.python_executable = argv[1];
     settings.script_path = argv[2];
     settings.class_names = "person,head";
@@ -149,6 +153,9 @@ int main(int argc, char** argv) try {
         nlohmann::json status; stream >> status;
         expect(status.at("result").at("root") == settings.root_directory,
                "参数经过JSON完整传递，不经过shell解释");
+        std::ifstream job_stream(fs::u8path(view.job_directory) / "job.json");
+        nlohmann::json job; job_stream >> job;
+        expect(job.at("workers") == 2, "加载进程配置通过真实后台作业JSON传递");
     }
     expect(!workspace.execute(Action::IMPORT_CANDIDATE, settings, false, false, ""),
            "inspect成功不授予模型导入资格");

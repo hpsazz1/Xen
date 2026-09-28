@@ -4132,8 +4132,10 @@ struct Overlay::Impl {
                 ImGui::InputInt("##training_epochs", &settings.epochs);
                 form_row("输入尺寸 / px", "训练输入边长，须与候选模型导出和 Runtime 输入契约相容；修改后需重新评估延迟与准确率。");
                 ImGui::InputInt("##training_imgsz", &settings.image_size);
-                form_row("批量大小 / 张", "一次训练迭代的图像数量；显存不足时减小并重新开始，不会自动修改正在执行的作业。");
+                form_row("批量大小 / 张", "一次训练迭代的图像数量；更大批量会减少每轮更新次数，需重新评估训练轮数。显存不足时减小并重新开始，不会自动修改正在执行的作业。");
                 ImGui::InputInt("##training_batch", &settings.batch_size);
+                form_row("数据加载进程", "0–8；0为主进程同步加载，增加可提前解码与增强图片，但会占用更多内存。按实测耗时选择，恢复训练须保持原值；仅在新作业生效。");
+                ImGui::InputInt("##training_workers", &settings.loader_workers);
                 form_row("训练设备", "填写 GPU 编号（例如 0）或 cpu。训练需先停止 Runtime，避免占用检测资源。");
                 ImGui::InputText("##training_device", &settings.device);
                 ImGui::EndTable();

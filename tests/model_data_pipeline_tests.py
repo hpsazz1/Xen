@@ -303,7 +303,7 @@ class PipelineTests(unittest.TestCase):
         status = self.base / "status.json"
         output = self.base / "training"
         with patch.object(pipeline, "load_yolo", side_effect=lambda path, training=False, **kwargs: FakeModel(path)), patch.object(pipeline, "onnx_contract", return_value=dict(input_shape=[1, 3, 640, 640], output_shape=[1, 5, 8400], detector_runtime="NOT_EXECUTED")):
-            self.assertEqual(pipeline.execute(self.job("train", dataset=str(dataset), weights=str(weight), output=str(output), **self.trust(weight)), status), 0)
+            self.assertEqual(pipeline.execute(self.job("train", dataset=str(dataset), weights=str(weight), output=str(output), workers=8, **self.trust(weight)), status), 0)
             result = pipeline.read_json(status)["result"]
             self.assertTrue(Path(result["candidate"]).is_file())
             card = pipeline.read_json(result["candidate_card"])
@@ -311,7 +311,7 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(card["test_evaluation"], "NOT_EXECUTED")
             pipeline.validate_dataset(dataset)
             evaluation = self.base / "evaluation"
-            self.assertEqual(pipeline.execute(self.job("evaluate", model=result["candidate"], baseline_model=result["candidate"], dataset=str(dataset), output=str(evaluation)), status), 0)
+            self.assertEqual(pipeline.execute(self.job("evaluate", model=result["candidate"], baseline_model=result["candidate"], dataset=str(dataset), output=str(evaluation), workers=2), status), 0)
             measured = pipeline.read_json(status)["result"]
             self.assertTrue(measured["passed_compatibility"])
             self.assertFalse(measured["comparison"]["improvement_claim"])
@@ -325,6 +325,9 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(report["per_class"][0]["nested"], [3, True])
             self.assertEqual(report["baseline"]["per_class"][0]["Instances"], 2)
         self.assertFalse(captured["export"]["nms"])
+        self.assertEqual(captured["train"]["workers"], 8)
+        self.assertEqual(pipeline.read_json(output / "config.json")["effective_training"]["workers"], 8)
+        self.assertTrue(all(v["workers"] == 2 for v in captured["evaluations"]))
         self.assertFalse(captured["export"]["dynamic"])
         self.assertEqual(captured["export"]["opset"], 17)
         self.assertEqual(len(captured["evaluations"]), 2)
@@ -364,6 +367,20 @@ class PipelineTests(unittest.TestCase):
         self.assertIs(type(normalized["count"]), int)
         self.assertEqual(normalized["count"], 2**60)
         self.assertIs(type(normalized["ratio"]), float)
+
+    def test_workers_bounds_reject_invalid_jobs_before_model_loading(self):
+        dataset = self.freeze()
+        weight = self.base / "trusted.pt"
+        weight.write_bytes(b"fixture")
+        self.assertEqual(pipeline.training_workers(), 0)
+        for count in (0, 1, 8):
+            self.assertEqual(pipeline.training_workers(count), count)
+        for value in (-1, 9, True, False, 1.5, "2", None):
+            for operation in ("train", "evaluate"):
+                with self.subTest(workers=value, operation=operation), patch.object(pipeline, "load_yolo") as load:
+                    with self.assertRaisesRegex(pipeline.PipelineError, "workers"):
+                        getattr(pipeline, operation)(self.context(operation, dataset=str(dataset), weights=str(weight), model=str(weight), workers=value, **self.trust(weight)))
+                    load.assert_not_called()
 
     def test_train_orchestration_and_checkpoint_cancellation(self):
         dataset = self.freeze()
@@ -414,7 +431,7 @@ class PipelineTests(unittest.TestCase):
         last, best = weights / "last.pt", weights / "best.pt"
         last.write_bytes(b"optimizer-state-epoch-0")
         best.write_bytes(b"historical-best")
-        config = dict(schema_version=1, dataset_sha256=pipeline.sha256(dataset / "dataset.json"), class_names=self.names, effective_training=dict(epochs=3, imgsz=640, batch=8, device="cpu"))
+        config = dict(schema_version=1, dataset_sha256=pipeline.sha256(dataset / "dataset.json"), class_names=self.names, effective_training=dict(epochs=3, imgsz=640, batch=8, device="cpu", workers=2))
         pipeline.write_json(original / "config.json", config)
         pipeline.write_json(original / "checkpoint.json", dict(dataset_sha256=config["dataset_sha256"], config_sha256=pipeline.sha256(original / "config.json"), last_sha256=pipeline.sha256(last), best_sha256=pipeline.sha256(best), epoch=0))
         originals = {p: p.read_bytes() for p in original.rglob("*") if p.is_file()}
@@ -451,6 +468,7 @@ class PipelineTests(unittest.TestCase):
                 observed["resume"] = kwargs["resume"]
                 self.trainer = kwargs["trainer"](kwargs)
                 observed["data"] = self.trainer.args.data
+                observed["workers"] = (kwargs["workers"], self.trainer.args.workers)
                 data_root = Path(pipeline.read_json(self.trainer.args.data)["path"])
                 (data_root / "labels" / "train.cache").write_bytes(b"resumed-trainer-cache")
                 self.trainer.resume_training(self.ckpt)
@@ -470,6 +488,8 @@ class PipelineTests(unittest.TestCase):
             result = pipeline.train(self.context("train", weights=str(last), dataset=str(dataset), output=str(output), resume=True, epochs=3, **self.trust(last)))
         self.assertTrue(observed["resume"])
         self.assertTrue(observed["native_check_resume"])
+        self.assertEqual(observed["workers"], (2, 2))
+        self.assertEqual(pipeline.read_json(output / "config.json")["effective_training"]["workers"], 2)
         self.assertTrue(Path(observed["data"]).is_relative_to(output))
         pipeline.validate_dataset(dataset)
         self.assertEqual(observed["optimizer"], {"state": "kept"})
@@ -477,12 +497,21 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(observed["seed_best"], b"historical-best")
         self.assertTrue(Path(result["candidate"]).is_relative_to(output))
         self.assertTrue(all(p.read_bytes() == data for p, data in originals.items()))
-        for alteration, message in ((dict(epochs=4), "epochs=3"), (dict(imgsz=320), "imgsz=640")):
+        for alteration, message in ((dict(epochs=4), "epochs=3"), (dict(imgsz=320), "imgsz=640"), (dict(workers=0), "workers=2")):
             with self.assertRaisesRegex(pipeline.PipelineError, message):
                 pipeline.resume_source(self.job("train", weights=str(last), **alteration), dataset, pipeline.read_json(dataset / "dataset.json"))
         changed = dict(pipeline.read_json(dataset / "dataset.json"), class_names=["different"])
         with self.assertRaisesRegex(pipeline.PipelineError, "类别不同"):
             pipeline.resume_source(self.job("train", weights=str(last)), dataset, changed)
+        config["effective_training"].pop("workers")
+        pipeline.write_json(original / "config.json", config)
+        checkpoint = pipeline.read_json(original / "checkpoint.json")
+        checkpoint["config_sha256"] = pipeline.sha256(original / "config.json")
+        pipeline.write_json(original / "checkpoint.json", checkpoint)
+        legacy = pipeline.resume_source(self.job("train", weights=str(last), workers=0), dataset, pipeline.read_json(dataset / "dataset.json"))
+        self.assertEqual(legacy["effective"]["workers"], 0)
+        with self.assertRaisesRegex(pipeline.PipelineError, "workers=0"):
+            pipeline.resume_source(self.job("train", weights=str(last), workers=2), dataset, pipeline.read_json(dataset / "dataset.json"))
         config["dataset_sha256"] = "0"*64
         pipeline.write_json(original / "config.json", config)
         with self.assertRaisesRegex(pipeline.PipelineError, "数据版本"):

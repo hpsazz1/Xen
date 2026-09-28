@@ -208,7 +208,7 @@ Json settings_json(const Settings& value, const fs::path& data_root) {
         {"device", value.device}, {"interval_ms", value.interval_ms},
         {"exploration_interval_ms", value.exploration_interval_ms},
         {"epochs", value.epochs}, {"image_size", value.image_size},
-        {"batch_size", value.batch_size}};
+        {"batch_size", value.batch_size}, {"loader_workers", value.loader_workers}};
 }
 
 } // namespace
@@ -413,6 +413,7 @@ bool Workspace::initialize(const fs::path& data_root, Settings& settings,
             // 旧设置的数量/磁盘配额字段作为未知键兼容忽略，连续采集不再使用。
             XEN_DATA_SETTING(interval_ms); XEN_DATA_SETTING(exploration_interval_ms);
             XEN_DATA_SETTING(epochs); XEN_DATA_SETTING(image_size); XEN_DATA_SETTING(batch_size);
+            XEN_DATA_SETTING(loader_workers);
 #undef XEN_DATA_SETTING
             const auto saved_script = path_from(settings.script_path);
             if (!saved_script.empty() && saved_script.is_relative()) {
@@ -703,7 +704,8 @@ bool Workspace::execute(Action action, Settings& settings,
             {"dataset", dataset}, {"review_manifest", settings.review_manifest},
             {"model", settings.model_path.empty() ? active_model_path : settings.model_path},
             {"epochs", settings.epochs}, {"imgsz", settings.image_size},
-            {"batch", settings.batch_size}, {"device", settings.device}};
+            {"batch", settings.batch_size}, {"device", settings.device},
+            {"workers", settings.loader_workers}};
         if (action == Action::TRAIN) job["resume"] = settings.resume_training;
         if (action != Action::INSPECT_DATA) job["class_names"] = names_from(settings);
         else if (settings.class_schema_confirmed) job["class_names"] = names_from(settings);
