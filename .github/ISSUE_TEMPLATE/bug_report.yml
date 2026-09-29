@@ -1,0 +1,41 @@
+name: 故障报告
+description: 提供可复现的应用、构建或文档问题。
+title: "[故障] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        安全漏洞请使用仓库 Security 页的私密报告入口。不要粘贴凭据、完整个人配置或未经脱敏的运行资料。
+  - type: input
+    id: revision
+    attributes:
+      label: 提交或发布包版本
+      description: 填写提交哈希或包名；如果无法确认，请说明来源。
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 运行环境
+      description: Windows、GPU、推理后端、画面来源、输入后端；与问题无关的项目可省略。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤
+      description: 从使用的启动入口开始，列出最少操作和必要配置。
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: 预期与实际表现
+      description: 说明发生阶段、频率及完整错误提示。
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 脱敏证据
+      description: 可提供日志片段、截图和已有测试结果；区分软件测试、离线分析和实际设备观察，不必为提交问题重新触发真实输出。

@@ -1,0 +1,23 @@
+name: 功能建议
+description: 描述具体使用场景、现有困难和可检查的改进目标。
+title: "[建议] "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 使用场景与问题
+      description: 你正在完成什么任务，现有流程卡在哪里？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望的改进
+      description: 描述最小可用方案及如何判断改进有效。
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 已尝试的替代办法
+      description: 可补充截图、限制条件或相关资料，不要包含私人数据。

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 使用说明与支持
+    url: https://github.com/hpsazz1/Xen/blob/main/SUPPORT.md
+    about: 先查看使用指南、常见排查入口及反馈所需信息。
+  - name: 私密报告安全漏洞
+    url: https://github.com/hpsazz1/Xen/security/advisories/new
+    about: 凭据泄漏、未授权访问与安全门绕过请通过私密渠道报告。
