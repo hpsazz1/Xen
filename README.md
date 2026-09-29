@@ -86,10 +86,10 @@ Xen 将**采集、检测、瞄准、辅助控制、数据整理和训练**集中
 | [查看 MP4](https://github.com/hpsazz1/Xen/releases/download/v2026.09.29/recoil.mp4) | [查看 MP4](https://github.com/hpsazz1/Xen/releases/download/v2026.09.29/stop-trigger.mp4) |
 
 <p align="center">
-  <img src="assets/readme/showcase/match.gif" width="480" alt="本人视角的实际对局片段，原速7秒">
+  <img src="assets/readme/showcase/match.gif" width="480" alt="本人视角的实际对局片段，原速5秒">
 </p>
 
-<p align="center">实战片段 · 7 秒 · <a href="https://github.com/hpsazz1/Xen/releases/download/v2026.09.29/match.mp4">查看 MP4</a></p>
+<p align="center">实战片段 · 5 秒 · <a href="https://github.com/hpsazz1/Xen/releases/download/v2026.09.29/match.mp4">查看 MP4</a></p>
 
 精选片段展示使用场景，不据此推导命中率、急停时延或跨环境效果。[素材说明](assets/readme/showcase/README.md)记录时长、处理方式和权利边界。
 
