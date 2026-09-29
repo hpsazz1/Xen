@@ -93,6 +93,24 @@ Xen 将**采集、检测、瞄准、辅助控制、数据整理和训练**集中
 
 精选片段展示使用场景，不据此推导命中率、急停时延或跨环境效果。[素材说明](assets/readme/showcase/README.md)记录时长、处理方式和权利边界。
 
+### 追踪、补偿与预测
+
+三段按相同倍率放大准星附近画面，右上角叠加运行日志中的**基础瞄点 → 预测瞄点**及两点距离。绿点为基础瞄点，橙圈为预测瞄点；像素值按原画面计算，放大不改变数值。
+
+**基础追踪** · 原录像 1–6 秒 · [查看高清 MP4](https://github.com/hpsazz1/Xen/releases/download/v2026.09.29/tracking.mp4)
+
+<p align="center"><img src="assets/readme/showcase/tracking.gif" width="768" alt="基础追踪：准星局部放大、瞄点连线及原画面像素距离"></p>
+
+**基础＋补偿** · 原录像 2–7 秒 · [查看高清 MP4](https://github.com/hpsazz1/Xen/releases/download/v2026.09.29/tracking-compensation.mp4)
+
+<p align="center"><img src="assets/readme/showcase/tracking-compensation.gif" width="768" alt="基础＋补偿：准星局部放大、瞄点连线及原画面像素距离"></p>
+
+**基础＋补偿＋预测** · 原录像 16–21 秒 · [查看高清 MP4](https://github.com/hpsazz1/Xen/releases/download/v2026.09.29/tracking-prediction.mp4)
+
+<p align="center"><img src="assets/readme/showcase/tracking-prediction.gif" width="768" alt="基础＋补偿＋预测：准星局部放大、瞄点连线及原画面像素距离"></p>
+
+三段除补偿、预测开关外，其余瞄准配置一致。未开启预测时两点重合，显示 0 px；延迟补偿作用于控制过程，不能用这段连线的长度衡量。日志与录像经目标位置近似对齐，标记用于解释瞄点关系，不作为逐帧物理时延测量；未锁定时不显示有效距离。
+
 ## 快速开始
 
 ### 1. 选择运行方式
