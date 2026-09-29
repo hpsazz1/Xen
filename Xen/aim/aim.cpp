@@ -1212,6 +1212,8 @@ struct Aim::Impl {
     float prediction_y_feedforward = 0.0f;
     float prediction_y_measurement = 0.0f;
     bool frame_prediction_enabled = false;
+    bool prediction_source_gap_preserved = false;
+    std::chrono::steady_clock::time_point prediction_last_valid_source_at{};
     std::uint64_t prediction_policy_track_id = 0;
     std::uint64_t prediction_policy_epoch = 0;
     std::uint64_t controller_track_id = 0;
@@ -3593,6 +3595,8 @@ struct Aim::Impl {
     }
 
     void reset_controller() noexcept {
+        prediction_source_gap_preserved = false;
+        prediction_last_valid_source_at = {};
         model_residual_x = {};
         prediction_axis_measurement_x = 0.0f;
         prediction_y_feedforward = 0.0f;
@@ -3655,6 +3659,8 @@ struct Aim::Impl {
     }
 
     void clear_prediction_policy_state() noexcept {
+        prediction_source_gap_preserved = false;
+        prediction_last_valid_source_at = {};
         prediction_axis_measurement_x = 0.0f;
         prediction_y_feedforward = 0.0f;
         prediction_y_measurement = 0.0f;
@@ -3696,12 +3702,30 @@ struct Aim::Impl {
     }
 
     void prepare_prediction_policy(const AimFrame& frame, const Track& track) noexcept {
+        const auto background_pair = prediction_background_pair_x(frame, track);
         const bool enabled = config.enable_prediction &&
             (frame.lock_active || !config.enable_delay_compensation) &&
-            !track.predicted && prediction_background_pair_x(frame, track).valid;
+            !track.predicted && background_pair.valid;
         const bool lifecycle_changed = prediction_policy_track_id != track.id ||
             prediction_policy_epoch != frame.observation_epoch;
-        if (enabled != frame_prediction_enabled || lifecycle_changed ||
+        const bool was_source_gap = prediction_source_gap_preserved;
+        const float source_gap_seconds = std::chrono::duration<float>(
+            frame.captured_at - prediction_last_valid_source_at).count();
+        // 缺测撤销本帧预测，不等同于结束已建立的目标生命周期。只在既有
+        // 静止释放时域内暂存资格；恢复必须由当前同源双边共同支持原方向。
+        const bool preserve_source_state = !lifecycle_changed &&
+            config.enable_prediction && config.control_delay_ms > 0.0f &&
+            frame.lock_active && !track.predicted && lead_active &&
+            std::fabs(prediction_motion_candidate_x_seconds) >=
+                kPredictionHorizontalMotionEstablishmentSeconds &&
+            prediction_last_valid_source_at != std::chrono::steady_clock::time_point{} &&
+            source_gap_seconds > 0.0f &&
+            source_gap_seconds < kPredictionStaticReleaseConfirmSeconds &&
+            (!enabled || (was_source_gap &&
+                background_pair.world_left_dx_roi * lead_direction_x > 0.0f &&
+                background_pair.world_right_dx_roi * lead_direction_x > 0.0f));
+        if (((enabled != frame_prediction_enabled || was_source_gap) &&
+             !preserve_source_state) || lifecycle_changed ||
             (config.enable_delay_compensation && !frame.lock_active)) {
             // 来源暂缺撤销估计与请求；已提交参考在公开出口按原预算回收。
             // 重入仍属于同一次激活，不能伪装成首次启动。
@@ -3715,6 +3739,13 @@ struct Aim::Impl {
                 lead_ever_activated = previously_activated;
             }
         }
+        if (enabled && was_source_gap && preserve_source_state) {
+            // 只累计恢复帧真实观测区间，缺口时间不计作连续运动见证。
+            prediction_world_interval_evidence.last_at =
+                frame.background_motion_x.previous_captured_at;
+        }
+        prediction_source_gap_preserved = !enabled && preserve_source_state;
+        if (enabled) prediction_last_valid_source_at = frame.captured_at;
         frame_prediction_enabled = enabled;
         prediction_policy_track_id = track.id;
         prediction_policy_epoch = frame.observation_epoch;
@@ -3869,6 +3900,8 @@ struct Aim::Impl {
             prediction_low_motion_y_frames = 0;
         }
         if (!frame_prediction_enabled) {
+            // 不消费旧世界速度；公开出口仍将上一偏移按原slew撤向基础点。
+            if (prediction_source_gap_preserved) return projection;
             prediction_forecast_applied = false;
             lead_active = false;
             lead_axis_active_x = false;
@@ -5997,6 +6030,8 @@ struct Aim::Impl {
         vertical_takeover = {};
         controller_has_history = false;
         frame_prediction_enabled = false;
+        prediction_source_gap_preserved = false;
+        prediction_last_valid_source_at = {};
         prediction_policy_track_id = 0;
         prediction_policy_epoch = 0;
         tracks.clear();

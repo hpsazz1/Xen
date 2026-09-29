@@ -1593,6 +1593,11 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(aim_prediction_soft_allocation_tests OPENCV)
     add_test(NAME aim_prediction_soft_allocation_tests COMMAND aim_prediction_soft_allocation_tests)
 
+    add_executable(aim_prediction_gap_continuity_tests tests/aim_prediction_gap_continuity_tests.cpp)
+    target_link_libraries(aim_prediction_gap_continuity_tests PRIVATE aim log)
+    xen_deploy_runtime_dlls(aim_prediction_gap_continuity_tests OPENCV)
+    add_test(NAME aim_prediction_gap_continuity_tests COMMAND aim_prediction_gap_continuity_tests)
+
     add_executable(aim_x_filter_reset_tests tests/aim_x_filter_reset_tests.cpp)
     target_link_libraries(aim_x_filter_reset_tests PRIVATE aim log)
     xen_deploy_runtime_dlls(aim_x_filter_reset_tests OPENCV)
