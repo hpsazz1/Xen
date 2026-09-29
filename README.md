@@ -82,7 +82,7 @@ Xen 将**采集、检测、瞄准、辅助控制、数据整理和训练**集中
 
 | 压枪 · 5 秒 | 急停＋扳机 · 6 秒 |
 | :--: | :--: |
-| ![靶场连续射击实录](assets/readme/showcase/recoil.gif) | ![靶场移动与射击实录](assets/readme/showcase/stop-trigger.gif) |
+| ![靶场连续射击实录](assets/readme/showcase/recoil.gif) | ![靶场移动与射击实录](assets/readme/showcase/stop-trigger-01-07.gif) |
 | [查看 MP4](https://github.com/hpsazz1/Xen/releases/download/v2026.09.29/recoil.mp4) | [查看 MP4](https://github.com/hpsazz1/Xen/releases/download/v2026.09.29/stop-trigger.mp4) |
 
 <p align="center">
