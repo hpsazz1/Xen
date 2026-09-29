@@ -80,9 +80,9 @@ Xen 将**采集、检测、瞄准、辅助控制、数据整理和训练**集中
 
 以下片段来自 2026-09-29 的实际测试录像。用户完成压枪、急停＋扳机及实战测试后，反馈整体效果可以接受。片段保留原速，裁去昵称和聊天区域；GIF 为轻量预览，点击下方 MP4 可查看更清晰的版本。
 
-| 压枪 · 5 秒 | 急停＋扳机 · 7 秒 |
+| 压枪 · 5 秒 | 急停＋扳机 · 6 秒 |
 | :--: | :--: |
-| ![靶场连续射击实录](assets/readme/showcase/recoil.gif) | ![靶场移动与手枪射击实录](assets/readme/showcase/stop-trigger.gif) |
+| ![靶场连续射击实录](assets/readme/showcase/recoil.gif) | ![靶场移动与射击实录](assets/readme/showcase/stop-trigger.gif) |
 | [查看 MP4](https://github.com/hpsazz1/Xen/releases/download/v2026.09.29/recoil.mp4) | [查看 MP4](https://github.com/hpsazz1/Xen/releases/download/v2026.09.29/stop-trigger.mp4) |
 
 <p align="center">
@@ -109,7 +109,7 @@ Xen 将**采集、检测、瞄准、辅助控制、数据整理和训练**集中
 
 <p align="center"><img src="assets/readme/showcase/tracking-prediction.gif" width="768" alt="基础＋补偿＋预测：准星局部放大、瞄点连线及原画面像素距离"></p>
 
-三段除补偿、预测开关外，其余瞄准配置一致。未开启预测时两点重合，显示 0 px；延迟补偿作用于控制过程，不能用这段连线的长度衡量。日志与录像经目标位置近似对齐，标记用于解释瞄点关系，不作为逐帧物理时延测量；未锁定时不显示有效距离。
+三段均开启死区和软化区：死区为 **1.5 px**，软化区半径为 **30%**，最小强度为 **20%**。除补偿、预测开关外，其余瞄准配置一致。未开启预测时两点重合，显示 0 px；延迟补偿作用于控制过程，不能用这段连线的长度衡量。日志与录像经目标位置近似对齐，标记用于解释瞄点关系，不作为逐帧物理时延测量；未锁定时不显示有效距离。
 
 ## 快速开始
 
