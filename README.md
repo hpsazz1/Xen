@@ -14,6 +14,7 @@
     <a href="#功能概览">功能概览</a> ·
     <a href="#界面预览">界面预览</a> ·
     <a href="#快速开始">快速开始</a> ·
+    <a href="#项目架构">项目架构</a> ·
     <a href="#构建与开发">构建与开发</a> ·
     <a href="#使用指南">使用指南</a>
   </p>
@@ -127,6 +128,45 @@ flowchart LR
 | `logs/` | 应用日志 |
 
 **不要直接清空整个 `cache/`。** 其中包含用户数据与验收证据；升级前保留配置、模型、弹道和所需记录。训练环境也应重新检查绑定，不能把另一台机器的 Python 路径直接复制过来。
+
+## 项目架构
+
+实时处理由 Runtime 统一协调；原生界面负责配置和状态展示，模型工作台负责采集后的审核、训练与评价。下图表示主要职责与数据流，不对应固定的线程数量。
+
+```mermaid
+flowchart TB
+    UI["Overlay · 原生控制台"]
+    CFG["Config · 配置与模型选择"]
+    SRC["本机桌面 / 双机视频源"]
+    CTX["热键 / GSI / 源端焦点与时钟"]
+
+    subgraph RT["Runtime · 生命周期、队列与运行状态"]
+        CAP["Capture · 画面采集"] --> DET["Detector · ONNX Runtime 推理"]
+        DET --> AIM["Aim · 追踪、目标选择与控制"]
+        AIM --> GATE["输出协调与 SafetyGate"]
+        AUX["辅助控制 · 扳机 / 急停 / 弹道"] --> GATE
+        DET -.目标观测.-> AUX
+    end
+
+    SRC --> CAP
+    UI --> CFG
+    CFG -.配置.-> RT
+    CTX -.状态与许可.-> RT
+    GATE --> OUT["Mouse / Input · SendInput / KMBOX NET / MAKCU"]
+    RT -.运行快照与诊断.-> UI
+    RT -.报告与原始记录.-> REPORT["Debug / Log · 归档与离线分析"]
+
+    CAP -.原图.-> DATA["Data Collector · 素材与预测归档"]
+    DET -.预测.-> DATA
+    DATA --> WORK["Model Workspace · 审核、数据集、训练与评价"]
+    UI -.作业操作.-> WORK
+    WORK --> MODEL["候选 ONNX 模型"]
+    MODEL -.用户显式导入和选择.-> CFG
+```
+
+- **实时链路**：采集、推理与控制在 Runtime 中协作，设备输出受统一许可与清理流程约束。
+- **模型闭环**：素材与预测用于审核和训练；候选由用户显式采用，不自动替换正在使用的模型。双机部署的训练作业在主机执行。
+- **诊断链路**：运行报告和原始记录用于离线分析，帮助区分图像、推理、控制与设备回执问题。
 
 ## 构建与开发
 
