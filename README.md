@@ -13,6 +13,7 @@
   <p>
     <a href="#功能概览">功能概览</a> ·
     <a href="#界面预览">界面预览</a> ·
+    <a href="#实测精选">实测精选</a> ·
     <a href="#快速开始">快速开始</a> ·
     <a href="#项目架构">项目架构</a> ·
     <a href="#构建与开发">构建与开发</a> ·
@@ -28,6 +29,8 @@
 Xen 将**采集、检测、瞄准、辅助控制、数据整理和训练**集中在一个原生桌面界面中。既能处理本机桌面画面，也能接入双机视频源；使用不同的推理后端适配硬件，并保留可回放、可比较的运行记录。
 
 项目追求“小而美的瑞士军刀”：让每项能力有明确入口，让配置、数据和结果可以追溯。
+
+**正式版本：[2026.09.29](https://github.com/hpsazz1/Xen/releases/tag/v2026.09.29)** · [发布说明与验证范围](assets/guide/releases/2026-09-29.md)。公开版本提供源码与精选演示；模型、运行库和本机配置按指南准备。
 
 ## 功能概览
 
@@ -72,6 +75,23 @@ Xen 将**采集、检测、瞄准、辅助控制、数据整理和训练**集中
     <td>检查专用环境与可信权重，准备训练和独立评价。</td>
   </tr>
 </table>
+
+## 实测精选
+
+以下片段来自 2026-09-29 的实际测试录像。用户完成压枪、急停＋扳机及实战测试后，反馈整体效果可以接受。片段保留原速，裁去昵称和聊天区域；GIF 为轻量预览，点击下方 MP4 可查看更清晰的版本。
+
+| 压枪 · 5 秒 | 急停＋扳机 · 7 秒 |
+| :--: | :--: |
+| ![靶场连续射击实录](assets/readme/showcase/recoil.gif) | ![靶场移动与手枪射击实录](assets/readme/showcase/stop-trigger.gif) |
+| [查看 MP4](https://github.com/hpsazz1/Xen/releases/download/v2026.09.29/recoil.mp4) | [查看 MP4](https://github.com/hpsazz1/Xen/releases/download/v2026.09.29/stop-trigger.mp4) |
+
+<p align="center">
+  <img src="assets/readme/showcase/match.gif" width="480" alt="本人视角的实际对局片段，原速7秒">
+</p>
+
+<p align="center">实战片段 · 7 秒 · <a href="https://github.com/hpsazz1/Xen/releases/download/v2026.09.29/match.mp4">查看 MP4</a></p>
+
+精选片段展示使用场景，不据此推导命中率、急停时延或跨环境效果。[素材说明](assets/readme/showcase/README.md)记录时长、处理方式和权利边界。
 
 ## 快速开始
 
