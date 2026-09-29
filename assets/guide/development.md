@@ -214,31 +214,33 @@ Debug CSV/JSON 运行报告与崩溃诊断独立于 Log，不随此开关关闭�
 
 ## 源码与验证
 
-```text
-Xen/
-├── aim/                 # 追踪、选择、控制与评价
-├── aim_landmark/        # 诊断用头部 landmark 关联
-├── app/                 # 应用、Launcher、模型目录与资源
-├── benchmark/           # 无界面 Runtime 基准
-├── capture/             # DXGI、UDP、XUDP、NDI
-├── capture_evidence/    # Capture 像素证据录制与发布
-├── clock_source/        # NDI 源机时钟旁路进程
-├── clock_sync/          # 双机四时间戳与 affine 映射
-├── config/              # INI 聚合、保存与校验
-├── crash/               # 崩溃报告与紧急日志尾部
-├── debug/               # 有界样本与 CSV/JSON 报告
-├── detector/            # ORT Session、前后处理、多任务输出
-├── keyboard/            # 热键与急停事件
-├── log/                 # 全局日志基础设施
-├── mouse/               # Win32、KMBOX NET、MAKCU
-├── mouse_benchmark/     # 鼠标后端基准与报告
-├── mouse_effect_probe/  # 平衡 X 激励、逐 source-frame 执行与证据报告
-├── mouse_effect_probe_runner/   # NDI/sidecar/deadman 编排入口
-├── mouse_effect_probe_sequence/ # 离线序列生成入口
-├── overlay/             # Win32/D3D11/ImGui 控制台
-├── runtime/             # 生命周期、队列与安全门
-└── sender/              # 生产发送端
-```
+先按下面的功能入口阅读，再沿调用链定位实现；完整目录可直接浏览 [Xen/](../../Xen/)。这些是源码模块，独立工具的可执行目标见[上方目标表](#可执行目标)。
+
+| 想了解或修改什么 | 优先入口 | 相关模块 |
+| :-- | :-- | :-- |
+| 应用启动与主循环 | [app/main.cpp](../../Xen/app/main.cpp) | `app/`，配置与各模块生命周期 |
+| 发布包选择推理后端 | [app/launcher.cpp](../../Xen/app/launcher.cpp) | `app/` 中的路由、发布合同与启动校验 |
+| 页面、控件和状态展示 | [overlay/](../../Xen/overlay/) | `overlay.cpp` 及功能面板；配置定义在 `config/` |
+| 图像从哪里进入 | [capture/](../../Xen/capture/) | `sender/` 发送端、`capture_evidence/` 画面取证 |
+| 模型加载与推理结果 | [detector/](../../Xen/detector/) | Session、预处理、后处理及后端适配 |
+| 目标如何转换成控制请求 | [aim/](../../Xen/aim/) | `runtime/` 组帧与控制协调 |
+| 启停、队列与输出许可 | [runtime/runtime.h](../../Xen/runtime/runtime.h) | `runtime.cpp`、`runtime_queue.cpp`、`mouse/`、`keyboard/` |
+| 扳机、急停与武器弹道 | [trigger/](../../Xen/trigger/)、[auto_stop/](../../Xen/auto_stop/)、[recoil/](../../Xen/recoil/) | `weapon/` 提供共享武器资料；`recoil_tuner/` 负责离线优化 |
+| 素材保存与训练流程 | [data_collection/](../../Xen/data_collection/)、[model_workspace/](../../Xen/model_workspace/) | [scripts/model_data_pipeline.py](../../scripts/model_data_pipeline.py) 及训练脚本；C++ 工作台编排后台作业 |
+| 双机焦点和时间同步 | [source_context/](../../Xen/source_context/)、[clock_sync/](../../Xen/clock_sync/) | `source_context_host/`、`clock_source/` 提供源端进程 |
+| 日志、归档与离线评价 | [debug/](../../Xen/debug/)、[debug_session/](../../Xen/debug_session/) | `log/`、`crash/`、`input_training/`、`reference_assessment/` |
+
+### 工具与测试的位置
+
+- `benchmark/`、`mouse_benchmark/`：运行链与设备后端基准。
+- `auto_stop_capture/`、`auto_stop_probe/`：急停画面取证与独立设备探针。
+- `mouse_effect_probe/` 及同名前缀目录：鼠标效果取证、序列生成与结果封存。
+- `recoil_calibration_cli/`、`recoil_tuner_cli/`：校准与优化命令行入口。
+- `aim_landmark/`、`aim_production_red/`：Aim 诊断与回归支持。
+- [tests/](../../tests/)：按模块查找测试，`tests/fixtures/` 保存测试素材；实际目标和登记以 [CMakeLists.txt](../../CMakeLists.txt) 为准。
+- [scripts/](../../scripts/)：正式构建、数据处理、训练、发布和分析入口；先查看脚本参数或 `--help`。
+
+源码仓库中的 `assets/` 保存可分发资料；用户模型、采集内容和运行报告放在应用数据目录，不应混入测试夹具或公开截图目录。
 
 模块内 `.h` 与 `.cpp` 平铺；源码 include 以 `Xen/` 为根，例如
 `#include "detector/detector.h"`。

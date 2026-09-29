@@ -16,6 +16,7 @@
     <a href="#快速开始">快速开始</a> ·
     <a href="#项目架构">项目架构</a> ·
     <a href="#构建与开发">构建与开发</a> ·
+    <a href="#仓库结构">仓库结构</a> ·
     <a href="#使用指南">使用指南</a>
   </p>
 </div>
@@ -187,19 +188,39 @@ cmake --build build --config Release --target xen_app --parallel
 
 输出为 `build/Release/Xen.exe`。CUDA、TensorRT、DirectML、OpenVINO 和 NDI 需使用匹配 SDK；各推理发行包使用独立构建目录。完整构建、运行库核验与发布参见[开发指南](assets/guide/development.md)。
 
+## 仓库结构
+
+下面列出主要源码与公开资料。各模块如何协作见[项目架构](#项目架构)，定位具体功能见[开发指南的代码导航](assets/guide/development.md#源码与验证)。
+
 ```text
-Xen/
-├── capture/       画面输入
-├── detector/      模型推理与后处理
-├── aim/           追踪、选择与控制
-├── runtime/       生命周期、队列与安全门
-├── mouse/         输入设备后端
-├── overlay/       原生桌面界面
-└── app/           应用入口与启动器
-scripts/           构建、数据、分析与发布工具
-tests/             单元、集成与契约测试
-assets/guide/      公开使用指南
+仓库根目录/
+├── Xen/                    C++ 应用与功能模块（选列）
+│   ├── app/                应用入口、启动器与模型目录
+│   ├── overlay/            原生界面与功能面板
+│   ├── config/             配置读取、保存与校验
+│   ├── capture/            本机与网络画面输入
+│   ├── detector/           推理、预处理与后处理
+│   ├── aim/                目标追踪、选择与瞄准控制
+│   ├── runtime/            运行生命周期、队列与安全门
+│   ├── mouse/              输入设备后端
+│   ├── trigger/            自动扳机
+│   ├── auto_stop/          急停策略与事务
+│   ├── recoil/             弹道档案与执行
+│   ├── data_collection/    素材与预测采集
+│   └── model_workspace/    审核、数据集与训练作业编排
+├── scripts/                构建、数据处理、训练与发布脚本
+├── tests/                  单元、集成、契约测试与夹具
+├── assets/
+│   ├── guide/              分类使用与开发指南
+│   ├── readme/             首页界面截图及来源说明
+│   ├── recoil/             弹道导入说明与清单
+│   └── reference_assessment/ 参考评估示例与第三方许可
+├── CMakeLists.txt          依赖、构建目标与测试登记
+├── LICENSE                 MIT 许可证
+└── README.md               项目介绍与使用入口
 ```
+
+构建输出 `build/`、运行数据 `cache/` 和本地配置不属于上述源码目录。发布包的目录布局另见[运行与发布目录](assets/guide/development.md#应用启动与发布布局)。
 
 ## 使用指南
 
