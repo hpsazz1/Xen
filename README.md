@@ -8,6 +8,7 @@
     <img src="https://img.shields.io/badge/C%2B%2B-20-00599C" alt="C++20">
     <img src="https://img.shields.io/badge/inference-ONNX_Runtime-5B5FC7" alt="ONNX Runtime">
     <img src="https://img.shields.io/badge/UI-Dear_ImGui-009688" alt="Dear ImGui">
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
   </p>
   <p>
     <a href="#功能概览">功能概览</a> ·
@@ -180,4 +181,6 @@ assets/guide/      公开使用指南
 
 感谢 ONNX Runtime、OpenCV、Dear ImGui、spdlog、SimpleIni、nlohmann/json 及相关项目。独立输入评估参考的 cs-match-hud 许可与来源保存在 [reference_assessment](assets/reference_assessment/)。
 
-第三方依赖遵循各自许可证，正式包附带相应许可材料。当前仓库未声明统一的项目许可证；模型权重的使用与分发权限需另行确认。
+Xen 原创源码及随附文档采用 [MIT License](LICENSE)，允许使用、修改、商用和再分发，须保留版权及许可声明；软件按原样提供，不提供担保。
+
+第三方代码、依赖及另有声明的材料仍遵循各自许可证。项目的 MIT 授权不替代模型权重、外部数据或其他第三方素材的授权；使用与分发这些材料时需另行核对。
