@@ -17,7 +17,9 @@
     <a href="#项目架构">项目架构</a> ·
     <a href="#构建与开发">构建与开发</a> ·
     <a href="#仓库结构">仓库结构</a> ·
-    <a href="#使用指南">使用指南</a>
+    <a href="#使用指南">使用指南</a> ·
+    <a href="https://github.com/hpsazz1/Xen/wiki">Wiki</a> ·
+    <a href="https://github.com/users/hpsazz1/projects/1">项目看板</a>
   </p>
 </div>
 
@@ -236,7 +238,8 @@ cmake --build build --config Release --target xen_app --parallel
 
 | 需要什么 | 入口 |
 | :-- | :-- |
-| 使用帮助与排查 | [支持说明](SUPPORT.md) |
+| 使用帮助与排查 | [Wiki 使用手册](https://github.com/hpsazz1/Xen/wiki) · [支持说明](SUPPORT.md) |
+| 查看开发与发布进度 | [项目看板](https://github.com/users/hpsazz1/projects/1)，区分待处理、进行中、待验收与已完成。 |
 | 报告故障或提出建议 | [问题模板](https://github.com/hpsazz1/Xen/issues/new/choose) |
 | 提交代码或改进文档 | [贡献指南](CONTRIBUTING.md) |
 | 报告安全漏洞 | [安全政策与私密渠道](SECURITY.md) |
