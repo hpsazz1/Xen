@@ -5694,13 +5694,18 @@ struct Aim::Impl {
         diagnostics.modelled_response_x_counts = accepted_soft_maintenance;
         const double floating_position_after = static_cast<double>(floating_position_before_cap) *
             (allocation_total_before_cap != 0.0f ? motion_compensated_x / allocation_total_before_cap : 1.0f) - error_direction_x * derivative_damping_x;
+        // P与维护量一样使用最终分配阶段的份额。软区/接管削弱P不属于R拒收，
+        // 否则尚无库存或反向误差时也会人为写入反向积分，抵消小幅预测纠偏。
+        const float accepted_position_x = representable_float(floating_position_after)
+            ? static_cast<float>(floating_position_after) * transition_accept_x * soft_x *
+                soft_allocation_accept_x * position_accept_x : 0.0f;
         if (residual_role) {
             const float accepted_m = accepted_soft_maintenance;
             const float accepted_pi = shaped_x - accepted_m;
             model_residual_x.counts = static_cast<float>(std::clamp(
                 static_cast<double>(model_residual_x.counts) +
                     (background_role
-                        ? static_cast<double>(accepted_pi) - floating_position_after - proposed_residual_counts
+                        ? static_cast<double>(accepted_pi) - accepted_position_x - proposed_residual_counts
                         : static_cast<double>(accepted_pi) - residual_pi_request) * anti_windup_alpha,
                 -static_cast<double>(config.max_counts_per_frame),
                 static_cast<double>(config.max_counts_per_frame)));
@@ -5709,9 +5714,7 @@ struct Aim::Impl {
             feedforward_x = dormant_legacy_integral;
         }
 
-        model_residual_x.float_position_counts = representable_float(floating_position_after)
-            ? static_cast<float>(floating_position_after) * transition_accept_x * soft_x *
-                soft_allocation_accept_x * position_accept_x : 0.0f;
+        model_residual_x.float_position_counts = accepted_position_x;
         model_residual_x.previous_source_p = proportional_x;
         shaper_initialized = true;
         if (y_filter_update == FilterUpdate::Reset) {

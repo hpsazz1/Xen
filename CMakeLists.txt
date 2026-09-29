@@ -1588,6 +1588,11 @@ if(BUILD_TESTING)
     add_test(NAME aim_combo_dynamics_tests COMMAND aim_combo_dynamics_tests)
     add_test(NAME aim_long_delay_tests COMMAND aim_combo_dynamics_tests --long-delay)
 
+    add_executable(aim_prediction_soft_allocation_tests tests/aim_prediction_soft_allocation_tests.cpp)
+    target_link_libraries(aim_prediction_soft_allocation_tests PRIVATE aim log)
+    xen_deploy_runtime_dlls(aim_prediction_soft_allocation_tests OPENCV)
+    add_test(NAME aim_prediction_soft_allocation_tests COMMAND aim_prediction_soft_allocation_tests)
+
     add_executable(aim_x_filter_reset_tests tests/aim_x_filter_reset_tests.cpp)
     target_link_libraries(aim_x_filter_reset_tests PRIVATE aim log)
     xen_deploy_runtime_dlls(aim_x_filter_reset_tests OPENCV)
