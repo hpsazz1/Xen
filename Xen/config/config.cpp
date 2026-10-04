@@ -543,6 +543,8 @@ bool has_strict_int_list(const CSimpleIniA& ini,
 bool validate_typed_config_values(const CSimpleIniA& ini,
                                   std::string& error) {
     constexpr TypedConfigKey kIntegerKeys[]{
+        {"movement", "jump_delay_ms"}, {"movement", "spin_duration_ms"},
+        {"movement", "large_duration_ms"},
         {"log", "ringbuf_capacity"},
         {"log", "file_max_size_mb"},
         {"log", "file_max_count"},
@@ -600,6 +602,8 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
     }
 
     constexpr TypedConfigKey kNumberKeys[]{
+        {"movement", "spin_angle_degrees"}, {"movement", "large_angle_degrees"},
+        {"movement", "sensitivity"}, {"movement", "yaw_degrees_per_count"},
         {"detector", "conf_threshold"},
         {"detector", "nms_threshold"},
         {"aim", "high_confidence"},
@@ -648,6 +652,7 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"capture", "center_roi"},
         {"aim", "enable_delay_compensation"},
         {"aim", "enable_prediction"},
+        {"movement", "enabled"}, {"movement", "wheel_down_positive"},
         {"auto_stop", "enabled"}, {"auto_stop", "cycle_enabled"},
         {"auto_stop", "use_counterpulse_timing"}, {"auto_stop", "experimental_hud_model"},
         {"trigger", "enabled"}, {"trigger", "fire_enabled"}, {"trigger", "require_stop"},
@@ -757,6 +762,10 @@ bool validate_app_config(const AppConfig& config,
         constexpr int kMaxCaptureSourceDimension = 16384;
         constexpr int kMaxLogRingBufferCapacity = 65'536;
         constexpr int kMaxLogFileCount = 200'000;
+        if (!movement::valid_config(config.movement)) {
+            error = "身法配置非法：检查模式、时长、角度、灵敏度与输入报告设置";
+            return false;
+        }
         if (config.detector.model_path.empty()) {
             error = "Detector 模型路径不能为空";
             return false;
@@ -1108,6 +1117,30 @@ bool load_app_config(const std::string& path,
         if (!validate_typed_config_values(ini, error)) return false;
 
         AppConfig candidate = config;
+        // 身法缺节或缺键时恢复默认，避免旧配置意外沿用已开启状态。
+        candidate.movement = {};
+        auto& movement_config = candidate.movement;
+        movement_config.enabled = ini.GetBoolValue("movement", "enabled", false);
+        movement_config.wheel_down_positive = ini.GetBoolValue("movement", "wheel_down_positive", true);
+        const auto movement_mode = lowercase_ascii(ini.GetValue("movement", "mode", "spin"));
+        if (movement_mode == "spin") movement_config.mode = movement::Mode::SPIN;
+        else if (movement_mode == "large_jump") movement_config.mode = movement::Mode::LARGE_JUMP;
+        else { error = "配置项 movement.mode 非法"; return false; }
+        const auto report_mode = lowercase_ascii(ini.GetValue("movement", "report_mode", "cumulative"));
+        if (report_mode == "cumulative") movement_config.report_mode = movement::ReportMode::CUMULATIVE;
+        else if (report_mode == "relative") movement_config.report_mode = movement::ReportMode::RELATIVE_DELTA;
+        else { error = "配置项 movement.report_mode 非法"; return false; }
+#define READ_MOVEMENT_INT(name) movement_config.name = static_cast<int>(ini.GetLongValue("movement", #name, movement_config.name))
+#define READ_MOVEMENT_NUMBER(name) movement_config.name = ini.GetDoubleValue("movement", #name, movement_config.name)
+        READ_MOVEMENT_INT(jump_delay_ms);
+        READ_MOVEMENT_INT(spin_duration_ms);
+        READ_MOVEMENT_INT(large_duration_ms);
+        READ_MOVEMENT_NUMBER(spin_angle_degrees);
+        READ_MOVEMENT_NUMBER(large_angle_degrees);
+        READ_MOVEMENT_NUMBER(sensitivity);
+        READ_MOVEMENT_NUMBER(yaw_degrees_per_count);
+#undef READ_MOVEMENT_INT
+#undef READ_MOVEMENT_NUMBER
         // 旧配置无独立节时必须关闭，不能继承调用方已经开启的状态。
         candidate.auto_stop.enabled = ini.GetBoolValue("auto_stop", "enabled", false);
         candidate.auto_stop.cycle_enabled = ini.GetBoolValue("auto_stop", "cycle_enabled", false);
@@ -1505,6 +1538,21 @@ bool save_app_config(const std::string& path,
         if (!validate_app_config(config, error)) return false;
         CSimpleIniA ini;
         ini.SetUnicode(true);
+        ini.SetBoolValue("movement", "enabled", config.movement.enabled);
+        ini.SetBoolValue("movement", "wheel_down_positive", config.movement.wheel_down_positive);
+        ini.SetValue("movement", "mode", config.movement.mode == movement::Mode::SPIN ? "spin" : "large_jump");
+        ini.SetValue("movement", "report_mode", config.movement.report_mode == movement::ReportMode::CUMULATIVE ? "cumulative" : "relative");
+#define WRITE_MOVEMENT_INT(name) ini.SetLongValue("movement", #name, config.movement.name)
+#define WRITE_MOVEMENT_NUMBER(name) ini.SetDoubleValue("movement", #name, config.movement.name)
+        WRITE_MOVEMENT_INT(jump_delay_ms);
+        WRITE_MOVEMENT_INT(spin_duration_ms);
+        WRITE_MOVEMENT_INT(large_duration_ms);
+        WRITE_MOVEMENT_NUMBER(spin_angle_degrees);
+        WRITE_MOVEMENT_NUMBER(large_angle_degrees);
+        WRITE_MOVEMENT_NUMBER(sensitivity);
+        WRITE_MOVEMENT_NUMBER(yaw_degrees_per_count);
+#undef WRITE_MOVEMENT_INT
+#undef WRITE_MOVEMENT_NUMBER
         ini.SetValue("detector", "model_path", config.detector.model_path.c_str());
         ini.SetValue("detector", "backend", backend_name(config.detector.backend));
         ini.SetLongValue("detector", "device_id", config.detector.device_id);

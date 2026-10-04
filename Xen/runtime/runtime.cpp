@@ -70,6 +70,8 @@ struct Runtime::Impl {
     // 公有控制入口可与停止并发；原子共享引用保证清理期间对象仍存活。
     std::atomic<std::shared_ptr<AutoStopWorker>> auto_stop_worker;
     std::atomic<std::shared_ptr<TriggerWorker>> trigger_worker;
+    std::atomic<std::shared_ptr<movement::Worker>> movement_worker;
+    bool movement_start_failed = false;
     source_context::SourceContextClient source_context_client;
     weapon::GsiReceiver gsi_receiver;
     std::atomic<std::shared_ptr<RecoilWorker>> recoil_worker;
@@ -313,6 +315,7 @@ struct Runtime::Impl {
                 config.capture.enable_d3d11_directml_interop;
         }
         pipeline_samples.clear();
+        if (config.movement.enabled) configure_movement(config.movement);
         control_latency_samples.clear();
         debug_samples.reset();
         fps_started = std::chrono::steady_clock::now();
@@ -1192,6 +1195,36 @@ struct Runtime::Impl {
         }
     }
 
+    bool configure_movement(const movement::Config& value) noexcept {
+        if (!movement::valid_config(value)) return false;
+        if (auto worker = movement_worker.load()) {
+            if (!(config.movement == value)) worker->configure(value);
+            config.movement = value;
+            return true;
+        }
+        if (movement_start_failed && config.movement == value) return false;
+        movement_start_failed = false;
+        config.movement = value;
+        if (!value.enabled) return true;
+        try {
+            auto worker = std::make_shared<movement::Worker>(mouse, [this] {
+                // 只沿用应用已有输出开关/急停；身法没有视觉、武器或地面前提。
+                return config.mouse.allow_send_input && !stop_requested.load() &&
+                    safety_gate.output_armed() && !safety_gate.emergency_stopped();
+            });
+            if (!worker->start(value)) {
+                movement_start_failed = true;
+                std::lock_guard lock(snapshot_mutex);
+                current_snapshot.movement = worker->snapshot();
+                current_snapshot.movement.state = movement::State::FAULT;
+                current_snapshot.movement.error = "身法输入订阅失败或设备不支持；关闭后重新启用可重试";
+                return false;
+            }
+            movement_worker.store(std::move(worker));
+            return true;
+        } catch (...) { movement_start_failed = true; return false; }
+    }
+
     void stop_training() noexcept {
         // 先冻结设备水位，再让后台排空；不发送任何软件按键或鼠标命令。
         if (training_device) training_device->set_input_report_subscription(false);
@@ -1200,6 +1233,13 @@ struct Runtime::Impl {
     }
 
     void release_modules() noexcept {
+        movement_start_failed = false;
+        if (auto worker = movement_worker.exchange(std::shared_ptr<movement::Worker>{})) {
+            worker->stop();
+            std::lock_guard lock(snapshot_mutex);
+            current_snapshot.movement = worker->snapshot();
+            current_snapshot.movement_available = false;
+        }
         stop_training();
         if (auto worker = trigger_worker.exchange(std::shared_ptr<TriggerWorker>{})) {
             worker->stop();
@@ -1664,6 +1704,10 @@ RuntimeSnapshot Runtime::snapshot() const noexcept {
     try {
         std::lock_guard<std::mutex> lock(impl_->snapshot_mutex);
         auto result = impl_->current_snapshot;
+        if (auto worker = impl_->movement_worker.load()) {
+            result.movement = worker->snapshot();
+            result.movement_available = true;
+        }
         if (auto session = impl_->training.load()) result.training = session->snapshot();
         if (auto archive = impl_->recoil_archive.load()) result.recoil_archive = archive->snapshot();
         if (auto trigger = impl_->trigger_worker.load()) {
@@ -1686,6 +1730,18 @@ RuntimeSnapshot Runtime::snapshot() const noexcept {
     } catch (...) {
         return {};
     }
+}
+
+bool Runtime::set_movement_config(const movement::Config& value) noexcept {
+    if (!impl_ || !movement::valid_config(value)) return false;
+    std::unique_lock lock(impl_->lifecycle_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) return false;
+    {
+        std::lock_guard snapshot_lock(impl_->snapshot_mutex);
+        if (impl_->current_snapshot.state != RuntimeState::RUNNING) return false;
+    }
+    // 未启用时不新建监听线程；已有Worker自行在停用时释放模拟按键。
+    return impl_->configure_movement(value);
 }
 
 bool Runtime::start_input_training(const std::filesystem::path& directory,

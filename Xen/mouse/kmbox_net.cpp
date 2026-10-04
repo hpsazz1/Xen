@@ -432,6 +432,17 @@ public:
         return true;
     }
 
+    bool set_movement_report_subscription(bool enabled) noexcept override {
+        std::lock_guard<std::mutex> lock(monitor_mutex_);
+        if (enabled && (monitor_stop_.load(std::memory_order_acquire) || monitor_failed_)) return false;
+        return movement_reports_.subscribe(enabled);
+    }
+    bool read_movement_reports(InputReportCursor& cursor, InputReportBatch& batch) noexcept override {
+        std::lock_guard<std::mutex> lock(monitor_mutex_);
+        movement_reports_.read(cursor, batch);
+        return true;
+    }
+
     bool poll_input(InputSnapshot& snapshot) noexcept override {
         snapshot = {};
         std::lock_guard<std::mutex> lock(monitor_mutex_);
@@ -806,6 +817,8 @@ private:
             wasd_sequence_ = 0;
             input_reports_.close(std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count());
+            movement_reports_.close(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
         }
         if (monitor_configured_ && socket_ != INVALID_SOCKET) {
             std::array<std::uint8_t, kHeaderBytes> disable_packet{};
@@ -847,6 +860,8 @@ private:
                     std::lock_guard<std::mutex> lock(monitor_mutex_);
                     monitor_failed_ = true;
                     input_reports_.fail(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count());
+                    movement_reports_.fail(std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now().time_since_epoch()).count());
                     if (wasd_subscribed_) publish_wasd_locked(false,
                         std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -916,10 +931,13 @@ private:
                 std::lock_guard<std::mutex> lock(monitor_mutex_);
                 observation.monitor_sequence_before = monitor_sequence_;
                 // 与既有状态parser/observer独立，外来IP不污染训练会话。
-                if (input_reports_.subscribed() && observation.source_ip_matches_configured_device) {
-                    input_reports_.publish(mouse::detail::parse_input_report(
+                if ((input_reports_.subscribed() || movement_reports_.subscribed()) &&
+                    observation.source_ip_matches_configured_device) {
+                    const auto report = mouse::detail::parse_input_report(
                         std::span<const std::uint8_t>(packet.data(), static_cast<std::size_t>(received)),
-                        observation.received_at_steady_ns, observation.source_endpoint_valid));
+                        observation.received_at_steady_ns, observation.source_endpoint_valid);
+                    input_reports_.publish(report);
+                    movement_reports_.publish(report);
                 }
                 if (observation.accepted_as_monitor_state) {
                     mouse_buttons_ = packet[1];
@@ -983,6 +1001,7 @@ private:
     std::thread monitor_thread_;
     mutable std::mutex monitor_mutex_;
     mouse::detail::InputReportBuffer input_reports_;
+    mouse::detail::MovementReportBuffer movement_reports_;
     std::array<bool, 256> keyboard_keys_{};
     std::uint8_t mouse_buttons_ = 0;
     bool wasd_subscribed_ = false;

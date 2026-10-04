@@ -2954,7 +2954,69 @@ struct Overlay::Impl {
     void render_auxiliary_config(
             const RuntimeSnapshot& snapshot, AppConfig& app_config,
             bool can_edit, OverlayActions& actions) {
-        ImGui::TextWrapped("停止运行后可编辑并保存参数；下次启动生效。");
+        begin_config_panel("movement_panel", "身法", 420.0f);
+        auto& move = app_config.movement;
+        const auto previous_movement = move;
+        const char* movement_state = "已停止";
+        switch (snapshot.movement.state) {
+            case movement::State::STOPPED: movement_state = "已停止"; break;
+            case movement::State::IDLE: movement_state = "等待下滚轮"; break;
+            case movement::State::DELAY: movement_state = "起跳后等待"; break;
+            case movement::State::TURNING: movement_state = "转动中"; break;
+            case movement::State::CLEANING: movement_state = "释放接管中"; break;
+            case movement::State::FAULT: movement_state = "输出故障"; break;
+        }
+        ImGui::TextWrapped("状态：%s；设备：%s", movement_state,
+            snapshot.movement_available ? "可用" : "未就绪");
+        ImGui::TextWrapped("开始 %llu / 完成 %llu / 取消 %llu；本次水平净计数 %d",
+            static_cast<unsigned long long>(snapshot.movement.started),
+            static_cast<unsigned long long>(snapshot.movement.completed),
+            static_cast<unsigned long long>(snapshot.movement.canceled), snapshot.movement.sent_dx);
+        if (!snapshot.movement.error.empty())
+            ImGui::TextWrapped("%s", snapshot.movement.error.c_str());
+        ImGui::TextWrapped("下滚轮须已在游戏中绑定跳跃。触发前鼠标方向选择首侧：左转配 D，右转配 A；动作期间临时屏蔽 W，结束后归还。");
+        ImGui::TextWrapped("运行中可调整，动作参数从下一次触发生效；关闭会结束当前动作并释放接管。");
+        if (begin_form("movement_form", 126.0f)) {
+            form_row("启用身法", "默认关闭；开启后由物理下滚轮触发，忙碌期间不重复排队。关闭时释放 A/D 并解除 W 屏蔽。");
+            toggle_switch("##movement_enabled", &move.enabled);
+            form_row("动作模式", "旋转跳只向首侧转动；大跳先首侧再反侧。首方向由触发前的物理鼠标左右动作选择，不需要手动 A/D。");
+            int mode = move.mode == movement::Mode::SPIN ? 0 : 1;
+            const char* modes[]{"旋转跳", "大跳"};
+            if (ImGui::Combo("##movement_mode", &mode, modes, 2))
+                move.mode = mode == 0 ? movement::Mode::SPIN : movement::Mode::LARGE_JUMP;
+            const bool spin = move.mode == movement::Mode::SPIN;
+            form_row(spin ? "转角 / 度" : "每侧转角 / 度", "大于 0 且不超过 360 度；未缩放视角估算，按转角 ÷（游戏灵敏度 × m_yaw）换算鼠标计数。可按实际结果标定，两种模式分别保存。");
+            ImGui::InputDouble("##movement_angle", spin ? &move.spin_angle_degrees : &move.large_angle_degrees, 1.0, 5.0, "%.2f");
+            form_row(spin ? "转动时长 / ms" : "每侧时长 / ms", "范围 1–5000 ms；大跳包含两侧，每侧使用此时长。这是可调动作参数，不是游戏官方最佳时长。");
+            ImGui::InputInt("##movement_duration", spin ? &move.spin_duration_ms : &move.large_duration_ms, 1, 10);
+            form_row("起跳后延时 / ms", "范围 0–2000 ms；从收到下滚轮触发起等待，不代表已观测到游戏起跳，随后执行定时动作。");
+            ImGui::InputInt("##movement_delay", &move.jump_delay_ms, 1, 10);
+            form_row("游戏灵敏度", "填写游戏中的 sensitivity，用于转角换算；必须大于零。镜头缩放或游戏输入设置变化时需调整。");
+            ImGui::InputDouble("##movement_sensitivity", &move.sensitivity, 0.01, 0.1, "%.3f");
+            ImGui::EndTable();
+        }
+        if (ImGui::CollapsingHeader("兼容设置##movement_compatibility")) {
+            ImGui::TextWrapped("NET 原始滚轮语义尚未设备校准；按实际输入报告选择，不表示已自动识别。");
+            if (begin_form("movement_compatibility_form", 126.0f)) {
+                form_row("m_yaw", "每鼠标计数的水平角度基数，默认 0.022；与游戏灵敏度相乘后换算转角，可调整标定。");
+                ImGui::InputDouble("##movement_yaw", &move.yaw_degrees_per_count, 0.001, 0.01, "%.6f");
+                form_row("输入报告形式", "累计坐标使用相邻报告差值；相对报告使用本次增量。NET 固件语义未自动校准，错误选择可能漏触发或重复识别。");
+                int report = move.report_mode == movement::ReportMode::CUMULATIVE ? 0 : 1;
+                const char* reports[]{"累计坐标", "相对增量"};
+                if (ImGui::Combo("##movement_report", &report, reports, 2))
+                    move.report_mode = report == 0 ? movement::ReportMode::CUMULATIVE : movement::ReportMode::RELATIVE_DELTA;
+                form_row("下滚方向为正", "开启表示正滚轮变化是下滚，关闭表示负变化是下滚；此项用于 monitor 输入，未声称与发送 API 方向一致。");
+                toggle_switch("##movement_wheel_positive", &move.wheel_down_positive);
+                ImGui::EndTable();
+            }
+        }
+        show_help_tooltip("兼容参数只影响后续动作；需根据设备实际报告调整。");
+        if (!movement::valid_config(move)) {
+            move = previous_movement;
+            ImGui::TextWrapped("输入超出有效范围，已保留上一次有效参数。");
+        }
+        end_config_panel();
+        ImGui::TextWrapped("其他辅助参数停止运行后可编辑并保存；下次启动生效。");
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         begin_config_panel("auto_stop_panel", app_config.auto_stop.experimental_hud_model ? "自动急停（HUD动态制动）" : "自动急停（H40对照）", 300.0f);
         const char* status = "已关闭";

@@ -18,6 +18,7 @@
 #include "detector/detector.h"
 #include "mouse/mouse.h"
 #include "input_training/input_training.h"
+#include "movement/movement.h"
 
 namespace data_collection { class Collector; }
 
@@ -274,6 +275,8 @@ struct AimDispatchRejectionSummary {
 };
 
 struct RuntimeSnapshot {
+    movement::Snapshot movement;
+    bool movement_available = false;
     AimDispatchRejectionSummary aim_dispatch_rejections;
     std::shared_ptr<const input_training::Snapshot> training;
     AutoStopSnapshot auto_stop;
@@ -367,6 +370,8 @@ public:
                std::shared_ptr<IMouseController> input_device,
                std::optional<RecoilArchiveConfig> archive = {}) noexcept;
     void stop() noexcept;
+    // 动作参数热更新，只应用于下一轮；停用会取消当前动作并清理。
+    bool set_movement_config(const movement::Config& config) noexcept;
     // 只订阅调用方已经打开的设备，停止态也可记录；不启动检测或武装输出。
     bool start_input_training(const std::filesystem::path& directory,
                               std::shared_ptr<IMouseController> input_device = {}) noexcept;

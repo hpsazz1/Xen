@@ -466,6 +466,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                 : "日志输出等级已立即更新。保存配置后保留此设置。";
         }
 
+        // 辅助页身法参数可在运行中调试，其他配置仍遵循原启停规则。
+        if (snapshot.state == RuntimeState::RUNNING && !runtime_stop_job.valid())
+            runtime.set_movement_config(config.movement);
+
         const auto keyboard_routing = app::detail::route_keyboard_events(
             runtime, keyboard_poll, actions.hotkey_capture_consumed);
         const bool emergency_pressed =

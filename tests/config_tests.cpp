@@ -1302,6 +1302,54 @@ void test_feature_combinations_round_trip() {
     std::filesystem::remove(path, ignored);
 }
 
+void test_movement_config() {
+    const auto directory = make_temp_test_directory("movement");
+    if (directory.empty()) { expect(false, "身法配置隔离目录"); return; }
+    const auto path = directory / "config.ini";
+    AppConfig config, loaded;
+    std::string error;
+    expect(!config.movement.enabled, "身法默认关闭");
+    config.movement.enabled = true;
+    config.movement.mode = movement::Mode::LARGE_JUMP;
+    config.movement.report_mode = movement::ReportMode::RELATIVE_DELTA;
+    config.movement.wheel_down_positive = false;
+    config.movement.jump_delay_ms = 31;
+    config.movement.spin_duration_ms = 321;
+    config.movement.large_duration_ms = 123;
+    config.movement.spin_angle_degrees = 73.5;
+    config.movement.large_angle_degrees = 17.25;
+    config.movement.sensitivity = 1.4;
+    config.movement.yaw_degrees_per_count = 0.023;
+    expect(save_app_config(path.string(), config, error) && load_app_config(path.string(), loaded, error),
+        "身法配置往返：" + error);
+    const auto& value = loaded.movement;
+    expect(value.enabled && value.mode == movement::Mode::LARGE_JUMP &&
+        value.report_mode == movement::ReportMode::RELATIVE_DELTA && !value.wheel_down_positive &&
+        value.jump_delay_ms == 31 && value.spin_duration_ms == 321 && value.large_duration_ms == 123 &&
+        value.spin_angle_degrees == 73.5 && value.large_angle_degrees == 17.25 &&
+        value.sensitivity == 1.4 && value.yaw_degrees_per_count == 0.023,
+        "身法所有字段必须独立保留");
+    expect(write_file_bytes(path, "[ui]\nwidth=900\n"), "写入身法旧配置");
+    expect(load_app_config(path.string(), loaded, error) && !loaded.movement.enabled &&
+        loaded.movement.mode == movement::Mode::SPIN &&
+        loaded.movement.spin_duration_ms == movement::Config{}.spin_duration_ms &&
+        loaded.movement.sensitivity == movement::Config{}.sensitivity,
+        "缺少身法节时恢复默认且不继承开启状态");
+    for (const char* invalid : {"enabled=perhaps", "mode=unknown", "report_mode=unknown",
+             "wheel_down_positive=maybe", "jump_delay_ms=1.5", "spin_duration_ms=abc",
+             "large_duration_ms=0", "spin_angle_degrees=nan", "large_angle_degrees=-1",
+             "sensitivity=0", "yaw_degrees_per_count=inf"}) {
+        loaded.movement.spin_duration_ms = 333;
+        expect(write_file_bytes(path, std::string("[movement]\n") + invalid + "\n"), "写入身法非法配置");
+        expect(!load_app_config(path.string(), loaded, error), std::string("拒绝身法非法配置：") + invalid);
+        expect(loaded.movement.spin_duration_ms == 333, "非法配置不能部分覆盖现有身法参数");
+    }
+    config.movement.sensitivity = 0;
+    expect(!save_app_config(path.string(), config, error), "保存时同样拒绝非法身法参数");
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+}
+
 void test_auxiliary_cycle_config() {
     const auto directory = make_temp_test_directory("auxiliary_cycle");
     if (directory.empty()) { expect(false, "循环配置隔离目录"); return; }
@@ -1572,6 +1620,7 @@ void test_team_filter_config() {
 } // namespace
 
 int main() {
+    test_movement_config();
     test_team_filter_config();
     test_trigger_legacy_timing_migration();
     test_current_code_defaults();

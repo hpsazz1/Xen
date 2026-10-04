@@ -913,6 +913,10 @@ add_library(mouse STATIC
 target_include_directories(mouse PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(mouse PUBLIC log PRIVATE user32 ws2_32 shell32 ole32 uuid)
 
+add_library(movement STATIC Xen/movement/movement.cpp)
+target_include_directories(movement PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(movement PUBLIC mouse PRIVATE log Threads::Threads)
+
 add_library(auto_stop_worker STATIC Xen/auto_stop/auto_stop_worker.cpp)
 target_include_directories(auto_stop_worker PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(auto_stop_worker PUBLIC auto_stop mouse PRIVATE Threads::Threads)
@@ -960,7 +964,7 @@ target_include_directories(config
         ${OpenCV_INCLUDE_DIRS}
     PRIVATE
         ${simpleini_SOURCE_DIR})
-target_link_libraries(config PUBLIC log trigger source_context weapon recoil)
+target_link_libraries(config PUBLIC log trigger source_context weapon recoil movement)
 add_library(recoil_calibration_io STATIC Xen/recoil/recoil_calibration_io.cpp)
 target_link_libraries(recoil_calibration_io PUBLIC recoil config)
 add_executable(xen_recoil_calibration Xen/recoil_calibration_cli/main.cpp)
@@ -1009,7 +1013,7 @@ add_library(runtime STATIC
     Xen/runtime/camera_motion.cpp)
 target_include_directories(runtime PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(runtime
-    PUBLIC detector capture aim aim_landmark auto_stop auto_stop_worker trigger_worker source_context recoil_worker recoil_archive weapon mouse keyboard config log data_collection input_training
+    PUBLIC detector capture aim aim_landmark auto_stop auto_stop_worker trigger_worker source_context recoil_worker recoil_archive weapon mouse keyboard config log data_collection input_training movement
     PRIVATE Threads::Threads)
 
 add_library(app_input STATIC
@@ -1843,6 +1847,11 @@ if(BUILD_TESTING)
     add_executable(test_mouse_input_reports tests/test_mouse_input_reports.cpp)
     target_include_directories(test_mouse_input_reports PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
     add_test(NAME mouse_input_report_tests COMMAND test_mouse_input_reports)
+
+    add_executable(movement_tests tests/movement_tests.cpp)
+    target_link_libraries(movement_tests PRIVATE movement)
+    add_test(NAME movement_tests COMMAND movement_tests)
+    xen_deploy_runtime_dlls(movement_tests)
 
     add_executable(input_training_panel_tests tests/input_training_panel_tests.cpp
         Xen/overlay/input_training_panel.cpp)

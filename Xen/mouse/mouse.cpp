@@ -288,6 +288,14 @@ public:
         return output_owner_.held();
     }
 
+    bool set_movement_report_subscription(bool enabled) noexcept override {
+        return inner_ && output_owner_.held() && inner_->set_movement_report_subscription(enabled);
+    }
+    bool read_movement_reports(InputReportCursor& cursor, InputReportBatch& batch) noexcept override {
+        if (!inner_ || !output_owner_.held()) { batch = {}; return false; }
+        return inner_->read_movement_reports(cursor, batch);
+    }
+
     void close() noexcept override {
         if (inner_) inner_->close();
         output_owner_.release();

@@ -65,5 +65,25 @@ int main() {
     buffer.read(end, batch);
     require(batch.count == 1 && !batch.events[0].state_valid && batch.frozen &&
             batch.status == InputMonitorStatus::CLOSED, "关闭必须保留无效终止事实");
+    mouse::detail::MovementReportBuffer movement;
+    require(movement.subscribe(true), "身法小环可独立订阅");
+    require(buffer.subscribe(true), "重新开始录制");
+    movement.publish(event);
+    buffer.publish(event);
+    buffer.freeze();
+    movement.publish(event);
+    InputReportCursor movement_cursor;
+    movement.read(movement_cursor, batch);
+    require(batch.count == 2 && batch.subscribed && !batch.frozen,
+            "训练停止不能冻结实时身法输入");
+    for (std::size_t index = 0; index < movement.kCapacity + 4; ++index) movement.publish(event);
+    movement.read(movement_cursor, batch);
+    require(batch.gap && batch.dropped_count == 4 && batch.count == 256,
+            "身法小环慢消费者必须显式报告覆盖缺口");
+    movement.close(1001);
+    InputReportCursor movement_tail{batch.epoch, batch.final_sequence};
+    movement.read(movement_tail, batch);
+    require(batch.count == 1 && !batch.events[0].state_valid && batch.frozen,
+            "设备关闭必须终止身法游标");
     std::cout << "输入报告解析、冻结、缺口与代际契约通过\n";
 }

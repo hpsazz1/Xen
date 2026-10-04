@@ -16,6 +16,7 @@
 #include "keyboard/keyboard.h"
 #include "log/log.h"
 #include "mouse/mouse.h"
+#include "movement/movement.h"
 
 struct RuntimeConfig {
     int profile_window = 256;
@@ -93,6 +94,7 @@ struct AppConfig {
         return value;
     }();
     KeyboardConfig keyboard;
+    movement::Config movement;
     // 日常入口采用HUD；显式false配置仍可选择H40对照。
     AutoStopConfig auto_stop{.experimental_hud_model = true};
     TriggerConfig trigger = [] {

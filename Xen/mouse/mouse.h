@@ -217,6 +217,11 @@ public:
     virtual bool read_input_reports(InputReportCursor&, InputReportBatch& batch) noexcept {
         batch = {}; return false;
     }
+    // 独立于训练归档的实时小环，停止/冻结归档不撤销身法监听。
+    virtual bool set_movement_report_subscription(bool) noexcept { return false; }
+    virtual bool read_movement_reports(InputReportCursor&, InputReportBatch& batch) noexcept {
+        batch = {}; return false;
+    }
     virtual void close() noexcept = 0;
     virtual MouseStatus status() const noexcept = 0;
     virtual std::string last_error() const = 0;

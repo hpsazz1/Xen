@@ -39,9 +39,11 @@ inline InputReportEvent parse_input_report(std::span<const std::uint8_t> payload
 }
 
 // 外部owner持monitor锁。固定容量覆盖最旧记录，每个reader独立报告精确本机缺口。
-class InputReportBuffer {
+template<std::size_t Capacity>
+class BasicInputReportBuffer {
 public:
-    static constexpr std::size_t kCapacity = 65536;
+    static_assert(Capacity > 0);
+    static constexpr std::size_t kCapacity = Capacity;
     bool subscribed() const noexcept { return subscribed_; }
     bool subscribe(bool enabled) noexcept {
         if (!enabled) { freeze(); return true; }
@@ -120,5 +122,8 @@ private:
     bool frozen_ = false;
     InputMonitorStatus status_ = InputMonitorStatus::CLOSED;
 };
+using InputReportBuffer = BasicInputReportBuffer<65536>;
+// 身法仅消费实时输入；录制冻结不影响此独立的小容量游标。
+using MovementReportBuffer = BasicInputReportBuffer<512>;
 }
 #endif
