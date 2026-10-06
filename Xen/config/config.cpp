@@ -545,6 +545,7 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
     constexpr TypedConfigKey kIntegerKeys[]{
         {"movement", "jump_delay_ms"}, {"movement", "spin_duration_ms"},
         {"movement", "large_duration_ms"},
+        {"movement", "spin_virtual_key"}, {"movement", "large_virtual_key"},
         {"log", "ringbuf_capacity"},
         {"log", "file_max_size_mb"},
         {"log", "file_max_count"},
@@ -653,6 +654,7 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"aim", "enable_delay_compensation"},
         {"aim", "enable_prediction"},
         {"movement", "enabled"}, {"movement", "wheel_down_positive"},
+        {"movement", "spin_enabled"}, {"movement", "large_enabled"},
         {"auto_stop", "enabled"}, {"auto_stop", "cycle_enabled"},
         {"auto_stop", "use_counterpulse_timing"}, {"auto_stop", "experimental_hud_model"},
         {"trigger", "enabled"}, {"trigger", "fire_enabled"}, {"trigger", "require_stop"},
@@ -968,6 +970,23 @@ bool validate_app_config(const AppConfig& config,
                 error = "异常标记快捷键与急停或扳机功能键冲突"; return false;
             }
         }
+        const auto movement_key_conflicts = [&](bool enabled, movement::Trigger trigger, int key) {
+            if (!enabled || trigger != movement::Trigger::KEY || key == 0) return false;
+            const auto contains = [key](const std::vector<int>& keys) {
+                return std::find(keys.begin(), keys.end(), key) != keys.end();
+            };
+            return contains(config.keyboard.emergency_virtual_keys) ||
+                contains(config.keyboard.runtime_toggle_virtual_keys) ||
+                contains(config.keyboard.aim_hold_virtual_keys) ||
+                contains(config.keyboard.debug_test_virtual_keys) ||
+                contains(config.keyboard.anomaly_mark_virtual_keys) ||
+                contains(config.auto_stop.release_virtual_keys) ||
+                key == config.auto_stop.activation_virtual_key || key == config.trigger.hold_virtual_key;
+        };
+        if (movement_key_conflicts(config.movement.spin_enabled, config.movement.spin_trigger, config.movement.spin_virtual_key) ||
+            movement_key_conflicts(config.movement.large_enabled, config.movement.large_trigger, config.movement.large_virtual_key)) {
+            error = "身法触发键与急停或其他功能键冲突"; return false;
+        }
         const int stop_key = config.auto_stop.activation_virtual_key;
         if (config.auto_stop.counter_hold_ms < 1 || config.auto_stop.counter_hold_ms > 200 ||
             config.auto_stop.shot_after_release_ms < 0 || config.auto_stop.shot_after_release_ms > 200) {
@@ -1122,10 +1141,35 @@ bool load_app_config(const std::string& path,
         auto& movement_config = candidate.movement;
         movement_config.enabled = ini.GetBoolValue("movement", "enabled", false);
         movement_config.wheel_down_positive = ini.GetBoolValue("movement", "wheel_down_positive", true);
-        const auto movement_mode = lowercase_ascii(ini.GetValue("movement", "mode", "spin"));
-        if (movement_mode == "spin") movement_config.mode = movement::Mode::SPIN;
-        else if (movement_mode == "large_jump") movement_config.mode = movement::Mode::LARGE_JUMP;
-        else { error = "配置项 movement.mode 非法"; return false; }
+        if (!ini.GetValue("movement", "spin_enabled", nullptr) &&
+            !ini.GetValue("movement", "large_enabled", nullptr)) {
+            const auto old_mode = lowercase_ascii(ini.GetValue("movement", "mode", "spin"));
+            if (old_mode != "spin" && old_mode != "large_jump") {
+                error = "配置项 movement.mode 非法"; return false;
+            }
+            movement_config.spin_enabled = old_mode == "spin";
+            movement_config.large_enabled = old_mode == "large_jump";
+            // 旧单项均使用下滚轮，迁移时保留原触发方向。
+            if (ini.GetValue("movement", "mode", nullptr)) {
+                if (old_mode == "large_jump") movement_config.large_trigger = movement::Trigger::WHEEL_DOWN;
+                else movement_config.spin_trigger = movement::Trigger::WHEEL_DOWN;
+            }
+        } else {
+            movement_config.spin_enabled = ini.GetBoolValue("movement", "spin_enabled", true);
+            movement_config.large_enabled = ini.GetBoolValue("movement", "large_enabled", false);
+        }
+        const auto read_trigger = [&](const char* key, movement::Trigger& value) {
+            const char* raw = ini.GetValue("movement", key, nullptr);
+            if (!raw) return true;
+            const auto text = lowercase_ascii(raw);
+            if (text == "wheel_down") value = movement::Trigger::WHEEL_DOWN;
+            else if (text == "wheel_up") value = movement::Trigger::WHEEL_UP;
+            else if (text == "key") value = movement::Trigger::KEY;
+            else { error = std::string("配置项 movement.") + key + " 非法"; return false; }
+            return true;
+        };
+        if (!read_trigger("spin_trigger", movement_config.spin_trigger) ||
+            !read_trigger("large_trigger", movement_config.large_trigger)) return false;
         const auto report_mode = lowercase_ascii(ini.GetValue("movement", "report_mode", "cumulative"));
         if (report_mode == "cumulative") movement_config.report_mode = movement::ReportMode::CUMULATIVE;
         else if (report_mode == "relative") movement_config.report_mode = movement::ReportMode::RELATIVE_DELTA;
@@ -1540,11 +1584,25 @@ bool save_app_config(const std::string& path,
         ini.SetUnicode(true);
         ini.SetBoolValue("movement", "enabled", config.movement.enabled);
         ini.SetBoolValue("movement", "wheel_down_positive", config.movement.wheel_down_positive);
-        ini.SetValue("movement", "mode", config.movement.mode == movement::Mode::SPIN ? "spin" : "large_jump");
+        ini.Delete("movement", "mode");
+        ini.SetBoolValue("movement", "spin_enabled", config.movement.spin_enabled);
+        ini.SetBoolValue("movement", "large_enabled", config.movement.large_enabled);
+        const auto trigger_name = [](movement::Trigger value) {
+            switch (value) {
+                case movement::Trigger::WHEEL_DOWN: return "wheel_down";
+                case movement::Trigger::WHEEL_UP: return "wheel_up";
+                case movement::Trigger::KEY: return "key";
+            }
+            return "unknown";
+        };
+        ini.SetValue("movement", "spin_trigger", trigger_name(config.movement.spin_trigger));
+        ini.SetValue("movement", "large_trigger", trigger_name(config.movement.large_trigger));
         ini.SetValue("movement", "report_mode", config.movement.report_mode == movement::ReportMode::CUMULATIVE ? "cumulative" : "relative");
 #define WRITE_MOVEMENT_INT(name) ini.SetLongValue("movement", #name, config.movement.name)
 #define WRITE_MOVEMENT_NUMBER(name) ini.SetDoubleValue("movement", #name, config.movement.name)
         WRITE_MOVEMENT_INT(jump_delay_ms);
+        WRITE_MOVEMENT_INT(spin_virtual_key);
+        WRITE_MOVEMENT_INT(large_virtual_key);
         WRITE_MOVEMENT_INT(spin_duration_ms);
         WRITE_MOVEMENT_INT(large_duration_ms);
         WRITE_MOVEMENT_NUMBER(spin_angle_degrees);

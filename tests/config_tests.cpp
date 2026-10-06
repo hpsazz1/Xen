@@ -1308,9 +1308,17 @@ void test_movement_config() {
     const auto path = directory / "config.ini";
     AppConfig config, loaded;
     std::string error;
-    expect(!config.movement.enabled, "身法默认关闭");
+    expect(!config.movement.enabled && config.movement.spin_enabled && !config.movement.large_enabled &&
+        config.movement.spin_trigger == movement::Trigger::WHEEL_UP &&
+        config.movement.large_trigger == movement::Trigger::WHEEL_DOWN && config.movement.jump_delay_ms == 0,
+        "身法总开关默认关闭，上滚旋转跳、下滚大跳且无额外延时");
     config.movement.enabled = true;
-    config.movement.mode = movement::Mode::LARGE_JUMP;
+    config.movement.spin_enabled = true;
+    config.movement.large_enabled = true;
+    config.movement.spin_trigger = movement::Trigger::KEY;
+    config.movement.spin_virtual_key = 0x4A;
+    config.movement.large_trigger = movement::Trigger::WHEEL_DOWN;
+    config.movement.large_virtual_key = 0x4B;
     config.movement.report_mode = movement::ReportMode::RELATIVE_DELTA;
     config.movement.wheel_down_positive = false;
     config.movement.jump_delay_ms = 31;
@@ -1323,7 +1331,9 @@ void test_movement_config() {
     expect(save_app_config(path.string(), config, error) && load_app_config(path.string(), loaded, error),
         "身法配置往返：" + error);
     const auto& value = loaded.movement;
-    expect(value.enabled && value.mode == movement::Mode::LARGE_JUMP &&
+    expect(value.enabled && value.spin_enabled && value.large_enabled &&
+        value.spin_trigger == movement::Trigger::KEY && value.spin_virtual_key == 0x4A &&
+        value.large_trigger == movement::Trigger::WHEEL_DOWN && value.large_virtual_key == 0x4B &&
         value.report_mode == movement::ReportMode::RELATIVE_DELTA && !value.wheel_down_positive &&
         value.jump_delay_ms == 31 && value.spin_duration_ms == 321 && value.large_duration_ms == 123 &&
         value.spin_angle_degrees == 73.5 && value.large_angle_degrees == 17.25 &&
@@ -1331,11 +1341,34 @@ void test_movement_config() {
         "身法所有字段必须独立保留");
     expect(write_file_bytes(path, "[ui]\nwidth=900\n"), "写入身法旧配置");
     expect(load_app_config(path.string(), loaded, error) && !loaded.movement.enabled &&
-        loaded.movement.mode == movement::Mode::SPIN &&
+        loaded.movement.spin_enabled && !loaded.movement.large_enabled &&
+        loaded.movement.spin_trigger == movement::Trigger::WHEEL_UP &&
         loaded.movement.spin_duration_ms == movement::Config{}.spin_duration_ms &&
         loaded.movement.sensitivity == movement::Config{}.sensitivity,
         "缺少身法节时恢复默认且不继承开启状态");
+    expect(write_file_bytes(path, "[movement]\nenabled=true\nmode=large_jump\njump_delay_ms=20\n"), "写入旧大跳配置");
+    expect(load_app_config(path.string(), loaded, error) && loaded.movement.enabled &&
+        !loaded.movement.spin_enabled && loaded.movement.large_enabled &&
+        loaded.movement.large_trigger == movement::Trigger::WHEEL_DOWN && loaded.movement.jump_delay_ms == 20,
+        "旧大跳迁移保持原单项、下滚和显式延时");
+    expect(save_app_config(path.string(), loaded, error), "保存迁移后的身法配置");
+    const auto migrated = read_file_bytes(path);
+    expect(migrated.find("\nmode =") == std::string::npos &&
+        migrated.find("\nmode=") == std::string::npos &&
+        migrated.find("large_trigger") != std::string::npos,
+        "迁移保存删除旧mode并写入独立触发");
+    expect(write_file_bytes(path, "[movement]\nmode=spin\n"), "写入旧旋转跳配置");
+    expect(load_app_config(path.string(), loaded, error) && loaded.movement.spin_enabled &&
+        !loaded.movement.large_enabled && loaded.movement.spin_trigger == movement::Trigger::WHEEL_DOWN,
+        "显式旧旋转跳保留原下滚触发");
+    expect(write_file_bytes(path, "[movement]\nmode=unknown\nspin_enabled=true\nlarge_enabled=true\nspin_trigger=key\nspin_virtual_key=0\n"), "写入新格式未绑定键");
+    expect(load_app_config(path.string(), loaded, error) && loaded.movement.spin_virtual_key == 0,
+        "新格式优先于旧mode且允许未绑定键");
     for (const char* invalid : {"enabled=perhaps", "mode=unknown", "report_mode=unknown",
+             "spin_enabled=perhaps", "large_enabled=perhaps", "spin_trigger=unknown", "large_trigger=unknown",
+             "spin_virtual_key=-1", "large_virtual_key=256", "spin_virtual_key=1.5",
+             "spin_enabled=true\nspin_trigger=key\nspin_virtual_key=35",
+             "spin_enabled=true\nlarge_enabled=true\nspin_trigger=wheel_down\nlarge_trigger=wheel_down",
              "wheel_down_positive=maybe", "jump_delay_ms=1.5", "spin_duration_ms=abc",
              "large_duration_ms=0", "spin_angle_degrees=nan", "large_angle_degrees=-1",
              "sensitivity=0", "yaw_degrees_per_count=inf"}) {

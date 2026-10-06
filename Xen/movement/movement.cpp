@@ -1,11 +1,11 @@
 #include "movement/movement.h"
+#include "mouse/input_internal.h"
 #include "log/log.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
-#include <deque>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -17,6 +17,17 @@ using namespace std::chrono_literals;
 bool acknowledged(const KeyboardReceipt& receipt) noexcept {
     return receipt.disposition == KeyboardDisposition::ACKNOWLEDGED;
 }
+bool supported_trigger_key(int key) noexcept {
+    static const auto supported = [] {
+        std::array<bool, 256> keys{};
+        keys[0] = true;
+        for (int usage = 0; usage < 256; ++usage)
+            keys[mouse::detail::hid_usage_to_virtual_key(static_cast<std::uint8_t>(usage))] = true;
+        for (int value : {1, 2, 4, 5, 6, 0x10, 0x11, 0x12}) keys[value] = true;
+        return keys;
+    }();
+    return key >= 0 && key < 256 && supported[static_cast<std::size_t>(key)];
+}
 int wrapped_delta(std::int16_t value, std::int16_t previous) noexcept {
     const auto delta = static_cast<std::uint16_t>(static_cast<unsigned>(
         static_cast<std::uint16_t>(value)) - static_cast<std::uint16_t>(previous));
@@ -26,7 +37,16 @@ int wrapped_delta(std::int16_t value, std::int16_t previous) noexcept {
 bool valid_config(const Config& config) noexcept {
     const auto angle_valid = [](double value) { return std::isfinite(value) && value > 0 && value <= 360; };
     const double scale = config.sensitivity * config.yaw_degrees_per_count;
-    return (config.mode == Mode::SPIN || config.mode == Mode::LARGE_JUMP) &&
+    const auto trigger_valid = [](Trigger trigger, int key) {
+        return (trigger == Trigger::WHEEL_DOWN || trigger == Trigger::WHEEL_UP || trigger == Trigger::KEY) &&
+            key >= 0 && key <= 255 && (trigger != Trigger::KEY || supported_trigger_key(key));
+    };
+    const bool collision = config.spin_enabled && config.large_enabled &&
+        config.spin_trigger == config.large_trigger &&
+        (config.spin_trigger != Trigger::KEY ||
+         (config.spin_virtual_key != 0 && config.spin_virtual_key == config.large_virtual_key));
+    return !collision && trigger_valid(config.spin_trigger, config.spin_virtual_key) &&
+        trigger_valid(config.large_trigger, config.large_virtual_key) &&
         (config.report_mode == ReportMode::CUMULATIVE || config.report_mode == ReportMode::RELATIVE_DELTA) &&
         config.jump_delay_ms >= 0 && config.jump_delay_ms <= 2000 &&
         config.spin_duration_ms >= 1 && config.spin_duration_ms <= 5000 &&
@@ -55,8 +75,9 @@ public:
     InputReportCursor cursor;
     bool baseline = false, debt = false, active = false, fault = false;
     InputReportEvent previous;
-    std::deque<std::pair<std::int64_t, int>> recent_x;
+    std::int64_t direction_observed_ns = 0;
     Direction direction = Direction::LEFT;
+    Mode action_mode = Mode::SPIN;
     Config action_config;
     Clock::time_point action_start{}, phase_start{};
     int phase = 0, phase_sent = 0, phase_counts = 0;
@@ -85,7 +106,7 @@ public:
     }
     void reset_input() {
         baseline = false;
-        recent_x.clear();
+        direction_observed_ns = 0;
     }
     void finish(bool completed) {
         active = false;
@@ -99,7 +120,7 @@ public:
             tail.events[tail.count - 1].sequence == tail.final_sequence) {
             previous = tail.events[tail.count - 1]; baseline = true;
         } else if (tail.count || tail.gap || tail.dropped_count) baseline = false;
-        recent_x.clear();
+        direction_observed_ns = 0;
         // 发布完成意味着尾水位已经消费；否则用户看到完成后立即再滚会被清尾吞掉。
         { std::lock_guard lock(mutex);
           if (completed && cleaned && !fault) ++view.completed; else ++view.canceled;
@@ -107,7 +128,8 @@ public:
     }
     bool action_allowed() {
         bool enabled;
-        { std::lock_guard lock(mutex); enabled = config.enabled; }
+        { std::lock_guard lock(mutex);
+          enabled = config.enabled && (action_mode == Mode::SPIN ? config.spin_enabled : config.large_enabled); }
         return !stopping.load() && enabled && permitted() &&
             action_cancel_generation == cancel_generation.load();
     }
@@ -126,17 +148,17 @@ public:
             if (!command_ok(mouse->set_wasd_mask(1, true), "身法屏蔽 W 未确认")) { finish(false); return; }
             if (!action_allowed()) { finish(false); return; }
             phase = 1;
-            phase_start = Clock::now();
+            // 使用同一个触发时刻，ACK 往返不再重新启动转动计时。
+            phase_start = action_start + std::chrono::milliseconds(action_config.jump_delay_ms);
             set_state(State::TURNING);
         }
         const bool left = (direction == Direction::LEFT) != (phase == 2);
         if (!phase_key_sent) {
-            if (!command_ok(mouse->set_wasd_keyboard(left ? 8 : 2), "身法方向键未确认")) { finish(false); return; }
+            if (!command_ok(mouse->set_wasd_keyboard(left ? 2 : 8), "身法方向键未确认")) { finish(false); return; }
             phase_key_sent = true;
-            phase_start = Clock::now();
         }
         if (!action_allowed()) { finish(false); return; }
-        const int duration = action_config.mode == Mode::SPIN ? action_config.spin_duration_ms : action_config.large_duration_ms;
+        const int duration = action_mode == Mode::SPIN ? action_config.spin_duration_ms : action_config.large_duration_ms;
         const double elapsed = std::chrono::duration<double, std::milli>(Clock::now() - phase_start).count();
         const int target = static_cast<int>(std::llround(phase_counts * std::clamp(elapsed / duration, 0.0, 1.0)));
         const int remaining = target - phase_sent;
@@ -150,16 +172,18 @@ public:
             { std::lock_guard lock(mutex); view.sent_dx += left ? -step : step; }
         }
         if (phase_sent != phase_counts || elapsed < duration) return;
-        if (phase == 1 && action_config.mode == Mode::LARGE_JUMP) {
+        if (phase == 1 && action_mode == Mode::LARGE_JUMP) {
             phase = 2; phase_sent = 0; phase_key_sent = false;
+            phase_start = Clock::now();
         } else finish(true);
     }
-    void begin(const Config& current) {
+    void begin(const Config& current, Mode mode) {
         if (!current.enabled || fault || active || !permitted() || stopping.load()) return;
         action_config = current;
+        action_mode = mode;
         action_cancel_generation = cancel_generation.load();
         action_start = Clock::now(); phase = 0; phase_sent = 0; phase_key_sent = false;
-        const double angle = current.mode == Mode::SPIN ? current.spin_angle_degrees : current.large_angle_degrees;
+        const double angle = mode == Mode::SPIN ? current.spin_angle_degrees : current.large_angle_degrees;
         phase_counts = static_cast<int>(std::llround(angle / (current.sensitivity * current.yaw_degrees_per_count)));
         active = true;
         { std::lock_guard lock(mutex); view.state = State::DELAY; view.direction = direction; view.sent_dx = 0; ++view.started; }
@@ -180,17 +204,37 @@ public:
             // 键盘包可能复带鼠标字段；重复字段不当作新的相对运动或滚轮。
             dx = event.raw_x; wheel = event.raw_wheel;
         }
+        const auto key_down = [](const InputReportEvent& report, int key) {
+            if (key <= 0 || key > 255) return false;
+            std::array<bool, 256> keys{};
+            mouse::detail::apply_hid_keyboard_report(report.keyboard_modifiers,
+                report.keyboard_usages.data(), report.keyboard_usages.size(), keys);
+            keys[0x01] = (report.mouse_buttons & 1) != 0;
+            keys[0x02] = (report.mouse_buttons & 2) != 0;
+            keys[0x04] = (report.mouse_buttons & 4) != 0;
+            keys[0x05] = (report.mouse_buttons & 8) != 0;
+            keys[0x06] = (report.mouse_buttons & 16) != 0;
+            return keys[static_cast<std::size_t>(key)];
+        };
+        const auto triggered = [&](Trigger trigger, int key) {
+            if (trigger == Trigger::KEY) return key_down(event, key) && !key_down(previous, key);
+            const bool down = current.wheel_down_positive ? wheel > 0 : wheel < 0;
+            return wheel != 0 && (trigger == Trigger::WHEEL_DOWN ? down : !down);
+        };
+        const bool spin = current.spin_enabled && triggered(current.spin_trigger, current.spin_virtual_key);
+        const bool large = current.large_enabled && triggered(current.large_trigger, current.large_virtual_key);
         previous = event;
         if (active) return;
-        while (!recent_x.empty() && recent_x.front().first < event.received_at_steady_ns - 100000000)
-            recent_x.pop_front();
-        if (dx) recent_x.emplace_back(event.received_at_steady_ns, dx);
-        if (recent_x.size() > 256) recent_x.pop_front();
-        long long sum = 0;
-        for (const auto& item : recent_x) sum += item.second;
-        if (sum) direction = sum < 0 ? Direction::LEFT : Direction::RIGHT;
-        if (allow_begin && ((current.wheel_down_positive && wheel > 0) || (!current.wheel_down_positive && wheel < 0)))
-            begin(current);
+        // 最近一次实际转向优先；不让早先的大幅移动压过起跳瞬间的小幅反向。
+        if (dx) {
+            direction = dx < 0 ? Direction::LEFT : Direction::RIGHT;
+            direction_observed_ns = event.received_at_steady_ns;
+        }
+        const bool fresh_direction = direction_observed_ns != 0 &&
+            event.received_at_steady_ns >= direction_observed_ns &&
+            event.received_at_steady_ns - direction_observed_ns <= 100000000;
+        if (allow_begin && fresh_direction && spin != large)
+            begin(current, spin ? Mode::SPIN : Mode::LARGE_JUMP);
     }
     void run() noexcept {
         try {

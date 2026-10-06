@@ -25,6 +25,7 @@ public:
     std::vector<bool> masks;
     std::uint64_t sequence = 0, epoch = 1;
     std::atomic<int> cleanups{0};
+    int keyboard_delay_ms = 0;
     std::atomic<bool> fail_move{false}, fail_cleanup{false}, fail_mask{false};
     bool subscribed = false;
     bool open() noexcept override { return true; }
@@ -41,6 +42,7 @@ public:
         return result;
     }
     KeyboardReceipt set_wasd_keyboard(std::uint8_t mask) noexcept override {
+        if (keyboard_delay_ms) std::this_thread::sleep_for(std::chrono::milliseconds(keyboard_delay_ms));
         std::lock_guard lock(mutex); software.push_back(mask);
         return {KeyboardDisposition::ACKNOWLEDGED};
     }
@@ -67,11 +69,12 @@ public:
         }
         return true;
     }
-    void report(int x, int wheel, bool valid = true) {
+    void report(int x, int wheel, bool valid = true, std::uint8_t usage = 0) {
         std::lock_guard lock(mutex);
         InputReportEvent event;
         event.epoch = epoch; event.sequence = ++sequence; event.state_valid = valid;
         event.received_at_steady_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+        event.keyboard_usages[0] = usage;
         event.raw_x = static_cast<std::int16_t>(x); event.raw_wheel = static_cast<std::int16_t>(wheel);
         reports.push_back(event);
     }
@@ -81,7 +84,7 @@ public:
 };
 movement::Config config() {
     movement::Config result;
-    result.enabled = true; result.jump_delay_ms = 2; result.spin_duration_ms = 12;
+    result.enabled = true; result.spin_trigger = movement::Trigger::WHEEL_DOWN; result.jump_delay_ms = 0; result.spin_duration_ms = 12;
     result.large_duration_ms = 12; result.spin_angle_degrees = 1.0; result.large_angle_degrees = 1.0;
     result.sensitivity = 1.0; result.yaw_degrees_per_count = 0.01;
     return result;
@@ -94,14 +97,14 @@ void spin_and_symmetric_large() {
         for (int sign : {-1, 1}) {
             auto fake = std::make_shared<Fake>();
             movement::Worker worker(fake, [] { return true; });
-            auto value = config(); value.mode = mode;
+            auto value = config(); value.spin_enabled = mode == movement::Mode::SPIN; value.large_enabled = !value.spin_enabled;
             require(worker.start(value), "启动失败"); trigger(fake, sign * 10);
             wait_for([&] { return worker.snapshot().completed == 1; });
             require(fake->total() == (mode == movement::Mode::SPIN ? sign * 100 : 0), "角度累计或大跳对称错误");
             const auto keys = fake->keys();
-            require(keys.front() == (sign < 0 ? 8 : 2), "左右方向键映射错误");
+            require(keys.front() == (sign < 0 ? 2 : 8), "左右方向键映射错误");
             if (mode == movement::Mode::LARGE_JUMP)
-                require(keys.size() == 2 && keys[1] == (sign < 0 ? 2 : 8), "大跳第二段未反向");
+                require(keys.size() == 2 && keys[1] == (sign < 0 ? 8 : 2), "大跳第二段未反向");
             require(fake->cleanups == 1, "动作完成未清理");
             worker.stop(); require(fake->cleanups == 1, "无债务停止重复发送清理");
         }
@@ -188,6 +191,59 @@ void epoch_and_delay_cancel() {
     wait_for([&] { return worker.snapshot().canceled == 2; });
     require(fake->keys().empty(), "失效输入仍执行方向键"); worker.stop();
 }
+void disabling_active_item_cleans_up() {
+    auto fake = std::make_shared<Fake>(); movement::Worker worker(fake, [] { return true; });
+    auto value = config(); value.spin_duration_ms = 500;
+    require(worker.start(value), "启动失败"); trigger(fake);
+    wait_for([&] { return !fake->keys().empty(); });
+    value.spin_enabled = false; worker.configure(value);
+    wait_for([&] { return worker.snapshot().canceled == 1; });
+    require(fake->cleanups == 1, "关闭单项未立即取消并清理"); worker.stop();
+}
+void shared_trigger_clock() {
+    require(movement::Config{}.jump_delay_ms == 0, "默认仍起跳后等待");
+    auto fake = std::make_shared<Fake>(); fake->keyboard_delay_ms = 30;
+    movement::Worker worker(fake, [] { return true; });
+    require(worker.start(config()), "启动失败"); trigger(fake);
+    wait_for([&] { return worker.snapshot().completed == 1; });
+    { std::lock_guard lock(fake->mutex);
+      require(fake->moves.size() == 1 && fake->moves[0] == -100,
+          "方向键ACK之后重新起算鼠标计时，额外延长动作"); }
+    worker.stop();
+}
+void latest_direction_and_independent_triggers() {
+    auto fake = std::make_shared<Fake>(); movement::Worker worker(fake, [] { return true; });
+    auto value = config(); value.spin_trigger = movement::Trigger::WHEEL_UP;
+    value.large_enabled = true;
+    require(worker.start(value), "双项启动失败");
+    fake->report(0, 0); fake->report(-100, 0); fake->report(-99, -1);
+    wait_for([&] { return worker.snapshot().completed == 1; });
+    require(fake->total() == 100 && fake->keys().front() == 8, "起跳瞬间反向被旧方向覆盖或上滚未触发旋转跳");
+    fake->report(-109, 0);
+    wait_for([&] { return worker.snapshot().completed == 2; });
+    auto keys = fake->keys();
+    require(keys.size() == 3 && keys[1] == 2 && keys[2] == 8 && fake->total() == 100,
+        "双项并存下滚未独立触发大跳");
+    worker.stop();
+}
+void key_trigger_and_stale_direction() {
+    auto fake = std::make_shared<Fake>(); movement::Worker worker(fake, [] { return true; });
+    auto value = config(); value.spin_trigger = movement::Trigger::KEY; value.spin_virtual_key = 0x20;
+    require(worker.start(value), "按键模式启动失败");
+    fake->report(0, 0); fake->report(-1, 0, true, 0x2c);
+    wait_for([&] { return worker.snapshot().completed == 1; });
+    fake->report(-2, 0, true, 0x2c);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    require(worker.snapshot().started == 1, "按键长按重复触发");
+    fake->report(-2, 0); fake->report(-3, 0, true, 0x2c);
+    wait_for([&] { return worker.snapshot().completed == 2; });
+    worker.stop();
+    auto stale = std::make_shared<Fake>(); movement::Worker other(stale, [] { return true; });
+    require(other.start(config()), "启动失败"); stale->report(0,0); stale->report(-10,0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150)); stale->report(-10,1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    require(other.snapshot().started == 0, "陈旧方向或默认左侧触发动作"); other.stop();
+}
 void mouse_failure_and_polarity() {
     {
         auto fake = std::make_shared<Fake>(); fake->fail_move = true;
@@ -214,9 +270,11 @@ int main() {
         require(movement::valid_config(movement::Config{}), "默认配置非法");
         auto invalid = config(); invalid.sensitivity = 0;
         require(!movement::valid_config(invalid), "零灵敏度未拒绝");
+        auto unsupported = config(); unsupported.spin_trigger = movement::Trigger::KEY; unsupported.spin_virtual_key = 0x60;
+        require(!movement::valid_config(unsupported), "未识别的小键盘键被接受为触发");
         spin_and_symmetric_large(); disabled_has_no_output(); cancel_and_permission();
         fault_latches(); wrap_and_relative_dedup(); running_config_is_frozen(); epoch_and_delay_cancel();
-        mouse_failure_and_polarity();
+        mouse_failure_and_polarity(); shared_trigger_clock(); disabling_active_item_cleans_up(); latest_direction_and_independent_triggers(); key_trigger_and_stale_direction();
         std::cout << "身法专项通过\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

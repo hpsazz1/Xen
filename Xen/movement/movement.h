@@ -9,11 +9,17 @@
 
 namespace movement {
 enum class Mode { SPIN, LARGE_JUMP };
+enum class Trigger { WHEEL_DOWN, WHEEL_UP, KEY };
 enum class ReportMode { CUMULATIVE, RELATIVE_DELTA };
 struct Config {
     bool enabled = false;
-    Mode mode = Mode::SPIN;
-    int jump_delay_ms = 20;
+    bool spin_enabled = true;
+    bool large_enabled = false;
+    Trigger spin_trigger = Trigger::WHEEL_UP;
+    Trigger large_trigger = Trigger::WHEEL_DOWN;
+    int spin_virtual_key = 0;
+    int large_virtual_key = 0;
+    int jump_delay_ms = 0;
     int spin_duration_ms = 300;
     double spin_angle_degrees = 90;
     int large_duration_ms = 150;
@@ -35,7 +41,7 @@ struct Snapshot {
     std::string error;
 };
 // 生命周期由单一调用方串行管理；配置、取消及快照可跨线程调用。
-// 只发送方向键与水平位移；跳跃始终由用户物理滚轮及游戏绑定产生。
+// 只发送方向键与水平位移；跳跃由用户物理触发及游戏绑定产生。
 class Worker final {
 public:
     Worker(std::shared_ptr<IMouseController> mouse, std::function<bool()> output_permission);

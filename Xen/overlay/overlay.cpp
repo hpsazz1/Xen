@@ -2960,7 +2960,7 @@ struct Overlay::Impl {
         const char* movement_state = "已停止";
         switch (snapshot.movement.state) {
             case movement::State::STOPPED: movement_state = "已停止"; break;
-            case movement::State::IDLE: movement_state = "等待下滚轮"; break;
+            case movement::State::IDLE: movement_state = "等待身法触发"; break;
             case movement::State::DELAY: movement_state = "起跳后等待"; break;
             case movement::State::TURNING: movement_state = "转动中"; break;
             case movement::State::CLEANING: movement_state = "释放接管中"; break;
@@ -2974,23 +2974,36 @@ struct Overlay::Impl {
             static_cast<unsigned long long>(snapshot.movement.canceled), snapshot.movement.sent_dx);
         if (!snapshot.movement.error.empty())
             ImGui::TextWrapped("%s", snapshot.movement.error.c_str());
-        ImGui::TextWrapped("下滚轮须已在游戏中绑定跳跃。触发前鼠标方向选择首侧：左转配 D，右转配 A；动作期间临时屏蔽 W，结束后归还。");
+        ImGui::TextWrapped("两项可同时启用，须使用不同触发。触发键或滚轮方向须在游戏中绑定跳跃；这里不会修改游戏绑定。鼠标向左配 A/左转，向右配 D/右转；动作期间临时屏蔽 W，结束后归还。");
         ImGui::TextWrapped("运行中可调整，动作参数从下一次触发生效；关闭会结束当前动作并释放接管。");
         if (begin_form("movement_form", 126.0f)) {
-            form_row("启用身法", "默认关闭；开启后由物理下滚轮触发，忙碌期间不重复排队。关闭时释放 A/D 并解除 W 屏蔽。");
+            form_row("启用身法", "总开关默认关闭；两项分别启用和绑定。忙碌期间不重复排队；关闭时释放 A/D 并解除 W 屏蔽。");
             toggle_switch("##movement_enabled", &move.enabled);
-            form_row("动作模式", "旋转跳只向首侧转动；大跳先首侧再反侧。首方向由触发前的物理鼠标左右动作选择，不需要手动 A/D。");
-            int mode = move.mode == movement::Mode::SPIN ? 0 : 1;
-            const char* modes[]{"旋转跳", "大跳"};
-            if (ImGui::Combo("##movement_mode", &mode, modes, 2))
-                move.mode = mode == 0 ? movement::Mode::SPIN : movement::Mode::LARGE_JUMP;
-            const bool spin = move.mode == movement::Mode::SPIN;
-            form_row(spin ? "转角 / 度" : "每侧转角 / 度", "大于 0 且不超过 360 度；未缩放视角估算，按转角 ÷（游戏灵敏度 × m_yaw）换算鼠标计数。可按实际结果标定，两种模式分别保存。");
-            ImGui::InputDouble("##movement_angle", spin ? &move.spin_angle_degrees : &move.large_angle_degrees, 1.0, 5.0, "%.2f");
-            form_row(spin ? "转动时长 / ms" : "每侧时长 / ms", "范围 1–5000 ms；大跳包含两侧，每侧使用此时长。这是可调动作参数，不是游戏官方最佳时长。");
-            ImGui::InputInt("##movement_duration", spin ? &move.spin_duration_ms : &move.large_duration_ms, 1, 10);
-            form_row("起跳后延时 / ms", "范围 0–2000 ms；从收到下滚轮触发起等待，不代表已观测到游戏起跳，随后执行定时动作。");
-            ImGui::InputInt("##movement_delay", &move.jump_delay_ms, 1, 10);
+            const auto action_settings = [&](bool spin) {
+                ImGui::PushID(spin ? "spin" : "large");
+                form_row(spin ? "旋转跳" : "大跳", "独立开关；旋转跳执行首侧，大跳先首侧再反侧。首侧由物理鼠标方向选择。");
+                toggle_switch("##enabled", spin ? &move.spin_enabled : &move.large_enabled);
+                auto& trigger = spin ? move.spin_trigger : move.large_trigger;
+                auto& key = spin ? move.spin_virtual_key : move.large_virtual_key;
+                int selected = trigger == movement::Trigger::WHEEL_DOWN ? 0 :
+                    trigger == movement::Trigger::WHEEL_UP ? 1 : 2;
+                const char* choices[]{"下滚轮", "上滚轮", "按键"};
+                form_row("触发方式", "只监听物理输入；游戏须将同一按键或滚轮方向绑定跳跃。两项同时启用时不能占用相同触发。");
+                if (ImGui::Combo("##trigger", &selected, choices, 3))
+                    trigger = selected == 0 ? movement::Trigger::WHEEL_DOWN :
+                        selected == 1 ? movement::Trigger::WHEEL_UP : movement::Trigger::KEY;
+                if (trigger == movement::Trigger::KEY) {
+                    form_row("虚拟键码", "使用字母、主键盘数字、F1–F12、方向/编辑键、修饰键或鼠标键的 Windows 虚拟键码；0 未绑定。暂不支持小键盘和标点，勿占用急停或其他功能键。");
+                    ImGui::InputInt("##key", &key, 1, 16);
+                }
+                form_row(spin ? "转角 / 度" : "每侧转角 / 度", "大于 0 且不超过 360 度；按转角 ÷（灵敏度 × m_yaw）换算，实际结果需核对。");
+                ImGui::InputDouble("##angle", spin ? &move.spin_angle_degrees : &move.large_angle_degrees, 1.0, 5.0, "%.2f");
+                form_row(spin ? "转动时长 / ms" : "每侧时长 / ms", "范围 1–5000 ms；大跳两侧各使用此时长。");
+                ImGui::InputInt("##duration", spin ? &move.spin_duration_ms : &move.large_duration_ms, 1, 10);
+                ImGui::PopID();
+            };
+            action_settings(true);
+            action_settings(false);
             form_row("游戏灵敏度", "填写游戏中的 sensitivity，用于转角换算；必须大于零。镜头缩放或游戏输入设置变化时需调整。");
             ImGui::InputDouble("##movement_sensitivity", &move.sensitivity, 0.01, 0.1, "%.3f");
             ImGui::EndTable();
@@ -2998,6 +3011,8 @@ struct Overlay::Impl {
         if (ImGui::CollapsingHeader("兼容设置##movement_compatibility")) {
             ImGui::TextWrapped("NET 原始滚轮语义尚未设备校准；按实际输入报告选择，不表示已自动识别。");
             if (begin_form("movement_compatibility_form", 126.0f)) {
+                form_row("触发后延时 / ms", "默认 0，范围 0–2000 ms；仅保留兼容调节，不代表观测到游戏起跳。");
+                ImGui::InputInt("##movement_delay", &move.jump_delay_ms, 1, 10);
                 form_row("m_yaw", "每鼠标计数的水平角度基数，默认 0.022；与游戏灵敏度相乘后换算转角，可调整标定。");
                 ImGui::InputDouble("##movement_yaw", &move.yaw_degrees_per_count, 0.001, 0.01, "%.6f");
                 form_row("输入报告形式", "累计坐标使用相邻报告差值；相对报告使用本次增量。NET 固件语义未自动校准，错误选择可能漏触发或重复识别。");
@@ -3011,9 +3026,24 @@ struct Overlay::Impl {
             }
         }
         show_help_tooltip("兼容参数只影响后续动作；需根据设备实际报告调整。");
-        if (!movement::valid_config(move)) {
+        const auto trigger_conflicts = [&](bool enabled, movement::Trigger trigger, int key) {
+            if (!enabled || trigger != movement::Trigger::KEY || key == 0) return false;
+            const auto contains = [key](const std::vector<int>& keys) {
+                return std::find(keys.begin(), keys.end(), key) != keys.end();
+            };
+            return contains(app_config.keyboard.emergency_virtual_keys) ||
+                contains(app_config.keyboard.runtime_toggle_virtual_keys) ||
+                contains(app_config.keyboard.aim_hold_virtual_keys) ||
+                contains(app_config.keyboard.debug_test_virtual_keys) ||
+                contains(app_config.keyboard.anomaly_mark_virtual_keys) ||
+                contains(app_config.auto_stop.release_virtual_keys) ||
+                key == app_config.auto_stop.activation_virtual_key || key == app_config.trigger.hold_virtual_key;
+        };
+        if (!movement::valid_config(move) ||
+            trigger_conflicts(move.spin_enabled, move.spin_trigger, move.spin_virtual_key) ||
+            trigger_conflicts(move.large_enabled, move.large_trigger, move.large_virtual_key)) {
             move = previous_movement;
-            ImGui::TextWrapped("输入超出有效范围，已保留上一次有效参数。");
+            ImGui::TextWrapped("参数越界或触发与其他功能冲突，已保留上一次有效参数。");
         }
         end_config_panel();
         ImGui::TextWrapped("其他辅助参数停止运行后可编辑并保存；下次启动生效。");
