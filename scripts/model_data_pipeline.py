@@ -614,6 +614,10 @@ def export_dataset(ctx):
         if covered != set(range(len(names))):
             raise PipelineError(f"{split} 缺少某些类别的正例；请补充独立已审核数据")
     output = ctx.output()
+    # 仅正式审核修订进入训练；保留未导出身份，便于核对筛选结果。
+    omitted = [dict(session_id=key[0], sample_id=key[1], image_sha256=sample["image_sha256"],
+                    state=reviews.get(key, {}).get("state", "UNKNOWN"))
+               for key, sample in samples.items() if key not in valid]
     records = []
     for entry in entries:
         ctx.check()
@@ -629,6 +633,9 @@ def export_dataset(ctx):
     # JSON 是 YAML 1.2 子集，无需依赖 YAML 库即可写标准 data.yaml。
     write_json(output / "data.yaml", dict(path=str(output), train="images/train", val="images/val", test="images/test", names=names))
     manifest = dict(schema_version=SCHEMA, created_at=now(), class_names=names, split_groups=split_groups, data_yaml_sha256=sha256(output / "data.yaml"), samples=records, counts=dict(Counter(r["split"] for r in records)), states=dict(Counter(r["state"] for r in records)), leakage_check="sha256 + RGB 16x16 MAD <= 2; session 分组", source_root=str(Path(ctx.job["root"]).resolve()))
+    manifest["selection"] = dict(source_samples=len(samples), included=len(records),
+                                 omitted_counts=dict(Counter(item["state"] for item in omitted)),
+                                 omitted=omitted)
     write_json(output / "dataset.json", manifest)
     write_json(output / "dataset_identity.json", dict(dataset_sha256=sha256(output / "dataset.json")))
     write_json(registry_path, dict(schema_version=SCHEMA, class_names=names, split_groups=dict(old_groups, **split_groups), updated_at=now()))
@@ -652,6 +659,8 @@ def validate_dataset(path):
         key = (identifier(item["session_id"]), identifier(item["sample_id"]))
         if key in keys or split not in {"train", "val", "test"} or state not in VERIFIED:
             raise PipelineError("冻结数据含重复、未知状态或无效 split")
+        if not isinstance(item.get("revision"), str) or not item["revision"].strip():
+            raise PipelineError("冻结数据缺少正式审核 revision 身份")
         keys.add(key)
         if key[0] in groups and groups[key[0]] != split:
             raise PipelineError("同 session 跨 split")
@@ -674,6 +683,11 @@ def validate_dataset(path):
     actual_labels = {p.resolve() for p in (path / "labels").rglob("*") if p.is_file()}
     if expected_images != actual_images or expected_labels != actual_labels or set(groups.values()) != {"train", "val", "test"} or groups != manifest["split_groups"]:
         raise PipelineError("冻结数据白名单/分组不完整，拒绝混入未审核图片")
+    for split in ("train", "val", "test"):
+        covered = {box["class_id"] for entry in entries if entry["split"] == split
+                   for box in entry["review"]["detections"]}
+        if covered != set(range(len(names))):
+            raise PipelineError(f"{split} 缺少类别真值，不能用于独立评估")
     check_leakage(entries)
     check_annotation_consistency(entries)
     return manifest

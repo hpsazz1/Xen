@@ -6,12 +6,16 @@
 #include "runtime/aim_frame_internal.h"
 #include "runtime/collection_frame_internal.h"
 #include "runtime/input_training_internal.h"
+#include "runtime/lineup_bridge_internal.h"
+#include "lineup/control_ipc.h"
+#include "lineup/calibration_internal.h"
 #include "auto_stop/auto_stop_worker.h"
 #include "trigger/trigger_worker.h"
 #include "recoil/recoil_worker.h"
 #include "recoil/recoil_store.h"
 #include "weapon/weapon_timing.h"
 #include "weapon/weapon_catalog.h"
+#include "weapon/context_sharing_internal.h"
 #include <unordered_map>
 #include <cstdlib>
 #include "data_collection/data_collection.h"
@@ -74,6 +78,20 @@ struct Runtime::Impl {
     bool movement_start_failed = false;
     source_context::SourceContextClient source_context_client;
     weapon::GsiReceiver gsi_receiver;
+    weapon::detail::ContextPublisher context_publisher;
+    std::mutex lineup_locate_mutex;
+    weapon::detail::LineupLocateEvent lineup_locate;
+    bool lineup_locate_enabled = false;
+    std::atomic<bool> lineup_active{false};
+    std::atomic<bool> lineup_throw_pending{false};
+    lineup::control::Server lineup_server;
+    std::thread lineup_thread;
+    std::atomic<bool> lineup_stop{false};
+    lineup::detail::ExecutionGeometry lineup_capture_geometry;
+    lineup::Clock::time_point lineup_capture_at{};
+    std::uint64_t lineup_capture_generation = 0, lineup_source_clock_session = 0;
+    bool lineup_source_time_valid = false;
+    std::uint64_t lineup_bound_generation = 0, lineup_focus_session = 0;
     std::atomic<std::shared_ptr<RecoilWorker>> recoil_worker;
     std::optional<RecoilArchiveConfig> recoil_archive_config;
     std::atomic<std::shared_ptr<RecoilBatchArchive>> recoil_archive;
@@ -335,7 +353,7 @@ struct Runtime::Impl {
             }
             timing_catalog = std::make_shared<const weapon::TimingCatalog>(std::move(catalog));
         }
-        if (config.auto_stop.enabled || config.trigger.enabled || config.recoil.enabled) output_arbiter = std::make_shared<AutoStopOutputArbiter>();
+        output_arbiter = std::make_shared<AutoStopOutputArbiter>();
         if (config.auto_stop.enabled) {
             Log::register_module("auto_stop", LogLevel::INFO);
             if (config.mouse.backend == MouseBackend::KMBOX_NET &&
@@ -345,7 +363,7 @@ struct Runtime::Impl {
                     [this] {
                         return config.mouse.allow_send_input &&
                             !stop_requested.load(std::memory_order_acquire) &&
-                            safety_gate.can_dispatch_auxiliary();
+                            !lineup_active.load() && safety_gate.can_dispatch_auxiliary();
                     },
                     [this] {
                         auto previous = stop_request_watermark.load();
@@ -386,10 +404,19 @@ struct Runtime::Impl {
                 }
             }
         if (config.gsi.enabled) {
-            if (!gsi_receiver.start(config.gsi)) {
+            if (!gsi_receiver.start(config.gsi, false)) {
                 set_error("GSI接收启动失败：" + gsi_receiver.last_error()); return false;
             }
         }
+        {
+            std::lock_guard lock(lineup_locate_mutex);
+            lineup_locate = {};
+            lineup_locate_enabled = config.keyboard.lineup_locate_virtual_key != 0;
+        }
+        if ((config.gsi.enabled || config.keyboard.lineup_locate_virtual_key != 0) &&
+            !context_publisher.start(config.gsi, [this] { return gsi_receiver.snapshot(); },
+                [this] { std::lock_guard lock(lineup_locate_mutex); return lineup_locate; }))
+            LOG_WARN("runtime", "本地只读上下文/定位事件发布失败；助手仍可手动操作");
         if (config.trigger.enabled) {
             Log::register_module("trigger", LogLevel::INFO);
             if (timing_catalog) LOG_INFO("trigger", "点射使用共享武器资料r{}，启动后固定版本", timing_catalog->revision);
@@ -411,7 +438,7 @@ struct Runtime::Impl {
                 };
             }
             auto worker = std::make_shared<TriggerWorker>(mouse, output_arbiter,
-                [this] { return config.mouse.allow_send_input && !stop_requested.load() && safety_gate.can_dispatch_auxiliary(); },
+                [this] { return config.mouse.allow_send_input && !stop_requested.load() && !lineup_active.load() && safety_gate.can_dispatch_auxiliary(); },
                 [this, previous_session = std::uint64_t{0} ]() mutable {
                     const auto source = source_context_client.snapshot();
                     if (!source.available || !source.focused) { previous_session = 0; return false; }
@@ -420,7 +447,7 @@ struct Runtime::Impl {
                 },
                 [this] { const auto id = stop_request_watermark.load(); return id == UINT64_MAX ? 0 : id + 1; },
                 [this](std::uint64_t id) {
-                    if (!safety_gate.can_dispatch_auxiliary() || stop_requested.load() || id == 0) return false;
+                    if (lineup_active.load() || !safety_gate.can_dispatch_auxiliary() || stop_requested.load() || id == 0) return false;
                     auto previous = stop_request_watermark.load();
                     do { if (id <= previous) return false; } while (!stop_request_watermark.compare_exchange_weak(previous, id));
                     auto stop = auto_stop_worker.load();
@@ -487,7 +514,7 @@ struct Runtime::Impl {
                     input.profile_conditions_match = input.weapon_block == RecoilWeaponBlock::NONE;
                     input.focused = focus.available && focus.focused && focus.session_id == focus_session;
                     focus_session = focus.available && focus.focused ? focus.session_id : 0;
-                    input.permission = config.mouse.allow_send_input && !stop_requested.load() && safety_gate.can_dispatch_recoil();
+                    input.permission = config.mouse.allow_send_input && !stop_requested.load() && !lineup_active.load() && safety_gate.can_dispatch_recoil();
                     return input;
                 },
                 [this] { if (auto trigger = trigger_worker.load()) return trigger->firing_signal(); return TriggerFiringSignal{}; });
@@ -504,7 +531,183 @@ struct Runtime::Impl {
                 }
             }
         }
+        lineup_stop.store(false);
+        lineup_active.store(false);
+        lineup_throw_pending.store(false);
+        lineup_capture_at = {};
+        lineup_focus_session = lineup_bound_generation = 0;
+        if (!lineup_server.start(lineup::control::channel_key(config.gsi))) {
+            LOG_WARN("runtime", "道具控制通道不可用；现有 Runtime 功能保持");
+        } else lineup_thread = std::thread([this] { lineup_loop(); });
         return true;
+    }
+
+    void pause_lineup_outputs(bool active) {
+        lineup_active.store(active, std::memory_order_release);
+        aim_reset_requested.store(true, std::memory_order_release);
+        if (!active) return;
+        if (auto worker = auto_stop_worker.load()) worker->cancel();
+        if (auto worker = trigger_worker.load()) worker->cancel();
+        if (auto worker = recoil_worker.load()) worker->cancel();
+        if (auto worker = movement_worker.load()) worker->cancel();
+    }
+    bool lineup_others_idle() {
+        if (auto worker = auto_stop_worker.load()) {
+            const auto state = worker->snapshot();
+            if (state.cleanup_unknown || state.status == AutoStopStatus::FAULT ||
+                state.status == AutoStopStatus::BRAKING || state.status == AutoStopStatus::MASKED ||
+                state.status == AutoStopStatus::ESTIMATED) return false;
+        }
+        if (auto worker = trigger_worker.load()) {
+            const auto state = worker->snapshot();
+            if (state.faulted || state.button_may_be_down || state.phase == TriggerPhase::DOWN_PENDING ||
+                state.phase == TriggerPhase::UP_PENDING || state.phase == TriggerPhase::HELD) return false;
+        }
+        if (auto worker = recoil_worker.load()) {
+            const auto state = worker->snapshot();
+            if (state.faulted || state.pending || state.phase == RecoilPhase::PENDING ||
+                state.phase == RecoilPhase::FIRING) return false;
+        }
+        if (auto worker = movement_worker.load()) {
+            const auto state = worker->snapshot().state;
+            if (state != movement::State::IDLE && state != movement::State::STOPPED) return false;
+        }
+        return !mouse->left_button_faulted() && !mouse->left_button_cleanup_required();
+    }
+    lineup::detail::ExecutionPermit lineup_permit() {
+        lineup::detail::ExecutionPermit permit;
+        permit.gate_open = config.mouse.allow_send_input && !stop_requested.load() && !lineup_stop.load() &&
+                           safety_gate.can_dispatch_auxiliary();
+        permit.armed = safety_gate.output_armed();
+        permit.healthy = safety_gate.input_healthy();
+        permit.exclusive = mouse && mouse->output_owner_exclusive();
+        const auto focus = source_context_client.snapshot();
+        permit.focused = focus.available && focus.focused && focus.session_id == lineup_focus_session;
+        InputSnapshot input;
+        permit.input_state_valid = mouse && mouse->poll_input(input) && input.state_valid && input.status == InputMonitorStatus::READY;
+        permit.healthy = permit.healthy && permit.input_state_valid;
+        if (permit.input_state_valid) {
+            for (const auto &[key, control] : std::initializer_list<std::pair<int, const char*>>{
+                    {1,"button:left"},{2,"button:right"},{0x20,"jump"},{'W',"movement:forward"},
+                    {'A',"movement:left"},{'S',"movement:back"},{'D',"movement:right"}})
+                if (input.virtual_keys[static_cast<std::size_t>(key)]) permit.user_held.insert(control);
+        }
+        return permit;
+    }
+    void lineup_loop() noexcept {
+        using namespace std::chrono_literals;
+        using State = lineup::detail::ExecutionState;
+        try {
+            lineup::detail::ExecutionGeometry expected_geometry;
+            std::string expected_source_session;
+            runtime::detail::LineupExecutionSession session(mouse, output_arbiter,
+                [this, &expected_geometry, &expected_source_session] {
+                    auto permit = lineup_permit();
+                    std::lock_guard lock(snapshot_mutex);
+                    const auto now = lineup::Clock::now();
+                    permit.gate_open = permit.gate_open && lineup_capture_at != lineup::Clock::time_point{} &&
+                        now >= lineup_capture_at && now - lineup_capture_at <= 100ms &&
+                        lineup_capture_geometry == expected_geometry && lineup_capture_generation == lineup_bound_generation &&
+                        lineup_source_time_valid && lineup_source_clock_session != 0 &&
+                        expected_source_session == "source-clock-" + std::to_string(lineup_source_clock_session);
+                    return permit;
+                }, [this](bool active) { pause_lineup_outputs(active); },
+                [this] { return lineup_others_idle(); },
+                [this] { safety_gate.emergency_stop(); output_arbiter->latch_output_fault(); },
+                lineup::detail::ExecutionLimits{12, 40, 3000ms, 100ms, 2.0, 6.0});
+            std::uint64_t epoch = 0, locate_sequence = 0;
+            bool pending = false;
+            lineup::Clock::time_point pending_at{};
+            lineup::detail::CalibrationReadResult calibration;
+            std::string unavailable_reason;
+            while (!stop_requested.load() && !lineup_stop.load()) {
+                const auto received = lineup_server.snapshot();
+                auto now = lineup::Clock::now();
+                const bool throw_pressed = lineup_throw_pending.exchange(false);
+                if (!received.connected || !received.available || received.valid_until <= now ||
+                    received.request.mode == lineup::control::Mode::CANCEL) {
+                    session.cancel(now); pending = false;
+                    unavailable_reason = received.reason.empty() ? "lineup_control_unavailable" : received.reason;
+                } else {
+                    if (epoch != received.connection_epoch) {
+                        session.cancel(now); pending = false; epoch = received.connection_epoch; locate_sequence = 0;
+                    }
+                    if (received.locate_sequence != 0 && received.locate_sequence != locate_sequence) {
+                        session.cancel(now); pending = false; locate_sequence = received.locate_sequence;
+                        const auto focus = source_context_client.snapshot();
+                        lineup_focus_session = focus.available && focus.focused ? focus.session_id : 0;
+                        const auto &observation = received.request.observation;
+                        expected_geometry = observation.identity.geometry;
+                        expected_source_session = observation.identity.session_id;
+                        bool geometry_matches = false;
+                        {
+                            std::lock_guard lock(snapshot_mutex);
+                            geometry_matches = expected_geometry == lineup_capture_geometry && lineup_source_time_valid &&
+                                lineup_source_clock_session != 0 &&
+                                expected_source_session == "source-clock-" + std::to_string(lineup_source_clock_session);
+                            lineup_bound_generation = lineup_capture_generation;
+                        }
+                        if (observation.identity.source_id != config.capture.ndi_source_name || !geometry_matches) {
+                            unavailable_reason = "runtime_capture_source_or_geometry_mismatch";
+                        } else {
+                            calibration = lineup::detail::read_calibration(
+                                std::filesystem::u8path(config.lineup.calibration_file), observation.identity.source_id,
+                                expected_geometry, MouseBackendName(config.mouse.backend), config.lineup.calibration_context);
+                            unavailable_reason = calibration.valid ? "" : calibration.reason;
+                            pending = calibration.valid;
+                            pending_at = lineup::Clock::now();
+                        }
+                    }
+                    if (pending && now - pending_at > 500ms) {
+                        session.cancel(now); pending = false; unavailable_reason = "competing_output_cleanup_timeout";
+                    }
+                    if (pending) {
+                        if (session.reserve()) {
+                            now = lineup::Clock::now();
+                            session.locate(received.request.observation, calibration.calibration, now);
+                            pending = false;
+                        }
+                    } else if (session.active()) {
+                        session.observe(received.request.observation, now);
+                        if (throw_pressed) {
+                            lineup::detail::ExecutionThrowPlan plan;
+                            plan.id = received.request.observation.identity.recipe_id + ":" +
+                                      std::to_string(received.request.observation.identity.recipe_version);
+                            plan.identity = received.request.observation.identity;
+                            plan.action = received.request.throw_action;
+                            const auto design = lineup::detail::inspect_action(plan.action);
+                            plan.validated = design.valid && design.configured && design.timing_complete;
+                            session.throw_edge(received.request.observation, plan, lineup::Clock::now());
+                        }
+                        session.tick(lineup::Clock::now());
+                    }
+                }
+                const auto snapshot = session.snapshot();
+                const char *state = snapshot.state == State::ALIGNING ? "aligning" : snapshot.state == State::ALIGNED ? "aligned" :
+                    snapshot.state == State::HOLDING ? "holding" : snapshot.state == State::COMPLETED ? "completed" :
+                    snapshot.state == State::UNKNOWN ? "unknown" : snapshot.state == State::CANCELLED ? "cancelled" :
+                    snapshot.state == State::BLOCKED ? "blocked" : "idle";
+                lineup_server.publish_status({{"state", state}, {"reason", unavailable_reason.empty() ? snapshot.reason : unavailable_reason},
+                    {"production_available", true}, {"active", session.active()}, {"steps", snapshot.steps},
+                    {"waiting_feedback", snapshot.waiting_feedback}, {"cleanup_required", snapshot.cleanup_required},
+                    {"release_may_throw", snapshot.release_may_throw}, {"completed_events", snapshot.completed_events},
+                    {"calibration_valid", calibration.valid},
+                    {"calibration_status", {{"valid", calibration.valid}, {"reason", calibration.reason}}},
+                    {"real_verified", false},
+                    {"capabilities", {{"left_button", mouse->supports_left_button()},
+                                      {"right_button", mouse->supports_lineup_inputs()},
+                                      {"movement", mouse->supports_wasd_keyboard()},
+                                      {"jump", mouse->supports_lineup_inputs()}}},
+                    {"throw_bound", config.keyboard.lineup_throw_virtual_key != 0}});
+                std::this_thread::sleep_for(5ms);
+            }
+            session.cancel(lineup::Clock::now());
+        } catch (...) {
+            safety_gate.emergency_stop();
+            lineup_active.store(true); // 异常清理状态不明时禁止竞争输出。
+            lineup_server.publish_status({{"state", "unknown"}, {"reason", "runtime_lineup_exception"},
+                                          {"production_available", true}});
+        }
     }
 
     void capture_loop() noexcept {
@@ -540,6 +743,14 @@ struct Runtime::Impl {
                 const double elapsed =
                     std::chrono::duration<double>(now - fps_started).count();
                 std::lock_guard<std::mutex> lock(snapshot_mutex);
+                lineup_capture_geometry = {write_slot->width, write_slot->height, write_slot->source_width,
+                    write_slot->source_height, write_slot->encoded_width, write_slot->encoded_height,
+                    write_slot->roi_x, write_slot->roi_y, write_slot->source_pixels_per_pixel_x,
+                    write_slot->source_pixels_per_pixel_y, write_slot->source_mapping_verified};
+                lineup_capture_at = write_slot->timing.captured_at;
+                lineup_capture_generation = write_slot->timing.receiver_generation;
+                lineup_source_clock_session = write_slot->timing.source_clock_session_id;
+                lineup_source_time_valid = write_slot->timing.source_time_timing_valid;
                 current_snapshot.capture_status = capture_status;
                 current_snapshot.captured_frames =
                     frame_publisher.published_frames();
@@ -900,7 +1111,7 @@ struct Runtime::Impl {
                 const auto frame_weapon_session = sample_aim_weapon_session();
                 auto prepared = runtime::detail::prepare_aim_frame(
                     *frame, std::move(detections), observation_clock,
-                    camera_motion, safety_gate.can_dispatch() && frame_weapon_session.allowed);
+                    camera_motion, !lineup_active.load() && safety_gate.can_dispatch() && frame_weapon_session.allowed);
                 if (prepared.reset_aim || frame_weapon_session.reset_aim) {
                     if (auto stop = auto_stop_worker.load()) {
                         stop->publish_target({}); stop->publish_tracking_target({});
@@ -938,7 +1149,7 @@ struct Runtime::Impl {
                 // 在计算前等待正在执行的短事务；辅助动作计时不占通道。
                 // 不先算好命令再等锁，也不把正常短事务竞争当作零执行继续推进控制。
                 runtime::detail::AimOutputSlot output_slot;
-                if (runtime::detail::aim_frame_dispatch_allowed(aim_frame, safety_gate.can_dispatch()) && output_arbiter) {
+                if (runtime::detail::aim_frame_dispatch_allowed(aim_frame, !lineup_active.load() && safety_gate.can_dispatch()) && output_arbiter) {
                     const int timeout_ms = config.mouse.backend == MouseBackend::MAKCU
                         ? config.mouse.makcu_command_timeout_ms : config.mouse.kmbox_command_timeout_ms;
                     output_slot = runtime::detail::acquire_aim_output_slot(
@@ -953,7 +1164,7 @@ struct Runtime::Impl {
                 }
                 const auto control_weapon_session = sample_aim_weapon_session();
                 if (control_weapon_session.reset_aim) aim_reset_requested.store(true, std::memory_order_release);
-                aim_frame.lock_active = runtime::detail::aim_frame_dispatch_allowed(aim_frame, safety_gate.can_dispatch(),
+                aim_frame.lock_active = runtime::detail::aim_frame_dispatch_allowed(aim_frame, !lineup_active.load() && safety_gate.can_dispatch(),
                     frame_weapon_session, control_weapon_session);
                 aim_frame.control_at = std::chrono::steady_clock::now();
                 profile.control_timing_valid = true;
@@ -984,7 +1195,7 @@ struct Runtime::Impl {
                     const auto dispatch_weapon_session = sample_aim_weapon_session();
                     if (dispatch_weapon_session.reset_aim) aim_reset_requested.store(true, std::memory_order_release);
                     bool dispatch_allowed = runtime::detail::aim_frame_dispatch_allowed(
-                        aim_frame, safety_gate.can_dispatch(), frame_weapon_session, dispatch_weapon_session) &&
+                        aim_frame, !lineup_active.load() && safety_gate.can_dispatch(), frame_weapon_session, dispatch_weapon_session) &&
                         (!config.recoil.enabled || config.recoil.mixed_aim);
                     if (output_arbiter) dispatch_allowed = dispatch_allowed && output_slot.guard.owns_lock() &&
                         aim_frame.recoil_y_owned == output_arbiter->recoil_y_owned();
@@ -1000,7 +1211,7 @@ struct Runtime::Impl {
                         dispatch_allowed = false;
                         record_aim_rejection(output_slot, frame->timing.source_time_timing_valid);
                     }
-                    if (dispatch_allowed) {
+                    if (dispatch_allowed && !lineup_active.load()) {
                         const auto mouse_started = mouse_backend_completed;
                         mouse_receipt = mouse->move(command);
                         mouse_sent = mouse_receipt.succeeded;
@@ -1210,7 +1421,13 @@ struct Runtime::Impl {
             auto worker = std::make_shared<movement::Worker>(mouse, [this] {
                 // 只沿用应用已有输出开关/急停；身法没有视觉、武器或地面前提。
                 return config.mouse.allow_send_input && !stop_requested.load() &&
-                    safety_gate.output_armed() && !safety_gate.emergency_stopped();
+                    !lineup_active.load() && safety_gate.output_armed() && !safety_gate.emergency_stopped();
+            }, [this](bool suspended) {
+                if (auto counter_strafe = auto_stop_worker.load()) {
+                    counter_strafe->set_movement_suspended(suspended);
+                    return !suspended || counter_strafe->movement_suspension_ready();
+                }
+                return true;
             });
             if (!worker->start(value)) {
                 movement_start_failed = true;
@@ -1233,6 +1450,11 @@ struct Runtime::Impl {
     }
 
     void release_modules() noexcept {
+        lineup_stop.store(true);
+        if (lineup_thread.joinable()) lineup_thread.join();
+        lineup_server.stop();
+        lineup_active.store(false);
+        lineup_throw_pending.store(false);
         movement_start_failed = false;
         if (auto worker = movement_worker.exchange(std::shared_ptr<movement::Worker>{})) {
             worker->stop();
@@ -1270,6 +1492,12 @@ struct Runtime::Impl {
                     found == recoil_profile_statuses.end() ? id + "：无匹配曲线" : found->second;
             }
         }
+        {
+            std::lock_guard lock(lineup_locate_mutex);
+            lineup_locate_enabled = false;
+            lineup_locate = {};
+        }
+        context_publisher.stop();
         gsi_receiver.stop();
         source_context_client.stop();
         if (auto worker = auto_stop_worker.exchange(
@@ -1615,6 +1843,25 @@ bool Runtime::reload_detector(const DetectorConfig& config) noexcept {
 bool Runtime::post_intent(const RuntimeIntent& intent) noexcept {
     if (!impl_) return false;
     switch (intent.type) {
+        case RuntimeIntentType::LINEUP_THROW: {
+            if (!intent.active || impl_->stop_requested.load() ||
+                impl_->config.keyboard.lineup_throw_virtual_key == 0 || !impl_->lineup_active.load() ||
+                !impl_->safety_gate.can_dispatch_auxiliary()) return false;
+            return !impl_->lineup_throw_pending.exchange(true);
+        }
+        case RuntimeIntentType::LINEUP_LOCATE: {
+            if (!intent.active || impl_->stop_requested.load()) return false;
+            {
+                std::lock_guard state_lock(impl_->snapshot_mutex);
+                if (impl_->current_snapshot.state != RuntimeState::RUNNING) return false;
+            }
+            std::lock_guard lock(impl_->lineup_locate_mutex);
+            if (!impl_->lineup_locate_enabled || impl_->lineup_locate.sequence == UINT64_MAX)
+                return false;
+            ++impl_->lineup_locate.sequence;
+            impl_->lineup_locate.at = weapon::Clock::now();
+            return true;
+        }
         case RuntimeIntentType::ARM_OUTPUT:
             // 重载完成会强制解除控制武装；加载窗口拒绝新的武装请求，
             // 避免指针交换与主线程 ARM 意图竞争后意外恢复状态。
@@ -1681,7 +1928,7 @@ bool Runtime::post_intent(const RuntimeIntent& intent) noexcept {
 }
 
 bool Runtime::request_auto_stop(std::uint64_t request_id) noexcept {
-    if (!impl_ || !impl_->safety_gate.can_dispatch_auxiliary() ||
+    if (!impl_ || impl_->lineup_active.load() || !impl_->safety_gate.can_dispatch_auxiliary() ||
         impl_->stop_requested.load(std::memory_order_acquire)) return false;
     {
         std::lock_guard<std::mutex> lock(impl_->snapshot_mutex);

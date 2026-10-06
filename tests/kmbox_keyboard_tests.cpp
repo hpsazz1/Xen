@@ -59,6 +59,9 @@ void test_win32_input_stays_unverified_without_owned_source() {
     auto mouse = create_test_mouse(config);
     expect(mouse && mouse->open(),
            "Win32 输出 adapter 必须能在物理输出禁用态打开");
+    expect(!mouse->supports_left_ctrl_key() &&
+        mouse->set_left_ctrl_key(true).disposition == KeyboardDisposition::UNSUPPORTED,
+        "不支持Ctrl的后端不得换键或假成功");
     expect(!mouse->supports_wasd_keyboard() &&
         mouse->set_wasd_keyboard(1).disposition == KeyboardDisposition::UNSUPPORTED &&
         !mouse->set_wasd_event_subscription(true),
@@ -311,6 +314,69 @@ MouseConfig config_for(int port) {
     config.kmbox_command_timeout_ms = 40;
     return config;
 }
+void test_left_ctrl_composes_and_preserves_physical_state() {
+    FakeKmboxDevice device(std::vector<AckMode>(11, AckMode::VALID));
+    auto mouse = create_test_mouse(config_for(device.port()));
+    expect(mouse && mouse->open() && mouse->supports_left_ctrl_key(), "KMBOX声明Left Ctrl能力");
+    if (!mouse) return;
+    std::array<std::uint8_t,20> report{};
+    report[9] = 0x01; // 物理Left Ctrl modifier，不能转成软件保活。
+    device.send_monitor_packet(report);
+    InputSnapshot input;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    do {
+        mouse->poll_input(input);
+        if (input.state_valid && input.virtual_keys[VK_LCONTROL]) break;
+        std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < deadline);
+    expect(input.state_valid && input.virtual_keys[VK_LCONTROL], "monitor接收物理Ctrl");
+    const auto acknowledged = [&](KeyboardReceipt receipt) {
+        expect(receipt.disposition == KeyboardDisposition::ACKNOWLEDGED, "Ctrl组合键盘事务得到ACK");
+    };
+    acknowledged(mouse->set_wasd_keyboard(2));
+    acknowledged(mouse->set_space_key(true));
+    acknowledged(mouse->set_left_ctrl_key(true));
+    acknowledged(mouse->set_wasd_keyboard(8));
+    acknowledged(mouse->set_space_key(false));
+    acknowledged(mouse->set_left_ctrl_key(false));
+    acknowledged(mouse->set_left_ctrl_key(true));
+    acknowledged(mouse->cleanup_wasd_keyboard());
+    const auto packets = device.packets();
+    expect(packets.size() == 10, "Ctrl未安装额外物理mask/unmask");
+    if (packets.size() == 10) {
+        expect(packets[4][16] == 1 && packets[4][18] == 0x04 && packets[4][19] == 0x2c,
+            "Ctrl按下保留A/Space软件键");
+        expect(packets[5][16] == 1 && packets[5][18] == 0x07 && packets[5][19] == 0x2c,
+            "方向替换保留Ctrl/Space");
+        expect(packets[6][16] == 1 && packets[6][18] == 0x07 && packets[6][19] == 0,
+            "Space释放不丢Ctrl/D");
+        expect(packets[7][16] == 0 && packets[7][18] == 0x07, "Ctrl释放保留D");
+        expect(std::all_of(packets[9].begin()+16, packets[9].end(), [](auto byte) { return byte == 0; }),
+            "取消清理归零软件Ctrl/WASD/Space且不复制物理Ctrl");
+    }
+    mouse->poll_input(input);
+    expect(input.virtual_keys[VK_LCONTROL], "软件Ctrl释放与cleanup均不改写物理Ctrl快照");
+    mouse->close(); device.finish();
+}
+
+void test_left_ctrl_unknown_release_keeps_cleanup_debt() {
+    FakeKmboxDevice device({AckMode::VALID, AckMode::VALID, AckMode::NONE,
+        AckMode::NONE, AckMode::VALID, AckMode::VALID});
+    auto mouse = create_test_mouse(config_for(device.port()));
+    expect(mouse && mouse->open(), "Ctrl丢ACK回环连接");
+    if (!mouse) return;
+    expect(mouse->set_left_ctrl_key(true).disposition == KeyboardDisposition::APPLICATION_UNKNOWN,
+        "Ctrl down丢ACK为应用未知");
+    expect(mouse->set_left_ctrl_key(false).disposition == KeyboardDisposition::APPLICATION_UNKNOWN,
+        "Ctrl up丢ACK仍需清理不能假成功");
+    expect(mouse->cleanup_wasd_keyboard().disposition == KeyboardDisposition::ACKNOWLEDGED,
+        "未知Ctrl释放后cleanup重发零报告直到ACK");
+    const auto packets = device.packets();
+    expect(packets.size() == 5 && packets[2][16] == 1 && packets[3][16] == 0 && packets[4][16] == 0,
+        "Ctrl debt复用已有键盘清理机制");
+    mouse->close(); device.finish();
+}
+
 void test_packets_and_owned_cleanup() {
     FakeKmboxDevice device(std::vector<AckMode>(10, AckMode::VALID));
     auto mouse = create_test_mouse(config_for(device.port()));
@@ -461,6 +527,42 @@ void test_cleanup_refreshes_only_empty_software_report() {
         mouse->close(); device.finish();
     }
 }
+
+void test_movement_wad_release_uses_current_physical_state() {
+    for (int ending : {0,1,2}) {
+        FakeKmboxDevice device(std::vector<AckMode>(12, AckMode::VALID));
+        auto mouse=create_test_mouse(config_for(device.port()));
+        expect(mouse && mouse->open(), "身法WAD接管假设备连接");
+        if(!mouse)continue;
+        InputSnapshot input;
+        const auto wait_keys=[&](bool w,bool a,bool d) {
+            const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(1);
+            do {mouse->poll_input(input);if(input.state_valid && input.virtual_keys['W']==w &&
+                input.virtual_keys['A']==a && input.virtual_keys['D']==d && input.virtual_keys['Q'])return true;
+                std::this_thread::yield();}while(std::chrono::steady_clock::now()<deadline);
+            return false;
+        };
+        device.send_monitor(0,{0x1a,0x04,0x14});expect(wait_keys(true,true,false),"接收初始物理W/A");
+        for(std::uint8_t key:{1,2,8})expect(mouse->set_wasd_mask(key,true).disposition==KeyboardDisposition::ACKNOWLEDGED,"逐键屏蔽W/A/D");
+        expect(mouse->set_wasd_keyboard(8).disposition==KeyboardDisposition::ACKNOWLEDGED,"程序发D");
+        if(ending==1)device.send_monitor(0,{0x14});
+        if(ending==2)device.send_monitor(0,{0x07,0x14});
+        expect(wait_keys(ending==0,ending==0,ending==2),"屏蔽后monitor仍反映松键或新按D");
+        expect(mouse->cleanup_wasd_keyboard().disposition==KeyboardDisposition::ACKNOWLEDGED,"清理WAD已确认");
+        const auto packets=device.packets();
+        expect(packets.size()==11,"WAD清理命令数量");
+        if(packets.size()==11) {
+            const auto empty=[&](std::size_t i){return packets[i].size()==28 && read_u32_le(packets[i].data()+12)==0x123c2c2fU &&
+                std::all_of(packets[i].begin()+16,packets[i].end(),[](auto byte){return byte==0;});};
+            expect(empty(6) && empty(10),"释放和恢复刷新只发零软件键态，不补按初始快照");
+            const std::array<std::uint32_t,3> usages{0x1a00U,0x0400U,0x0700U};
+            for(std::size_t i=0;i<3;++i)expect(read_u32_le(packets[7+i].data()+12)==0x23344343U && read_u32_le(packets[7+i].data()+4)==usages[i],"只恢复本owner的WAD屏蔽");
+        }
+        expect(wait_keys(ending==0,ending==0,ending==2),"结束保持最新物理状态而非开始状态");
+        mouse->close();device.finish();
+    }
+}
+
 void test_last_refresh_debt_survives_retry_and_recreation() {
     for (const bool recreate : {false, true}) {
         std::vector<AckMode> responses(recreate ? 13 : 9, AckMode::VALID);
@@ -611,8 +713,11 @@ void test_event_journal() {
 int main() {
     WSADATA data{};
     if (WSAStartup(MAKEWORD(2,2), &data) != 0) return 2;
+    test_left_ctrl_composes_and_preserves_physical_state();
+    test_left_ctrl_unknown_release_keeps_cleanup_debt();
     test_packets_and_owned_cleanup();
     test_cleanup_refreshes_only_empty_software_report();
+    test_movement_wad_release_uses_current_physical_state();
     test_last_refresh_debt_survives_retry_and_recreation();
     test_all_combinations_and_disabled_output();
     test_ack_loss_cleanup();

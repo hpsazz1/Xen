@@ -24,7 +24,7 @@
 
 - Windows x64
 - Visual Studio 2026 / MSVC v14.51，安装 C++ 桌面开发组件
-- CMake 3.18 或更高版本
+- CMake 4.2 或更高版本（本文 `Visual Studio 18 2026` 生成器所需；项目声明的最低 CMake 版本仍为 3.18）
 - 与目标 Provider 匹配的 ONNX Runtime SDK
 - OpenCV
 - 开启 `BUILD_TESTING`：PowerShell 7，以及能导入 NumPy 和 OpenCV（`cv2`）的 Python 3

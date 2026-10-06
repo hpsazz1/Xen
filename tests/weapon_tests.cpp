@@ -24,6 +24,22 @@ int main() {
     using namespace weapon::detail;
     using namespace std::chrono_literals;
     GsiConfig config;
+    {
+        GsiConfig cfg; cfg.enabled = true;
+        GsiState state;
+        auto body = payload(cfg); body["map"]["name"] = "de_dust2"; body["player"]["team"] = "T";
+        const auto now = Clock::now();
+        state.ingest(body.dump(), cfg, now, 1700000000000);
+        const auto before = state.snapshot(now).context_epoch;
+        body["provider"]["timestamp"] = 1700000001;
+        body["player"]["steamid"] = "76561198000000001";
+        state.ingest(body.dump(), cfg, now + 1ms, 1700000001000);
+        body["provider"]["timestamp"] = 1700000002;
+        body["player"]["steamid"] = "76561198000000000";
+        state.ingest(body.dump(), cfg, now + 2ms, 1700000002000);
+        expect(state.snapshot(now + 2ms).context_valid && state.snapshot(now + 2ms).context_epoch > before,
+            "context discontinuity survives coalesced observation");
+    }
     expect(!valid_config(config), "GSI默认关闭");
     config.enabled = true;
     expect(valid_config(config), "显式本地配置");
@@ -330,6 +346,73 @@ int main() {
     expect(denied.ingest(bad.dump(), config, start + 100ms, utc + 100) == Status::DUPLICATE &&
            denied.snapshot(start + 100ms).revision == 1 && denied.snapshot(start + 100ms).valid_until == first.valid_until,
            "旧auth字段变化不能绕过去重或续命");
+    // 地图/阵营目录事实与控制字段分离；以下均为合成 GSI，不监听端口。
+    expect(canonical_map_id(" DE_DUST2 ") == "de_dust2", "普通地图只做ASCII大小写及外部空白规范化");
+    expect(canonical_map_id("workshop/123/de_test") == "workshop/123/de_test" &&
+           canonical_map_id("workshop/124/de_test") != canonical_map_id("workshop/123/de_test"),
+           "同名创意工坊图保留不同项目ID");
+    for (const auto* invalid : {"", "../de_dust2", "maps/de_dust2", "workshop/x/map", "workshop/1/../map", "de dust2", "de_dust2.bsp", "workshop/1/", "workshop//de_test"})
+        expect(canonical_map_id(invalid).empty(), "不猜测路径、扩展名或非法地图名");
+    auto context = full; context["map"]["name"] = "de_dust2"; context["player"]["team"] = "CT";
+    auto context_parsed = parse_payload(context.dump(), config, utc);
+    expect(context_parsed.context_valid && context_parsed.map_name == "de_dust2" && context_parsed.local_team == Team::CT && context_parsed.valid,
+           "合法本地地图与阵营独立发布");
+    auto equipment = context;
+    equipment["player"]["weapons"]["weapon_0"] = {{"name","weapon_smokegrenade"},{"type","Grenade"},{"state","active"}};
+    auto grenade_context = parse_payload(equipment.dump(), config, utc);
+    expect(grenade_context.context_valid && !grenade_context.valid && grenade_context.status == Status::NON_FIREARM,
+           "手持手雷上下文可用但枪械有效性仍为false");
+    for (int variation=0; variation<4; ++variation) {
+        auto sample = context;
+        if (variation==0) sample["player"].erase("weapons");
+        if (variation==1) sample["player"]["weapons"]["weapon_0"]["ammo_clip"] = 0;
+        if (variation==2) sample["player"]["weapons"]["weapon_0"]["state"] = "reloading";
+        if (variation==3) sample["player"]["state"]["health"] = 0;
+        auto result = parse_payload(sample.dump(), config, utc);
+        expect(result.context_valid && !result.valid && result.local_team == Team::CT,
+               "缺武器、空弹、换弹或仍为自身身份的死亡不冒充有效枪械，也不丢目录事实");
+    }
+    for (int variation=0; variation<9; ++variation) {
+        auto sample = context;
+        if (variation==0) sample.erase("map");
+        if (variation==1) sample["map"]["name"] = nullptr;
+        if (variation==2) sample["player"].erase("team");
+        if (variation==3) sample["player"]["team"] = "SPECTATOR";
+        if (variation==4) sample["player"]["steamid"] = "76561198000000001";
+        if (variation==5) sample["player"]["activity"] = "menu";
+        if (variation==6) sample["provider"]["appid"] = 570;
+        if (variation==7) sample["provider"].erase("timestamp");
+        if (variation==8) {sample["player"]["steamid"] = "76561198000000001"; sample["player"]["state"]["health"] = 100;sample["player"]["team"] = "T";}
+        auto result = parse_payload(sample.dump(), config, utc);
+        expect(!result.context_valid && result.map_name.empty() && result.local_team == Team::UNKNOWN,
+               "缺失、未知、观战目标或失信身份均清空地图阵营而不继承");
+    }
+    expect(!parse_payload(context.dump(),config,utc+10000).context_valid, "旧墙钟上下文拒绝");
+    GsiState context_state;
+    const auto context_now=Clock::time_point{}+1s;
+    context_state.ingest(context.dump(),config,context_now,utc);
+    const auto context_first=context_state.snapshot(context_now);
+    auto another_map=context;another_map["map"]["name"]="de_inferno";
+    expect(context_state.ingest(another_map.dump(),config,context_now+1ms,utc+1)==Status::READY,
+           "同秒仅换地图不被武器指纹吞掉");
+    auto context_second=context_state.snapshot(context_now+1ms);
+    expect(context_second.map_name=="de_inferno" && context_second.context_valid &&
+           context_second.valid_until==context_first.valid_until && context_second.control_safety_epoch==context_first.control_safety_epoch &&
+           context_second.recoil_safety_epoch==context_first.recoil_safety_epoch && context_second.source_epoch==context_first.source_epoch,
+           "地图变化不续TTL，不改变枪械控制安全代际");
+    expect(context_state.ingest(context.dump(),config,context_now+2ms,utc+2)==Status::DUPLICATE &&
+           !context_state.snapshot(context_now+2ms).context_valid && context_state.snapshot(context_now+2ms).valid,
+           "同秒已见旧地图回退清目录事实但保留原武器去重契约");
+    another_map["provider"]["timestamp"]=1700000001;
+    context_state.ingest(another_map.dump(),config,context_now+1s,utc+1000);
+    expect(context_state.snapshot(context_now+1s).context_valid, "新时间戳恢复上下文");
+    expect(context_state.ingest(context.dump(),config,context_now+1100ms,utc+1100)==Status::OUT_OF_ORDER &&
+           !context_state.snapshot(context_now+1100ms).context_valid && context_state.snapshot(context_now+1100ms).valid,
+           "旧秒包不回滚武器，但撤销目录上下文");
+    GsiState grenade_state;grenade_state.ingest(equipment.dump(),config,context_now,utc);
+    expect(grenade_state.snapshot(context_now).context_valid && !grenade_state.snapshot(context_now+2500ms).context_valid &&
+           grenade_state.snapshot(context_now+2500ms).map_name.empty(), "手雷valid=false也严格执行上下文TTL");
+    grenade_state.reset();expect(!grenade_state.snapshot(context_now).context_valid,"reset撤销目录事实");
     // 只测试纯解码/时间状态，不start接收器、不监听、不访问游戏或设备。
     return failures == 0 ? 0 : 1;
 }

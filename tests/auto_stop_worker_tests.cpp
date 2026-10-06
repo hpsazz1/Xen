@@ -1,4 +1,5 @@
 #include "auto_stop/auto_stop_worker.h"
+#include "movement/movement.h"
 #include <algorithm>
 #include <chrono>
 #include <deque>
@@ -40,6 +41,28 @@ public:
         BackendCall call(*this);
         ++moves;
         MouseMoveReceipt result; result.succeeded = true; result.backend_completed_at = Clock::now(); return result;
+    }
+    std::vector<InputReportEvent> movement_reports;
+    bool movement_subscribed = false;
+    void movement_report(int wheel) {
+        std::lock_guard lock(mutex);
+        InputReportEvent event; event.state_valid = true; event.epoch = 1;
+        event.sequence = movement_reports.size() + 1; event.received_at_steady_ns = clock_ns();
+        event.raw_wheel = static_cast<std::int16_t>(wheel); movement_reports.push_back(event);
+    }
+    bool set_movement_report_subscription(bool enabled) noexcept override {
+        std::lock_guard lock(mutex); movement_subscribed = enabled; return true;
+    }
+    bool read_movement_reports(InputReportCursor& cursor, InputReportBatch& batch) noexcept override {
+        std::lock_guard lock(mutex); batch = {}; batch.subscribed = movement_subscribed;
+        batch.epoch = 1; batch.final_sequence = movement_reports.size(); batch.status = InputMonitorStatus::READY;
+        if (cursor.epoch != 1) cursor = {1, 0};
+        for (const auto& event : movement_reports) {
+            if (event.sequence > cursor.sequence && batch.count < batch.events.size()) {
+                batch.events[batch.count++] = event; cursor.sequence = event.sequence;
+            }
+        }
+        return true;
     }
     bool output_owner_exclusive() const noexcept override { return true; }
     bool supports_wasd_keyboard() const noexcept override { return true; }
@@ -1170,6 +1193,15 @@ void automatic_recovery_contracts(bool hud_reference) {
         if (scenario == 4) worker.set_paused(true);
         if (scenario == 5) { std::lock_guard lock(fake->mutex); fake->gap = true; }
         wait_for([&] { return worker.snapshot().canceled != 0 && fake->released(); });
+        if (scenario == 3) {
+            const bool recovery_before = worker.snapshot().recovery_pending;
+            require(recovery_before, "permission loss requires recovery before movement");
+            worker.set_movement_suspended(true);
+            wait_for([&] { return worker.movement_suspension_ready(); });
+            worker.set_movement_suspended(false);
+            std::this_thread::sleep_for(20ms);
+            require(worker.snapshot().recovery_pending, "movement cannot clear existing recovery requirement");
+        }
         const auto stopped_reports = fake->reports();
         publish_present_target(worker, Clock::now() + 2s);
         std::this_thread::sleep_for(30ms);
@@ -1187,6 +1219,7 @@ void automatic_recovery_contracts(bool hud_reference) {
                 "连接恢复但未重新取得可信WASD事件流不得输出");
             fake->physical_batch({0, 1});
         }
+        if (scenario == 3) fake->physical_batch({0, 1});
         wait_for([&] { return !worker.snapshot().recovery_pending; });
         publish_present_target(worker, Clock::now() + 2s);
         wait_for([&] { return worker.estimated_completion_id() > first_id; });
@@ -1412,8 +1445,132 @@ void mixed_request_owner_contracts() {
         worker.stop();
     }
 }
+void movement_suspension_reentry_contract() {
+    using namespace std::chrono_literals;
+    auto fake = std::make_shared<Fake>();
+    std::atomic<std::uint64_t> id{0}; std::atomic<bool> allowed{true}, block{false};
+    std::promise<void> entered_promise, release_promise;
+    auto entered = entered_promise.get_future(); auto release = release_promise.get_future().share();
+    fake->before_wasd_read = [&] { if (block.exchange(false)) { entered_promise.set_value(); release.wait_for(2s); } };
+    AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [&] { return allowed.load(); },
+        [&] { return ++id; }, [] { return true; });
+    AutoStopConfig config{true, 5}; config.cycle_enabled = true;
+    require(worker.start(config), "suspension reentry start");
+    ready(worker, fake); publish_present_target(worker, Clock::now() + 2s);
+    wait_for([&] { return worker.estimated_completion_id() != 0; });
+    require(!worker.snapshot().recovery_pending, "no recovery before movement");
+    worker.set_movement_suspended(true);
+    wait_for([&] { return worker.movement_suspension_ready(); });
+    require(worker.snapshot().recovery_pending, "handoff creates temporary recovery requirement");
+    block = true;
+    require(entered.wait_for(1s) == std::future_status::ready, "hold suspension worker before reentry");
+    worker.set_movement_suspended(false); worker.set_movement_suspended(true);
+    release_promise.set_value();
+    wait_for([&] { return worker.movement_suspension_ready(); });
+    allowed = false;
+    worker.set_movement_suspended(false);
+    wait_for([&] { return !worker.snapshot().recovery_pending; });
+    worker.stop();
+}
+
+void movement_shared_worker_contract() {
+    using namespace std::chrono_literals;
+    auto fake = std::make_shared<Fake>(); fake->activation = false;
+    auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+    std::atomic<std::uint64_t> id{0};
+    AutoStopWorker stop(fake, arbiter, [] { return true; }, [&] { return ++id; }, [] { return true; });
+    require(stop.start(AutoStopConfig{true, 0}), "shared auto stop start");
+    movement::Worker movement(fake, [] { return true; },
+        [&](bool suspended) { stop.set_movement_suspended(suspended); return !suspended || stop.movement_suspension_ready(); });
+    movement::Config config; config.large_ctrl_enabled = false; config.enabled = true; config.spin_enabled = false; config.large_enabled = true;
+    config.large_duration_ms = 20; config.trigger_guard_ms = 150;
+    require(movement.start(config), "shared movement start");
+    fake->movement_report(0);
+    fake->physical(0); wait_for([&] { return fake->drained(); });
+    fake->physical(2); wait_for([&] { return fake->drained(); });
+    std::promise<void> entered_promise, release_promise;
+    auto entered = entered_promise.get_future(); auto release = release_promise.get_future().share();
+    { std::lock_guard lock(fake->mutex); fake->before_cleanup = [&] { entered_promise.set_value(); release.wait_for(2s); }; }
+    fake->physical(0);
+    wait_for([&] { auto reports = fake->reports(); return std::find(reports.begin(), reports.end(), 8) != reports.end(); });
+    fake->movement_report(-1);
+    require(entered.wait_for(1s) == std::future_status::ready, "shared cleanup entered");
+    wait_for([&] { return movement.snapshot().started == 1; });
+    require(fake->moves.load() == 0 && !fake->has_masks(), "movement waits for counterpulse cleanup ACK");
+    release_promise.set_value();
+    wait_for([&] { return fake->moves.load() > 0; });
+    const auto stop_requests = stop.snapshot().requests;
+    fake->physical_batch({2, 0, 8, 0});
+    wait_for([&] { return movement.snapshot().state == movement::State::COOLDOWN; });
+    fake->physical_batch({2, 0, 8, 0});
+    wait_for([&] { return fake->drained(); });
+    require(stop.snapshot().requests == stop_requests, "no counterpulse during movement and cooldown");
+    wait_for([&] { return movement.snapshot().state == movement::State::IDLE; });
+    std::this_thread::sleep_for(20ms);
+    require(stop.snapshot().requests == stop_requests, "no counterpulse replay after movement");
+    movement.stop(); stop.stop();
+}
+
+void movement_suspension_contracts() {
+    using namespace std::chrono_literals;
+    auto fake = std::make_shared<Fake>(); fake->activation = false;
+    auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+    std::atomic<std::uint64_t> id{0};
+    AutoStopWorker worker(fake, arbiter, [] { return true; }, [&] { return ++id; }, [] { return true; });
+    require(worker.start(AutoStopConfig{true, 0}), "movement suspension start");
+    fake->physical(0); wait_for([&] { return fake->drained(); });
+    fake->physical(2); wait_for([&] { return fake->drained(); });
+    std::promise<void> cleanup_entered, cleanup_release;
+    auto entered = cleanup_entered.get_future();
+    auto release = cleanup_release.get_future().share();
+    { std::lock_guard lock(fake->mutex); fake->before_cleanup = [&] {
+        cleanup_entered.set_value(); release.wait_for(2s);
+    }; }
+    fake->physical(0);
+    wait_for([&] { auto reports = fake->reports(); return std::find(reports.begin(), reports.end(), 8) != reports.end(); });
+    worker.set_movement_suspended(true);
+    require(entered.wait_for(1s) == std::future_status::ready, "cleanup entered before ready");
+    require(!worker.movement_suspension_ready(), "inflight cleanup cannot grant movement");
+    require(!worker.request(100) && !worker.resume_movement(1, Clock::now()), "suspension rejects queued work");
+    cleanup_release.set_value();
+    wait_for([&] { return worker.movement_suspension_ready(); });
+    { auto guard = arbiter->try_enter_cleanup(); require(guard.owns_lock(), "ready releases arbiter"); }
+    const auto count = fake->reports().size();
+    worker.set_movement_suspended(true);
+    fake->physical_batch({2, 0, 8, 0});
+    wait_for([&] { return fake->drained(); });
+    worker.publish_target(Clock::now() + 2s);
+    worker.publish_tracking_target(Clock::now() + 2s);
+    require(fake->reports().size() == count, "suspended edges produce no counterpulse");
+    worker.set_movement_suspended(false);
+    worker.set_movement_suspended(false);
+    require(!worker.movement_suspension_ready(), "resume revokes ready");
+    std::this_thread::sleep_for(20ms);
+    fake->physical(0); wait_for([&] { return fake->drained(); });
+    std::this_thread::sleep_for(5ms);
+    require(fake->reports().size() == count && !worker.snapshot().target_available,
+        "resume does not replay edges or targets");
+    fake->physical(8); wait_for([&] { return fake->drained(); });
+    fake->physical(0);
+    wait_for([&] { return fake->reports().size() > count; });
+    worker.set_movement_suspended(true);
+    wait_for([&] { return worker.movement_suspension_ready(); });
+    worker.set_paused(true);
+    worker.set_movement_suspended(false);
+    std::this_thread::sleep_for(10ms);
+    const auto paused_count = fake->reports().size();
+    fake->physical_batch({2, 0}); wait_for([&] { return fake->drained(); });
+    require(fake->reports().size() == paused_count, "movement resume preserves user pause");
+    worker.stop();
+    require(!worker.movement_suspension_ready(), "stopped worker cannot grant movement");
+}
+
 int main(int argc, char** argv) {
     try {
+        movement_suspension_contracts();
+        movement_suspension_reentry_contract();
+        movement_shared_worker_contract();
+        if (argc == 2 && std::string_view(argv[1]) == "--movement-suspension") return 0;
         if (argc == 2 && std::string_view(argv[1]) == "--hud-manual-rearm-poll") {
             hud_manual_release_contracts(2);
             return 0;

@@ -2961,8 +2961,11 @@ struct Overlay::Impl {
         switch (snapshot.movement.state) {
             case movement::State::STOPPED: movement_state = "已停止"; break;
             case movement::State::IDLE: movement_state = "等待身法触发"; break;
+            case movement::State::WAITING_DIRECTION: movement_state = "等待单独按 A 或 D 选侧"; break;
+            case movement::State::COOLDOWN: movement_state = "动作后保护中，忽略新触发"; break;
             case movement::State::DELAY: movement_state = "起跳后等待"; break;
             case movement::State::TURNING: movement_state = "转动中"; break;
+            case movement::State::CTRL_PENDING: movement_state = "等待Ctrl完成"; break;
             case movement::State::CLEANING: movement_state = "释放接管中"; break;
             case movement::State::FAULT: movement_state = "输出故障"; break;
         }
@@ -2974,14 +2977,14 @@ struct Overlay::Impl {
             static_cast<unsigned long long>(snapshot.movement.canceled), snapshot.movement.sent_dx);
         if (!snapshot.movement.error.empty())
             ImGui::TextWrapped("%s", snapshot.movement.error.c_str());
-        ImGui::TextWrapped("两项可同时启用，须使用不同触发。触发键或滚轮方向须在游戏中绑定跳跃；这里不会修改游戏绑定。鼠标向左配 A/左转，向右配 D/右转；动作期间临时屏蔽 W，结束后归还。");
+        ImGui::TextWrapped("两项可同时启用，须使用不同触发。触发键或滚轮方向须在游戏中绑定跳跃；这里不会修改游戏绑定。旋转跳由物理 A/D 选侧并锁定；动作期间临时屏蔽 W/A/D，结束后归还。");
         ImGui::TextWrapped("运行中可调整，动作参数从下一次触发生效；关闭会结束当前动作并释放接管。");
         if (begin_form("movement_form", 126.0f)) {
-            form_row("启用身法", "总开关默认关闭；两项分别启用和绑定。忙碌期间不重复排队；关闭时释放 A/D 并解除 W 屏蔽。");
+            form_row("启用身法", "总开关默认关闭；两项分别启用和绑定。忙碌期间不重复排队；关闭时释放软件方向键并恢复 W/A/D 物理直通。");
             toggle_switch("##movement_enabled", &move.enabled);
             const auto action_settings = [&](bool spin) {
                 ImGui::PushID(spin ? "spin" : "large");
-                form_row(spin ? "旋转跳" : "大跳", "独立开关；旋转跳执行首侧，大跳先首侧再反侧。首侧由物理鼠标方向选择。");
+                form_row(spin ? "旋转跳" : "Long Jump", "独立开关；旋转跳由物理 A 向左、D 向右选侧，可先按方向再触发；无方向或双按则等待。Long Jump每次固定先A向左，再D向右。程序自动转视角，无需甩鼠标。");
                 toggle_switch("##enabled", spin ? &move.spin_enabled : &move.large_enabled);
                 auto& trigger = spin ? move.spin_trigger : move.large_trigger;
                 auto& key = spin ? move.spin_virtual_key : move.large_virtual_key;
@@ -2998,18 +3001,28 @@ struct Overlay::Impl {
                 }
                 form_row(spin ? "转角 / 度" : "每侧转角 / 度", "大于 0 且不超过 360 度；按转角 ÷（灵敏度 × m_yaw）换算，实际结果需核对。");
                 ImGui::InputDouble("##angle", spin ? &move.spin_angle_degrees : &move.large_angle_degrees, 1.0, 5.0, "%.2f");
-                form_row(spin ? "转动时长 / ms" : "每侧时长 / ms", "范围 1–5000 ms；大跳两侧各使用此时长。");
+                form_row(spin ? "转动时长 / ms" : "每侧时长 / ms", "范围 1–5000 ms；Long Jump两侧各使用此时长。");
                 ImGui::InputInt("##duration", spin ? &move.spin_duration_ms : &move.large_duration_ms, 1, 10);
+                if (!spin) {
+                    form_row("定时点按 Left Ctrl", "默认开启；Long Jump 每次只短按一次 Left Ctrl。按触发接收时刻定时，不检测落地；后端不支持时拒绝本次 Long Jump。软件释放不会释放用户物理持有的 Ctrl。参数从下次动作生效。");
+                    toggle_switch("##ctrl_enabled", &move.large_ctrl_enabled);
+                    form_row("Ctrl 延迟 / ms", "默认650，范围0–2000ms；从本次触发接收时刻起计时，预计落地前按下，并非落地检测。约730ms滞空仅来自同条件录像；设备交接或发送耗时可能推迟实际输出。");
+                    ImGui::InputInt("##ctrl_delay", &move.large_ctrl_delay_ms, 10, 50);
+                    form_row("Ctrl 按住 / ms", "默认30，范围1–2000ms；从按下协议ACK完成后计时。两段转向结束先释放软件方向键，物理W/A/D仍屏蔽至Ctrl释放和清理；取消与急停释放软件Ctrl，故障时尝试清理，未确认则保留故障。下次动作生效。");
+                    ImGui::InputInt("##ctrl_hold", &move.large_ctrl_hold_ms, 1, 10);
+                }
                 ImGui::PopID();
             };
             action_settings(true);
             action_settings(false);
+            form_row("动作后保护 / ms", "默认150，范围0–2000ms；从清理结束计时，期内滚轮/按键触发直接消耗，不排队；0关闭保护。");
+            ImGui::InputInt("##movement_guard", &move.trigger_guard_ms, 10, 50);
             form_row("游戏灵敏度", "填写游戏中的 sensitivity，用于转角换算；必须大于零。镜头缩放或游戏输入设置变化时需调整。");
             ImGui::InputDouble("##movement_sensitivity", &move.sensitivity, 0.01, 0.1, "%.3f");
             ImGui::EndTable();
         }
         if (ImGui::CollapsingHeader("兼容设置##movement_compatibility")) {
-            ImGui::TextWrapped("NET 原始滚轮语义尚未设备校准；按实际输入报告选择，不表示已自动识别。");
+            ImGui::TextWrapped("默认按正增量上滚、负增量下滚解释；兼容选项用于不同固件，未自动识别远控输入来源。");
             if (begin_form("movement_compatibility_form", 126.0f)) {
                 form_row("触发后延时 / ms", "默认 0，范围 0–2000 ms；仅保留兼容调节，不代表观测到游戏起跳。");
                 ImGui::InputInt("##movement_delay", &move.jump_delay_ms, 1, 10);
@@ -3821,6 +3834,14 @@ struct Overlay::Impl {
         if (capture_was_active) actions.hotkey_capture_consumed = true;
         if (capture_result.type !=
                 overlay::detail::HotkeyCaptureResultType::NONE) {
+            if (capture_result.type == overlay::detail::HotkeyCaptureResultType::ASSIGNED &&
+                ((app_config.keyboard.lineup_locate_virtual_key != 0 &&
+                  capture_result.virtual_key == app_config.keyboard.lineup_locate_virtual_key) ||
+                 (app_config.keyboard.lineup_throw_virtual_key != 0 &&
+                  capture_result.virtual_key == app_config.keyboard.lineup_throw_virtual_key))) {
+                hotkey_capture_message = "该按键已绑定道具动作，请选择未占用按键";
+                return;
+            }
             std::vector<int>* binding = hotkey_binding(app_config);
             if (hotkey_binding_target == HotkeyBindingTarget::DEBUG_TEST && binding) {
                 if (capture_result.type == overlay::detail::HotkeyCaptureResultType::CLEARED) {

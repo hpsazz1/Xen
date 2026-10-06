@@ -84,6 +84,7 @@ bool NetworkLatestFramePool::take_latest(
         frame.width = frame.bgr.cols;
         frame.height = frame.bgr.rows;
         frame.timing = latest->timing;
+        frame.source_mapping_verified = latest->source_mapping_verified;
         frame.roi_x = latest->roi_x;
         frame.roi_y = latest->roi_y;
         frame.source_width = latest->source_width;
@@ -124,6 +125,7 @@ void NetworkLatestFramePool::reset() noexcept {
         for (const auto& slot : pool_) {
             if (slot.use_count() != 1) continue;
             slot->timing = {};
+            slot->source_mapping_verified = false;
             slot->roi_x = 0.0;
             slot->roi_y = 0.0;
             slot->source_width = 0;

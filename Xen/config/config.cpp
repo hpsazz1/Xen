@@ -544,7 +544,8 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
                                   std::string& error) {
     constexpr TypedConfigKey kIntegerKeys[]{
         {"movement", "jump_delay_ms"}, {"movement", "spin_duration_ms"},
-        {"movement", "large_duration_ms"},
+        {"movement", "large_duration_ms"}, {"movement", "trigger_guard_ms"},
+        {"movement", "large_ctrl_delay_ms"}, {"movement", "large_ctrl_hold_ms"},
         {"movement", "spin_virtual_key"}, {"movement", "large_virtual_key"},
         {"log", "ringbuf_capacity"},
         {"log", "file_max_size_mb"},
@@ -589,6 +590,8 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"source_context", "port"}, {"source_context", "ttl_ms"},
         {"recoil", "budget_window_ms"}, {"recoil", "max_observation_age_ms"},
         {"gsi", "port"}, {"gsi", "ttl_ms"}, {"gsi", "request_timeout_ms"},
+        {"lineup", "locate_virtual_key"},
+        {"lineup", "throw_virtual_key"},
         {"keyboard", "aim_hold_virtual_key"},
         {"keyboard", "emergency_virtual_key"},
         {"keyboard", "runtime_toggle_virtual_key"},
@@ -655,6 +658,7 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"aim", "enable_prediction"},
         {"movement", "enabled"}, {"movement", "wheel_down_positive"},
         {"movement", "spin_enabled"}, {"movement", "large_enabled"},
+        {"movement", "large_ctrl_enabled"},
         {"auto_stop", "enabled"}, {"auto_stop", "cycle_enabled"},
         {"auto_stop", "use_counterpulse_timing"}, {"auto_stop", "experimental_hud_model"},
         {"trigger", "enabled"}, {"trigger", "fire_enabled"}, {"trigger", "require_stop"},
@@ -987,6 +991,17 @@ bool validate_app_config(const AppConfig& config,
             movement_key_conflicts(config.movement.large_enabled, config.movement.large_trigger, config.movement.large_virtual_key)) {
             error = "身法触发键与急停或其他功能键冲突"; return false;
         }
+        const int throw_key = config.keyboard.lineup_throw_virtual_key;
+        if (throw_key != 0 && (throw_key == config.auto_stop.activation_virtual_key || throw_key == config.trigger.hold_virtual_key ||
+            std::find(config.auto_stop.release_virtual_keys.begin(), config.auto_stop.release_virtual_keys.end(), throw_key) != config.auto_stop.release_virtual_keys.end())) {
+            error = "道具投掷快捷键与急停或扳机功能键冲突"; return false;
+        }
+        const int locate_key = config.keyboard.lineup_locate_virtual_key;
+        if (locate_key != 0 && (locate_key == config.auto_stop.activation_virtual_key ||
+            locate_key == config.trigger.hold_virtual_key ||
+            std::find(config.auto_stop.release_virtual_keys.begin(), config.auto_stop.release_virtual_keys.end(), locate_key) != config.auto_stop.release_virtual_keys.end())) {
+            error = "道具定位快捷键与急停或扳机功能键冲突"; return false;
+        }
         const int stop_key = config.auto_stop.activation_virtual_key;
         if (config.auto_stop.counter_hold_ms < 1 || config.auto_stop.counter_hold_ms > 200 ||
             config.auto_stop.shot_after_release_ms < 0 || config.auto_stop.shot_after_release_ms > 200) {
@@ -1140,7 +1155,7 @@ bool load_app_config(const std::string& path,
         candidate.movement = {};
         auto& movement_config = candidate.movement;
         movement_config.enabled = ini.GetBoolValue("movement", "enabled", false);
-        movement_config.wheel_down_positive = ini.GetBoolValue("movement", "wheel_down_positive", true);
+        movement_config.wheel_down_positive = ini.GetBoolValue("movement", "wheel_down_positive", movement_config.wheel_down_positive);
         if (!ini.GetValue("movement", "spin_enabled", nullptr) &&
             !ini.GetValue("movement", "large_enabled", nullptr)) {
             const auto old_mode = lowercase_ascii(ini.GetValue("movement", "mode", "spin"));
@@ -1158,6 +1173,7 @@ bool load_app_config(const std::string& path,
             movement_config.spin_enabled = ini.GetBoolValue("movement", "spin_enabled", true);
             movement_config.large_enabled = ini.GetBoolValue("movement", "large_enabled", false);
         }
+        movement_config.large_ctrl_enabled = ini.GetBoolValue("movement", "large_ctrl_enabled", movement_config.large_ctrl_enabled);
         const auto read_trigger = [&](const char* key, movement::Trigger& value) {
             const char* raw = ini.GetValue("movement", key, nullptr);
             if (!raw) return true;
@@ -1177,8 +1193,13 @@ bool load_app_config(const std::string& path,
 #define READ_MOVEMENT_INT(name) movement_config.name = static_cast<int>(ini.GetLongValue("movement", #name, movement_config.name))
 #define READ_MOVEMENT_NUMBER(name) movement_config.name = ini.GetDoubleValue("movement", #name, movement_config.name)
         READ_MOVEMENT_INT(jump_delay_ms);
+        READ_MOVEMENT_INT(trigger_guard_ms);
+        READ_MOVEMENT_INT(spin_virtual_key);
+        READ_MOVEMENT_INT(large_virtual_key);
         READ_MOVEMENT_INT(spin_duration_ms);
         READ_MOVEMENT_INT(large_duration_ms);
+        READ_MOVEMENT_INT(large_ctrl_delay_ms);
+        READ_MOVEMENT_INT(large_ctrl_hold_ms);
         READ_MOVEMENT_NUMBER(spin_angle_degrees);
         READ_MOVEMENT_NUMBER(large_angle_degrees);
         READ_MOVEMENT_NUMBER(sensitivity);
@@ -1508,6 +1529,10 @@ bool load_app_config(const std::string& path,
                 ? std::vector<int>{static_cast<int>(legacy)}
                 : fallback;
         };
+        candidate.lineup.calibration_file = ini.GetValue("lineup", "calibration_file", "");
+        candidate.lineup.calibration_context = ini.GetValue("lineup", "calibration_context", "");
+        candidate.keyboard.lineup_throw_virtual_key = static_cast<int>(ini.GetLongValue("lineup", "throw_virtual_key", 0));
+        candidate.keyboard.lineup_locate_virtual_key = static_cast<int>(ini.GetLongValue("lineup", "locate_virtual_key", 0));
         candidate.keyboard.debug_test_enabled = ini.GetBoolValue("keyboard", "debug_test_enabled", false);
         candidate.keyboard.debug_test_virtual_keys = load_virtual_keys("debug_test_virtual_keys", "debug_test_virtual_key", {});
         candidate.keyboard.aim_hold_virtual_keys = load_virtual_keys(
@@ -1587,6 +1612,7 @@ bool save_app_config(const std::string& path,
         ini.Delete("movement", "mode");
         ini.SetBoolValue("movement", "spin_enabled", config.movement.spin_enabled);
         ini.SetBoolValue("movement", "large_enabled", config.movement.large_enabled);
+        ini.SetBoolValue("movement", "large_ctrl_enabled", config.movement.large_ctrl_enabled);
         const auto trigger_name = [](movement::Trigger value) {
             switch (value) {
                 case movement::Trigger::WHEEL_DOWN: return "wheel_down";
@@ -1601,10 +1627,13 @@ bool save_app_config(const std::string& path,
 #define WRITE_MOVEMENT_INT(name) ini.SetLongValue("movement", #name, config.movement.name)
 #define WRITE_MOVEMENT_NUMBER(name) ini.SetDoubleValue("movement", #name, config.movement.name)
         WRITE_MOVEMENT_INT(jump_delay_ms);
+        WRITE_MOVEMENT_INT(trigger_guard_ms);
         WRITE_MOVEMENT_INT(spin_virtual_key);
         WRITE_MOVEMENT_INT(large_virtual_key);
         WRITE_MOVEMENT_INT(spin_duration_ms);
         WRITE_MOVEMENT_INT(large_duration_ms);
+        WRITE_MOVEMENT_INT(large_ctrl_delay_ms);
+        WRITE_MOVEMENT_INT(large_ctrl_hold_ms);
         WRITE_MOVEMENT_NUMBER(spin_angle_degrees);
         WRITE_MOVEMENT_NUMBER(large_angle_degrees);
         WRITE_MOVEMENT_NUMBER(sensitivity);
@@ -1787,6 +1816,10 @@ bool save_app_config(const std::string& path,
                          config.auto_stop.activation_virtual_key);
         ini.SetValue("auto_stop", "release_virtual_keys",
                      format_int_list(config.auto_stop.release_virtual_keys).c_str());
+        ini.SetValue("lineup", "calibration_file", config.lineup.calibration_file.c_str());
+        ini.SetValue("lineup", "calibration_context", config.lineup.calibration_context.c_str());
+        ini.SetLongValue("lineup", "throw_virtual_key", config.keyboard.lineup_throw_virtual_key);
+        ini.SetLongValue("lineup", "locate_virtual_key", config.keyboard.lineup_locate_virtual_key);
         ini.SetBoolValue("keyboard", "debug_test_enabled", config.keyboard.debug_test_enabled);
         ini.SetValue("keyboard", "debug_test_virtual_keys", format_int_list(config.keyboard.debug_test_virtual_keys).c_str());
         ini.SetValue("keyboard", "anomaly_mark_virtual_keys", format_int_list(config.keyboard.anomaly_mark_virtual_keys).c_str());

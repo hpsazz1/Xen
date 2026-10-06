@@ -14,6 +14,7 @@ namespace capture::detail {
 struct NetworkDecodedFrame {
     cv::Mat bgr;
     FrameTiming timing;
+    bool source_mapping_verified = false;
     double roi_x = 0.0;
     double roi_y = 0.0;
     int source_width = 0;

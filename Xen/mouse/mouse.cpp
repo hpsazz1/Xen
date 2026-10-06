@@ -241,8 +241,26 @@ public:
     bool supports_wasd_keyboard() const noexcept override {
         return inner_ && output_owner_.held() && inner_->supports_wasd_keyboard();
     }
+    bool supports_left_ctrl_key() const noexcept override {
+        return inner_ && output_owner_.held() && inner_->supports_left_ctrl_key();
+    }
+    KeyboardReceipt set_left_ctrl_key(bool down) noexcept override {
+        if (!inner_ || !output_owner_.held()) return {KeyboardDisposition::REJECTED};
+        return inner_->set_left_ctrl_key(down);
+    }
     bool supports_left_button() const noexcept override {
         return inner_ && output_owner_.held() && inner_->supports_left_button();
+    }
+    bool supports_lineup_inputs() const noexcept override {
+        return inner_ && output_owner_.held() && inner_->supports_lineup_inputs();
+    }
+    ButtonReceipt set_right_button(bool down) noexcept override {
+        if (!inner_ || !output_owner_.held()) return {ButtonDisposition::REJECTED};
+        return inner_->set_right_button(down);
+    }
+    KeyboardReceipt set_space_key(bool down) noexcept override {
+        if (!inner_ || !output_owner_.held()) return {KeyboardDisposition::REJECTED};
+        return inner_->set_space_key(down);
     }
     bool left_button_faulted() const noexcept override {
         return inner_ && inner_->left_button_faulted();

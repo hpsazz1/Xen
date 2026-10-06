@@ -47,7 +47,13 @@ struct TeamFilterConfig {
     std::vector<int> t_class_ids{2, 3};
 };
 
+struct LineupConfig {
+    std::string calibration_file;
+    std::string calibration_context;
+};
+
 struct AppConfig {
+    LineupConfig lineup;
     // 产品默认配置集中在聚合层，独立模块仍保留适合算法与设备测试的通用安全默认值。
     DetectorConfig detector = [] {
         DetectorConfig value;

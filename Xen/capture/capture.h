@@ -168,6 +168,9 @@ struct CaptureStageTiming {
 
 struct FrameTiming {
     std::uint64_t sequence = 0;
+    // NDI 接收器实例代次：每次 open 内从 1 开始，重建递增；其他后端为 0。
+    // 只标识本地接收器生命周期，不冒充源机 session，也不改变 sequence。
+    std::uint64_t receiver_generation = 0;
     std::chrono::steady_clock::time_point captured_at{};
     double capture_ms = 0.0;
     CaptureStageTiming capture_stages;
@@ -225,6 +228,8 @@ struct CapturedFrame {
     int width = 0;
     int height = 0;
     FrameTiming timing;
+    // 仅当本帧采用已验证的源坐标 metadata 时为真；配置推导不构成证据。
+    bool source_mapping_verified = false;
     // bgr 左上角在主机完整 FOV 中的坐标；缩放完整帧时允许为小数。
     double roi_x = 0.0;
     double roi_y = 0.0;

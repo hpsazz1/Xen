@@ -51,6 +51,8 @@ enum class RuntimeIntentType {
     EMERGENCY_STOP,
     RESET_EMERGENCY,
     SET_AUTO_STOP_PAUSED,
+    LINEUP_LOCATE,
+    LINEUP_THROW,
 };
 
 struct RuntimeIntent {

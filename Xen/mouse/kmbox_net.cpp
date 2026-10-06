@@ -32,6 +32,7 @@ namespace {
 constexpr std::uint32_t kConnectCommand = 0xaf3c2828U;
 constexpr std::uint32_t kMouseMoveCommand = 0xaede7345U;
 constexpr std::uint32_t kMouseLeftCommand = 0x9823ae8dU;
+constexpr std::uint32_t kMouseRightCommand = 0x238d8212U;
 constexpr std::uint32_t kMonitorCommand = 0x27388020U;
 constexpr std::size_t kHeaderBytes = 16;
 constexpr std::size_t kMousePayloadBytes = 56;
@@ -42,7 +43,7 @@ constexpr std::size_t kMonitorPacketBytes = 20U;
 
 // 同进程重建控制器不能遗忘未确认释放；不保存凭据到磁盘或日志。
 std::mutex button_debt_mutex;
-std::unordered_set<std::string> button_debt_endpoints;
+std::unordered_map<std::string, std::uint8_t> button_debt_endpoints;
 
 struct KeyboardCleanupDebt {
     bool keyboard_dirty = false;
@@ -114,7 +115,8 @@ public:
                 ":" + std::to_string(canonical_uuid);
         std::lock_guard<std::mutex> lock(button_debt_mutex);
         button_faulted_ = button_debt_endpoints.contains(output_endpoint_);
-        button_dirty_ = button_faulted_;
+        dirty_buttons_ = button_faulted_ ? button_debt_endpoints.at(output_endpoint_) : 0;
+        button_dirty_ = dirty_buttons_ != 0;
     }
 
     ~KmboxNetMouseController() override {
@@ -129,6 +131,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(button_debt_mutex);
             if (button_debt_endpoints.contains(output_endpoint_)) {
+                dirty_buttons_ |= button_debt_endpoints.at(output_endpoint_);
                 button_dirty_ = true;
                 button_faulted_ = true;
             }
@@ -357,7 +360,21 @@ public:
     }
 
     bool supports_wasd_keyboard() const noexcept override { return true; }
+    bool supports_left_ctrl_key() const noexcept override { return true; }
     bool supports_left_button() const noexcept override { return true; }
+    bool supports_lineup_inputs() const noexcept override { return true; }
+    ButtonReceipt set_right_button(bool down) noexcept override {
+        std::lock_guard<std::mutex> lock(io_mutex_);
+        return button_locked(down, 2);
+    }
+    KeyboardReceipt set_space_key(bool down) noexcept override {
+        std::lock_guard<std::mutex> lock(io_mutex_);
+        return keyboard_locked(software_wasd_, down, software_left_ctrl_);
+    }
+    KeyboardReceipt set_left_ctrl_key(bool down) noexcept override {
+        std::lock_guard<std::mutex> lock(io_mutex_);
+        return keyboard_locked(software_wasd_, software_space_, down);
+    }
     bool left_button_faulted() const noexcept override {
         std::lock_guard<std::mutex> lock(io_mutex_);
         return button_faulted_;
@@ -373,7 +390,7 @@ public:
 
     KeyboardReceipt set_wasd_keyboard(std::uint8_t mask) noexcept override {
         std::lock_guard<std::mutex> lock(io_mutex_);
-        return keyboard_locked(mask);
+        return keyboard_locked(mask, software_space_, software_left_ctrl_);
     }
     KeyboardReceipt set_wasd_mask(std::uint8_t key, bool masked) noexcept override {
         std::lock_guard<std::mutex> lock(io_mutex_);
@@ -495,41 +512,45 @@ private:
         // 分配失败时仍保留实例债务并关闭后续 down；不能因记账异常终止清理。
         try {
             std::lock_guard<std::mutex> lock(button_debt_mutex);
-            button_debt_endpoints.insert(output_endpoint_);
+            button_debt_endpoints.insert_or_assign(output_endpoint_, dirty_buttons_);
         } catch (...) { button_faulted_ = true; }
     }
-    ButtonReceipt button_locked(bool down) noexcept {
+    ButtonReceipt button_locked(bool down, std::uint8_t bit = 1) noexcept {
         ButtonReceipt result{ButtonDisposition::REJECTED};
         result.cleanup_required = button_dirty_;
         if (!config_.allow_send_input || socket_ == INVALID_SOCKET || !winsock_started_ ||
             (down && button_faulted_)) return result;
         // 幂等 down 不重发，不生成第二个射击边沿；up 必须真实确认才能消债。
-        if (down && software_buttons_ == 1) {
+        if (down && (software_buttons_ & bit)) {
             result.disposition = ButtonDisposition::ACKNOWLEDGED;
             result.backend_completed_at = std::chrono::steady_clock::now();
             return result;
         }
         std::array<std::uint8_t, kMousePacketBytes> packet{};
-        write_header(packet.data(), kMouseLeftCommand, ++sequence_);
-        write_u32_le(packet.data() + kHeaderBytes, down ? 1U : 0U);
+        const auto command = bit == 2 ? kMouseRightCommand : kMouseLeftCommand;
+        const auto buttons = down ? software_buttons_ | bit : software_buttons_ & ~std::uint32_t(bit);
+        write_header(packet.data(), command, ++sequence_);
+        write_u32_le(packet.data() + kHeaderBytes, buttons);
         // 先登记可能按下的责任，任何退出路径都不能遗忘。未发出也允许保守 up。
-        if (down) mark_button_debt_locked(false);
+        if (down) { dirty_buttons_ |= bit; mark_button_debt_locked(false); }
         if (down && button_faulted_) { result.cleanup_required = true; return result; }
         const bool acknowledged = send_and_wait_ack(packet.data(), packet.size(),
-            kMouseLeftCommand, sequence_, config_.kmbox_command_timeout_ms,
+            command, sequence_, config_.kmbox_command_timeout_ms,
             &result.protocol_ack_received_at, &result.datagram_sent);
         result.backend_completed_at = std::chrono::steady_clock::now();
         result.disposition = acknowledged ? ButtonDisposition::ACKNOWLEDGED :
             (result.datagram_sent ? ButtonDisposition::APPLICATION_UNKNOWN : ButtonDisposition::REJECTED);
         if (acknowledged) {
-            software_buttons_ = down ? 1U : 0U;
-            if (!down) {
+            software_buttons_ = buttons;
+            if (!down) dirty_buttons_ &= ~bit;
+            if (!dirty_buttons_) {
                 button_dirty_ = false;
                 button_faulted_ = false;
                 std::lock_guard<std::mutex> lock(button_debt_mutex);
                 button_debt_endpoints.erase(output_endpoint_);
-            }
+            } else mark_button_debt_locked(false);
         } else if (button_dirty_ || result.datagram_sent) {
+            dirty_buttons_ |= bit;
             mark_button_debt_locked(true);
         }
         result.cleanup_required = button_dirty_;
@@ -575,21 +596,31 @@ private:
             : (result.datagram_sent ? KeyboardDisposition::APPLICATION_UNKNOWN : KeyboardDisposition::REJECTED);
         return result;
     }
-    KeyboardReceipt keyboard_locked(std::uint8_t mask) noexcept {
+    KeyboardReceipt keyboard_locked(std::uint8_t mask, bool space = false,
+                                    bool left_ctrl = false) noexcept {
         if (mask > 15 || !config_.allow_send_input || socket_ == INVALID_SOCKET)
             return {KeyboardDisposition::REJECTED};
         constexpr std::uint32_t command = 0x123c2c2fU;
         std::array<std::uint8_t, 28> packet{};
         write_header(packet.data(), command, ++sequence_);
+        // HID modifier bit 0；不复制 monitor 的物理修饰键，不安装 Ctrl 屏蔽。
+        packet[16] = left_ctrl ? 0x01 : 0x00;
         std::size_t index = 18;
         for (std::uint8_t bit = 1; bit <= 8; bit <<= 1)
             if (mask & bit) packet[index++] = wasd_usage(bit);
+        if (space) packet[index++] = 0x2c; // USB HID Keyboard Spacebar；不是滚轮。
         // 先登记潜在责任；分配失败时拒绝发送，不能让新 owner 遗忘已发出的报告。
         if (!save_keyboard_debt_locked({true, owned_masks_}))
             return {KeyboardDisposition::REJECTED};
         auto result = keyboard_packet_locked(packet.data(), packet.size(), command);
-        if (result.datagram_sent) keyboard_dirty_ = true;
-        if (result.disposition == KeyboardDisposition::ACKNOWLEDGED && mask == 0) keyboard_dirty_ = false;
+        if (result.datagram_sent) {
+            keyboard_dirty_ = true;
+            software_wasd_ = mask;
+            software_space_ = space;
+            software_left_ctrl_ = left_ctrl;
+        }
+        if (result.disposition == KeyboardDisposition::ACKNOWLEDGED && mask == 0 && !space && !left_ctrl)
+            keyboard_dirty_ = false;
         // 已有条目的更新不分配；若记账失败，发送前的保守责任仍保留在端点表中。
         save_keyboard_debt_locked({keyboard_dirty_, owned_masks_});
         return result;
@@ -801,7 +832,11 @@ private:
 
     void close_locked(bool attempt_keyboard_cleanup = true) noexcept {
         // 只做一次有界释放；失败债务跨 close/open 与同进程控制器重建保留。
-        if (button_dirty_ && socket_ != INVALID_SOCKET) {
+        if ((dirty_buttons_ & 2) && socket_ != INVALID_SOCKET) {
+            if (button_locked(false, 2).disposition != ButtonDisposition::ACKNOWLEDGED)
+                set_error("KMBOX 右键释放未确认，保留清理责任");
+        }
+        if ((dirty_buttons_ & 1) && socket_ != INVALID_SOCKET) {
             if (button_locked(false).disposition != ButtonDisposition::ACKNOWLEDGED)
                 LOG_ERROR("mouse", "KMBOX 左键释放未确认，保留清理债务");
         }
@@ -988,6 +1023,10 @@ private:
     std::string output_endpoint_;
     // 仅受 io_mutex_ 保护，绝不从物理 monitor 的 mouse_buttons_ 反推。
     std::uint32_t software_buttons_ = 0;
+    std::uint8_t dirty_buttons_ = 0;
+    std::uint8_t software_wasd_ = 0;
+    bool software_space_ = false;
+    bool software_left_ctrl_ = false;
     bool button_dirty_ = false;
     bool button_faulted_ = false;
     SOCKET socket_ = INVALID_SOCKET;

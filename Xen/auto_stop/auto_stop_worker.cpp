@@ -44,6 +44,13 @@ std::unique_lock<std::timed_mutex> AutoStopOutputArbiter::try_enter_aim(OutputAr
     return lock;
 }
 
+std::unique_lock<std::timed_mutex> AutoStopOutputArbiter::try_enter_lineup() noexcept {
+    std::unique_lock<std::timed_mutex> lock(mutex_, std::try_to_lock);
+    if (lock.owns_lock() && (faulted_.load(std::memory_order_acquire) ||
+                            auxiliary_pending_.load(std::memory_order_acquire))) lock.unlock();
+    return lock;
+}
+
 std::unique_lock<std::timed_mutex> AutoStopOutputArbiter::enter_aim_until(Clock::time_point deadline,
     OutputArbiterRejection* rejection) noexcept {
     std::unique_lock<std::timed_mutex> lock(mutex_, std::defer_lock);
@@ -136,6 +143,13 @@ public:
     std::condition_variable wake;
     std::thread thread;
     std::atomic<bool> stopping{false}, paused{false};
+    std::atomic<bool> movement_suspended{false}, movement_transition{false};
+    std::uint64_t movement_generation = 0;
+    bool movement_ready = false, movement_prior_recovery_pending = false;
+    bool movement_blocked() const noexcept {
+        return movement_suspended.load(std::memory_order_acquire) ||
+            movement_transition.load(std::memory_order_acquire);
+    }
     std::atomic<std::uint64_t> cancel_generation{0};
     bool running = false, fault = false;
     std::uint64_t pending_id = 0, last_request_id = 0, submitted_generation = 0;
@@ -194,7 +208,7 @@ public:
                 !input.virtual_keys[0x23] && config.activation_virtual_key > 0 &&
                 config.activation_virtual_key < 256 &&
                 (input.virtual_keys[config.activation_virtual_key] || manual_fire_id.load() != 0) &&
-                !paused.load(std::memory_order_acquire) && !stopping.load(std::memory_order_acquire);
+                !movement_blocked() && !paused.load(std::memory_order_acquire) && !stopping.load(std::memory_order_acquire);
         } catch (...) { return false; }
     }
     bool manual_permission(const InputSnapshot& input) noexcept {
@@ -203,7 +217,7 @@ public:
             return config.use_counterpulse_timing && allocate_request && focused && focused() &&
                 weapon_permission() && allowed && allowed() && !arbiter->faulted_.load() &&
                 input.state_valid && input.status == InputMonitorStatus::READY &&
-                !release_key_held(input) && !input.virtual_keys[0x23] && !paused.load() && !stopping.load();
+                !release_key_held(input) && !input.virtual_keys[0x23] && !movement_blocked() && !paused.load() && !stopping.load();
         } catch (...) { return false; }
     }
     // 调用方持有mutex；在发布/读取两端保留期限断点，新帧不能复活旧请求。
@@ -344,7 +358,7 @@ public:
             return normal_change && mouse->poll_input(fresh) && fresh.state_valid && fresh.status == InputMonitorStatus::READY &&
                 intent.input_continuous && intent.epoch == active_input_epoch && held_wasd(fresh) == intent.held_mask &&
                 !fresh.virtual_keys[0x23] && !release_key_held(fresh) && allowed && allowed() && focused && focused() &&
-                !paused.load() && !stopping.load() && !arbiter->faulted_.load();
+                !movement_blocked() && !paused.load() && !stopping.load() && !arbiter->faulted_.load();
         };
         auto cancel_active = [&](bool force_fault, const char* reason, bool normal_activation_release = false,
                                  bool cycle_resume = false, bool manual_finished = false, bool ordinary_transition = false,
@@ -428,7 +442,7 @@ public:
                     // GSI或调用方撤销只影响输出准入；不能把健康物理事件流改写为断流。
                     rescue_continuous = continuous && intent.input_continuous &&
                         allowed && allowed() && focused && focused() &&
-                        !after_cleanup.virtual_keys[0x23] && !paused.load() && !stopping.load() && !arbiter->faulted_.load();
+                        !after_cleanup.virtual_keys[0x23] && !movement_blocked() && !paused.load() && !stopping.load() && !arbiter->faulted_.load();
                     if (rescue_continuous) {
                         // 救援后自动核验仍待条件恢复；只保存真实物理流，不承接旧制动资格。
                         history = checked_history; intent = checked_intent; cursor = after_cursor; input = after_cleanup;
@@ -443,7 +457,7 @@ public:
                           !release_key_held(after_cleanup)));
                     if (continuous && direction_permitted &&
                         allowed && allowed() && focused && focused() &&
-                        !after_cleanup.virtual_keys[0x23] && !paused.load() && !stopping.load() && !arbiter->faulted_.load())
+                        !after_cleanup.virtual_keys[0x23] && !movement_blocked() && !paused.load() && !stopping.load() && !arbiter->faulted_.load())
                     {
                         resumed = controller.restart_after_cleanup(intent, released_at);
                         if (!resumed && direction_transition && !intent.history_valid) {
@@ -458,7 +472,7 @@ public:
                     }
                 } else if (continuous && (cycle_resume ? cleanup_permission : !after_cleanup.virtual_keys[config.activation_virtual_key]) &&
                     !after_cleanup.virtual_keys[0x23] && !release_key_held(after_cleanup) && allowed && allowed() &&
-                    !paused.load() && !stopping.load() && !arbiter->faulted_.load() &&
+                    !movement_blocked() && !paused.load() && !stopping.load() && !arbiter->faulted_.load() &&
                     active_generation == cancel_generation.load() && session_valid)
                     resumed = config.use_counterpulse_timing ? controller.restart_after_cleanup(intent, released_at) :
                         controller.resume_after_masked_hold(intent, released_at);
@@ -505,6 +519,36 @@ public:
         };
         try {
             while (!stopping.load(std::memory_order_acquire)) {
+                if (movement_blocked()) {
+                    std::uint64_t generation;
+                    { std::lock_guard lock(mutex); generation = movement_generation; }
+                    if (active_id || debt) cancel_active(false, "movement_suspended");
+                    release_reservation();
+                    WasdEventBatch discarded;
+                    const bool drained = mouse->read_wasd_events(cursor, discarded) && discarded.subscribed &&
+                        !discarded.gap && discarded.count < discarded.events.size();
+                    history.reset(); intent = {}; release_armed_mask = 0;
+                    controller = detail::StopDriver(config); target_consumed = false;
+                    {
+                        std::unique_lock lock(mutex);
+                        pending_id = estimated_id = resume_id = 0;
+                        target_until = {}; tracking_target_until = {}; tracked_request_id = 0;
+                        state.target_available = false; state.cycle_moving = false;
+                        trigger_idle = false; ++trigger_idle_generation;
+                        const bool quiescent = !active_id && !debt && !fault && !state.cleanup_unknown &&
+                            !arbiter->faulted_.load() && !output.owns_lock();
+                        if (generation == movement_generation) {
+                            movement_ready = movement_suspended.load() && quiescent;
+                            if (!movement_suspended.load() && quiescent && drained) {
+                                movement_transition.store(false, std::memory_order_release);
+                                state.recovery_pending = movement_prior_recovery_pending;
+                                state.status = paused.load() ? AutoStopStatus::PAUSED : AutoStopStatus::CANCELED;
+                            }
+                        }
+                        wake.wait_for(lock, std::chrono::milliseconds(1));
+                    }
+                    continue;
+                }
                 bool hud_followup_ready = false;
                 bool input_ok = mouse->poll_input(input) && input.state_valid && input.status == InputMonitorStatus::READY;
                 std::uint8_t released_axes = 0;
@@ -570,7 +614,7 @@ public:
                     }
                     normal_switch = normal_switch && input_ok && events_ok && intent.input_continuous &&
                         allowed && allowed() && focused && focused() && !input.virtual_keys[0x23] &&
-                        !paused.load() && !arbiter->faulted_.load();
+                        !movement_blocked() && !paused.load() && !arbiter->faulted_.load();
                     {
                         std::lock_guard lock(mutex);
                         LOG_INFO("auto_stop", "监听报告救援边沿：vk={}，snapshot_seq={}，wasd_epoch={}，wasd_seq={}，held={}，continuous={}，trusted={}，trust_generation={}，recovery_pending={}，only_weapon_keys={}，input_ok={}，events_ok={}，focused={}，allowed={}，fault={}，manual={}，normal_switch={}",
@@ -627,7 +671,7 @@ public:
                     intent.held_mask == held_wasd(input) && weapon_ready &&
                     (!allocate_request || (focused && focused())) && allowed && allowed() &&
                     !release_key_held(input) && !input.virtual_keys[0x23] &&
-                    !paused.load() && !stopping.load() && !arbiter->faulted_.load() &&
+                    !movement_blocked() && !paused.load() && !stopping.load() && !arbiter->faulted_.load() &&
                     !mouse->left_button_cleanup_required();
                 bool recovery_pending = false;
                 {
@@ -774,7 +818,7 @@ public:
                 {
                     std::lock_guard<std::mutex> lock(mutex);
                     if (latched_fault || !weapon_ready || recovery_pending || !input_ok || !events_ok ||
-                        paused.load() || config.activation_virtual_key <= 0 || config.activation_virtual_key >= 256 ||
+                        movement_blocked() || paused.load() || config.activation_virtual_key <= 0 || config.activation_virtual_key >= 256 ||
                         !input.virtual_keys[config.activation_virtual_key] ||
                         !state.source_focused || !allowed || !allowed()) state.cycle_moving = false;
                     state.block_reason = latched_fault ? AutoStopBlockReason::OUTPUT_FAULT :
@@ -802,7 +846,7 @@ public:
                 }
                 if (normal_weapon_change && input_ok && events_ok && intent.input_continuous &&
                     intent.epoch == active_input_epoch && allowed && allowed() && focused && focused() &&
-                    !input.virtual_keys[0x23] && !release_key_held(input) && !paused.load() && !latched_fault) {
+                    !input.virtual_keys[0x23] && !release_key_held(input) && !movement_blocked() && !paused.load() && !latched_fault) {
                     cancel_active(false, "normal_weapon_transition", false, false, false, true);
                     target_consumed = false;
                     continue;
@@ -855,7 +899,7 @@ public:
                     const bool normal_release = manual_fire_id.load() == 0 && independent && (estimated || masked_hold) && input_ok && events_ok &&
                         intent.input_continuous && intent.epoch == active_input_epoch &&
                         !input.virtual_keys[config.activation_virtual_key] && !input.virtual_keys[0x23] &&
-                        !release_key_held(input) && !paused.load() && !stopping.load() &&
+                        !release_key_held(input) && !movement_blocked() && !paused.load() && !stopping.load() &&
                         active_generation == cancel_generation.load() && allowed && allowed() &&
                         !recovery_pending && session_permission(false);
                     const char* reason = !input_ok ? "input_invalid" : !events_ok ? "input_gap" :
@@ -1122,6 +1166,7 @@ void AutoStopWorker::publish_target(std::chrono::steady_clock::time_point valid_
     if (!impl_) return;
     try {
         std::lock_guard<std::mutex> lock(impl_->mutex);
+        if (impl_->movement_blocked()) return;
         impl_->target_until = valid_until;
         impl_->target_reason = valid_until == Clock::time_point{} ? reason : AutoStopBlockReason::NONE;
         impl_->wake.notify_all();
@@ -1134,6 +1179,7 @@ void AutoStopWorker::publish_tracking_target(Clock::time_point valid_until) noex
         const auto now = Clock::now();
         // 旧期限与新空检测都能撤销旧持有，新帧到达也必须先完成旧请求清理。
         impl_->invalidate_tracking_locked(now);
+        if (impl_->movement_blocked()) return;
         impl_->tracking_target_until = valid_until;
         impl_->invalidate_tracking_locked(now);
         impl_->wake.notify_all();
@@ -1219,7 +1265,7 @@ bool AutoStopWorker::request(std::uint64_t id) noexcept {
     if (!impl_ || id == 0) return false;
     try {
         std::lock_guard<std::mutex> lock(impl_->mutex);
-        if (!impl_->running || impl_->fault || impl_->paused.load() || impl_->stopping.load() ||
+        if (!impl_->running || impl_->fault || impl_->movement_blocked() || impl_->paused.load() || impl_->stopping.load() ||
             impl_->pending_id || id <= impl_->last_request_id || impl_->state.status != AutoStopStatus::READY) return false;
         impl_->last_request_id = id;
         impl_->pending_id = id;
@@ -1240,7 +1286,7 @@ bool AutoStopWorker::retain_for_manual_fire(std::uint64_t request_id) noexcept {
             !input.virtual_keys[1] || input.virtual_keys[0x23] || impl_->release_key_held(input)) return false;
         std::lock_guard<std::mutex> lock(impl_->mutex);
         if (!impl_->running || !impl_->allocate_request || impl_->fault || impl_->state.cleanup_unknown ||
-            impl_->paused.load() || impl_->stopping.load() || impl_->arbiter->faulted_.load() ||
+            impl_->movement_blocked() || impl_->paused.load() || impl_->stopping.load() || impl_->arbiter->faulted_.load() ||
             impl_->state.recovery_pending || !impl_->state.source_focused ||
             impl_->state.status != AutoStopStatus::ESTIMATED || impl_->estimated_id != request_id ||
             impl_->estimated_generation != impl_->cancel_generation.load() ||
@@ -1258,7 +1304,7 @@ bool AutoStopWorker::resume_movement(std::uint64_t request_id, Clock::time_point
         std::lock_guard<std::mutex> lock(impl_->mutex);
         const auto now = Clock::now();
         if (!impl_->running || impl_->manual_fire_id.load() != 0 || !impl_->config.cycle_enabled || !impl_->allocate_request || impl_->fault ||
-            impl_->paused.load() || impl_->stopping.load() || impl_->state.cleanup_unknown ||
+            impl_->movement_blocked() || impl_->paused.load() || impl_->stopping.load() || impl_->state.cleanup_unknown ||
             impl_->state.recovery_pending || impl_->state.status != AutoStopStatus::ESTIMATED ||
             impl_->estimated_id != request_id || impl_->resume_id != 0 ||
             impl_->estimated_generation != impl_->cancel_generation.load() ||
@@ -1295,6 +1341,31 @@ void AutoStopWorker::cancel(std::uint64_t request_id) noexcept {
         impl_->wake.notify_all();
     } catch (...) {}
 }
+void AutoStopWorker::set_movement_suspended(bool suspended) noexcept {
+    if (!impl_) return;
+    try {
+        std::lock_guard lock(impl_->mutex);
+        if (impl_->movement_suspended.load() == suspended) return;
+        if (suspended && !impl_->movement_transition.load()) impl_->movement_prior_recovery_pending = impl_->state.recovery_pending;
+        impl_->movement_transition.store(true, std::memory_order_release);
+        impl_->movement_suspended.store(suspended, std::memory_order_release);
+        ++impl_->movement_generation;
+        impl_->movement_ready = false;
+        impl_->cancel_generation.fetch_add(1, std::memory_order_acq_rel);
+        impl_->pending_id = impl_->estimated_id = impl_->resume_id = 0;
+        impl_->target_until = {}; impl_->tracking_target_until = {};
+        impl_->state.target_available = false;
+        impl_->wake.notify_all();
+    } catch (...) {}
+}
+bool AutoStopWorker::movement_suspension_ready() const noexcept {
+    if (!impl_) return false;
+    try {
+        std::lock_guard lock(impl_->mutex);
+        return impl_->running && !impl_->stopping.load() && impl_->movement_suspended.load() &&
+            impl_->movement_ready && !impl_->fault && !impl_->state.cleanup_unknown && !impl_->arbiter->faulted_.load();
+    } catch (...) { return false; }
+}
 void AutoStopWorker::set_paused(bool paused) noexcept {
     if (!impl_) return;
     impl_->paused.store(paused, std::memory_order_release);
@@ -1323,7 +1394,7 @@ bool AutoStopWorker::idle_for_trigger(const InputSnapshot& input) const noexcept
             if (!impl_->running || !impl_->trigger_idle || impl_->pending_id || impl_->fault ||
                 impl_->state.status == AutoStopStatus::BRAKING || impl_->state.status == AutoStopStatus::ESTIMATED ||
                 impl_->state.status == AutoStopStatus::MASKED || impl_->state.status == AutoStopStatus::FAULT ||
-                impl_->state.cleanup_unknown || impl_->state.recovery_pending || impl_->paused.load() ||
+                impl_->state.cleanup_unknown || impl_->state.recovery_pending || impl_->movement_blocked() || impl_->paused.load() ||
                 impl_->stopping.load()) return false;
             cursor = impl_->trigger_idle_cursor;
             generation = impl_->trigger_idle_generation;
@@ -1343,7 +1414,7 @@ bool AutoStopWorker::idle_for_trigger(const InputSnapshot& input) const noexcept
         std::lock_guard<std::mutex> lock(impl_->mutex);
         return impl_->running && impl_->trigger_idle && impl_->trigger_idle_generation == generation &&
             !impl_->pending_id && !impl_->fault && !impl_->state.cleanup_unknown && !impl_->state.recovery_pending &&
-            !impl_->paused.load() && !impl_->stopping.load() &&
+            !impl_->movement_blocked() && !impl_->paused.load() && !impl_->stopping.load() &&
             impl_->state.status != AutoStopStatus::BRAKING && impl_->state.status != AutoStopStatus::ESTIMATED &&
             impl_->state.status != AutoStopStatus::MASKED && impl_->state.status != AutoStopStatus::FAULT;
     } catch (...) { return false; }
@@ -1359,6 +1430,6 @@ std::uint64_t AutoStopWorker::estimated_completion_id() const noexcept {
         return impl_->running && !impl_->fault && !impl_->state.cleanup_unknown &&
             impl_->state.status == AutoStopStatus::ESTIMATED && impl_->state.source_focused &&
             impl_->estimated_generation == impl_->cancel_generation.load() &&
-            !impl_->paused.load() && !impl_->stopping.load() ? impl_->estimated_id : 0;
+            !impl_->movement_blocked() && !impl_->paused.load() && !impl_->stopping.load() ? impl_->estimated_id : 0;
     } catch (...) { return 0; }
 }

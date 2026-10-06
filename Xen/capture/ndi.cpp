@@ -471,6 +471,7 @@ public:
             last_metadata_.reset();
             session_state_.reset(config_.ndi_source_name);
             sequence_ = 0;
+            receiver_generation_ = 0;
             performance_sample_counter_ = 0;
             source_received_frames_ = 0;
             transport_dropped_frames_ = 0;
@@ -669,6 +670,7 @@ private:
         if (!receiver_) {
             return false;
         }
+        ++receiver_generation_;
         performance_sample_counter_ = 0;
         source_received_frames_ = 0;
         transport_dropped_frames_ = 0;
@@ -782,6 +784,7 @@ private:
                         finished - convert_started).count();
             }
             write_slot->timing.sequence = ++sequence_;
+            write_slot->timing.receiver_generation = receiver_generation_;
             write_slot->timing.captured_at = finished;
             write_slot->timing.capture_ms =
                 std::chrono::duration<double, std::milli>(
@@ -870,6 +873,7 @@ private:
             write_slot->timing.transport_dropped_frames =
                 transport_dropped_frames_;
             write_slot->timing.capture_stages = capture_stages;
+            write_slot->source_mapping_verified = geometry.metadata_applied;
             write_slot->roi_x = geometry.source_roi_x;
             write_slot->roi_y = geometry.source_roi_y;
             write_slot->source_width = geometry.source_width;
@@ -1060,6 +1064,7 @@ private:
     std::atomic<std::uint64_t> published_sequence_{0};
     std::string last_error_;
     std::uint64_t sequence_ = 0;
+    std::uint64_t receiver_generation_ = 0;
     std::uint64_t performance_sample_counter_ = 0;
     std::uint64_t source_received_frames_ = 0;
     std::uint64_t transport_dropped_frames_ = 0;

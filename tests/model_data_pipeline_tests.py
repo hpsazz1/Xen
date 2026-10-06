@@ -81,6 +81,46 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(pipeline.read_json(status)["result"]["samples"], 6)
 
+    def test_export_lists_omitted_unknown_and_excluded_without_training_them(self):
+        review = self.approve()
+        manifest = pipeline.read_json(review / "review.json")
+        manifest["samples"] = [item for item in manifest["samples"]
+                               if item["session_id"] == "session-0" and item["sample_id"] == "2"]
+        manifest["samples"][0]["state"] = "EXCLUDED"
+        pipeline.write_json(review / "review.json", manifest)
+        pipeline.import_labels(self.context("import_labels", review_manifest=str(review / "review.json")))
+        record = self.root / "session-1" / "samples" / "2.json"
+        unknown = pipeline.read_json(record)
+        unknown["sample_id"] = "draft-only"
+        pipeline.write_json(record.with_name("draft-only.json"), unknown)
+        dataset = self.base / "selected"
+        pipeline.export_dataset(self.context("export", output=str(dataset)))
+        frozen = pipeline.validate_dataset(dataset)
+        self.assertEqual(frozen["selection"]["omitted_counts"], {"EXCLUDED": 1, "UNKNOWN": 1})
+        self.assertEqual(frozen["selection"]["source_samples"], 7)
+        self.assertEqual(len(frozen["samples"]), 5)
+        self.assertFalse(any(item["sample_id"] == "draft-only" for item in frozen["samples"]))
+        self.assertFalse(any(item["session_id"] == "session-0" and item["sample_id"] == "2"
+                             for item in frozen["samples"]))
+
+    def test_training_validation_rejects_missing_review_and_split_leakage(self):
+        dataset = self.freeze()
+        original = pipeline.read_json(dataset / "dataset.json")
+        for mutation in ("revision", "session"):
+            manifest = json.loads(json.dumps(original))
+            if mutation == "revision":
+                manifest["samples"][0].pop("revision")
+            else:
+                first = manifest["samples"][0]
+                other = next(item for item in manifest["samples"] if item["split"] != first["split"])
+                other["session_id"] = first["session_id"]
+                other["sample_id"] = "different"
+            pipeline.write_json(dataset / "dataset.json", manifest)
+            pipeline.write_json(dataset / "dataset_identity.json",
+                                dict(dataset_sha256=pipeline.sha256(dataset / "dataset.json")))
+            with self.subTest(mutation=mutation), self.assertRaises(pipeline.PipelineError):
+                pipeline.validate_dataset(dataset)
+
     def test_yolo_border_boxes_survive_production_round_trip(self):
         # 实际冻结失败样本17：x2=44.78125，独立十位小数舍入使左边界约为-5e-11。
         side = 320

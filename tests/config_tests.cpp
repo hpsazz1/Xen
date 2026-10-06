@@ -256,6 +256,10 @@ void test_round_trip() {
     source.keyboard.debug_test_enabled = true;
     source.keyboard.debug_test_virtual_keys = {0x79,0x7A};
     source.keyboard.anomaly_mark_virtual_keys = {0x78};
+    source.keyboard.lineup_locate_virtual_key = 0x7B;
+    source.keyboard.lineup_throw_virtual_key = 0x7C;
+    source.lineup.calibration_file = "calibration/lineup-measured.json";
+    source.lineup.calibration_context = "fixture-game-conditions";
     source.log.global_level = LogLevel::WARN;
     source.log.enable_console = false;
     source.log.enable_file = false;
@@ -330,6 +334,10 @@ void test_round_trip() {
            loaded.keyboard.debug_test_enabled == source.keyboard.debug_test_enabled &&
            loaded.keyboard.debug_test_virtual_keys == source.keyboard.debug_test_virtual_keys &&
            loaded.keyboard.anomaly_mark_virtual_keys == source.keyboard.anomaly_mark_virtual_keys &&
+           loaded.keyboard.lineup_locate_virtual_key == source.keyboard.lineup_locate_virtual_key &&
+           loaded.keyboard.lineup_throw_virtual_key == source.keyboard.lineup_throw_virtual_key &&
+           loaded.lineup.calibration_file == source.lineup.calibration_file &&
+           loaded.lineup.calibration_context == source.lineup.calibration_context &&
            loaded.keyboard.aim_hold_virtual_keys ==
                source.keyboard.aim_hold_virtual_keys &&
            loaded.keyboard.emergency_virtual_keys ==
@@ -849,6 +857,23 @@ void test_legacy_keyboard_config() {
            "写入显式禁用标记键配置");
     expect(load_app_config(path.string(), loaded, error) && loaded.keyboard.anomaly_mark_virtual_keys.empty(),
            "显式清空标记键不得恢复默认F9");
+    expect(loaded.keyboard.lineup_locate_virtual_key == 0, "旧 INI 缺少定位字段默认未绑定");
+    expect(write_file_bytes(path, "[lineup]\nlocate_virtual_key=123\n"), "写入可选定位键");
+    expect(load_app_config(path.string(), loaded, error) && loaded.keyboard.lineup_locate_virtual_key == 123,
+           "同一 INI 的 lineup 专属字段可读入");
+    expect(write_file_bytes(path, "[lineup]\nlocate_virtual_key=123oops\n"), "写入非法定位值");
+    expect(!load_app_config(path.string(), loaded, error), "定位字段必须严格整数");
+    expect(loaded.keyboard.runtime_toggle_virtual_keys == std::vector<int>{118},
+           "缺失 keyboard 字段保留此前迁移的 F7 绑定");
+    expect(write_file_bytes(path, "[lineup]\nlocate_virtual_key=118\n"), "写入继承绑定冲突定位键");
+    expect(!load_app_config(path.string(), loaded, error) &&
+               loaded.keyboard.lineup_locate_virtual_key == 123 &&
+               loaded.keyboard.runtime_toggle_virtual_keys == std::vector<int>{118},
+           "定位不得占用继承的 F7，失败不改已加载配置");
+    expect(write_file_bytes(path, "[keyboard]\nruntime_toggle_virtual_keys=119\n[lineup]\nlocate_virtual_key=119\n"),
+           "显式配置原 F8 运行键及同键定位冲突");
+    expect(!load_app_config(path.string(), loaded, error), "定位不占用原 F8 运行键");
+
     std::error_code ignored;
     std::filesystem::remove(path, ignored);
 }
@@ -987,6 +1012,25 @@ void test_invalid_config() {
     config.keyboard.emergency_virtual_keys = {0x23};
     expect(validate_app_config(config, error),
            "互不冲突且位于 Win32 范围内的虚拟键应通过校验");
+    expect(config.keyboard.lineup_locate_virtual_key == 0 && config.keyboard.lineup_throw_virtual_key == 0,
+           "旧配置定位和投掷均未绑定");
+    config.keyboard.lineup_throw_virtual_key = 0x77;
+    expect(!validate_app_config(config,error), "投掷不占用运行键");
+    config.keyboard.lineup_throw_virtual_key = 0x20;
+    expect(!validate_app_config(config,error), "Space只用于动作，不用作投掷触发键");
+    config.keyboard.lineup_throw_virtual_key = 0x7B;
+    config.keyboard.lineup_locate_virtual_key = 0x7B;
+    expect(!validate_app_config(config,error), "定位与投掷必须独立按键");
+    config.keyboard.lineup_throw_virtual_key = 0;
+    config.keyboard.lineup_locate_virtual_key = 0x7B;
+    expect(validate_app_config(config,error), "独立定位绑定有效");
+    config.trigger.hold_virtual_key = 0x7B;
+    expect(!validate_app_config(config,error), "定位与扳机键冲突必须拒绝");
+    config.trigger.hold_virtual_key = 0;
+    config.auto_stop.release_virtual_keys.push_back(0x7B);
+    expect(!validate_app_config(config,error), "定位与急停释放键冲突必须拒绝");
+    config.auto_stop.release_virtual_keys.pop_back();
+    config.keyboard.lineup_locate_virtual_key = 0;
     config.keyboard.debug_test_virtual_keys = {0x79};
     config.keyboard.debug_test_enabled = true;
     expect(validate_app_config(config,error), "独立调试开关及无冲突绑定应有效");
@@ -1312,6 +1356,9 @@ void test_movement_config() {
         config.movement.spin_trigger == movement::Trigger::WHEEL_UP &&
         config.movement.large_trigger == movement::Trigger::WHEEL_DOWN && config.movement.jump_delay_ms == 0,
         "身法总开关默认关闭，上滚旋转跳、下滚大跳且无额外延时");
+    expect(config.movement.large_angle_degrees == 25.0 && config.movement.large_duration_ms == 170 &&
+        config.movement.large_ctrl_enabled && config.movement.large_ctrl_delay_ms == 650 &&
+        config.movement.large_ctrl_hold_ms == 30, "Long Jump 默认每侧25度170ms及650ms后短按Ctrl30ms");
     config.movement.enabled = true;
     config.movement.spin_enabled = true;
     config.movement.large_enabled = true;
@@ -1322,8 +1369,12 @@ void test_movement_config() {
     config.movement.report_mode = movement::ReportMode::RELATIVE_DELTA;
     config.movement.wheel_down_positive = false;
     config.movement.jump_delay_ms = 31;
+    config.movement.trigger_guard_ms = 177;
     config.movement.spin_duration_ms = 321;
     config.movement.large_duration_ms = 123;
+    config.movement.large_ctrl_enabled = false;
+    config.movement.large_ctrl_delay_ms = 611;
+    config.movement.large_ctrl_hold_ms = 41;
     config.movement.spin_angle_degrees = 73.5;
     config.movement.large_angle_degrees = 17.25;
     config.movement.sensitivity = 1.4;
@@ -1335,7 +1386,8 @@ void test_movement_config() {
         value.spin_trigger == movement::Trigger::KEY && value.spin_virtual_key == 0x4A &&
         value.large_trigger == movement::Trigger::WHEEL_DOWN && value.large_virtual_key == 0x4B &&
         value.report_mode == movement::ReportMode::RELATIVE_DELTA && !value.wheel_down_positive &&
-        value.jump_delay_ms == 31 && value.spin_duration_ms == 321 && value.large_duration_ms == 123 &&
+        value.trigger_guard_ms == 177 && value.jump_delay_ms == 31 && value.spin_duration_ms == 321 && value.large_duration_ms == 123 &&
+        !value.large_ctrl_enabled && value.large_ctrl_delay_ms == 611 && value.large_ctrl_hold_ms == 41 &&
         value.spin_angle_degrees == 73.5 && value.large_angle_degrees == 17.25 &&
         value.sensitivity == 1.4 && value.yaw_degrees_per_count == 0.023,
         "身法所有字段必须独立保留");
@@ -1343,6 +1395,10 @@ void test_movement_config() {
     expect(load_app_config(path.string(), loaded, error) && !loaded.movement.enabled &&
         loaded.movement.spin_enabled && !loaded.movement.large_enabled &&
         loaded.movement.spin_trigger == movement::Trigger::WHEEL_UP &&
+        loaded.movement.trigger_guard_ms == 150 && !loaded.movement.wheel_down_positive &&
+        loaded.movement.large_ctrl_enabled && loaded.movement.large_ctrl_delay_ms == 650 &&
+        loaded.movement.large_ctrl_hold_ms == 30 && loaded.movement.large_duration_ms == 170 &&
+        loaded.movement.large_angle_degrees == 25.0 &&
         loaded.movement.spin_duration_ms == movement::Config{}.spin_duration_ms &&
         loaded.movement.sensitivity == movement::Config{}.sensitivity,
         "缺少身法节时恢复默认且不继承开启状态");
@@ -1364,12 +1420,39 @@ void test_movement_config() {
     expect(write_file_bytes(path, "[movement]\nmode=unknown\nspin_enabled=true\nlarge_enabled=true\nspin_trigger=key\nspin_virtual_key=0\n"), "写入新格式未绑定键");
     expect(load_app_config(path.string(), loaded, error) && loaded.movement.spin_virtual_key == 0,
         "新格式优先于旧mode且允许未绑定键");
+    for (const char* boundary : {"large_ctrl_delay_ms=0\nlarge_ctrl_hold_ms=1",
+             "large_ctrl_delay_ms=2000\nlarge_ctrl_hold_ms=200"}) {
+        expect(write_file_bytes(path, std::string("[movement]\n") + boundary + "\n"), "写入Ctrl合法边界");
+        expect(load_app_config(path.string(), loaded, error), std::string("接受Ctrl合法边界：") + boundary);
+    }
+
+    for (int hold : {1, 30, 200, 201, 2000}) {
+        const auto ini = std::string("[movement]\nlarge_ctrl_hold_ms=") + std::to_string(hold) +
+            "\nspin_duration_ms=200\nlarge_duration_ms=170\nlarge_angle_degrees=25\nlarge_ctrl_delay_ms=650\n";
+        expect(write_file_bytes(path, ini), "写入Ctrl按住范围回归");
+        expect(load_app_config(path.string(), loaded, error) && loaded.movement.large_ctrl_hold_ms == hold,
+            "接受Ctrl按住时长：" + std::to_string(hold));
+        const auto expected = loaded.movement;
+        expect(save_app_config(path.string(), loaded, error) && load_app_config(path.string(), loaded, error) &&
+            loaded.movement == expected && loaded.movement.large_ctrl_hold_ms == hold &&
+            loaded.movement.spin_duration_ms == 200 && loaded.movement.large_duration_ms == 170 &&
+            loaded.movement.large_angle_degrees == 25 && loaded.movement.large_ctrl_delay_ms == 650,
+            "Ctrl时长持久化不改其他身法参数：" + std::to_string(hold));
+    }
+    for (int hold : {-1, 0, 2001}) {
+        loaded.movement.large_ctrl_hold_ms = hold;
+        const auto before = read_file_bytes(path);
+        expect(!save_app_config(path.string(), loaded, error) && read_file_bytes(path) == before,
+            "保存拒绝Ctrl越界且不改文件：" + std::to_string(hold));
+    }
     for (const char* invalid : {"enabled=perhaps", "mode=unknown", "report_mode=unknown",
+             "large_ctrl_enabled=perhaps", "large_ctrl_delay_ms=-1", "large_ctrl_delay_ms=2001",
+             "large_ctrl_delay_ms=1.5", "large_ctrl_hold_ms=0", "large_ctrl_hold_ms=2001", "large_ctrl_hold_ms=1.5",
              "spin_enabled=perhaps", "large_enabled=perhaps", "spin_trigger=unknown", "large_trigger=unknown",
              "spin_virtual_key=-1", "large_virtual_key=256", "spin_virtual_key=1.5",
              "spin_enabled=true\nspin_trigger=key\nspin_virtual_key=35",
              "spin_enabled=true\nlarge_enabled=true\nspin_trigger=wheel_down\nlarge_trigger=wheel_down",
-             "wheel_down_positive=maybe", "jump_delay_ms=1.5", "spin_duration_ms=abc",
+             "wheel_down_positive=maybe", "trigger_guard_ms=-1", "trigger_guard_ms=2001", "trigger_guard_ms=1.5", "jump_delay_ms=1.5", "spin_duration_ms=abc",
              "large_duration_ms=0", "spin_angle_degrees=nan", "large_angle_degrees=-1",
              "sensitivity=0", "yaw_degrees_per_count=inf"}) {
         loaded.movement.spin_duration_ms = 333;

@@ -36,6 +36,12 @@ KeyboardRoutingResult route_keyboard_events(
             result.runtime_toggle_pressed = true;
         } else if (event.type == KeyboardEventType::DEBUG_TEST) {
             result.debug_test_pressed = true;
+        } else if (event.type == KeyboardEventType::LINEUP_THROW && event.active &&
+                   poll.input_healthy && poll.new_input_fact) {
+            runtime.post_intent({RuntimeIntentType::LINEUP_THROW, true});
+        } else if (event.type == KeyboardEventType::LINEUP_LOCATE && event.active &&
+                   poll.input_healthy && poll.new_input_fact) {
+            runtime.post_intent({RuntimeIntentType::LINEUP_LOCATE, true});
         } else if (event.type == KeyboardEventType::ANOMALY_MARK && event.active) {
             result.anomaly_mark_pressed = true;
         }

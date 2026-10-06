@@ -399,6 +399,55 @@ void test_debug_test_hotkey() {
     for (int key : {1,0x57,0x41,0x53,0x44,0x77}) { config.debug_test_virtual_keys = {key}; expect(!valid_keyboard_config(config), "测试动作或全局冲突绑定必须拒绝"); }
     config.debug_test_virtual_keys = {0x05}; expect(valid_keyboard_config(config), "未被占用侧键应与现有快捷键一致支持");
 }
+void test_lineup_locate_hotkey() {
+    KeyboardConfig config;
+    expect(config.lineup_locate_virtual_key == 0, "道具定位默认未绑定，不改变既有键");
+    for (int key : {-1, 256, 1, 0x57, 0x41, 0x53, 0x44, 0x02, 0x23, 0x77, 0x78}) {
+        config.lineup_locate_virtual_key = key;
+        expect(!valid_keyboard_config(config), "道具定位拒绝越界及已有功能冲突");
+    }
+    config.lineup_locate_virtual_key = 0x7B;
+    auto device = std::make_shared<FakeInputDevice>();
+    device->snapshot_.status = InputMonitorStatus::READY;
+    device->snapshot_.state_valid = true;
+    device->snapshot_.sequence = 1;
+    device->snapshot_.virtual_keys[0x7B] = true;
+    KeyboardListener listener(config, device);
+    expect(listener.open(), "定位复用同一输入设备");
+    expect(listener.poll().events.empty(), "首次健康已有按住不构成定位边沿");
+    device->snapshot_.virtual_keys[0x7B] = false; ++device->snapshot_.sequence; listener.poll();
+    device->snapshot_.virtual_keys[0x7B] = true; ++device->snapshot_.sequence;
+    auto event = listener.poll();
+    expect(event.events.size() == 1 && event.events[0].type == KeyboardEventType::LINEUP_LOCATE,
+           "健康释放重按产生一次只读定位事件");
+    expect(listener.poll().events.empty(), "重复输入序号不重发定位");
+    for (int i = 0; i < 5; ++i) { ++device->snapshot_.sequence; expect(listener.poll().events.empty(), "长按不重复定位"); }
+    device->snapshot_.status = InputMonitorStatus::STALE; device->snapshot_.state_valid = false; listener.poll();
+    device->snapshot_.status = InputMonitorStatus::READY; device->snapshot_.state_valid = true; ++device->snapshot_.sequence;
+    expect(listener.poll().events.empty(), "断线恢复按住不触发定位");
+    device->snapshot_.virtual_keys[0x7B] = false; ++device->snapshot_.sequence; listener.poll();
+    device->snapshot_.virtual_keys[0x7B] = true; ++device->snapshot_.sequence;
+    event = listener.poll();
+    expect(event.events.size() == 1 && event.events[0].type == KeyboardEventType::LINEUP_LOCATE,
+           "恢复后释放重按才产生新定位");
+    KeyboardConfig throwing; throwing.lineup_throw_virtual_key = 0x7C;
+    auto throw_device = std::make_shared<FakeInputDevice>();
+    throw_device->snapshot_.status = InputMonitorStatus::READY;
+    throw_device->snapshot_.state_valid = true;
+    throw_device->snapshot_.sequence = 1;
+    throw_device->snapshot_.virtual_keys[0x7C] = true;
+    KeyboardListener throw_listener(throwing, throw_device);
+    expect(throw_listener.open() && throw_listener.poll().events.empty(), "投掷初次按住不触发");
+    throw_device->snapshot_.virtual_keys[0x7C] = false; ++throw_device->snapshot_.sequence; throw_listener.poll();
+    throw_device->snapshot_.virtual_keys[0x7C] = true; ++throw_device->snapshot_.sequence;
+    auto thrown = throw_listener.poll();
+    expect(thrown.events.size() == 1 && thrown.events[0].type == KeyboardEventType::LINEUP_THROW,
+           "投掷只转交独立按下边沿");
+    ++throw_device->snapshot_.sequence;
+    expect(throw_listener.poll().events.empty(), "长按投掷不连发");
+
+}
+
 void test_keyboard_listener_uses_selected_device() {
     auto device = std::make_shared<FakeInputDevice>();
     device->snapshot_.status = InputMonitorStatus::READY;
@@ -1637,6 +1686,7 @@ int main() {
     test_ndi_receive_loop_watchdog_covers_receiver_errors();
     test_invalid_keyboard_config();
     test_debug_test_hotkey();
+    test_lineup_locate_hotkey();
     test_keyboard_event_state_machine();
     test_keyboard_listener_uses_selected_device();
     test_invalid_capture_config();

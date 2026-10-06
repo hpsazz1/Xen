@@ -21,3 +21,7 @@ recoil_profiles/
 # Python 专项工具的字节码缓存。
 __pycache__/
 *.pyc
+
+# 本机设备配置及临时诊断产物，不进入公开源码。
+/config.ini
+/tmp/
