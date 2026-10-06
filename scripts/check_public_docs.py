@@ -21,7 +21,7 @@ ROOT_DOCS = {
 def public_document(path):
     return path in ROOT_DOCS or (
         path.lower().endswith(".md")
-        and path.startswith(("assets/guide/", "assets/readme/", ".github/"))
+        and path.startswith(("assets/", ".github/"))
     )
 
 

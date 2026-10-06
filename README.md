@@ -209,36 +209,9 @@ flowchart LR
 
 实时处理由 Runtime 统一协调；原生界面负责配置和状态展示，模型工作台负责采集后的审核、训练与评价。下图表示主要职责与数据流，不对应固定的线程数量。
 
-```mermaid
-flowchart TB
-    UI["Overlay · 原生控制台"]
-    CFG["Config · 配置与模型选择"]
-    SRC["本机桌面 / 双机视频源"]
-    CTX["热键 / GSI / 源端焦点与时钟"]
-
-    subgraph RT["Runtime · 生命周期、队列与运行状态"]
-        CAP["Capture · 画面采集"] --> DET["Detector · ONNX Runtime 推理"]
-        DET --> AIM["Aim · 追踪、目标选择与控制"]
-        AIM --> GATE["输出协调与 SafetyGate"]
-        AUX["辅助控制 · 身法 / 扳机 / 急停 / 弹道"] --> GATE
-        DET -.目标观测.-> AUX
-    end
-
-    SRC --> CAP
-    UI --> CFG
-    CFG -.配置.-> RT
-    CTX -.状态与许可.-> RT
-    GATE --> OUT["Mouse / Input · SendInput / KMBOX NET / MAKCU"]
-    RT -.运行快照与诊断.-> UI
-    RT -.报告与原始记录.-> REPORT["Debug / Log · 归档与离线分析"]
-
-    CAP -.原图.-> DATA["Data Collector · 素材与预测归档"]
-    DET -.预测.-> DATA
-    DATA --> WORK["Model Workspace · 审核、数据集、训练与评价"]
-    UI -.作业操作.-> WORK
-    WORK --> MODEL["候选 ONNX 模型"]
-    MODEL -.用户显式导入和选择.-> CFG
-```
+<p align="center">
+  <img src="assets/readme/architecture.svg" width="1000" alt="Xen 架构：画面采集、模型检测、瞄准和辅助控制经安全门输出；素材进入审核训练，候选模型由用户手动采用。">
+</p>
 
 - **实时链路**：采集、推理与控制在 Runtime 中协作，设备输出受统一许可与清理流程约束。
 - **模型闭环**：素材与预测用于审核和训练；候选由用户显式采用，不自动替换正在使用的模型。双机部署的训练作业在主机执行。
@@ -270,41 +243,64 @@ cmake --build build --config Release --target xen_app --parallel
 
 ```text
 仓库根目录/
-├── Xen/                    C++ 应用与功能模块（选列）
-│   ├── app/                应用入口、启动器与模型目录
-│   ├── overlay/            原生界面与功能面板
-│   ├── config/             配置读取、保存与校验
-│   ├── capture/            本机与网络画面输入
-│   ├── detector/           推理、预处理与后处理
-│   ├── aim/                目标追踪、选择与瞄准控制
-│   ├── runtime/            运行生命周期、队列与安全门
-│   ├── mouse/              输入设备后端
-│   ├── trigger/            自动扳机
-│   ├── auto_stop/          急停策略与事务
-│   ├── recoil/             弹道档案与执行
-│   ├── movement/           旋转跳与 Long Jump
-│   ├── lineup/             手机配方、局部匹配与 Runtime 执行协作
-│   ├── data_collection/    素材与预测采集
-│   └── model_workspace/    审核、数据集与训练作业编排
-├── scripts/                构建、数据处理、训练与发布脚本
-├── tests/                  单元、集成、契约测试与夹具
+├── Xen/                         C++ 应用与主要功能模块（选列）
+│   ├── app/                     应用入口、启动器与输入路由
+│   ├── overlay/                 原生界面与功能面板
+│   ├── config/                  配置读取、保存与校验
+│   ├── capture/                 本机、网络及 NDI 画面输入
+│   ├── sender/                  双机画面发送端
+│   ├── detector/                模型推理、预处理与后处理
+│   ├── aim/                     目标追踪、选择与瞄准控制
+│   ├── runtime/                 生命周期、队列、安全门与助手协作
+│   ├── mouse/                   鼠标及设备输出后端
+│   ├── keyboard/                热键、物理状态与共享键盘输出
+│   ├── trigger/                 自动扳机
+│   ├── auto_stop/               急停策略与事务
+│   ├── recoil/                  弹道档案与执行
+│   ├── movement/                旋转跳、Long Jump 与动作清理
+│   ├── weapon/                  武器资料、GSI 与本地上下文共享
+│   ├── lineup/                  手机道具助手、局部定位与执行协作
+│   │   └── web/                 手机页面、样式与交互脚本
+│   ├── data_collection/         素材与预测采集
+│   ├── model_workspace/         审核、数据集、训练与候选管理
+│   ├── source_context/          双机源端状态与焦点
+│   ├── clock_sync/              时钟同步与时间映射
+│   ├── debug/                   运行记录与诊断数据
+│   ├── debug_session/           调试会话与工具编排
+│   ├── log/                     日志输出
+│   └── crash/                   崩溃诊断
+├── scripts/                     正式构建、运行、发布与分析入口
+│   ├── build_lineup.ps1         手机助手构建
+│   ├── start_lineup.ps1         手机助手启动
+│   ├── build_lineup_calibration.py  助手量测标定数据整理
+│   ├── review_run.py            单 Run 离线复盘
+│   ├── model_data_pipeline.py   素材审核与数据集处理
+│   └── model_data_review.html   批量审核页面
+├── tests/                       单元、集成、契约测试
+│   └── fixtures/               测试素材与夹具
 ├── assets/
-│   ├── guide/              分类使用与开发指南
-│   ├── readme/             首页界面截图及来源说明
-│   ├── recoil/             弹道导入说明与清单
-│   └── reference_assessment/ 参考评估示例与第三方许可
-├── CMakeLists.txt          依赖、构建目标与测试登记
-├── LICENSE                 MIT 许可证
-└── README.md               项目介绍与使用入口
+│   ├── guide/                  控制、身法、训练、助手与开发指南
+│   ├── readme/                 UI 截图、架构 SVG 与来源说明
+│   │   └── showcase/           压枪、追踪和身法 GIF
+│   ├── recoil/                 弹道导入说明与清单
+│   └── reference_assessment/   参考评估示例与第三方许可
+├── .github/                    文档检查工作流、问题与 PR 模板
+├── CMakeLists.txt              依赖、构建目标与测试登记
+├── CONTRIBUTING.md             贡献与验证说明
+├── SUPPORT.md                  使用帮助与排查入口
+├── SECURITY.md                 安全问题报告方式
+├── LICENSE                     MIT 许可证
+└── README.md                   项目介绍与使用入口
 ```
 
-构建输出 `build/`、运行数据 `cache/` 和本地配置不属于上述源码目录。发布包的目录布局另见[运行与发布目录](assets/guide/development.md#应用启动与发布布局)。
+专项探针、基准、校准与离线研究目录按用途列在[开发指南](assets/guide/development.md#工具与测试的位置)。`docs/` 与 `AGENTS.md` 仅本地维护；`build/`、`cache/`、`logs/`、`tmp/` 和本机 `config.ini` 不进入公开源码。发布包的目录布局另见[运行与发布目录](assets/guide/development.md#应用启动与发布布局)。
 
 ## 使用指南
 
 | 指南 | 内容 |
 | :-- | :-- |
 | [采集、审核与训练](assets/guide/training.md) | 从素材整理到训练环境、模型评价与候选管理。 |
+| [身法简明说明](assets/guide/movement.md) | 旋转跳与 Long Jump 的入口、触发与演示。 |
 | [瞄准、辅助与弹道](assets/guide/controls.md) | 控制设置、阵营筛选、自动扳机、急停与弹道工作流。 |
 | [录制、分析与实验工具](assets/guide/tools.md) | 输入评价、离线对照、有界测试及命令参数。 |
 | [构建与开发](assets/guide/development.md) | 依赖、可执行目标、脚本入口、运行目录和诊断。 |

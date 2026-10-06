@@ -109,6 +109,8 @@ Xen-unified-<版本>/
 |---|---|---|
 | `xen_app` | `Xen.exe` | 主应用与 Overlay |
 | `xen_launcher` | `XenLauncher.exe` | 正式包 Provider 路由入口 |
+| `xen_lineup` | `XenLineup.exe` | 手机道具助手本地服务，配套 `lineup-web/` 页面 |
+| `xen_lineup_offline` | `XenLineupOffline.exe` | 助手离线数据处理与匹配验证 |
 | `xen_sender` | `XenSender.exe` | DXGI → XUDP 发送端 |
 | `xen_clock_source` | `XenClockSource.exe` | NDI 源机四时间戳旁路；不接触图像或输入设备 |
 | `xen_capture_evidence` | `XenCaptureEvidence.exe` | 不可武装的 Capture/NDI 像素证据录制入口 |
@@ -128,6 +130,10 @@ Xen-unified-<版本>/
 |---|---|
 | [scripts/build.ps1](../../scripts/build.ps1) | 当前 Provider 的完整构建与测试 |
 | [scripts/build_aim_debug.ps1](../../scripts/build_aim_debug.ps1) | 固定 NVIDIA 环境下的 Aim/Runtime 轻量构建 |
+| [scripts/build_lineup.ps1](../../scripts/build_lineup.ps1) | 复用已有依赖缓存，在独立目录构建并验证手机助手 |
+| [scripts/start_lineup.ps1](../../scripts/start_lineup.ps1) | 启动手机助手；访问及配置要求见助手指南 |
+| [scripts/build_lineup_calibration.py](../../scripts/build_lineup_calibration.py) | 打包已有量测标定证据，不执行自动标定 |
+| [scripts/review_run.py](../../scripts/review_run.py) | 读取已有 Run，生成离线复盘报告 |
 | [scripts/publish_release_bundle.ps1](../../scripts/publish_release_bundle.ps1) | 生成隔离 Provider 的正式发布包 |
 | [scripts/invoke_aim_manual_acceptance.ps1](../../scripts/invoke_aim_manual_acceptance.ps1) | 生成并执行受控 Aim 人工 Run |
 | [scripts/run_ndi_clock_source.ps1](../../scripts/run_ndi_clock_source.ps1) | 在 NDI 源机前台启动时钟旁路；不会访问 KMBOX |
@@ -226,6 +232,9 @@ Debug CSV/JSON 运行报告与崩溃诊断独立于 Log，不随此开关关闭�
 | 目标如何转换成控制请求 | [aim/](../../Xen/aim/) | `runtime/` 组帧与控制协调 |
 | 启停、队列与输出许可 | [runtime/runtime.h](../../Xen/runtime/runtime.h) | `runtime.cpp`、`runtime_queue.cpp`、`mouse/`、`keyboard/` |
 | 扳机、急停与武器弹道 | [trigger/](../../Xen/trigger/)、[auto_stop/](../../Xen/auto_stop/)、[recoil/](../../Xen/recoil/) | `weapon/` 提供共享武器资料；`recoil_tuner/` 负责离线优化 |
+| 旋转跳与 Long Jump | [movement/](../../Xen/movement/) | 动作阶段、方向与清理；`keyboard/` 和 `mouse/` 提供设备能力 |
+| 手机配方、局部定位与投掷协作 | [lineup/](../../Xen/lineup/)、[lineup/web/](../../Xen/lineup/web/) | 本地服务、标定、控制通道及手机界面；[Runtime 桥接](../../Xen/runtime/lineup_bridge_internal.h) |
+| Runtime 与助手共享游戏上下文 | [weapon/context_sharing.cpp](../../Xen/weapon/context_sharing.cpp) | 同登录会话本地管道；复用 Runtime 的 GSI 接收 |
 | 素材保存与训练流程 | [data_collection/](../../Xen/data_collection/)、[model_workspace/](../../Xen/model_workspace/) | [scripts/model_data_pipeline.py](../../scripts/model_data_pipeline.py) 及训练脚本；C++ 工作台编排后台作业 |
 | 双机焦点和时间同步 | [source_context/](../../Xen/source_context/)、[clock_sync/](../../Xen/clock_sync/) | `source_context_host/`、`clock_source/` 提供源端进程 |
 | 日志、归档与离线评价 | [debug/](../../Xen/debug/)、[debug_session/](../../Xen/debug_session/) | `log/`、`crash/`、`input_training/`、`reference_assessment/` |
@@ -239,6 +248,10 @@ Debug CSV/JSON 运行报告与崩溃诊断独立于 Log，不随此开关关闭�
 - `aim_landmark/`、`aim_production_red/`：Aim 诊断与回归支持。
 - [tests/](../../tests/)：按模块查找测试，`tests/fixtures/` 保存测试素材；实际目标和登记以 [CMakeLists.txt](../../CMakeLists.txt) 为准。
 - [scripts/](../../scripts/)：正式构建、数据处理、训练、发布和分析入口；先查看脚本参数或 `--help`。
+- [build_lineup.ps1](../../scripts/build_lineup.ps1)、[start_lineup.ps1](../../scripts/start_lineup.ps1)：手机助手构建与启动；[build_lineup_calibration.py](../../scripts/build_lineup_calibration.py) 整理量测标定输入。
+- [review_run.py](../../scripts/review_run.py)：只读已有 Run，生成离线复盘报告；[tests/review_run_tests.py](../../tests/review_run_tests.py) 覆盖对应工具。
+- `tests/lineup_*`、`tests/gsi_context_*` 与 [runtime_lineup_bridge_tests.cpp](../../tests/runtime_lineup_bridge_tests.cpp)：助手、上下文共享和执行桥接的专项验证。
+
 
 源码仓库中的 `assets/` 保存可分发资料；用户模型、采集内容和运行报告放在应用数据目录，不应混入测试夹具或公开截图目录。
 

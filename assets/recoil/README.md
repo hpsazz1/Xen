@@ -12,7 +12,7 @@ python tools/recoil/import_recoil_profiles.py --source-directory <用户持有�
 
 转换严格校验清单SHA256。三列按增量X/Y与delay_ms消费，使用旧经验比例2.45/参考灵敏度并反转Y，累计为counts；每行时长为multiple*(delay/sleep_divider-sleep_suber)。保留全部行、不跳过首子步、不随机化，不把该周期当游戏射速。实际单位/输入响应尚未标定，转换不能双重套入Aim counts_per_pixel或DPI系数。
 
-输出始终为IMPORTED，phase_tolerance/recovery未知且校准证据为空，不能进入活动压枪执行。导入报告记录总量、时长和旧参数差异；不覆盖已存在版本。项目软件测试只使用自制合成曲线，未将这些源候选当实机已验收数据。
+默认累计格式的输出始终为IMPORTED，phase_tolerance/recovery未知且校准证据为空，不能直接进入活动压枪执行；下文离散迁移格式也不自动确认或启用。导入报告记录总量、时长和旧参数差异；不覆盖已存在版本。项目软件测试只使用自制合成曲线，未将这些源候选当实机已验收数据。用户核对与启用流程见 [控制指南](../guide/controls.md#弹道配置与活动版本)。
 
 武器内部身份与统一显示名以 `assets/weapon_catalog.inc` 为唯一目录，GSI、共享点射资料和导入器使用同表。保存的 `weapon_id` 保持现有 canonical ID，例如 `m4a1_s`；界面统一显示 `M4A1-S`。旧曲线的 `id`、文件名和来源哈希保留，旧清单 `m4a1.csv` 明确对应 `m4a1_s`，不可由裸 `m4a1` 猜测武器；GSI `weapon_m4a1` 明确对应 `m4a4`。G3SG1 可识别但没有已验证点射资料，不由名称目录补造时序。
 

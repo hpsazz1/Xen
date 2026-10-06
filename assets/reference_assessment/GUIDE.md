@@ -1,17 +1,17 @@
 # 独立参考评估工具
 
-任务 AUTO-STOP-REFERENCE-001。用户已选择只做参考评估和离线比较，保留生产控制限制。
+本工具用于参考评估和离线比较，源于 AUTO-STOP-REFERENCE-001；当前生产急停另见 [控制指南](../guide/controls.md#hud与h40策略)。
 `XenReferenceCompare.exe` 不连接 KMBOX、GSI 或游戏，不链接 Mouse/Worker/Runtime，不替换原入口。
 
 ## 使用
 
-在本目录打开 PowerShell，运行合成样例（报告目录必须不存在）：
+在已构建并打包的独立工具目录打开 PowerShell，运行合成样例（报告目录必须不存在；源码构建入口见 [工具指南](../guide/tools.md#独立参考比较)）：
 
 ```powershell
 .\XenReferenceCompare.exe --events .\example.json --output .\reports\example-1
 ```
 
-比较现有调试页“输入训练”导出的完整 `XEN_INPUT_TRAINING_V1` 归档目录：
+比较调试页“人工录制与回看”保存的完整 `XEN_INPUT_TRAINING_V1` 归档目录：
 
 ```powershell
 .\XenReferenceCompare.exe --archive 'D:\你的归档目录' --output .\reports\recorded-1
@@ -47,7 +47,7 @@
 原Rust核心59测试通过，8组原实现黄金轨迹用于核对C++数值与状态；这不是整个Tauri应用的验证。
 
 默认模型：最大归一速度1，加速5.5/s、自然减速2.5/s、反向减速14/s，稳定阈值比例0.34；换向阈值2/10/120ms，去重50ms；首次采样DOWN+18ms，短按窗90ms，后续100ms采样。
-这些固定参数只存在于离线模型，不用于生产控制。短tap在UP早于首次due时仍按原模型向未来DOWN+18ms结算；不代表该时刻真实发火。
+本工具使用上述固定参数执行离线评价，不发送控制输出。生产 HUD 动态制动另外复用了运动估计思想，具体适配和边界见 [HUD 实验说明](HUD-EXPERIMENT.md)，不能将本工具的评分当作生产开火许可。短tap在UP早于首次due时仍按原模型向未来DOWN+18ms结算；不代表该时刻真实发火。
 
 不含自定义参数/键位、GSI增强、OS漏键补偿。Shift/Space只记录，不推断慢走或腾空。
 边沿归一、断点后全释放重同步、单调时间及资源校验、Xen并排评估和H40假ACK视图均是本次适配。

@@ -5,6 +5,7 @@
 - [采集、审核与训练](assets/guide/training.md)
 - [Aim、辅助、扳机与弹道](assets/guide/controls.md)
 - [输入评估与离线工具](assets/guide/tools.md)
+- [手机配方练习参考](assets/guide/lineup.md)
 - [构建、发布与日志诊断](assets/guide/development.md)
 
 ## 选择报告入口
