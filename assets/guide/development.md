@@ -101,7 +101,7 @@ Xen-unified-<版本>/
 这些用户数据不能按“缓存”一概删除。随包训练脚本使用相对工具路径；用户自选脚本、素材、权重和
 已验证 Python 环境保留明确路径。升级时应复核绑定，不能直接搬移 venv 或复制旧 CMake 构建树。
 发布包不包含用户旧弹道 CSV、训练权重或测试 EXE，旧包可保留供回退。
-完整包固定携带同提交的 `tools/source/start_source_context_session.ps1`；`Start-Xen.cmd` 是各机已有凭据绑定的启动封装，交付时逐机迁移核验，不把主机封装直接用于辅机。
+完整包固定携带同提交的 `tools/source/start_source_context_session.ps1`；根目录 `Start-Xen.cmd` 使用相对路径启动 Launcher，不包含设备凭据。旧机器上自定义的同名封装需单独保存，设备与源端连接信息在各机配置中填写。
 单 Worker 更新来源保存在清单内的 `tools/acceptance/WORKER-UPDATE.json`，不扩展 Launcher
 固定的清单顶层字段。发布回归使用 Launcher 同一生产解析器验证生成结果，再检查传输完整性。
 
