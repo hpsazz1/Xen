@@ -102,6 +102,10 @@ public:
 };
 movement::Config config() {
     movement::Config result;
+    // 多数场景使用累计滚轮单旋转夹具；相对报告和双模式场景另行显式覆盖。
+    result.spin_enabled = true;
+    result.large_enabled = false;
+    result.report_mode = movement::ReportMode::CUMULATIVE;
     result.large_ctrl_enabled = false;
     result.trigger_guard_ms = 0; result.wheel_down_positive = true;
     result.enabled = true; result.spin_trigger = movement::Trigger::WHEEL_DOWN; result.jump_delay_ms = 0; result.spin_duration_ms = 12;

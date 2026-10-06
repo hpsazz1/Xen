@@ -22,8 +22,10 @@ def main():
     assert legacy['size_origin'] == 'legacy_override'
     assert legacy['gsi_mode'] == 'shared' and not legacy['config_loaded']
     with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        config = root / 'shared.ini'
+        # Windows ACP936下也必须保留宽命令行中的中文与非代码页字符。
+        root = Path(tmp) / '中文发行版_🚀'
+        root.mkdir()
+        config = root / '默认配置_🧪.ini'
         config.write_text('[capture]\nbackend=ndi\nndi_source_name=shared-fixture\nndi_source_width=2560\nndi_source_height=1440\nndi_frame_layout=center_crop_1_to_1\nndi_clock_sync_url=udp://127.0.0.1:5011\n', encoding='utf-8')
         digest = hashlib.sha256(config.read_bytes()).hexdigest()
         shared = check('--config', str(config))
@@ -45,15 +47,17 @@ def main():
         config.write_text(config.read_text().replace('locate_virtual_key=120', 'locate_virtual_key=121'), encoding='utf-8')
         bound = check('--config', str(config))
         assert bound['locate_virtual_key'] == 121 and bound['locate_hotkey_status'] == 'requires_running_runtime'
-        gsi = root / 'gsi.ini'
+        gsi = root / '状态配置_🛰.ini'
+        gsi.write_text('[gsi]\nbind_address=127.0.0.1\n', encoding='utf-8')
+        assert check('--config', str(config), '--gsi-config', str(gsi))['gsi_config_error'] == ''
         gsi.write_text('[gsi]\nbind_address=0.0.0.0\n', encoding='utf-8')
         assert check('--gsi-config', str(gsi), expected=1)['gsi_config_error']
         missing = root / 'missing.ini'
         assert check('--config', str(missing), expected=1)['config_error']
         assert not missing.exists()
-        config.write_text('[capture]\nndi_source_width=-5\n', encoding='utf-8')
+        config.write_text('[capture]\nbackend=ndi\nndi_source_name=shared-fixture\nndi_source_width=-5\n', encoding='utf-8')
         assert check('--config', str(config), expected=1)['config_error']
-    print('lineup_config_tests: shared INI, unchanged bytes, precedence, ROI metadata pending, missing/invalid, legacy and synthetic passed')
+    print('lineup_config_tests: Unicode CLI/shared INI, unchanged bytes, precedence, ROI metadata pending, missing/invalid, legacy and synthetic passed')
 
 if __name__ == '__main__':
     main()

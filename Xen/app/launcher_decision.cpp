@@ -29,8 +29,10 @@ int resolve_launcher_runtime(
         std::string config_error;
         if (!load_app_config(config_path, config, config_error)) {
             std::error_code filesystem_error;
+            const std::filesystem::path native_config_path(
+                std::u8string(config_path.begin(), config_path.end()));
             const bool config_exists =
-                std::filesystem::exists(config_path, filesystem_error);
+                std::filesystem::exists(native_config_path, filesystem_error);
             if (filesystem_error) {
                 present_error(
                     adapter,
@@ -47,7 +49,7 @@ int resolve_launcher_runtime(
                 return kLauncherDecisionFailureExitCode;
             }
             // 发布包首次启动仍允许缺少 config.ini，并沿用 AppConfig 的
-            // 安全默认 TensorRT 路由；只有确实缺失才能进入该分支。
+            // 默认后端路由，由 Worker 生成配置；只有确实缺失才能进入该分支。
         }
 
         runtime = find_runtime_for_backend(manifest, config.detector.backend);

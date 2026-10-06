@@ -69,11 +69,13 @@ VC CRT 从所用 Visual Studio 的官方 Redist 目录解析；可用 `-MsvcRedi
 
 ## 应用启动与发布布局
 
-1. 启动一次 `build/Release/Xen.exe`。程序会在同目录创建 `models/` 和默认 `config.ini`。
+1. 启动一次 `build/Release/Xen.exe`。程序会在同目录创建 `models/`；`config.ini` 不存在时按代码发行默认生成完整配置。默认 CPU 推理、本机桌面采集，物理输出和辅助总开关关闭。
 2. 把 ONNX 模型放入 `models/` 根目录，在“检测”页刷新、选择并应用模型。
 3. 配置 Capture 与 Provider，启动 Runtime；先保持物理输出关闭，确认预览、日志和 Provider 状态。
 4. 需要真实设备验收时，使用正式 Prepare/Launch 脚本生成独立 Run，并由用户手动执行带确认令牌的
    Launch 命令。
+
+删除 `config.ini` 后再次启动会按代码发行默认重建，不会恢复此前的私人连接信息；设备地址、NDI 源及双机焦点等需重新填写。已有有效配置不被覆盖，已有但无效的配置会报错而不是静默重置。
 
 正式多 Provider 包只从根目录 `XenLauncher.exe` 进入。Launcher 负责 manifest 路由、路径安全、
 后端归属和 Worker 存在性；日常启动不会扫描或哈希整包。完整文件集合与 SHA-256 校验只保留在

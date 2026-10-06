@@ -58,23 +58,16 @@ struct AppConfig {
     DetectorConfig detector = [] {
         DetectorConfig value;
         value.model_path = "14wv11.onnx";
-        value.backend = BackendType::TENSORRT;
+        value.backend = BackendType::CPU;
         value.openvino_device = OpenVinoDevice::CPU;
-        value.enable_fp16 = true;
+        value.enable_fp16 = false;
         return value;
     }();
     CaptureConfig capture = [] {
         CaptureConfig value;
-        value.backend = CaptureBackend::NDI;
-        value.udp_frame_layout = UdpFrameLayout::CENTER_CROP_1_TO_1;
-        value.udp_source_width = 2560;
-        value.udp_source_height = 1440;
-        value.ndi_source_name = "HPSAZZ (Xen-ROI-320)";
-        value.ndi_discovery_timeout_ms = 10000;
-        value.ndi_clock_sync_url = "udp://192.168.3.10:5011";
-        value.ndi_frame_layout = NetworkFrameLayout::CENTER_CROP_1_TO_1;
-        value.ndi_source_width = 2560;
-        value.ndi_source_height = 1440;
+        // 缺配置首次启动使用本机画面，不继承任何私人双机绑定。
+        value.udp_url.clear();
+        value.ndi_source_name.clear();
         return value;
     }();
     AimConfig aim = [] {
@@ -84,6 +77,8 @@ struct AppConfig {
         value.smoothing = 0.475f;
         value.counts_per_pixel_x = 0.425f;
         value.counts_per_pixel_y = 0.40f;
+        value.body_aim_height_ratio = 0.16f;
+        value.soft_zone_radius_percent = 30.0f;
         value.max_counts_per_frame = 14.0f;
         value.enable_delay_compensation = true;
         value.control_delay_ms = 15.0f;
@@ -91,20 +86,17 @@ struct AppConfig {
         value.enable_prediction = false;
         return value;
     }();
-    MouseConfig mouse = [] {
-        MouseConfig value;
-        value.backend = MouseBackend::KMBOX_NET;
-        value.kmbox_ip = "192.168.2.188";
-        value.kmbox_port = 13384;
-        value.kmbox_uuid = "7679E04E";
-        return value;
-    }();
+    MouseConfig mouse;
     KeyboardConfig keyboard;
     movement::Config movement;
     // 日常入口采用HUD；显式false配置仍可选择H40对照。
     AutoStopConfig auto_stop{.experimental_hud_model = true};
     TriggerConfig trigger = [] {
         TriggerConfig value;
+        value.fire_enabled = false;
+        value.random_timing_enabled = true;
+        value.require_stop = true;
+        value.allow_estimated_stop = true;
         value.fire_delay_ms = 0;
         value.fire_mode = TriggerFireMode::SINGLE;
         value.head_width_percent = value.head_height_percent = 100.0f;
@@ -112,7 +104,12 @@ struct AppConfig {
         return value;
     }();
     source_context::SourceContextConfig source_context;
-    RecoilConfig recoil;
+    RecoilConfig recoil = [] {
+        RecoilConfig value;
+        value.sensitivity = 1.4;
+        value.mixed_aim = true;
+        return value;
+    }();
     weapon::GsiConfig gsi;
     TeamFilterConfig team_filter;
     // 独立于弹道启用；启动时读取一次，运行中固定版本。
@@ -123,11 +120,7 @@ struct AppConfig {
         return value;
     }();
     RuntimeConfig runtime;
-    UiConfig ui = [] {
-        UiConfig value;
-        value.open_detached_preview_on_start = true;
-        return value;
-    }();
+    UiConfig ui;
 };
 
 bool validate_app_config(const AppConfig& config,

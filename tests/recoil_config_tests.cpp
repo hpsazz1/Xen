@@ -10,6 +10,11 @@ int main() {
         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".ini");
     try {
         AppConfig config; std::string error;
+        // 本专项验证 KMBOX 压枪配置合同，不依赖便携入口的 Win32 默认。
+        config.mouse.backend = MouseBackend::KMBOX_NET;
+        config.mouse.kmbox_ip = "127.0.0.1";
+        config.mouse.kmbox_port = 32123;
+        config.mouse.kmbox_uuid = "12345678";
         config.recoil.enabled = true;
         check(!validate_app_config(config, error), "缺GSI与场景不能启用");
         config.gsi.enabled = true;

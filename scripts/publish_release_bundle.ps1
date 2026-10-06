@@ -11,6 +11,8 @@
     [string[]]$LicenseEvidence,
     [string]$ConfigPath = "",
     [string]$WorkspaceSettingsPath = "",
+    [string]$TutorialPath = "",
+    [string]$ReleaseNotesPath = "",
     [string[]]$ToolFiles = @(),
     [string]$RepositoryRoot = (Split-Path -Parent $PSScriptRoot),
     [string]$GitExecutable = "git",
@@ -42,6 +44,16 @@ $repositoryPayload = [ordered]@{
     "assets/weapon_catalog.inc" = "assets/weapon_catalog.inc"
     "assets/recoil/legacy_manifest.json" = "assets/recoil/legacy_manifest.json"
     "assets/recoil/README.md" = "assets/recoil/README.md"
+}
+
+$lineupToolNames = @("XenLineup.exe", "XenLineupOffline.exe")
+$lineupPayload = [ordered]@{
+    "lineup-web/index.html" = "Xen/lineup/web/index.html"
+    "lineup-web/app.js" = "Xen/lineup/web/app.js"
+    "lineup-web/style.css" = "Xen/lineup/web/style.css"
+    "start_lineup.ps1" = "scripts/start_lineup.ps1"
+    "build_lineup_calibration.py" = "scripts/build_lineup_calibration.py"
+    "review_run.py" = "scripts/review_run.py"
 }
 
 function Resolve-ExistingPath([string]$Path, [string]$Description) {
@@ -374,6 +386,17 @@ if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-fA-F]{40}$') {
 }
 
 $model = Resolve-ExistingNonEmptyFile $ModelPath "发布模型"
+$tutorial = ""
+if ($TutorialPath) {
+    $tutorial = Resolve-ExistingNonEmptyFile $TutorialPath "单文件教程"
+    if ([IO.Path]::GetExtension($tutorial) -ine ".html") { throw "单文件教程必须是 HTML 文件" }
+}
+$releaseNotes = ""
+if ($ReleaseNotesPath) {
+    $releaseNotes = Resolve-ExistingNonEmptyFile $ReleaseNotesPath "发行说明"
+    if ([IO.Path]::GetExtension($releaseNotes) -ine ".md") { throw "发行说明必须是 Markdown 文件" }
+}
+$productLicense = Resolve-ExistingNonEmptyFile (Join-Path $repository "LICENSE") "产品许可证"
 $workspaceSettings = ""
 if ($WorkspaceSettingsPath) {
     $workspaceSettings = Resolve-ExistingNonEmptyFile $WorkspaceSettingsPath "Workspace 设置"
@@ -419,6 +442,23 @@ foreach ($entry in $repositoryPayload.GetEnumerator()) {
         throw "构建脚本/资源与当前版本不同：$($entry.Key)"
     }
     $payloadFiles[$entry.Key] = $built
+}
+# Lineup 与源工具共享 OpenCV、NDI 和 CRT，不夹带推理 Provider。
+$lineupTools = @{}
+foreach ($name in $lineupToolNames) {
+    $lineupTools[$name] = Resolve-ExistingNonEmptyFile (Join-Path $builds[0].ReleaseDirectory $name) "必需 Lineup 工具"
+}
+$lineupFiles = @{}
+foreach ($entry in $lineupPayload.GetEnumerator()) {
+    $source = Resolve-ExistingNonEmptyFile (Join-Path $repository $entry.Value) "Lineup 版本内资源"
+    if ($entry.Key.StartsWith("lineup-web/", [StringComparison]::Ordinal)) {
+        $built = Resolve-ExistingNonEmptyFile (Join-Path $builds[0].ReleaseDirectory $entry.Key) "Lineup 构建网页"
+        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash -ne
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $built).Hash) {
+            throw "Lineup 构建网页与当前源码不同：$($entry.Key)"
+        }
+        $lineupFiles[$entry.Key] = $built
+    } else { $lineupFiles[$entry.Key] = $source }
 }
 $requiredComponents = [System.Collections.Generic.HashSet[string]]::new(
     [System.StringComparer]::OrdinalIgnoreCase)
@@ -502,6 +542,54 @@ try {
         Copy-VerifiedFile $payloadFiles[$relativePath] $relativePath "" `
             (Join-Path $repository $repositoryPayload[$relativePath]) $incoming $manifestFiles
     }
+
+    foreach ($name in $lineupToolNames) {
+        Copy-VerifiedFile $lineupTools[$name] "tools/lineup/$name" "" $lineupTools[$name] $incoming $manifestFiles
+    }
+    foreach ($file in $layouts[0].Groups.source) {
+        $source = Join-Path $builds[0].ReleaseDirectory ([string]$file.name)
+        Copy-VerifiedFile $source "tools/lineup/$($file.name)" "" ([string]$file.source) $incoming $manifestFiles
+    }
+    foreach ($entry in $lineupPayload.GetEnumerator()) {
+        Copy-VerifiedFile $lineupFiles[$entry.Key] "tools/lineup/$($entry.Key)" "" (Join-Path $repository $entry.Value) $incoming $manifestFiles
+    }
+    if ($tutorial) {
+        Copy-VerifiedFile $tutorial "Xen-guide.html" "" $tutorial $incoming $manifestFiles
+    }
+    if ($releaseNotes) {
+        Copy-VerifiedFile $releaseNotes "RELEASE-NOTES.md" "" $releaseNotes $incoming $manifestFiles
+    }
+    Copy-VerifiedFile $productLicense "LICENSE" "" $productLicense $incoming $manifestFiles
+    # 相对路径启动，不绑定目标电脑；失败时保留窗口显示退出码。
+    $startText = @'
+@echo off
+setlocal
+cd /d "%~dp0"
+"%~dp0XenLauncher.exe"
+set "xen_exit=%errorlevel%"
+if not "%xen_exit%"=="0" (
+  echo Xen exited with code %xen_exit%.
+  pause
+)
+exit /b %xen_exit%
+'@
+    $startFile = Join-Path $incoming "Start-Xen.cmd.source"
+    [IO.File]::WriteAllText($startFile, $startText.Replace("`r`n", "`n").Replace("`n", "`r`n"), [Text.Encoding]::ASCII)
+    Copy-VerifiedFile $startFile "Start-Xen.cmd" "" "generated:portable-launcher" $incoming $manifestFiles
+    Remove-Item -LiteralPath $startFile
+    $lineupStartText = @'
+param([string]$BindAddress = '127.0.0.1', [int]$Port = 8879, [switch]$CheckOnly)
+$ErrorActionPreference = 'Stop'
+$packageRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
+Push-Location -LiteralPath $packageRoot
+try {
+    & (Join-Path $PSScriptRoot 'start_lineup.ps1') -XenRoot $packageRoot -ConfigPath (Join-Path $packageRoot 'config.ini') -Executable (Join-Path $PSScriptRoot 'XenLineup.exe') -DataDirectory (Join-Path $packageRoot 'cache/lineup') -BindAddress $BindAddress -Port $Port -CheckOnly:$CheckOnly
+} finally { Pop-Location }
+'@
+    $lineupStartFile = Join-Path $incoming "Start-Lineup.ps1.source"
+    [IO.File]::WriteAllText($lineupStartFile, $lineupStartText, [Text.UTF8Encoding]::new($false))
+    Copy-VerifiedFile $lineupStartFile "tools/lineup/Start-Lineup.ps1" "" "generated:portable-lineup" $incoming $manifestFiles
+    Remove-Item -LiteralPath $lineupStartFile
 
     Copy-VerifiedFile $model ("models/" + (Split-Path -Leaf $model)) "" `
         $model $incoming $manifestFiles

@@ -35,6 +35,11 @@ namespace {
 constexpr std::size_t kMaxLogModuleOverrides = 64;
 constexpr std::size_t kMaxLogModuleNameLength = 64;
 
+std::filesystem::path config_path_from_utf8(const std::string& path) {
+    // 公有接口接收 UTF-8；Windows 的窄字符串路径构造依赖系统代码页。
+    return std::filesystem::path(std::u8string(path.begin(), path.end()));
+}
+
 std::string lowercase_ascii(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(),
         [](unsigned char ch) {
@@ -397,7 +402,7 @@ void set_file_error(std::string& error,
 bool write_file_atomically(const std::string& path,
                            const std::string& bytes,
                            std::string& error) {
-    const std::filesystem::path target_path(path);
+    const auto target_path = config_path_from_utf8(path);
     if (target_path.empty()) {
         set_error(error, "配置文件路径不能为空");
         return false;
@@ -1143,7 +1148,8 @@ bool load_app_config(const std::string& path,
     try {
         CSimpleIniA ini;
         ini.SetUnicode(true);
-        const SI_Error result = ini.LoadFile(path.c_str());
+        const auto native_path = config_path_from_utf8(path);
+        const SI_Error result = ini.LoadFile(native_path.c_str());
         if (result < 0) {
             error = "无法读取配置文件: " + path;
             return false;
@@ -1587,9 +1593,14 @@ bool load_or_create_app_config(const std::string& path,
     created = false;
     if (load_app_config(path, config, error)) return true;
 
-    std::error_code filesystem_error;
-    const bool exists = std::filesystem::exists(path, filesystem_error);
-    if (filesystem_error || exists) {
+    try {
+        std::error_code filesystem_error;
+        const bool exists = std::filesystem::exists(
+            config_path_from_utf8(path), filesystem_error);
+        if (filesystem_error || exists) return false;
+    } catch (const std::exception&) {
+        // 路径转换失败不能被当成文件缺失，否则可能覆盖另一个代码页路径。
+        error = "配置文件路径不是有效的 UTF-8";
         return false;
     }
 

@@ -102,7 +102,8 @@ std::string quote(const std::filesystem::path& p) {
 std::string configuration(const std::filesystem::path& path,AppConfig& config) {
     const auto before=read(path);
     std::string error;
-    if(!load_app_config(path.string(),config,error))throw std::runtime_error("校准配置无法载入；请先在设置中保存有效配置");
+    const auto utf8_path=path.u8string();
+    if(!load_app_config(std::string(utf8_path.begin(),utf8_path.end()),config,error))throw std::runtime_error("校准配置无法载入；请先在设置中保存有效配置");
     if(config.mouse.backend!=MouseBackend::KMBOX_NET || !config.source_context.enabled || !config.gsi.enabled)
         throw std::runtime_error("校准要求KMBOX NET、源端焦点和GSI配置均已启用");
     if(read(path)!=before)throw std::runtime_error("配置在读取期间变化；请重新准备");

@@ -188,6 +188,8 @@ public:
                 }
                 const auto sampled_at = RecoilClock::now();
                 const auto before = input();
+                // 停机可能在采样期间到达；不要把它折成普通DISABLED并提前关闭批次。
+                if (stopping.load()) break;
                 if (manual_restart_pending) {
                     // 二次复核时遇到接管，旧意图先按NOT_SENT结算，再在此处重启。
                     if (before.healthy && before.permission && !source_blocked)
@@ -245,7 +247,8 @@ public:
                         const bool same = current.profile == before.profile && current.weapon_generation == before.weapon_generation &&
                             current.device_epoch == before.device_epoch && current.weapon_trust_generation == before.weapon_trust_generation &&
                             current.firing_started_at == before.firing_started_at;
-                        if (!same) rejection = RecoilDispatchRejection::CONTEXT_CHANGED;
+                        if (stopping.load()) rejection = RecoilDispatchRejection::STOPPING;
+                        else if (!same) rejection = RecoilDispatchRejection::CONTEXT_CHANGED;
                         else if (!current.enabled) rejection = RecoilDispatchRejection::DISABLED;
                         else if (!current.held) rejection = RecoilDispatchRejection::NOT_HELD;
                         else if (!current.healthy) rejection = RecoilDispatchRejection::INPUT_UNHEALTHY;
@@ -286,7 +289,11 @@ public:
                     }
                     controller.acknowledge(receipt, RecoilClock::now());
                     if (!backend_called && ordinary_block) controller.advance(*ordinary_block, RecoilClock::now());
-                    finish_if_ended();
+                    // 复核期间停机的未发送意图仍记录NOT_SENT，但批次归档说明真实停机原因。
+                    // 已调用后端的未知ACK与自然耗尽继续由控制器裁定，不能伪装成正常停止。
+                    if (rejection == RecoilDispatchRejection::STOPPING)
+                        end_batch(RecoilBatchEndReason::STOPPED);
+                    else finish_if_ended();
                 }
                 const auto settled = controller.snapshot();
                 arbiter->set_recoil_y_owned(!calibration_budget &&

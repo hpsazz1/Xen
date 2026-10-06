@@ -41,7 +41,10 @@ def main():
     def invoke(*values, ok=False, entry=script):
         result = subprocess.run([shell, '-NoProfile', '-File', str(entry), *map(str, values)],
                                 capture_output=True, timeout=30)
-        assert (result.returncode == 0) == ok, '入口返回值不符合预期'
+        assert (result.returncode == 0) == ok, (
+            f'入口返回值不符合预期：exit={result.returncode}, expected_success={ok}\n'
+            + result.stdout.decode('utf-8-sig', errors='replace')[-4000:]
+            + result.stderr.decode('utf-8-sig', errors='replace')[-4000:])
         return result
 
     with tempfile.TemporaryDirectory(prefix='xen-counterpulse-cli-') as folder:

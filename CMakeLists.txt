@@ -1280,6 +1280,22 @@ target_link_libraries(xen_mouse_effect_probe_composite_seal PRIVATE
 
 include(CTest)
 if(BUILD_TESTING)
+    # 测试解释器必须先于任何命令登记解析，不能依赖第二次配置留下的缓存。
+    find_program(XEN_POWERSHELL7_EXECUTABLE NAMES pwsh)
+    if(NOT XEN_POWERSHELL7_EXECUTABLE)
+        message(FATAL_ERROR "PowerShell 7 executable not found: pwsh")
+    endif()
+    set(XEN_WINDOWS_POWERSHELL
+        "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe")
+    if(NOT EXISTS "${XEN_WINDOWS_POWERSHELL}")
+        message(FATAL_ERROR
+            "Windows PowerShell 5 executable not found: ${XEN_WINDOWS_POWERSHELL}")
+    endif()
+    find_program(XEN_PYTHON_EXECUTABLE NAMES python python3)
+    if(NOT XEN_PYTHON_EXECUTABLE)
+        message(FATAL_ERROR "Python executable not found: python or python3")
+    endif()
+    find_program(XEN_NODE_EXECUTABLE NAMES node)
     add_executable(lineup_tests tests/lineup_tests.cpp)
     target_link_libraries(lineup_tests PRIVATE lineup)
     xen_deploy_runtime_dlls(lineup_tests OPENCV)
@@ -1379,22 +1395,6 @@ if(BUILD_TESTING)
     target_link_libraries(recoil_report_tests PRIVATE xen_debug)
     xen_deploy_runtime_dlls(recoil_report_tests OPENCV)
     add_test(NAME recoil_report_tests COMMAND recoil_report_tests)
-    # 测试解释器必须先于任何命令登记解析，不能依赖第二次配置留下的缓存。
-    find_program(XEN_POWERSHELL7_EXECUTABLE NAMES pwsh)
-    if(NOT XEN_POWERSHELL7_EXECUTABLE)
-        message(FATAL_ERROR "PowerShell 7 executable not found: pwsh")
-    endif()
-    set(XEN_WINDOWS_POWERSHELL
-        "$ENV{SystemRoot}/System32/WindowsPowerShell/v1.0/powershell.exe")
-    if(NOT EXISTS "${XEN_WINDOWS_POWERSHELL}")
-        message(FATAL_ERROR
-            "Windows PowerShell 5 executable not found: ${XEN_WINDOWS_POWERSHELL}")
-    endif()
-    find_program(XEN_PYTHON_EXECUTABLE NAMES python python3)
-    if(NOT XEN_PYTHON_EXECUTABLE)
-        message(FATAL_ERROR "Python executable not found: python or python3")
-    endif()
-    find_program(XEN_NODE_EXECUTABLE NAMES node)
     add_test(NAME lineup_config_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
         "${PROJECT_SOURCE_DIR}/tests/lineup_config_tests.py" --exe "$<TARGET_FILE:xen_lineup>")
     add_test(NAME review_run_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8

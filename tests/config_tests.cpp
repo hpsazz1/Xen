@@ -89,32 +89,86 @@ bool directory_contains_only(const std::filesystem::path& directory,
     return !error && entry_count == 1 && found_expected;
 }
 
+void test_utf8_config_path() {
+    const auto directory = make_temp_test_directory("utf8");
+    expect(!directory.empty(), "应创建 UTF-8 路径测试目录");
+    if (directory.empty()) return;
+    const auto nested = directory / std::filesystem::path(u8"发行版_\U0001F680");
+    std::filesystem::create_directory(nested);
+    const auto path = nested / std::filesystem::path(u8"默认配置_\U0001F9EA.ini");
+    const auto encoded = path.u8string();
+    const std::string utf8_path(encoded.begin(), encoded.end());
+    AppConfig config;
+    std::string error;
+    bool created = false;
+    expect(load_or_create_app_config(utf8_path, config, created, error) &&
+               created && std::filesystem::is_regular_file(path),
+           "中文及非系统代码页路径应在准确位置创建配置");
+    config.detector.backend = BackendType::CPU;
+    expect(save_app_config(utf8_path, config, error),
+           "UTF-8 配置路径应支持原子保存");
+    AppConfig loaded;
+    expect(load_app_config(utf8_path, loaded, error) &&
+               loaded.detector.backend == BackendType::CPU,
+           "UTF-8 配置路径应读取已保存值");
+    created = true;
+    expect(load_or_create_app_config(utf8_path, loaded, created, error) && !created,
+           "UTF-8 已有配置不得误判为缺失");
+
+    const auto before = read_file_bytes(path);
+    {
+        ScopedHandle locked(CreateFileW(path.c_str(), GENERIC_READ,
+            FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+        expect(locked.valid(), "应锁住 UTF-8 配置以检查原子失败保护");
+        if (locked.valid()) {
+            config.detector.backend = BackendType::DIRECTML;
+            expect(!save_app_config(utf8_path, config, error),
+                   "UTF-8 目标拒绝替换时应明确失败");
+        }
+    }
+    expect(read_file_bytes(path) == before && directory_contains_only(nested, path),
+           "UTF-8 保存失败应保留原文件且清理临时文件");
+    const std::string malformed = "[movement]\nenabled=invalid\n";
+    expect(write_file_bytes(path, malformed), "应写入 UTF-8 路径下的无效配置");
+    created = true;
+    expect(!load_or_create_app_config(utf8_path, loaded, created, error) &&
+               !created && read_file_bytes(path) == malformed,
+           "UTF-8 路径下无效已有文件不得被默认配置覆盖");
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+}
+
 void test_current_code_defaults() {
     const AppConfig config;
     expect(config.detector.model_path == "14wv11.onnx" &&
-               config.detector.backend == BackendType::TENSORRT &&
+               config.detector.backend == BackendType::CPU &&
                config.detector.openvino_device == OpenVinoDevice::CPU &&
-               config.detector.enable_fp16 &&
+               !config.detector.enable_fp16 &&
                config.detector.enable_trt_cuda_graph &&
                config.detector.enable_gpu_preprocess,
-           "代码 Detector 默认值应匹配当前 TensorRT 配置");
-    expect(config.capture.backend == CaptureBackend::NDI &&
-               config.capture.ndi_source_name == "HPSAZZ (Xen-ROI-320)" &&
-               config.capture.ndi_discovery_timeout_ms == 10000 &&
-               config.capture.ndi_clock_sync_url ==
-                   "udp://192.168.3.10:5011" &&
+           "代码 Detector 默认值应使用便携 CPU 入口");
+    expect(config.capture.backend == CaptureBackend::DESKTOP_DUPLICATION &&
+               config.capture.udp_url.empty() &&
+               config.capture.ndi_source_name.empty() &&
+               config.capture.ndi_discovery_timeout_ms == 5000 &&
+               config.capture.ndi_clock_sync_url.empty() &&
                config.capture.ndi_frame_layout ==
-                   NetworkFrameLayout::CENTER_CROP_1_TO_1 &&
-               config.capture.ndi_source_width == 2560 &&
-               config.capture.ndi_source_height == 1440 &&
+                   NetworkFrameLayout::FULL_FRAME_1_TO_1 &&
+               config.capture.ndi_source_width == 0 &&
+               config.capture.ndi_source_height == 0 &&
                config.capture.roi_width == 320 &&
                config.capture.roi_height == 320,
-           "代码 Capture 默认值应匹配当前 NDI 320 配置");
+           "代码 Capture 默认值应使用本机桌面且不绑定源机器");
     expect(config.aim.person_class_ids == std::vector<int>({0, 2}) &&
                config.aim.head_class_ids == std::vector<int>({1, 3}) &&
                config.aim.smoothing == 0.475f &&
                config.aim.counts_per_pixel_x == 0.425f &&
                config.aim.counts_per_pixel_y == 0.40f &&
+               config.aim.body_aim_height_ratio == 0.16f &&
+               config.aim.soft_zone_radius_percent == 30.0f &&
+               config.recoil.sensitivity == 1.4 &&
+               config.recoil.mixed_aim && config.trigger.random_timing_enabled &&
+               config.trigger.require_stop && config.trigger.allow_estimated_stop &&
                config.aim.max_counts_per_frame == 14.0f &&
                config.aim.enable_delay_compensation &&
                config.aim.control_delay_ms == 15.0f &&
@@ -123,14 +177,14 @@ void test_current_code_defaults() {
                config.aim.max_prediction_lead_percent == 35.0f &&
                config.aim.predicted_gain == 0.50f,
            "代码 Aim 默认值应匹配已接受的分轴 tracking 配置");
-    expect(config.mouse.backend == MouseBackend::KMBOX_NET &&
+    expect(config.mouse.backend == MouseBackend::WIN32_SEND_INPUT &&
                !config.mouse.allow_send_input &&
-               config.mouse.kmbox_ip == "192.168.2.188" &&
-               config.mouse.kmbox_port == 13384 &&
-               config.mouse.kmbox_uuid == "7679E04E",
-           "代码 Mouse 默认值应包含设备参数并保持物理输出禁用");
+               config.mouse.kmbox_ip.empty() &&
+               config.mouse.kmbox_port == 0 &&
+               config.mouse.kmbox_uuid.empty() && !config.trigger.fire_enabled,
+           "代码 Mouse 默认值不绑定设备且保持物理输出禁用");
     expect(config.log.global_level == LogLevel::INFO &&
-               config.ui.open_detached_preview_on_start,
+               !config.ui.open_detached_preview_on_start,
            "代码 Log/UI 默认值应匹配当前配置");
 }
 
@@ -167,17 +221,34 @@ void test_load_or_create_default_config() {
 
     AppConfig loaded;
     expect(load_app_config(path.string(), loaded, error) &&
-               loaded.detector.backend == BackendType::TENSORRT &&
-               loaded.capture.backend == CaptureBackend::NDI &&
+               loaded.detector.backend == BackendType::CPU &&
+               loaded.capture.backend == CaptureBackend::DESKTOP_DUPLICATION &&
                !loaded.aim.enable_prediction &&
                loaded.aim.enable_delay_compensation &&
                loaded.aim.smoothing == 0.475f &&
                loaded.aim.counts_per_pixel_x == 0.425f &&
                loaded.aim.counts_per_pixel_y == 0.40f &&
+               loaded.aim.body_aim_height_ratio == 0.16f &&
+               loaded.aim.soft_zone_radius_percent == 30.0f &&
+               loaded.recoil.sensitivity == 1.4 &&
+               loaded.recoil.mixed_aim && loaded.trigger.random_timing_enabled &&
+               loaded.trigger.require_stop && loaded.trigger.allow_estimated_stop &&
                loaded.aim.max_counts_per_frame == 14.0f &&
                loaded.aim.control_delay_ms == 15.0f &&
-               loaded.mouse.backend == MouseBackend::KMBOX_NET &&
-               !loaded.mouse.allow_send_input,
+               loaded.mouse.backend == MouseBackend::WIN32_SEND_INPUT &&
+               !loaded.mouse.allow_send_input &&
+               !loaded.movement.enabled && loaded.movement.spin_enabled &&
+               loaded.movement.large_enabled && loaded.movement.large_ctrl_enabled &&
+               loaded.movement.spin_angle_degrees == 90 &&
+               loaded.movement.spin_duration_ms == 200 &&
+               loaded.movement.large_angle_degrees == 25 &&
+               loaded.movement.large_duration_ms == 170 &&
+               loaded.movement.large_ctrl_delay_ms == 650 &&
+               loaded.movement.large_ctrl_hold_ms == 200 &&
+               loaded.movement.trigger_guard_ms == 150 &&
+               loaded.movement.sensitivity == 1.4 &&
+               loaded.movement.yaw_degrees_per_count == 0.022 &&
+               loaded.movement.report_mode == movement::ReportMode::RELATIVE_DELTA,
            "生成的默认配置应可回读且不得开启物理输出: " + error);
 
     const std::string invalid_text =
@@ -640,8 +711,17 @@ void test_atomic_save_preserves_existing_file_on_replace_failure() {
     std::filesystem::remove_all(directory, ignored);
 }
 
+void configure_test_kmbox(AppConfig& config) {
+    // 使用隔离假设备参数，仅测试配置，不创建网络连接。
+    config.mouse.backend = MouseBackend::KMBOX_NET;
+    config.mouse.kmbox_ip = "127.0.0.1";
+    config.mouse.kmbox_port = 13384;
+    config.mouse.kmbox_uuid = "00000000";
+}
+
 void test_auto_stop_config() {
     AppConfig config;
+    configure_test_kmbox(config);
     std::string error;
     expect(!config.auto_stop.enabled && config.auto_stop.activation_virtual_key == 0,
            "自动急停默认关闭且未绑定");
@@ -718,6 +798,7 @@ void test_auto_stop_config() {
 
 void test_trigger_and_source_context_config() {
     AppConfig config;
+    configure_test_kmbox(config);
     std::string error;
     expect(!config.trigger.enabled && config.trigger.hold_virtual_key == 0 && !config.source_context.enabled,
         "扳机与源端状态默认关闭，扳机默认未绑定");
@@ -728,6 +809,9 @@ void test_trigger_and_source_context_config() {
     config.trigger.enabled = true;
     config.gsi.enabled = true;
     config.trigger.fire_enabled = false;
+    // 本场景只验证扳机几何和共享许可；急停依赖由专门的联动场景覆盖。
+    config.trigger.require_stop = false;
+    config.trigger.allow_estimated_stop = false;
     config.trigger.hold_virtual_key = config.keyboard.aim_hold_virtual_keys.front();
     config.trigger.head_width_percent = 100.0f;
     config.trigger.head_height_percent = 100.0f;
@@ -906,6 +990,7 @@ void test_invalid_config() {
     expect(validate_app_config(config, error),
            "UI 尺寸恰好等于五页紧凑布局下限时应通过配置校验");
     config.capture.backend = CaptureBackend::UDP_MJPEG;
+    config.capture.udp_url = "udp://127.0.0.1:5000";
     config.capture.udp_read_timeout_ms = 500;
     config.capture.udp_disconnect_timeout_ms = 100;
     expect(!validate_app_config(config, error),
@@ -1257,9 +1342,9 @@ void test_aim_soft_zone_config() {
     const auto path = directory / "config.ini";
     AppConfig loaded;
     std::string error;
-    expect(loaded.aim.soft_zone_radius_percent == 0.0f &&
+    expect(loaded.aim.soft_zone_radius_percent == 30.0f &&
                loaded.aim.soft_zone_min_strength == 0.2f,
-           "软化区默认关闭且中心保留强度为 0.2");
+           "发行软化区默认半径30%且中心保留强度为0.2");
     loaded.aim.soft_zone_radius_percent = 40.0f;
     loaded.aim.soft_zone_min_strength = 0.6f;
     expect(write_file_bytes(path, "[aim]\nsmoothing=0.625\n") &&
@@ -1352,13 +1437,13 @@ void test_movement_config() {
     const auto path = directory / "config.ini";
     AppConfig config, loaded;
     std::string error;
-    expect(!config.movement.enabled && config.movement.spin_enabled && !config.movement.large_enabled &&
+    expect(!config.movement.enabled && config.movement.spin_enabled && config.movement.large_enabled &&
         config.movement.spin_trigger == movement::Trigger::WHEEL_UP &&
         config.movement.large_trigger == movement::Trigger::WHEEL_DOWN && config.movement.jump_delay_ms == 0,
         "身法总开关默认关闭，上滚旋转跳、下滚大跳且无额外延时");
     expect(config.movement.large_angle_degrees == 25.0 && config.movement.large_duration_ms == 170 &&
         config.movement.large_ctrl_enabled && config.movement.large_ctrl_delay_ms == 650 &&
-        config.movement.large_ctrl_hold_ms == 30, "Long Jump 默认每侧25度170ms及650ms后短按Ctrl30ms");
+        config.movement.large_ctrl_hold_ms == 200, "Long Jump 默认每侧25度170ms及650ms后按Ctrl200ms");
     config.movement.enabled = true;
     config.movement.spin_enabled = true;
     config.movement.large_enabled = true;
@@ -1397,7 +1482,7 @@ void test_movement_config() {
         loaded.movement.spin_trigger == movement::Trigger::WHEEL_UP &&
         loaded.movement.trigger_guard_ms == 150 && !loaded.movement.wheel_down_positive &&
         loaded.movement.large_ctrl_enabled && loaded.movement.large_ctrl_delay_ms == 650 &&
-        loaded.movement.large_ctrl_hold_ms == 30 && loaded.movement.large_duration_ms == 170 &&
+        loaded.movement.large_ctrl_hold_ms == 200 && loaded.movement.large_duration_ms == 170 &&
         loaded.movement.large_angle_degrees == 25.0 &&
         loaded.movement.spin_duration_ms == movement::Config{}.spin_duration_ms &&
         loaded.movement.sensitivity == movement::Config{}.sensitivity,
@@ -1471,6 +1556,7 @@ void test_auxiliary_cycle_config() {
     if (directory.empty()) { expect(false, "循环配置隔离目录"); return; }
     const auto path = directory / "config.ini";
     AppConfig config, loaded;
+    configure_test_kmbox(config);
     std::string error;
     config.auto_stop.enabled = config.auto_stop.cycle_enabled = true;
     config.auto_stop.activation_virtual_key = 5;
@@ -1499,12 +1585,13 @@ void test_trigger_legacy_timing_migration() {
     if (directory.empty()) { expect(false, "扳机迁移隔离目录"); return; }
     const auto path = directory / "config.ini";
     AppConfig loaded;
+    configure_test_kmbox(loaded);
     std::string error;
     expect(write_file_bytes(path, "[trigger]\nrange_percent=55\n"), "写入框内范围比例");
     expect(load_app_config(path.string(), loaded, error) && loaded.trigger.range_percent == 55.0f,
         "用户范围比例必须读取而非被默认值覆盖");
-    expect(!loaded.trigger.random_timing_enabled && !AppConfig{}.trigger.random_timing_enabled,
-        "旧配置缺少随机时序开关时保持关闭");
+    expect(!loaded.trigger.random_timing_enabled && AppConfig{}.trigger.random_timing_enabled,
+        "旧配置缺键保持随机时序关闭，新生成发行配置采用当前选项");
     for (const bool enabled : {true, false}) {
         loaded.trigger.random_timing_enabled = enabled;
         expect(save_app_config(path.string(), loaded, error) && load_app_config(path.string(), loaded, error) &&
@@ -1599,6 +1686,8 @@ void test_shared_weapon_timing_config() {
     if (directory.empty()) { expect(false, "武器配置隔离目录"); return; }
     const auto path = directory / "config.ini";
     AppConfig config, loaded;
+    configure_test_kmbox(config);
+    configure_test_kmbox(loaded);
     std::string error;
     config.gsi.enabled = true;
     config.weapon_timing_file = "custom/weapon-timing.json";
@@ -1735,7 +1824,15 @@ void test_team_filter_config() {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    // 发布工具复用生产序列化，导出代码默认值；不创建任何设备或运行时。
+    if (argc == 3 && std::string(argv[1]) == "--write-default-config") {
+        std::string error;
+        if (save_app_config(argv[2], AppConfig{}, error)) return 0;
+        std::cerr << error << '\n';
+        return 1;
+    }
+    test_utf8_config_path();
     test_movement_config();
     test_team_filter_config();
     test_trigger_legacy_timing_migration();

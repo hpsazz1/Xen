@@ -119,6 +119,9 @@ void discrete_permit_preserves_events_and_limits() {
 void files(const std::filesystem::path& root) {
     auto p=profile();const auto source=root/"source.json";{std::ofstream output(source);output<<serialize_recoil_profile(*p);}
     AppConfig config;config.gsi.enabled=true;
+    // 校准准备使用明确的回环设备夹具，不继承便携入口后端。
+    config.mouse.backend=MouseBackend::KMBOX_NET;config.mouse.kmbox_ip="127.0.0.1";
+    config.mouse.kmbox_port=32123;config.mouse.kmbox_uuid="12345678";
     config.source_context.enabled=true;config.source_context.host="127.0.0.1";config.source_context.port=5014;
     config.source_context.process_name="synthetic.exe";
     const auto cfg=root/"config.ini";std::string error;check(save_app_config(cfg.string(),config,error),error.c_str());

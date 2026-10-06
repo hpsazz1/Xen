@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <thread>
 #include <mutex>
+#include <future>
 #include <vector>
 using namespace std::chrono_literals;
 namespace {
@@ -20,6 +21,7 @@ public:
     std::atomic<bool> cancel_key{false};
     std::atomic<bool> calibration_key{true};
     std::atomic<bool> trigger_key{false}, block_up{false}, up_entered{false}, release_up{false};
+    std::atomic<bool> block_poll{false}, poll_entered{false}, release_poll{false};
     std::atomic<int> downs{0}, ups{0};
     std::atomic<bool> pre_call_receipt{false};
     std::atomic<RecoilTime> last_poll_at{RecoilTime{}};
@@ -38,6 +40,10 @@ public:
             pre_call_receipt?last_poll_at.load():RecoilClock::now(); return result;
     }
     bool poll_input(InputSnapshot& out) noexcept override {
+        if (block_poll) {
+            poll_entered = true;
+            release_poll.wait(false);
+        }
         if(on_poll)on_poll();
         last_poll_at=RecoilClock::now();++polls;
         out={};out.state_valid = healthy; out.status = healthy?InputMonitorStatus::READY:InputMonitorStatus::STALE;
@@ -541,7 +547,17 @@ int main() {
         }
         {
             Fixture f;f.ready();f.mouse->held=true;
-            check(until([&]{return f.mouse->moves>0;}),"停止测试先进入执行");f.worker->stop();
+            check(until([&]{return f.mouse->moves>0;}),"停止测试先进入执行");
+            f.mouse->block_poll=true;
+            const bool blocked=until([&]{return f.mouse->poll_entered.load();});
+            std::promise<void> stopping;
+            auto started=stopping.get_future();
+            auto stopped=std::async(std::launch::async,[&]{stopping.set_value();f.worker->stop();});
+            started.wait();
+            const bool waiting=stopped.wait_for(20ms)==std::future_status::timeout;
+            f.mouse->release_poll=true;f.mouse->release_poll.notify_all();
+            stopped.get();
+            check(blocked&&waiting,"假输入屏障必须截住采样，stop等待输出线程收尾");
             check(f.worker->read_execution_events(0).events.back().end_reason==RecoilBatchEndReason::STOPPED,
                 "worker停机发布最后STOPPED事件供归档drain");
         }

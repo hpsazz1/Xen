@@ -24,7 +24,8 @@ with tempfile.TemporaryDirectory(prefix="xen-calibration-cli-") as temp:
         "state": "SCHEMA_VALID", "source": {}, "calibration": {}, "phase_tolerance_ms": None,
         "recovery_ms": None, "points": [[0, 0, 0], [20, 2, 3]]}), encoding="utf-8")
     config = root / "config.ini"
-    config.write_text("[gsi]\nenabled=true\nexpected_player_id=76561198000000000\n"
+    config.write_text("[mouse]\nbackend=kmbox_net\nkmbox_ip=127.0.0.1\nkmbox_port=32123\nkmbox_uuid=12345678\nallow_send_input=false\n"
+                      "[gsi]\nenabled=true\nexpected_player_id=76561198000000000\n"
                       "[source_context]\nenabled=true\nhost=127.0.0.1\nport=5014\nprocess_name=synthetic.exe\n", encoding="utf-8")
     request = root / "request.json"
     value = {"environment": {"weapon_id": "ak47", "game_build": "synthetic", "input_path": "kmbox_net",

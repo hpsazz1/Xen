@@ -128,12 +128,36 @@ void test_missing_config_preserves_default_runtime_contract() {
 
     expect(exit_code == 0 && runtime && runtime->id == "nvidia" &&
                error.call_count == 0,
-           "缺失配置必须保留 AppConfig 默认 TensorRT→NVIDIA Worker 合同");
+           "缺失配置必须保留 AppConfig 默认后端到 Worker 的路由合同");
+}
+
+void test_utf8_config_path_preserves_invalid_file_failure() {
+    TemporaryDirectory temporary;
+    const auto directory = temporary.path() / std::filesystem::path(u8"发行版_\U0001F680");
+    std::filesystem::create_directory(directory);
+    const auto path = directory / std::filesystem::path(u8"配置_\U0001F9EA.ini");
+    const auto encoded = path.u8string();
+    const std::string config_path(encoded.begin(), encoded.end());
+    const auto manifest = test_manifest();
+    const app::detail::ReleaseRuntimeEntry* runtime = nullptr;
+    ErrorCapture error;
+    write_file(path, "[detector]\nbackend=directml\n");
+    expect(app::detail::resolve_launcher_runtime(
+               manifest, config_path, adapter_for(error), runtime) == 0 &&
+               runtime && runtime->id == "directml" && error.call_count == 0,
+           "中文及非系统代码页路径应按有效配置选择 Worker");
+    write_file(path, "[detector]\nbackend=invalid\n");
+    expect(app::detail::resolve_launcher_runtime(
+               manifest, config_path, adapter_for(error), runtime) ==
+               app::detail::kLauncherDecisionFailureExitCode && !runtime &&
+               error.call_count == 1,
+           "UTF-8 路径的损坏已有配置不得误判缺失并选默认 Worker");
 }
 
 } // namespace
 
 int main() {
+    test_utf8_config_path_preserves_invalid_file_failure();
     test_existing_invalid_config_fails_before_worker_selection();
     test_valid_config_selects_declared_runtime_without_error();
     test_missing_config_preserves_default_runtime_contract();
