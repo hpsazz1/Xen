@@ -5,6 +5,7 @@
 #include <ws2tcpip.h>
 #undef ERROR
 #include "lineup/service.h"
+#include "lineup/control_publication_internal.h"
 #include "config/config.h"
 #include "log/log.h"
 #include "weapon/weapon.h"
@@ -41,11 +42,11 @@ struct Socket {
 };
 struct Options {
     std::string bind = "127.0.0.1", source, gsi_mode = "shared";
-    std::filesystem::path data = "lineup-data", web, gsi_config, config_path;
+    std::filesystem::path data = "lineup-data", web, gsi_config, config_path, capture_inbox;
     CaptureConfig capture;
     weapon::GsiConfig shared_config;
     int locate_virtual_key = 0, throw_virtual_key = 0;
-    bool calibration_configured = false;
+    bool calibration_configured = false, test_mode = false;
     std::string config_error, capture_error, size_origin = "fallback_unverified";
     bool config_loaded = false, check_config = false, version = false;
     int port = 8879, width = 1920, height = 1080, seconds = 0;
@@ -82,6 +83,7 @@ Options parse(int argc, char **argv) {
             o.shared_config = app.gsi;
             o.locate_virtual_key = app.keyboard.lineup_locate_virtual_key;
             o.throw_virtual_key = app.keyboard.lineup_throw_virtual_key;
+            o.test_mode = app.lineup.test_mode;
             o.calibration_configured = !app.lineup.calibration_file.empty() && !app.lineup.calibration_context.empty();
             o.source = app.capture.ndi_source_name;
             o.width = app.capture.ndi_source_width;
@@ -116,6 +118,8 @@ Options parse(int argc, char **argv) {
             o.bind = v;
         else if (a == "--data")
             o.data = std::filesystem::u8path(v);
+        else if (a == "--capture-inbox")
+            o.capture_inbox = std::filesystem::absolute(std::filesystem::u8path(v));
         else if (a == "--web")
             o.web = std::filesystem::u8path(v);
         else if (a == "--ndi-source")
@@ -138,6 +142,11 @@ Options parse(int argc, char **argv) {
         (o.synthetic && !o.source.empty()))
         throw std::runtime_error("地址/尺寸/源参数无效；仅绑定明确回环或私网 IPv4");
     if (o.gsi_mode != "shared" && o.gsi_mode != "direct") throw std::runtime_error("GSI mode must be shared or direct");
+    if (!o.capture_inbox.empty() && (!o.config_loaded || !o.test_mode || o.synthetic ||
+        o.capture.backend != CaptureBackend::NDI || o.capture.roi_width != 320 || o.capture.roi_height != 320 ||
+        !o.capture.center_roi || o.capture.ndi_source_width < 320 || o.capture.ndi_source_height < 320 ||
+        o.capture.ndi_frame_layout != NetworkFrameLayout::CENTER_CROP_1_TO_1))
+        throw std::runtime_error("主机采集收件箱仅用于显式测试配置：中心 320 ROI、1:1 中心裁剪及明确源尺寸");
     return o;
 }
 weapon::GsiConfig read_gsi_config(const Options &options) {
@@ -183,6 +192,8 @@ nlohmann::json startup_state(const Options &o) {
             {"gsi_mode", o.gsi_mode},
             {"locate_virtual_key", o.locate_virtual_key},
             {"throw_virtual_key", o.throw_virtual_key},
+            {"test_mode", o.test_mode},
+            {"host_capture_enabled", !o.capture_inbox.empty()},
             {"throw_hotkey_status", o.throw_virtual_key ? "requires_running_runtime" : "unbound"},
             {"calibration_configured", o.calibration_configured},
             {"calibration_note", "configured does not mean measured or validated; Runtime verifies evidence"},
@@ -335,6 +346,15 @@ void handle(SOCKET socket, lineup::Service &service, const Options &o) {
                 reply(socket, 404, "text/plain", "not found");
             return;
         }
+        for (const auto &kind : {std::string("overview"), std::string("full")}) {
+            const auto prefix = "/api/" + kind + "/";
+            if (r.target.starts_with(prefix)) {
+                auto bytes = service.reference(kind + ":" + r.target.substr(prefix.size()));
+                if (bytes) reply(socket, 200, "image/png", {bytes->begin(), bytes->end()});
+                else reply(socket, 404, "text/plain", "not found");
+                return;
+            }
+        }
         if (r.target.starts_with("/api/standpoint/")) {
             auto bytes = service.reference("standpoint:" +
                                            r.target.substr(std::string("/api/standpoint/").size()));
@@ -485,6 +505,7 @@ int wmain(int argc, wchar_t **wide_argv) {
             std::cout << "XenLineup 手机配方练习服务，无自动游戏输入\n"
                          "--config <existing Xen INI> --check-config --version (read only)\n"
                          "--data <dir> --bind <private IPv4, default 127.0.0.1> --port <8879>\n"
+                         "--capture-inbox <dir> 仅测试配置：主机 F7 全屏包收件目录\n"
                          "--ndi-source <name> --source-width <1920> --source-height <1080>\n"
                          "--gsi-config <existing INI> 读取 [gsi]；默认只读 Runtime 本地上下文，不绑定 GSI 端口\n"
                          "--gsi-mode <shared|direct>；direct 仅用于显式独立接收端口。旧命令行全帧模式要求 Xen metadata；--config 沿用现有 ROI。\n"
@@ -506,6 +527,13 @@ int wmain(int argc, wchar_t **wide_argv) {
                                     o.config_loaded && !o.synthetic ? lineup::ReferenceMode::ROI
                                                                     : lineup::ReferenceMode::FULL_FRAME,
                                     o.config_loaded && !o.synthetic ? o.source : "");
+            if (!o.capture_inbox.empty()) {
+                if (!service.enable_host_capture(o.capture_inbox, {o.width, o.height}))
+                    throw std::runtime_error("主机采集目录启用失败：" + service.state()["host_capture"].dump());
+                const auto state = service.state();
+                service.command({{"action", "start"}, {"request_id", "test-session-start"},
+                                 {"epoch", state.at("epoch")}, {"revision", state.at("revision")}});
+            }
             weapon::GsiReceiver gsi;
             weapon::GsiContextReader shared_gsi;
             weapon::GsiConfig gsi_config;
@@ -526,7 +554,7 @@ int wmain(int argc, wchar_t **wide_argv) {
                     if ((gsi_config.enabled || o.locate_virtual_key != 0) && o.gsi_mode == "shared") {
                         snapshot = shared_gsi.snapshot();
                         service.update_gsi(snapshot, shared_gsi.last_error());
-                        if (shared_gsi.consume_lineup_locate()) service.request_locate();
+                        if (const auto sequence = shared_gsi.consume_lineup_locate()) service.request_locate(sequence);
                     } else service.update_gsi(snapshot, gsi_error);
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
@@ -536,20 +564,20 @@ int wmain(int argc, wchar_t **wide_argv) {
             if (execution_enabled) execution_client.start(lineup::control::channel_key(gsi_config));
             std::jthread execution([&](std::stop_token token) {
                 bool was_connected = false;
-                std::uint64_t last_sequence = 0, last_generation = 0;
+                lineup::detail::ControlPublication publication;
                 while (!stopping && !token.stop_requested()) {
                     const bool connected = execution_enabled && execution_client.connected();
                     if (connected != was_connected) {
                         service.reset_control(connected ? "runtime_connected_new_locate_required" : "runtime_disconnected");
-                        last_sequence = last_generation = 0; was_connected = connected;
+                        publication.reset(); was_connected = connected;
                     }
                     if (connected) {
                         service.set_execution_status(execution_client.status());
-                        auto request = service.control_request();
-                        if (request.mode == lineup::control::Mode::CANCEL || request.mode == lineup::control::Mode::LOCATE ||
-                            request.observation.sequence != last_sequence || request.observation.identity.selection_generation != last_generation) {
+                        bool preparing = false;
+                        auto request = service.control_request(&preparing);
+                        if (publication.wants(request, preparing)) {
                             if (!execution_client.publish(request)) service.reset_control("runtime_disconnected");
-                            else { last_sequence = request.observation.sequence; last_generation = request.observation.identity.selection_generation; }
+                            else publication.accepted(request);
                         }
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -581,10 +609,15 @@ int wmain(int argc, wchar_t **wide_argv) {
                 }
             });
             const auto started = Clock::now();
+            auto next_inbox_poll = started;
             while (!stopping) {
                 if (o.seconds && Clock::now() - started > std::chrono::seconds(o.seconds)) {
                     stopping = true;
                     break;
+                }
+                if (!o.capture_inbox.empty() && Clock::now() >= next_inbox_poll) {
+                    service.poll_host_captures();
+                    next_inbox_poll = Clock::now() + std::chrono::milliseconds(500);
                 }
                 fd_set set;
                 FD_ZERO(&set);

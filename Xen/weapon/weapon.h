@@ -99,8 +99,8 @@ public:
     void configure(const GsiConfig& config);
     WeaponSnapshot snapshot();
     std::string last_error() const;
-    // snapshot 后读取；首次连接仅建立基线，过期/重连事件不重放。
-    bool consume_lineup_locate() noexcept;
+    // snapshot 后读取事件序号；0 表示无新边沿，首次连接/过期/重连均不重放。
+    std::uint64_t consume_lineup_locate() noexcept;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

@@ -19,6 +19,72 @@
       p.recipe_id === next?.recipe_id && p.url === next?.url);
   }
   const teamLabel = value => ({ T: 'T', CT: 'CT', ANY: '通用', UNCLASSIFIED: '未分类', UNKNOWN: '未知' })[value] || '未分类';
+  // 地图使用游戏内部 ID，显示名来自当前 CS2 资源；旧库和新地图仍可加入选项。
+  const cs2Maps = [
+    ['de_dust2', '炙热沙城 II · Dust II'], ['de_mirage', '荒漠迷城 · Mirage'],
+    ['de_inferno', '炼狱小镇 · Inferno'], ['de_nuke', '核子危机 · Nuke'],
+    ['de_ancient', '远古遗迹 · Ancient'], ['de_anubis', '阿努比斯 · Anubis'],
+    ['de_overpass', '死亡游乐园 · Overpass'], ['de_cache', '死城之谜 · Cache'],
+    ['de_train', '列车停放站 · Train'], ['de_vertigo', '殒命大厦 · Vertigo'],
+    ['cs_office', '办公室 · Office'], ['cs_italy', '意大利小镇 · Italy'],
+    ['de_ancient_night', '远古遗迹（夜间） · Ancient (Night)'],
+    ['de_boulder', '岩峰修道院 · Boulder'], ['de_fachwerk', '木筋屋小镇 · Fachwerk'],
+    ['cs_shelter', '动物收容所 · Shelter'], ['de_debris', '残翼小镇 · Debris'],
+    ['de_eldorado', '黄金之城 · El Dorado'], ['de_poseidon', '波塞冬 · Poseidon'],
+    ['ar_baggage', '行李仓库 · Baggage'], ['ar_shoots', '山林小寨 · Shoots (Day)'],
+    ['ar_shoots_night', '山林夜寨 · Shoots (Night)'], ['ar_pool_day', '泳池派对 · Pool Day'],
+    ['rush_001', '综合区 · Complex']
+  ];
+  const throwMethods = [
+    ['stationary', '原地投掷'], ['jump', '原地跳投'], ['step', '一步投掷'],
+    ['step_jump', '一步跳投'], ['runup', '助跑投掷'], ['runup_jump', '助跑跳投']
+  ];
+  const throwButtons = [['left', '左键'], ['right', '右键'], ['left+right', '双键']];
+  const throwDirections = [['forward', '向前'], ['back', '向后'], ['left', '向左'], ['right', '向右'],
+    ['forward+left', '左前'], ['forward+right', '右前'], ['back+left', '左后'], ['back+right', '右后']];
+  function mapChoices(recipes = [], contextMap = '', selectedMap = '') {
+    const choices = new Map(cs2Maps);
+    for (const id of [...recipes.map(r => r.map), contextMap, selectedMap]) {
+      if (id && !choices.has(id)) choices.set(id, id);
+    }
+    return [...choices].map(([id, text]) => ({ id, text }));
+  }
+  function throwPreset(method, buttons, direction = 'forward') {
+    if (!throwMethods.some(([id]) => id === method)) throw new Error('请选择投掷方式。');
+    if (!throwButtons.some(([id]) => id === buttons)) throw new Error('请选择投掷按键。');
+    const moving = method.startsWith('step') || method.startsWith('runup');
+    if (moving && !throwDirections.some(([id]) => id === direction)) throw new Error('请选择投掷移动方向。');
+    const movement = moving ? direction : '', jump = method.includes('jump');
+    const phases = [actionPhase(buttons, '', false, '')];
+    if (moving) phases.push(actionPhase(buttons, movement, false, ''));
+    if (jump) phases.push(actionPhase(buttons, movement, true, ''));
+    if (moving || jump) phases.push(actionPhase('', movement, jump, ''));
+    phases.push(actionPhase('', '', false, ''));
+    return { schema: 1, type: 'phases', movement_profile: moving ? method.split('_')[0] : 'stationary', phases };
+  }
+  function captureRequest(form) {
+    if (!form.map?.trim()) throw new Error('请选择地图。');
+    if (!['CT', 'T'].includes(form.team)) throw new Error('请选择 CT 或 T 阵营。');
+    const action = throwPreset(form.method, form.buttons, form.direction);
+    const description = [throwMethods.find(([id]) => id === form.method)[1], throwButtons.find(([id]) => id === form.buttons)[1]];
+    if (action.movement_profile !== 'stationary') description.push(throwDirections.find(([id]) => id === form.direction)[1]);
+    return { map: form.map.trim(), team: form.team, region: form.region, standpoint_id: form.standpoint_id,
+      stance: form.stance, instructions: form.instructions, throw_instructions: description.join(' · '), throw_action: action };
+  }
+  function hostProfileRequest(form, action) {
+    const result = captureRequest(form);
+    if (!form.grenade?.trim()) throw new Error('请选择道具。');
+    return { ...result, name: form.name?.trim() || '', target: form.target?.trim() || '当前瞄点',
+      grenade: form.grenade.trim(), throw_action: action === undefined ? result.throw_action : action };
+  }
+  function hostCaptureSummary(host) {
+    if (!host?.enabled) return '主机 F7 入口未启用；请使用独立采集测试启动器。';
+    const names = { idle: '等待 F7 采集', ready: '等待 F7 采集', waiting_geometry: '等待辅机接收到匹配尺寸的画面',
+      waiting_idle: '等待当前定位或投掷结束', importing: '正在导入主机照片', imported: '主机照片已导入并选中',
+      profile_saved: 'F7 采集设置已保存', error: '主机采集导入失败' };
+    return (names[host.status] || '主机采集已启用') + (host.last_id ? ' · ' + host.last_id : '') +
+      (host.error ? ' · ' + host.error : '') + '。F8 只回准；F9 回准后执行完整投掷动作。';
+  }
   function filterRecipes(recipes, filters) {
     return recipes.filter(r => !r.draft && r.compatible !== false && Object.entries(filters).every(([k, v]) => {
       if (!v || (k === 'team' && v === 'UNKNOWN')) return true;
@@ -131,14 +197,15 @@
   }
   const labels = { live: '画面源已连接', connected: '画面源已连接', ready: '画面源已连接', disconnected: '画面源已断开', stopped: '已停止', unknown: '画面源未知', valid: '匹配可靠', not_found: '未找到参照', unreliable: '匹配不可靠', expired: '已过期', invalid: '无效', invalid_frame: '画面无效，请检查完整画面源', no_reference: '尚无可用参考', pending: '等待新帧', idle: '等待采集', waiting: '等待下一张有效新帧', saving: '正在保存，请稍候', cancelled: '采集已取消', saved: '已保存', error: '失败，请查看错误信息' };
   const textStatus = value => labels[value] || '未知状态';
-  const api = { executionSummary, actionPhase, actionSummary, canLocate, locationHint, startupSummary, practiceRecipes, previewValid, imageResultValid, filterRecipes, createController, textStatus, settleBatch, contextView, teamLabel };
+  const api = { mapChoices, throwPreset, captureRequest, hostProfileRequest, hostCaptureSummary, executionSummary, actionPhase, actionSummary, canLocate, locationHint, startupSummary, practiceRecipes, previewValid, imageResultValid, filterRecipes, createController, textStatus, settleBatch, contextView, teamLabel };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (!root.document) return;
   const $ = id => document.getElementById(id);
   let selected = '', view = null, pendingImage = '', shownImage = '', imageTicket = 0, scopeInitialized = false, contextSignature = null;
   let annotation = { id: '', aim: [0.5, 0.5], rect: [0.1, 0.1, 0.8, 0.6], corner: null, tool: 'aim' };
   const edited = new Map();
-  let pendingBatch = null, lastStartup = null;
+  const captureTouched = { map: false, team: false };
+  let pendingBatch = null, lastStartup = null, captureAction = null, hostProfileLoaded = false;
 
   function safeUrl(value) { try { const u = new URL(value, location.href); return u.origin === location.origin ? u.href : ''; } catch (_) { return ''; } }
   function setImage(id, url) { const el = $(id), safe = url ? safeUrl(url) : ''; if (safe) { if (el.src !== safe) el.src = safe; } else el.removeAttribute('src'); }
@@ -198,6 +265,30 @@
       pendingBatch = settled;
     }
     const context = contextView(s.context);
+    optionList($('capture-map'), mapChoices(recipes, context.map, $('capture-map').value), '请选择地图');
+    if (!captureTouched.map && context.map) $('capture-map').value = context.map;
+    if (!captureTouched.team && ['CT', 'T'].includes(context.team)) $('capture-team').value = context.team;
+    const host = s.host_capture;
+    $('save-host-profile').hidden = !host?.enabled;
+    $('host-capture-status').textContent = hostCaptureSummary(host);
+    if (!hostProfileLoaded && host?.profile?.map) {
+      const profile = host.profile;
+      for (const field of ['map','team','name','target','grenade','region','stance','instructions']) {
+        if (profile[field] !== undefined) $('capture-' + field).value = profile[field];
+      }
+      $('capture-standpoint').value = profile.standpoint_id || '';
+      const action = profile.throw_action;
+      if (action?.phases?.length) {
+        const moving = ['step','runup'].includes(action.movement_profile);
+        $('capture-throw-method').value = (moving ? action.movement_profile : '') +
+          (action.phases.some(p=>p.jump) ? (moving ? '_jump' : 'jump') : (moving ? '' : 'stationary'));
+        $('capture-throw-buttons').value = action.phases.find(p=>p.buttons?.length)?.buttons.join('+') || 'left';
+        $('capture-throw-direction').value = action.phases.find(p=>p.movement?.length)?.movement.join('+') || 'forward';
+        $('capture-throw-direction').disabled = !moving;
+        captureAction = JSON.parse(JSON.stringify(action)); drawCaptureAction();
+      }
+      captureTouched.map = captureTouched.team = hostProfileLoaded = true;
+    }
     ['map', 'region', 'target', 'grenade'].forEach(k => {
       const values = recipes.filter(r => !r.draft).map(r => r[k]).filter(Boolean);
       if (k === 'map') values.push(context.map, s.context?.auto_map || '', $('map').value);
@@ -245,6 +336,10 @@
     $('suggestion').textContent = (scopeMatches && suggestions.length ? '视觉建议站位：' + [...new Set(suggestions)].join('、') : '站位识别未知，可人工筛选。') + (list.length === 1 ? ' 当前唯一候选，请确认。' : ` 当前 ${list.length} 个候选。`) + (!scopeMatches ? ' 视觉搜索范围尚未同步，请再次选择地图或区域。' : s.search_limited ? ' 当前区域参考较多，正在分批轮转搜索。' : s.searching ? ' 正在搜索视觉候选。' : '');
     if (s.frame_mode === 'roi') $('suggestion').textContent = `当前 ${list.length} 个配方；选择点位并人工就位后，定位仅识别已锁配方。`;
     const r = recipes.find(x => x.id === (s.locked_id || selected)); $('detail').hidden = !r;
+    $('host-overview-panel').hidden = !r?.overview_url;
+    setImage('host-overview', r?.overview_url);
+    const fullUrl = r?.full_url ? safeUrl(r.full_url) : '';
+    if (fullUrl) $('host-full-link').href = fullUrl; else $('host-full-link').removeAttribute('href');
     if (r) {
       $('throw-action-status').textContent = actionSummary(r.throw_action, r.action_status);
       $('recipe-title').textContent = r.name || r.id; $('locked').textContent = s.locked_id ? '已锁定' : '待确认';
@@ -312,14 +407,16 @@
       $('drafts').append(row);
     });
   }
-  function renderActionEditor(row, recipe) {
+  function renderActionEditor(row, recipe, changed = null) {
     const panel = document.createElement('div'); panel.className = 'action-editor';
     const title = document.createElement('h4'); title.textContent = '投掷动作设计'; panel.append(title);
     const content = document.createElement('div'); panel.append(content); row.append(panel);
-    const hasActionEdit = () => Object.hasOwn(edited.get(recipe.id) || {}, 'throw_action');
+    const hasActionEdit = () => !changed && Object.hasOwn(edited.get(recipe.id) || {}, 'throw_action');
     let action = hasActionEdit() ? edited.get(recipe.id).throw_action : recipe.throw_action ?? null;
     if (action) action = JSON.parse(JSON.stringify(action));
-    const save = () => { const item = edited.get(recipe.id) || {id:recipe.id}; item.throw_action = action ? JSON.parse(JSON.stringify(action)) : null; edited.set(recipe.id,item); };
+    const save = () => { const value = action ? JSON.parse(JSON.stringify(action)) : null;
+      if (changed) { changed(value); return; }
+      const item = edited.get(recipe.id) || {id:recipe.id}; item.throw_action = value; edited.set(recipe.id,item); };
     function draw() {
       content.replaceChildren();
       const note = document.createElement('p'); note.className='muted'; note.textContent = actionSummary(action, hasActionEdit() ? null : recipe.action_status); content.append(note);
@@ -374,7 +471,37 @@
   $('lock').onclick = () => send('lock',{id:selected}); $('cancel').onclick = () => send('cancel');
   $('browse-mode').onclick = () => send('mode',{value:'browse'}); $('capture-mode').onclick = () => send('mode',{value:'capture'});
   $('run').onclick = () => send(view.state.running ? 'stop' : 'start'); $('export').onclick = () => send('export');
-  $('take').onclick = () => send('capture', {map:$('capture-map').value,region:$('capture-region').value,standpoint_id:$('capture-standpoint').value,stance:$('capture-stance').value,instructions:$('capture-instructions').value});
+  for (const field of ['map', 'team']) $('capture-' + field).onchange = () => { captureTouched[field] = true; };
+  for (const [id, options, first] of [['capture-throw-method', throwMethods, '请选择投掷方式'], ['capture-throw-buttons', throwButtons, null], ['capture-throw-direction', throwDirections, null]]) {
+    optionList($(id), options.map(([id, text]) => ({id, text})), first);
+  }
+  function drawCaptureAction() {
+    $('capture-action-panel').replaceChildren();
+    if (captureAction) renderActionEditor($('capture-action-panel'), {id:'host-profile', throw_action:captureAction}, value=>{captureAction=value;});
+  }
+  const changeCapturePreset = () => {
+    const method = $('capture-throw-method').value;
+    $('capture-throw-direction').disabled = !method.startsWith('step') && !method.startsWith('runup');
+    captureAction = method ? throwPreset(method, $('capture-throw-buttons').value, $('capture-throw-direction').value) : null;
+    drawCaptureAction();
+  };
+  for (const field of ['method', 'buttons', 'direction']) $('capture-throw-' + field).onchange = changeCapturePreset;
+  changeCapturePreset();
+  function captureForm() {
+    const form = Object.fromEntries(['map', 'team', 'name', 'target', 'grenade', 'region', 'standpoint', 'stance', 'instructions'].map(field => [field === 'standpoint' ? 'standpoint_id' : field, $('capture-' + field).value]));
+    for (const field of ['method', 'buttons', 'direction']) form[field] = $('capture-throw-' + field).value;
+    return form;
+  }
+  $('save-host-profile').onclick = () => {
+    try { return send('host_profile', hostProfileRequest(captureForm(), captureAction)); }
+    catch (error) { $('message').textContent = error.message; }
+  };
+  $('take').onclick = () => {
+    try {
+      const form = captureForm();
+      return send('capture', { ...captureRequest(form), name:form.name, target:form.target, grenade:form.grenade, throw_action:captureAction });
+    } catch (error) { $('message').textContent = error.message; }
+  };
   $('save-batch').onclick = async () => {
     if (!edited.size || pendingBatch) return;
     pendingBatch = [...edited.values()].map(item => ({ ...item }));

@@ -56,7 +56,7 @@ int main() {
     // 重启不等读者关闭旧实例：新发布者须自动恢复。
     expect(!reader.consume_lineup_locate(), "first connection must baseline old locate event");
     { std::lock_guard lock(mutex); locate = {2, weapon::Clock::now()}; }
-    expect(wait([&] { reader.snapshot(); return reader.consume_lineup_locate(); }), "new edge reaches reader");
+    expect(wait([&] { reader.snapshot(); return reader.consume_lineup_locate() == 2; }), "new edge preserves exact sequence");
     expect(!reader.consume_lineup_locate(), "event consumed once");
     std::this_thread::sleep_for(100ms); reader.snapshot();
     expect(!reader.consume_lineup_locate(), "heartbeat must not replay event");
@@ -75,7 +75,7 @@ int main() {
     { std::lock_guard lock(mutex); source.context_valid = false; }
     expect(wait([&] { return !reader.snapshot().context_valid; }), "invalid source clears context");
     { std::lock_guard lock(mutex); locate = {6, weapon::Clock::now()}; }
-    expect(wait([&] { reader.snapshot(); return reader.consume_lineup_locate(); }), "invalid GSI must not block manual locate");
+    expect(wait([&] { reader.snapshot(); return reader.consume_lineup_locate() == 6; }), "invalid GSI preserves manual locate sequence");
     // 慢读者不读管道；发布者停止仍有界，不等待客户端 drain。
     std::this_thread::sleep_for(1500ms);
     const auto begin = weapon::Clock::now(); publisher.stop();
@@ -106,7 +106,7 @@ int main() {
     expect(wait([&] { reader.snapshot(); return reader.last_error().empty(); }), "disabled GSI channel connected");
     expect(!reader.consume_lineup_locate(), "disabled GSI connection also baselines");
     { std::lock_guard lock(mutex); locate = {8, weapon::Clock::now()}; }
-    expect(wait([&] { reader.snapshot(); return reader.consume_lineup_locate(); }), "disabled GSI manual locate delivery");
+    expect(wait([&] { reader.snapshot(); return reader.consume_lineup_locate() == 8; }), "disabled GSI preserves exact locate sequence");
     // 已取入但尚未消费的事件也受原按下时间限制，不能因轮询刷新 TTL。
     { std::lock_guard lock(mutex); locate = {9, weapon::Clock::now()}; }
     std::this_thread::sleep_for(100ms); reader.snapshot();

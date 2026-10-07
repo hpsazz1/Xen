@@ -50,6 +50,7 @@ struct TeamFilterConfig {
 struct LineupConfig {
     std::string calibration_file;
     std::string calibration_context;
+    bool test_mode = false; // 独立测试配置：投掷键先回准本次定位，再单次投掷。
 };
 
 struct AppConfig {

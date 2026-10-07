@@ -1,6 +1,7 @@
 #include "lineup/service.h"
 #include "lineup/practice_internal.h"
 #include "lineup/action_internal.h"
+#include "lineup/host_capture_internal.h"
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -11,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cmath>
 #include <deque>
 #include <fstream>
 #include <mutex>
@@ -33,14 +35,54 @@ std::vector<unsigned char> read_bytes(const std::filesystem::path &p) {
 void write_json(const std::filesystem::path &p, const Json &j) {
     auto temp = p;
     temp += "." + unique_id() + ".tmp";
-    {
-        std::ofstream f(temp, std::ios::binary);
-        f << j.dump(2);
-        f.flush();
-        if (!f)
-            throw std::runtime_error("write failed");
+    try {
+        {
+            std::ofstream f(temp, std::ios::binary);
+            f << j.dump(2);
+            f.flush();
+            if (!f) throw std::runtime_error("write failed");
+            f.close();
+            if (f.fail()) throw std::runtime_error("close failed");
+        }
+        std::filesystem::rename(temp, p);
+    } catch (...) {
+        std::error_code ignored;
+        std::filesystem::remove(temp, ignored);
+        throw;
     }
-    std::filesystem::rename(temp, p);
+}
+void replace_json(const std::filesystem::path &path, const Json &value) {
+    auto temporary = path;
+    temporary += "." + unique_id() + ".tmp";
+    try {
+        write_json(temporary, value);
+        if (!MoveFileExW(temporary.c_str(), path.c_str(),
+                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            throw std::runtime_error("atomic JSON replacement failed");
+    } catch (...) {
+        std::error_code ignored;
+        std::filesystem::remove(temporary, ignored);
+        throw;
+    }
+}
+void write_png(const std::filesystem::path &path, const cv::Mat &image) {
+    std::vector<unsigned char> bytes;
+    if (!cv::imencode(".png", image, bytes)) throw std::runtime_error("image encoding failed");
+    std::ofstream output(path, std::ios::binary);
+    output.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    output.flush();
+    if (!output) throw std::runtime_error("image write failed");
+    output.close();
+    if (output.fail()) throw std::runtime_error("image close failed");
+}
+bool host_safe_id(const std::string &id) {
+    return !id.empty() && id.size() <= 96 && std::all_of(id.begin(), id.end(), [](unsigned char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
+    });
+}
+bool redirected(const std::filesystem::path &path) {
+    const auto attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
 }
 std::string lower_status(Status s) {
     auto v = std::string(status_name(s));
@@ -77,10 +119,21 @@ struct Service::Impl {
     bool locating = false;
     control::Request control_state;
     std::uint64_t sent_control_generation = 0;
+    std::uint64_t locate_trigger_sequence = 0;
     Json execution_status = {{"state","unavailable"},{"reason","runtime_disconnected"},{"real_verified",false}};
     cv::Size last_encoded_size;
     double last_roi_x = 0, last_roi_y = 0;
     bool last_mapping_verified = false;
+    bool live_geometry_available = false;
+    Clock::time_point live_geometry_at{};
+    bool host_enabled = false;
+    std::filesystem::path host_inbox;
+    cv::Size host_source_size;
+    Json host_profile = Json::object();
+    std::string host_status = "disabled", host_error, host_last_id;
+    std::unordered_set<std::string> host_imported, host_rejected;
+    std::mutex host_poll_mutex;
+    std::optional<std::filesystem::directory_iterator> host_iterator;
     std::mutex mutex;
     std::condition_variable cv;
     std::thread worker;
@@ -153,6 +206,12 @@ struct Service::Impl {
                     if (!r.contains("team")) r["team"] = "UNCLASSIFIED";
                     if (!r["team"].is_string() || !valid_team(r["team"].get<std::string>()))
                         throw std::runtime_error("invalid recipe team");
+                    if (r.contains("host_capture_id")) {
+                        if (!host_safe_id(r.at("host_capture_id").get<std::string>()) ||
+                            !host_safe_id(r.at("host_reference_id").get<std::string>()))
+                            throw std::runtime_error("invalid host capture identity");
+                        host_imported.insert(r.at("host_capture_id").get<std::string>());
+                    }
                     Engine e;
                     std::string why;
                     if (!e.load_reference(root / r.at("reference_id").get<std::string>(), why))
@@ -172,6 +231,7 @@ struct Service::Impl {
     }
     void clear_preview() {
         locating = false;
+        locate_trigger_sequence = 0;
         control_state = {};
         preview_bytes.clear();
         preview_state = Json::object();
@@ -245,6 +305,8 @@ struct Service::Impl {
                 {"mode", mode},
                 {"frame_mode", frame_mode == ReferenceMode::ROI ? "roi" : "full_frame"},
                 {"source_id", source_identity},
+                {"host_capture", {{"enabled", host_enabled}, {"profile", host_profile},
+                                  {"status", host_status}, {"error", host_error}, {"last_id", host_last_id}}},
                 {"practice", practice.snapshot()},
                 {"execution", execution_status},
                 {"locating", locating},
@@ -267,6 +329,163 @@ struct Service::Impl {
                 {"scope", scope},
                 {"search_limited", search_limited},
                 {"searching", frame_mode == ReferenceMode::FULL_FRAME && running && locked.empty()}};
+    }
+    void host_result(const std::string &status, const std::string &why = "") {
+        if (host_status == status && host_error == why) return;
+        host_status = status;
+        host_error = why;
+        ++revision;
+    }
+    bool host_idle() const {
+        if (locating || capture_request || execution_status.value("cleanup_required", false) ||
+            execution_status.value("active", false)) return false;
+        const auto state = execution_status.value("state", "unknown");
+        if (state == "aligned")
+            return execution_status.contains("active") && execution_status.at("active") == false;
+        return state == "idle" || state == "unavailable" || state == "blocked" ||
+               state == "completed" || state == "cancelled";
+    }
+    bool host_geometry_ready() const {
+        return running && live_geometry_available && !last_session.empty() &&
+            Clock::now() - live_geometry_at <= std::chrono::seconds(2) &&
+            last_size == cv::Size(320, 320) && last_source_size == host_source_size &&
+            last_encoded_size.width >= 320 && last_encoded_size.height >= 320 &&
+            last_roi_x == (host_source_size.width - 320) / 2 &&
+            last_roi_y == (host_source_size.height - 320) / 2 &&
+            last_scale_x == 1.0 && last_scale_y == 1.0;
+    }
+    void import_host_capture(const Json &task, Json values, std::uint64_t token) {
+        const auto capture_id = task.at("host_id").get<std::string>();
+        HostCaptureBundle bundle;
+        std::string why;
+        if (!read_host_capture_bundle(host_inbox / "captures" / capture_id, bundle, why))
+            throw std::runtime_error("host bundle: " + why);
+        const auto &metadata = bundle.metadata;
+        const auto &profile = metadata.at("profile");
+        if (metadata.at("id") != capture_id || profile.at("source_id") != source_identity ||
+            profile.at("source_width") != host_source_size.width ||
+            profile.at("source_height") != host_source_size.height || bundle.full.size() != host_source_size)
+            throw std::runtime_error("host source or dimensions mismatch");
+        if (!detail::inspect_action(profile.value("throw_action", Json())).valid)
+            throw std::runtime_error("invalid host throw action");
+        if (values.size() >= 4096) throw std::runtime_error("catalog capacity reached");
+        CapturedFrame reference_frame;
+        {
+            std::lock_guard lock(mutex);
+            if (closed || token != generation || !host_idle() || !host_geometry_ready()) {
+                busy = false;
+                host_result(!host_geometry_ready() ? "waiting_geometry" : "waiting_idle");
+                return;
+            }
+            reference_frame.bgr = bundle.roi;
+            reference_frame.width = reference_frame.height = 320;
+            reference_frame.source_width = last_source_size.width;
+            reference_frame.source_height = last_source_size.height;
+            reference_frame.encoded_width = last_encoded_size.width;
+            reference_frame.encoded_height = last_encoded_size.height;
+            reference_frame.roi_x = last_roi_x;
+            reference_frame.roi_y = last_roi_y;
+            reference_frame.source_mapping_verified = last_mapping_verified;
+        }
+        // 这是离线参考的构造时刻，不代表主机源时钟或 NDI 帧的新鲜度。
+        reference_frame.timing.sequence = 1;
+        reference_frame.timing.captured_at = Clock::now();
+        const auto reference_id = unique_id();
+        struct OwnedFiles {
+            std::filesystem::path stage, published, catalog;
+            bool owns_stage = false, owns_published = false;
+            ~OwnedFiles() {
+                std::error_code ignored;
+                // 三条路径只来自本次新建产物；失败不删除收件箱或已有参考。
+                if (owns_stage) std::filesystem::remove_all(stage, ignored);
+                if (owns_published) std::filesystem::remove_all(published, ignored);
+                if (!catalog.empty()) std::filesystem::remove(catalog, ignored);
+            }
+        } files;
+        files.stage = root / (".host-pending-" + unique_id());
+        files.owns_stage = std::filesystem::create_directory(files.stage);
+        if (!files.owns_stage) throw std::runtime_error("cannot create host import directory");
+        Engine engine;
+        cv::Mat mask(320, 320, CV_8U, cv::Scalar(0));
+        cv::rectangle(mask, cv::Rect(32, 32, 256, 192), cv::Scalar(255), cv::FILLED);
+        if (!engine.create_reference(reference_frame, "host-static-" + capture_id, reference_id,
+                                     reference_id, {160, 160}, mask, Clock::now(), why, ReferenceMode::ROI) ||
+            !engine.save_reference(files.stage, why))
+            throw std::runtime_error("host reference: " + why);
+        const auto staged_reference = files.stage / reference_id;
+        write_png(staged_reference / "full.png", bundle.full);
+        write_png(staged_reference / "overview.png", bundle.overview);
+        write_json(staged_reference / "host_capture.json", metadata);
+        Json reference_metadata;
+        {
+            std::ifstream input(staged_reference / "reference.json", std::ios::binary);
+            input >> reference_metadata;
+        }
+        reference_metadata["captured_steady_ns"] = nullptr;
+        reference_metadata["capture_origin"] = "desktop_duplication";
+        reference_metadata["capture_timestamp"] = metadata.at("capture_timestamp");
+        reference_metadata["static_reference"] = true;
+        replace_json(staged_reference / "reference.json", reference_metadata);
+        Engine verified;
+        if (!verified.load_reference(staged_reference, why))
+            throw std::runtime_error("host reference verification: " + why);
+        Json recipe = {{"id", reference_id}, {"reference_id", reference_id}, {"recipe_version", 1},
+            {"frame_mode", "roi"}, {"source_id", source_identity},
+            {"name", profile.value("name", "")}, {"target", profile.value("target", "")},
+            {"grenade", profile.value("grenade", "")}, {"team", profile.at("team")},
+            {"map", profile.at("map")}, {"validation", "unverified"},
+            {"throw_action", profile.value("throw_action", Json())},
+            {"aim", Json::array({.5, .5})}, {"static_rect", Json::array({.1, .1, .8, .6})},
+            {"standpoint_reference_id", reference_id}, {"host_capture_id", capture_id},
+            {"host_reference_id", reference_id}, {"capture_origin", "desktop_duplication"},
+            {"capture_timestamp", metadata.at("capture_timestamp")},
+            {"reference_url", "/api/reference/" + reference_id},
+            {"standpoint_url", "/api/standpoint/" + reference_id},
+            {"overview_url", "/api/overview/" + reference_id}, {"full_url", "/api/full/" + reference_id}};
+        if (recipe["name"] == "") recipe["name"] = "主机采集 " + capture_id;
+        if (recipe["target"] == "") recipe["target"] = "当前瞄点";
+        for (const auto key : {"region", "stance", "instructions", "standpoint_id", "notes", "conditions", "throw_instructions"})
+            recipe[key] = profile.value(key, "");
+        if (recipe["standpoint_id"] == "") recipe["standpoint_id"] = reference_id;
+        recipe["draft"] = recipe["grenade"] == "";
+        values.push_back(recipe);
+        files.catalog = root / ("catalog-host-" + unique_id() + ".json");
+        write_json(files.catalog, values);
+        {
+            std::lock_guard lock(mutex);
+            expire_context();
+            if (closed || token != generation || !host_idle() || !host_geometry_ready() ||
+                last_encoded_size != cv::Size(reference_frame.encoded_width, reference_frame.encoded_height) ||
+                last_mapping_verified != reference_frame.source_mapping_verified) {
+                busy = false;
+                host_result(!host_geometry_ready() ? "waiting_geometry" : "waiting_idle");
+                return;
+            }
+            if (host_imported.contains(capture_id)) {
+                busy = false;
+                host_result("imported");
+                return;
+            }
+            files.published = root / reference_id;
+            std::filesystem::rename(staged_reference, files.published);
+            files.owns_published = true;
+            if (!MoveFileExW(files.catalog.c_str(), (root / "catalog.json").c_str(),
+                            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+                throw std::runtime_error("atomic host catalog replacement failed");
+            files.owns_published = false;
+            recipes.swap(values);
+            host_imported.insert(capture_id);
+            host_last_id = capture_id;
+            clear_preview();
+            locked = reference_id;
+            lock_reason.clear();
+            mode = "browse";
+            busy = false;
+            capture_status = "saved";
+            error.clear();
+            host_result("imported");
+            ++revision;
+        }
     }
     void persist(Json values, std::optional<std::uint64_t> token = std::nullopt) {
         auto tmp = root / ("catalog-" + unique_id() + ".json");
@@ -340,7 +559,10 @@ struct Service::Impl {
                 if (task) {
                     reference_cache.clear();
                     auto action = task->at("action").get<std::string>();
-                    if (action == "capture") {
+                    if (action == "host_import") {
+                        import_host_capture(*task, std::move(values), token);
+                        continue;
+                    } else if (action == "capture") {
                         std::string why;
                         Engine engine;
                         auto id = unique_id();
@@ -360,19 +582,22 @@ struct Service::Impl {
                                   {"recipe_version", 1},
                                   {"frame_mode", frame_mode == ReferenceMode::ROI ? "roi" : "full_frame"},
                                   {"source_id", source_identity},
-                                  {"name", ""},
-                                  {"target", ""},
-                                  {"grenade", ""},
+                                  {"name", task->value("name", "")},
+                                  {"target", task->value("target", "")},
+                                  {"grenade", task->value("grenade", "")},
                                   {"notes", ""},
-                                  {"throw_instructions", ""},
+                                  {"throw_instructions", task->value("throw_instructions", "")},
                                   {"validation", "unverified"},
                                   {"conditions", ""},
                                   {"draft", true},
                                   {"team", task->value("team", "UNCLASSIFIED")},
                                   {"aim", Json::array({.5, .5})},
                                   {"static_rect", Json::array({.1, .1, .8, .6})}};
+                        r["draft"] = r["name"] == "" || r["target"] == "" || r["grenade"] == "";
                         for (auto key : {"map", "region", "stance", "instructions"})
                             r[key] = task->value(key, "");
+                        if (task->contains("throw_action"))
+                            r["throw_action"] = task->at("throw_action");
                         r["standpoint_id"] = task->value("standpoint_id", "");
                         if (r["standpoint_id"] == "")
                             r["standpoint_id"] = id;
@@ -692,6 +917,10 @@ struct Service::Impl {
                 if (task) {
                     busy = false;
                     capture_status = "error";
+                    if (task->value("action", "") == "host_import") {
+                        host_rejected.insert(task->at("host_id").get<std::string>());
+                        host_result("error", e.what());
+                    }
                     ++revision;
                 } else if (token == generation) {
                     clear_preview();
@@ -706,23 +935,42 @@ Service::Service(const std::filesystem::path &root, ReferenceMode mode, std::str
 Service::~Service() {
     close();
 }
-control::Request Service::control_request() {
+control::Request Service::control_request(bool *preparing) {
     auto &s = *impl_; std::lock_guard lock(s.mutex); s.expire_context();
+    if (preparing) *preparing = s.running && s.locating && !s.locked.empty() && !s.closed &&
+                                s.control_state.mode == control::Mode::CANCEL;
     auto request = s.control_state;
     if (!s.running || !s.locating || s.locked.empty() || s.closed) return {};
     if (request.mode != control::Mode::CANCEL && s.sent_control_generation != s.generation) {
         // 一次明确定位只产生一条 LOCATE；断线由主进程撤销，不自动重放。
         request.mode = control::Mode::LOCATE; s.sent_control_generation = s.generation;
     }
+    request.trigger_sequence = s.locate_trigger_sequence;
     return request;
 }
 void Service::reset_control(const std::string &reason) {
-    auto &s = *impl_; std::lock_guard lock(s.mutex); s.clear_preview();
-    s.execution_status = {{"state","unavailable"},{"reason",reason},{"real_verified",false}};
+    auto &s = *impl_; std::lock_guard lock(s.mutex);
+    const bool unresolved = s.host_enabled && (s.locating || !s.host_idle());
+    s.clear_preview();
+    s.execution_status = {{"state", unresolved ? "unknown" : "unavailable"},
+                          {"reason", reason}, {"real_verified", false}};
 }
 void Service::set_execution_status(const Json &status) {
     auto &s = *impl_; std::lock_guard lock(s.mutex);
-    if (status.is_object()) s.execution_status = status;
+    if (!status.is_object()) return;
+    s.execution_status = status;
+    // 仅独立测试的一次已确认终态能收起旧定位；旧回报和 UNKNOWN 不能解锁 F7。
+    if (s.host_enabled && s.locating && s.locate_trigger_sequence != 0 &&
+        status.contains("trigger_sequence") && status.at("trigger_sequence") == s.locate_trigger_sequence &&
+        status.contains("selection_generation") && status.at("selection_generation") == s.generation &&
+        status.contains("active") && status.at("active") == false &&
+        status.value("cleanup_required", false) == false) {
+        const auto state = status.value("state", "unknown");
+        if (state == "aligned" || state == "completed" || state == "cancelled" || state == "blocked") {
+            s.clear_preview();
+            ++s.revision;
+        }
+    }
 }
 void Service::update_gsi(const weapon::WeaponSnapshot &snapshot, const std::string &receiver_error) {
     auto &s = *impl_;
@@ -766,15 +1014,102 @@ void Service::update_gsi(const weapon::WeaponSnapshot &snapshot, const std::stri
         s.context["reason"] = receiver_error.empty() ? "使用手动地图和阵营" : "使用手动地图和阵营；" + receiver_error;
     if (changed) ++s.revision;
 }
-bool Service::request_locate() {
+bool Service::request_locate(std::uint64_t trigger_sequence) {
     auto &s = *impl_;
     std::lock_guard l(s.mutex);
     s.expire_context();
     if (s.closed || !s.running || s.mode != "browse" || s.locked.empty() || s.busy) return false;
     s.clear_preview();
+    s.locate_trigger_sequence = trigger_sequence;
     s.locating = true;
     ++s.revision;
     return true;
+}
+bool Service::enable_host_capture(const std::filesystem::path &inbox, cv::Size source_size) {
+    auto &s = *impl_;
+    std::lock_guard lock(s.mutex);
+    if (s.host_enabled || s.closed) return false;
+    try {
+        if (!s.storage_valid || s.frame_mode != ReferenceMode::ROI || s.source_identity.empty() ||
+            inbox.empty() || source_size.width < 320 || source_size.height < 320 ||
+            source_size.width > 7680 || source_size.height > 4320)
+            throw std::runtime_error("invalid host capture configuration");
+        auto path = std::filesystem::absolute(inbox).lexically_normal();
+        if (redirected(path) || redirected(path / "captures"))
+            throw std::runtime_error("redirected host inbox is not allowed");
+        std::filesystem::create_directories(path / "captures");
+        Json profile = {{"schema", 1}, {"source_id", s.source_identity},
+            {"source_width", source_size.width}, {"source_height", source_size.height},
+            {"map", ""}, {"team", ""}, {"throw_action", nullptr}, {"throw_instructions", ""}};
+        const bool exists = std::filesystem::exists(path / "profile.json");
+        if (exists) {
+            std::string why;
+            if (!read_host_capture_profile(path / "profile.json", profile, why))
+                throw std::runtime_error("host profile: " + why);
+            if (profile.at("source_id") != s.source_identity || profile.at("source_width") != source_size.width ||
+                profile.at("source_height") != source_size.height)
+                throw std::runtime_error("host profile source or dimensions mismatch");
+            if (!detail::inspect_action(profile.value("throw_action", Json())).valid)
+                throw std::runtime_error("invalid host throw action");
+        }
+        s.host_inbox = std::move(path);
+        s.host_source_size = source_size;
+        s.host_profile = std::move(profile);
+        s.host_enabled = true;
+        s.host_result(exists ? "ready" : "awaiting_profile");
+        return true;
+    } catch (const std::exception &e) {
+        s.host_result("error", e.what());
+        return false;
+    }
+}
+void Service::poll_host_captures() {
+    auto &s = *impl_;
+    // 每次最多检查 64 个目录项并只排一个解码任务；图像 I/O 在既有 worker 完成。
+    std::unique_lock polling(s.host_poll_mutex, std::try_to_lock);
+    if (!polling.owns_lock()) return;
+    try {
+        std::filesystem::path captures;
+        {
+            std::lock_guard lock(s.mutex);
+            if (!s.host_enabled || s.closed || !s.storage_valid || s.busy || s.job) return;
+            if (!s.host_idle()) { s.host_result("waiting_idle"); return; }
+            if (!s.host_geometry_ready()) { s.host_result("waiting_geometry"); return; }
+            if (s.host_rejected.size() >= 4096) { s.host_result("error", "too many rejected host captures"); return; }
+            captures = s.host_inbox / "captures";
+        }
+        if (redirected(captures)) throw std::runtime_error("redirected host captures directory");
+        if (!s.host_iterator) s.host_iterator.emplace(captures);
+        const std::filesystem::directory_iterator end;
+        for (int checked = 0; checked < 64; ++checked) {
+            if (*s.host_iterator == end) { s.host_iterator.reset(); return; }
+            const auto entry = **s.host_iterator;
+            ++(*s.host_iterator);
+            const auto capture_id = entry.path().filename().string();
+            if (!host_safe_id(capture_id) || !entry.is_directory() || redirected(entry.path())) continue;
+            {
+                std::lock_guard lock(s.mutex);
+                if (s.host_imported.contains(capture_id) || s.host_rejected.contains(capture_id)) continue;
+            }
+            bool complete = true;
+            for (const auto filename : {"capture.json", "full.png", "roi.png", "overview.png"})
+                if (!std::filesystem::is_regular_file(entry.path() / filename)) { complete = false; break; }
+            if (!complete) continue;
+            std::lock_guard lock(s.mutex);
+            if (s.closed || s.busy || s.job) return;
+            if (!s.host_idle()) { s.host_result("waiting_idle"); return; }
+            if (!s.host_geometry_ready()) { s.host_result("waiting_geometry"); return; }
+            s.job = Json{{"action", "host_import"}, {"host_id", capture_id}};
+            s.busy = true;
+            s.host_result("importing");
+            s.cv.notify_one();
+            return;
+        }
+    } catch (const std::exception &e) {
+        s.host_iterator.reset();
+        std::lock_guard lock(s.mutex);
+        s.host_result("error", e.what());
+    }
 }
 bool Service::wants_input() const {
     std::lock_guard l(impl_->mutex);
@@ -797,7 +1132,7 @@ CommandResult Service::command(const Json &c) {
         if (c.at("revision") != s.revision || id.empty() || id.size() > 128 || s.closed)
             return {409, s.snapshot()};
         auto a = c.at("action").get<std::string>();
-        if ((a == "capture" || a == "update" || a == "annotate" || a == "export") &&
+        if ((a == "capture" || a == "update" || a == "annotate" || a == "export" || a == "host_profile") &&
             (!s.storage_valid || s.busy || s.capture_request))
             return {409, s.snapshot()};
         if (a == "favorite" || a == "practice_queue" || a == "practice_record") {
@@ -865,19 +1200,61 @@ CommandResult Service::command(const Json &c) {
             s.clear_preview();
         } else if (a == "stop") {
             s.running = false;
+            s.live_geometry_available = false;
             s.capture_request.reset();
             s.clear_preview();
         } else if (a == "capture") {
             if (s.mode != "capture" || !s.running)
                 return {409, s.snapshot()};
+            // 排队前校验新增表单字段，拒绝时不能留下参考图或待保存请求。
+            for (auto key : {"map", "team", "throw_instructions", "name", "target", "grenade"})
+                if (c.contains(key) && !c.at(key).is_string())
+                    return {400, s.snapshot()};
+            if (c.contains("team") && !valid_team(c.at("team").get<std::string>()))
+                return {400, s.snapshot()};
+            if (c.contains("throw_action") && !detail::inspect_action(c.at("throw_action")).valid)
+                return {400, s.snapshot()};
             s.capture_request = c;
-            auto effective_team = s.context.value("team", "UNKNOWN");
-            (*s.capture_request)["team"] = effective_team == "T" || effective_team == "CT" ? effective_team : "UNCLASSIFIED";
-            if (!s.context.value("map", "").empty()) (*s.capture_request)["map"] = s.context.at("map");
+            // 表单显式分类只属于本张配方；旧调用未填写时继续沿用游戏上下文。
+            if (!c.contains("team")) {
+                const auto effective_team = s.context.value("team", "UNKNOWN");
+                (*s.capture_request)["team"] = effective_team == "T" || effective_team == "CT" ? effective_team : "UNCLASSIFIED";
+            }
+            if (c.value("map", "").empty() && !s.context.value("map", "").empty())
+                (*s.capture_request)["map"] = s.context.at("map");
             s.capture_after = s.submitted;
             s.capture_requested = Clock::now();
             s.capture_deadline = s.capture_requested + std::chrono::seconds(5);
             s.capture_status = "waiting";
+        } else if (a == "host_profile") {
+            if (!s.host_enabled) return {409, s.snapshot()};
+            static const std::unordered_set<std::string> allowed = {"action", "epoch", "revision", "request_id",
+                "map", "team", "throw_action", "throw_instructions", "region", "stance", "instructions",
+                "standpoint_id", "name", "target", "grenade", "notes", "conditions"};
+            for (auto item = c.begin(); item != c.end(); ++item)
+                if (!allowed.contains(item.key())) return {400, s.snapshot()};
+            Json profile = {{"schema", 1}, {"source_id", s.source_identity},
+                {"source_width", s.host_source_size.width}, {"source_height", s.host_source_size.height},
+                {"map", c.value("map", "")}, {"team", c.value("team", "")},
+                {"throw_action", c.value("throw_action", Json())},
+                {"throw_instructions", c.value("throw_instructions", "")}};
+            if (!detail::inspect_action(profile.at("throw_action")).valid) return {400, s.snapshot()};
+            for (const auto key : {"region", "stance", "instructions", "standpoint_id", "name", "target", "grenade", "notes", "conditions"})
+                if (c.contains(key)) profile[key] = c.at(key).get<std::string>();
+            const auto temporary = s.host_inbox / ("profile-" + unique_id() + ".json");
+            struct TemporaryProfile {
+                std::filesystem::path path;
+                ~TemporaryProfile() { std::error_code ignored; std::filesystem::remove(path, ignored); }
+            } cleanup{temporary};
+            write_json(temporary, profile);
+            Json verified;
+            std::string why;
+            if (!read_host_capture_profile(temporary, verified, why)) return {400, s.snapshot()};
+            if (!MoveFileExW(temporary.c_str(), (s.host_inbox / "profile.json").c_str(),
+                            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+                throw std::runtime_error("atomic host profile replacement failed");
+            s.host_profile = std::move(verified);
+            s.host_result("ready");
         } else if (a == "update" || a == "annotate" || a == "export") {
             s.job = c;
             s.busy = true;
@@ -907,6 +1284,7 @@ void Service::submit(const CapturedFrame &frame, const std::string &session) {
     if (!Engine::validate_frame(frame, session, Clock::now(), why, s.frame_mode)) {
         s.error = why;
         s.source = "invalid";
+        s.live_geometry_available = false;
         s.clear_preview();
         return;
     }
@@ -937,6 +1315,8 @@ void Service::submit(const CapturedFrame &frame, const std::string &session) {
     s.last_encoded_size = {frame.encoded_width, frame.encoded_height};
     s.last_roi_x = frame.roi_x; s.last_roi_y = frame.roi_y;
     s.last_mapping_verified = frame.source_mapping_verified;
+    s.live_geometry_available = true;
+    s.live_geometry_at = Clock::now();
     if (s.frame_mode == ReferenceMode::ROI && !s.capture_request && (s.mode != "browse" || !s.locating || s.locked.empty())) return;
     CapturedFrame owned = frame;
     owned.bgr = frame.bgr.clone();
@@ -952,6 +1332,7 @@ void Service::disconnect(const std::string &reason) {
     std::lock_guard l(s.mutex);
     ++s.revision;
     s.source = "disconnected";
+    s.live_geometry_available = false;
     s.error = reason;
     s.clear_preview();
     s.capture_request.reset();
@@ -968,20 +1349,24 @@ std::optional<std::vector<unsigned char>> Service::preview(const std::string &id
 }
 std::optional<std::vector<unsigned char>> Service::reference(const std::string &id) {
     auto &s = *impl_;
-    std::string ref;
+    std::string ref, filename = "raw.png";
     {
         std::lock_guard l(s.mutex);
         bool standpoint = id.starts_with("standpoint:");
-        auto key = standpoint ? id.substr(11) : id;
+        bool overview = id.starts_with("overview:"), full = id.starts_with("full:");
+        auto key = standpoint ? id.substr(11) : overview ? id.substr(9) : full ? id.substr(5) : id;
         for (auto &r : s.recipes)
-            if (r["id"] == key)
-                ref = r.at(standpoint ? "standpoint_reference_id" : "reference_id")
-                          .get<std::string>();
+            if (r["id"] == key) {
+                if (overview || full) {
+                    ref = r.value("host_reference_id", "");
+                    filename = overview ? "overview.png" : "full.png";
+                } else ref = r.at(standpoint ? "standpoint_reference_id" : "reference_id").get<std::string>();
+            }
     }
     if (ref.empty())
         return {};
     try {
-        return read_bytes(s.root / ref / "raw.png");
+        return read_bytes(s.root / ref / filename);
     } catch (...) {
         return {};
     }

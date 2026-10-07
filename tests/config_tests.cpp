@@ -331,6 +331,7 @@ void test_round_trip() {
     source.keyboard.lineup_throw_virtual_key = 0x7C;
     source.lineup.calibration_file = "calibration/lineup-measured.json";
     source.lineup.calibration_context = "fixture-game-conditions";
+    source.lineup.test_mode = true;
     source.log.global_level = LogLevel::WARN;
     source.log.enable_console = false;
     source.log.enable_file = false;
@@ -409,6 +410,7 @@ void test_round_trip() {
            loaded.keyboard.lineup_throw_virtual_key == source.keyboard.lineup_throw_virtual_key &&
            loaded.lineup.calibration_file == source.lineup.calibration_file &&
            loaded.lineup.calibration_context == source.lineup.calibration_context &&
+           loaded.lineup.test_mode == source.lineup.test_mode &&
            loaded.keyboard.aim_hold_virtual_keys ==
                source.keyboard.aim_hold_virtual_keys &&
            loaded.keyboard.emergency_virtual_keys ==
@@ -942,6 +944,7 @@ void test_legacy_keyboard_config() {
     expect(load_app_config(path.string(), loaded, error) && loaded.keyboard.anomaly_mark_virtual_keys.empty(),
            "显式清空标记键不得恢复默认F9");
     expect(loaded.keyboard.lineup_locate_virtual_key == 0, "旧 INI 缺少定位字段默认未绑定");
+    expect(!loaded.lineup.test_mode, "旧 INI 不启用独立测试投掷语义");
     expect(write_file_bytes(path, "[lineup]\nlocate_virtual_key=123\n"), "写入可选定位键");
     expect(load_app_config(path.string(), loaded, error) && loaded.keyboard.lineup_locate_virtual_key == 123,
            "同一 INI 的 lineup 专属字段可读入");
@@ -957,6 +960,15 @@ void test_legacy_keyboard_config() {
     expect(write_file_bytes(path, "[keyboard]\nruntime_toggle_virtual_keys=119\n[lineup]\nlocate_virtual_key=119\n"),
            "显式配置原 F8 运行键及同键定位冲突");
     expect(!load_app_config(path.string(), loaded, error), "定位不占用原 F8 运行键");
+    expect(write_file_bytes(path, "[keyboard]\naim_hold_virtual_keys=5\nruntime_toggle_virtual_keys=\nanomaly_mark_virtual_keys=\n[lineup]\nlocate_virtual_key=119\nthrow_virtual_key=120\ntest_mode=true\n"),
+           "写入独立 F8 F9 测试配置");
+    expect(load_app_config(path.string(), loaded, error) && loaded.lineup.test_mode &&
+               loaded.keyboard.lineup_locate_virtual_key == 119 && loaded.keyboard.lineup_throw_virtual_key == 120,
+           "仅独立测试 INI 开启回准后单次投掷");
+    expect(write_file_bytes(path, "[lineup]\ntest_mode=perhaps\n"), "写入测试模式非法布尔值");
+    expect(!load_app_config(path.string(), loaded, error) && loaded.lineup.test_mode, "非法测试模式失败且不改已加载配置");
+    expect(write_file_bytes(path, "[lineup]\nlocate_virtual_key=0\nthrow_virtual_key=0\n"), "写入旧配置无测试字段");
+    expect(load_app_config(path.string(), loaded, error) && !loaded.lineup.test_mode, "缺少测试字段默认关闭而非继承测试模式");
 
     std::error_code ignored;
     std::filesystem::remove(path, ignored);
@@ -1099,6 +1111,9 @@ void test_invalid_config() {
            "互不冲突且位于 Win32 范围内的虚拟键应通过校验");
     expect(config.keyboard.lineup_locate_virtual_key == 0 && config.keyboard.lineup_throw_virtual_key == 0,
            "旧配置定位和投掷均未绑定");
+    config.lineup.test_mode = true;
+    expect(!validate_app_config(config,error), "测试模式缺少两个本地绑定必须拒绝");
+    config.lineup.test_mode = false;
     config.keyboard.lineup_throw_virtual_key = 0x77;
     expect(!validate_app_config(config,error), "投掷不占用运行键");
     config.keyboard.lineup_throw_virtual_key = 0x20;

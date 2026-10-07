@@ -11,6 +11,7 @@ struct Request {
     Mode mode = Mode::CANCEL;
     detail::ExecutionObservation observation;
     std::uint64_t reference_version = 0;
+    std::uint64_t trigger_sequence = 0; // 本地定位边沿关联；零表示网页或旧客户端定位。
     nlohmann::json throw_action = nullptr;
 };
 struct Snapshot {

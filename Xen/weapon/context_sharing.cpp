@@ -231,8 +231,8 @@ WeaponSnapshot GsiContextReader::snapshot() {
     } catch (...) { i.close(); return {}; }
 }
 std::string GsiContextReader::last_error() const { return impl_->error; }
-bool GsiContextReader::consume_lineup_locate() noexcept {
+std::uint64_t GsiContextReader::consume_lineup_locate() noexcept {
     const auto until = std::exchange(impl_->locate_pending_until, std::uint64_t{0});
-    return until != 0 && GetTickCount64() <= until;
+    return until != 0 && GetTickCount64() <= until ? impl_->locate_seen : 0;
 }
 }

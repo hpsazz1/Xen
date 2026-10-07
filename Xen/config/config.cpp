@@ -647,6 +647,7 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
     }
 
     constexpr TypedConfigKey kBoolKeys[]{
+        {"lineup", "test_mode"},
         {"keyboard", "debug_test_enabled"},
         {"log", "enable_console"},
         {"log", "enable_file"},
@@ -1002,6 +1003,9 @@ bool validate_app_config(const AppConfig& config,
             error = "道具投掷快捷键与急停或扳机功能键冲突"; return false;
         }
         const int locate_key = config.keyboard.lineup_locate_virtual_key;
+        if (config.lineup.test_mode && (locate_key == 0 || throw_key == 0)) {
+            error = "道具独立测试模式须配置定位与投掷两个独立快捷键"; return false;
+        }
         if (locate_key != 0 && (locate_key == config.auto_stop.activation_virtual_key ||
             locate_key == config.trigger.hold_virtual_key ||
             std::find(config.auto_stop.release_virtual_keys.begin(), config.auto_stop.release_virtual_keys.end(), locate_key) != config.auto_stop.release_virtual_keys.end())) {
@@ -1537,6 +1541,7 @@ bool load_app_config(const std::string& path,
         };
         candidate.lineup.calibration_file = ini.GetValue("lineup", "calibration_file", "");
         candidate.lineup.calibration_context = ini.GetValue("lineup", "calibration_context", "");
+        candidate.lineup.test_mode = ini.GetBoolValue("lineup", "test_mode", false);
         candidate.keyboard.lineup_throw_virtual_key = static_cast<int>(ini.GetLongValue("lineup", "throw_virtual_key", 0));
         candidate.keyboard.lineup_locate_virtual_key = static_cast<int>(ini.GetLongValue("lineup", "locate_virtual_key", 0));
         candidate.keyboard.debug_test_enabled = ini.GetBoolValue("keyboard", "debug_test_enabled", false);
@@ -1829,6 +1834,7 @@ bool save_app_config(const std::string& path,
                      format_int_list(config.auto_stop.release_virtual_keys).c_str());
         ini.SetValue("lineup", "calibration_file", config.lineup.calibration_file.c_str());
         ini.SetValue("lineup", "calibration_context", config.lineup.calibration_context.c_str());
+        ini.SetBoolValue("lineup", "test_mode", config.lineup.test_mode);
         ini.SetLongValue("lineup", "throw_virtual_key", config.keyboard.lineup_throw_virtual_key);
         ini.SetLongValue("lineup", "locate_virtual_key", config.keyboard.lineup_locate_virtual_key);
         ini.SetBoolValue("keyboard", "debug_test_enabled", config.keyboard.debug_test_enabled);

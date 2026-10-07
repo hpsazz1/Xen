@@ -4,6 +4,67 @@ const assert = require('node:assert/strict');
 const { createController, previewValid, filterRecipes } = require('../Xen/lineup/web/app.js');
 const state = (revision = 1) => ({ epoch: 'session-a', revision, mode: 'browse', running: true, source_status: 'live', locked_id: 'r1', recipes: [], preview: { status: 'valid', recipe_id: 'r1', frame_id: '42', url: '/api/preview?frame_id=42', age_ms: 30 } });
 const deferred = () => { let resolve, reject; const promise = new Promise((a,b) => { resolve=a; reject=b; }); return {promise,resolve,reject}; };
+
+test('F7设置保留具体动作时长、名称与道具，清除动作不会暗中恢复投掷预设', () => {
+  const {hostProfileRequest,throwPreset}=require('../Xen/lineup/web/app.js');
+  const form={map:'de_dust2',team:'CT',method:'jump',buttons:'left',direction:'forward',grenade:'烟雾弹',name:'A点',target:''};
+  const action=throwPreset('jump','left');
+  action.phases.forEach((phase,index)=>{phase.duration_ms=index ? 0 : 500;});
+  const payload=hostProfileRequest(form,action);
+  assert.deepEqual(payload.throw_action,action);
+  assert.equal(payload.target,'当前瞄点'); assert.equal(payload.name,'A点');
+  assert.equal(hostProfileRequest(form,null).throw_action,null);
+  assert.throws(()=>hostProfileRequest({...form,grenade:''},action),/请选择道具/);
+});
+
+test('主机采集状态区分等待几何、忙态和错误，不把导入或F8描述成投掷成功', () => {
+  const {hostCaptureSummary}=require('../Xen/lineup/web/app.js');
+  assert.match(hostCaptureSummary({enabled:false}),/未启用/);
+  assert.match(hostCaptureSummary({enabled:true,status:'waiting_geometry'}),/等待辅机/);
+  assert.match(hostCaptureSummary({enabled:true,status:'waiting_idle'}),/等待当前/);
+  assert.match(hostCaptureSummary({enabled:true,status:'imported',last_id:'a'}),/已导入并选中.*F8 只回准/);
+  assert.match(hostCaptureSummary({enabled:true,status:'error',error:'尺寸不匹配'}),/尺寸不匹配/);
+});
+
+test('采集地图使用内部ID，保留当前地图与旧库自定义地图且不重复', () => {
+  const {mapChoices}=require('../Xen/lineup/web/app.js');
+  const options=mapChoices([{map:'de_mirage'},{map:'workshop/123/custom'}],'de_new_map','旧地图');
+  assert.equal(options.filter(o=>o.id==='de_mirage').length,1);
+  assert.match(options.find(o=>o.id==='de_mirage').text,/Mirage/);
+  for(const id of ['de_dust2','de_cache','workshop/123/custom','de_new_map','旧地图']) assert.ok(options.some(o=>o.id===id));
+  assert.ok(options.every(o=>o.id));
+});
+
+test('采集投掷方式保留力度方向与跳跃，预设无猜测时长且最终全释放', () => {
+  const {throwPreset}=require('../Xen/lineup/web/app.js');
+  for(const method of ['stationary','jump','step','step_jump','runup','runup_jump']) {
+    for(const buttons of ['left','right','left+right']) {
+      const action=throwPreset(method,buttons,'back+left');
+      assert.equal(action.schema,1); assert.equal(action.type,'phases');
+      assert.ok(action.phases.every(p=>p.duration_ms===null));
+      assert.deepEqual(action.phases[0].buttons,buttons.split('+'));
+      assert.deepEqual(action.phases.at(-1),{buttons:[],movement:[],jump:false,duration_ms:null});
+      assert.equal(action.phases.some(p=>p.jump),method.includes('jump'));
+      const moving=method.startsWith('step')||method.startsWith('runup');
+      assert.equal(action.phases.some(p=>p.movement.length>0),moving);
+      if(moving) assert.ok(action.phases.some(p=>p.movement.join('+')==='back+left'));
+    }
+  }
+  assert.throws(()=>throwPreset('unknown','left','forward'));
+  assert.throws(()=>throwPreset('stationary','middle','forward'));
+  assert.throws(()=>throwPreset('runup','left','forward+back'));
+});
+
+test('采集请求一次携带明确地图阵营和动作设计，空项不静默采用默认阵营', () => {
+  const {captureRequest}=require('../Xen/lineup/web/app.js');
+  const form={map:'de_mirage',team:'CT',region:'A',standpoint_id:'',stance:'蹲姿',instructions:'背靠墙角',method:'runup_jump',buttons:'right',direction:'forward'};
+  const request=captureRequest(form);
+  assert.equal(request.map,'de_mirage'); assert.equal(request.team,'CT');
+  assert.equal(request.stance,'蹲姿'); assert.equal(request.throw_action.movement_profile,'runup');
+  assert.match(request.throw_instructions,/助跑跳投/); assert.match(request.throw_instructions,/右键/);
+  assert.ok(!Object.hasOwn(request,'action'));
+  for(const patch of [{map:''},{team:''},{team:'ANY'},{method:''}]) assert.throws(()=>captureRequest({...form,...patch}));
+});
 test('标记严格绑定锁定配方、帧龄、源及前台连接', () => {
   assert.equal(previewValid(state(),100,true),true);
   for (const patch of [{running:false},{mode:'capture'},{source_status:'disconnected'},{locked_id:'r2'},{preview:{...state().preview,age_ms:-1}},{preview:{...state().preview,age_ms:NaN}},{preview:{...state().preview,status:'unreliable'}}]) assert.equal(previewValid({...state(),...patch},0,true),false);

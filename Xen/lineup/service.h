@@ -19,8 +19,11 @@ class Service {
     Json state();
     bool wants_input() const;
     // 仅消费本次明确定位事件，不产生游戏输入；无锁定、停止或忙时忽略。
-    bool request_locate();
-    control::Request control_request();
+    bool request_locate(std::uint64_t trigger_sequence = 0);
+    // 仅由独立入口配置可信收件目录；网页不能选择路径，轮询不创建设备或定位请求。
+    bool enable_host_capture(const std::filesystem::path &inbox, cv::Size source_size);
+    void poll_host_captures();
+    control::Request control_request(bool *preparing = nullptr);
     void reset_control(const std::string &reason);
     void set_execution_status(const Json &status);
     void update_gsi(const weapon::WeaponSnapshot &snapshot, const std::string &receiver_error = "");

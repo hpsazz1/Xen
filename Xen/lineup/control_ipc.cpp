@@ -125,6 +125,7 @@ Json encode(const Request &r) {
     Json j = {{"mode",r.mode == Mode::LOCATE ? "locate" : "observation"},
         {"recipe_id",i.recipe_id},{"reference_id",i.reference_id},{"source_id",i.source_id},{"session_id",i.session_id},
         {"recipe_version",i.recipe_version},{"reference_version",r.reference_version},{"selection_generation",i.selection_generation},
+        {"trigger_sequence",r.trigger_sequence},
         {"geometry",geometry_json(i.geometry)},{"sequence",o.sequence},{"capture_age_ns",o.captured_at == Clock::time_point{} ? Json(nullptr) : Json(age(o.captured_at))},
         {"source_age_ns",o.source_at ? Json(age(*o.source_at)) : Json(nullptr)},
         {"source_uncertainty_ms",o.source_uncertainty ? Json(o.source_uncertainty->count()) : Json(nullptr)},
@@ -142,6 +143,12 @@ Request decode(const Json &j, std::uint64_t sent_tick) {
             throw std::runtime_error("invalid_identity_counter");
     }
     r.mode = mode == "locate" ? Mode::LOCATE : Mode::OBSERVATION;
+    if (j.contains("trigger_sequence")) {
+        const auto &trigger = j.at("trigger_sequence");
+        if (!trigger.is_number_integer() || (!trigger.is_number_unsigned() && trigger.get<std::int64_t>() < 0))
+            throw std::runtime_error("invalid_trigger_sequence");
+        r.trigger_sequence = trigger.get<std::uint64_t>();
+    }
     auto &o = r.observation; auto &i = o.identity; auto &g = i.geometry;
     i.recipe_id = j.at("recipe_id"); i.reference_id = j.at("reference_id"); i.source_id = j.at("source_id"); i.session_id = j.at("session_id");
     i.recipe_version = j.at("recipe_version"); r.reference_version = j.at("reference_version"); i.selection_generation = j.at("selection_generation");
@@ -210,6 +217,7 @@ struct Server::Impl {
             latest.locate_sequence = h.sequence;
         } else if (!latest.available || r.observation.identity != latest.request.observation.identity ||
                    r.reference_version != latest.request.reference_version || r.throw_action != latest.request.throw_action ||
+                   r.trigger_sequence != latest.request.trigger_sequence ||
                    r.observation.sequence <= latest.request.observation.sequence) {
             revoke("observation_unbound_or_repeated", true); return true;
         }
@@ -380,7 +388,8 @@ bool Client::publish(const Request &request) noexcept {
         auto latest = request;
         if (impl_->pending && impl_->pending->mode == Mode::LOCATE && latest.mode == Mode::OBSERVATION &&
             impl_->pending->observation.identity == latest.observation.identity &&
-            impl_->pending->reference_version == latest.reference_version && impl_->pending->throw_action == latest.throw_action)
+            impl_->pending->reference_version == latest.reference_version && impl_->pending->throw_action == latest.throw_action &&
+            impl_->pending->trigger_sequence == latest.trigger_sequence)
             latest.mode = Mode::LOCATE;
         impl_->pending = std::move(latest); impl_->pending_at = Clock::now();
         SetEvent(impl_->wake); return true;

@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$BuildDirectory = (Join-Path $PSScriptRoot '../build/lineup'),
     [string]$DependencyCache = (Join-Path $PSScriptRoot '../build/nvidia/CMakeCache.txt'),
     [switch]$ConfigureOnly
@@ -48,6 +48,8 @@ try {
     $env:PATH = @((Join-Path $env:SystemRoot 'System32'), $env:SystemRoot) -join ';'
     & $ctest --test-dir $buildRoot -C Release -R '^(lineup_calibration_tests|lineup_calibration_tool_tests|lineup_control_ipc_tests|lineup_action_tests|lineup_execution_tests|lineup_config_tests|lineup_practice_tests|lineup_increment_tests|review_run_tests|lineup_tests|lineup_service_tests|lineup_http_tests|lineup_gsi_http_tests|gsi_context_sharing_tests|gsi_context_contract_tests|lineup_web_tests|ndi_capture_contract_tests|capture_evidence_tests|weapon_tests|weapon_timing_tests)$' --output-on-failure
     if ($LASTEXITCODE -ne 0) { throw "Lineup tests failed: $LASTEXITCODE" }
+    & $ctest --test-dir $buildRoot -C Release -R '^(lineup_host_capture_tests|lineup_host_service_tests|lineup_publication_tests|runtime_lineup_test_execution_tests|runtime_lineup_bridge_tests|lineup_execution_chain_tests|lineup_test_launcher_tests|config_tests)$' --output-on-failure
+    if ($LASTEXITCODE -ne 0) { throw "主机采集与独立快捷键测试失败：$LASTEXITCODE" }
 } finally { $env:PATH = $originalPath }
 Write-Host "Lineup Release artifacts: $(Join-Path $buildRoot 'Release')"
 Write-Host 'No capture service, game, remote transfer or publishing was started.'
