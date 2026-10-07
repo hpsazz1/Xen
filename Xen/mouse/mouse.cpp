@@ -251,9 +251,6 @@ public:
     bool supports_left_button() const noexcept override {
         return inner_ && output_owner_.held() && inner_->supports_left_button();
     }
-    bool supports_lineup_inputs() const noexcept override {
-        return inner_ && output_owner_.held() && inner_->supports_lineup_inputs();
-    }
     ButtonReceipt set_right_button(bool down) noexcept override {
         if (!inner_ || !output_owner_.held()) return {ButtonDisposition::REJECTED};
         return inner_->set_right_button(down);

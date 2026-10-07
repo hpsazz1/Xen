@@ -614,26 +614,9 @@ function(xen_deploy_runtime_dlls target)
     endif()
 endfunction()
 
-option(XEN_LINEUP_ONLY_RUNTIME "Deploy only the standalone lineup validation runtime closure" OFF)
-
 function(xen_finalize_runtime_deployment)
     get_property(runtime_targets GLOBAL PROPERTY XEN_RUNTIME_DEPLOY_TARGETS)
     get_property(runtime_files GLOBAL PROPERTY XEN_RUNTIME_DEPLOY_FILES)
-    # 独立 lineup 验证目录只部署本专项实际依赖，不携带 GPU Provider。
-    if(XEN_LINEUP_ONLY_RUNTIME)
-        set(runtime_targets xen_lineup xen_lineup_offline xen_lineup_host)
-        if(BUILD_TESTING)
-            list(APPEND runtime_targets lineup_tests lineup_service_tests capture_evidence_tests)
-            if(XEN_HAS_NDI)
-                list(APPEND runtime_targets ndi_capture_contract_tests)
-            endif()
-        endif()
-        set(runtime_files)
-        foreach(lineup_target IN LISTS runtime_targets)
-            get_target_property(lineup_files ${lineup_target} XEN_RUNTIME_DEPLOY_FILES)
-            list(APPEND runtime_files ${lineup_files})
-        endforeach()
-    endif()
     if(NOT runtime_targets)
         return()
     endif()
@@ -873,39 +856,6 @@ target_link_libraries(capture_evidence
     PUBLIC capture ${OpenCV_LIBS}
     PRIVATE nlohmann_json::nlohmann_json bcrypt)
 
-# 独立手机配方工具，不接入 Runtime/Aim/Mouse。
-add_library(lineup_control STATIC Xen/lineup/control_ipc.cpp)
-target_include_directories(lineup_control PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
-target_link_libraries(lineup_control PUBLIC nlohmann_json::nlohmann_json PRIVATE advapi32 Threads::Threads)
-add_library(lineup_calibration STATIC Xen/lineup/calibration.cpp)
-target_include_directories(lineup_calibration PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
-target_link_libraries(lineup_calibration PUBLIC nlohmann_json::nlohmann_json PRIVATE bcrypt)
-add_library(lineup STATIC Xen/lineup/lineup.cpp)
-target_include_directories(lineup PUBLIC ${PROJECT_SOURCE_DIR}/Xen ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(lineup PUBLIC ${OpenCV_LIBS} nlohmann_json::nlohmann_json PRIVATE log)
-add_library(lineup_host_capture STATIC Xen/lineup/host_capture_internal.cpp)
-target_include_directories(lineup_host_capture PUBLIC ${PROJECT_SOURCE_DIR}/Xen ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(lineup_host_capture PUBLIC ${OpenCV_LIBS} nlohmann_json::nlohmann_json)
-add_executable(xen_lineup_host Xen/lineup_host/main.cpp)
-set_target_properties(xen_lineup_host PROPERTIES OUTPUT_NAME XenLineupHost)
-target_link_libraries(xen_lineup_host PRIVATE lineup_host_capture capture log user32)
-xen_deploy_runtime_dlls(xen_lineup_host OPENCV NDI)
-add_library(lineup_service STATIC Xen/lineup/service.cpp)
-target_link_libraries(lineup_service PUBLIC lineup weapon PRIVATE lineup_host_capture Threads::Threads log)
-add_executable(xen_lineup Xen/lineup/main.cpp)
-set_target_properties(xen_lineup PROPERTIES OUTPUT_NAME XenLineup)
-target_link_libraries(xen_lineup PRIVATE lineup_service lineup_control capture config log ws2_32)
-target_include_directories(xen_lineup PRIVATE ${simpleini_SOURCE_DIR})
-xen_deploy_runtime_dlls(xen_lineup OPENCV NDI)
-add_custom_target(lineup_web
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${PROJECT_SOURCE_DIR}/Xen/lineup/web" "${CMAKE_BINARY_DIR}/$<CONFIG>/lineup-web")
-add_dependencies(xen_lineup lineup_web)
-add_executable(xen_lineup_offline Xen/lineup/offline_main.cpp)
-set_target_properties(xen_lineup_offline PROPERTIES OUTPUT_NAME XenLineupOffline)
-target_link_libraries(xen_lineup_offline PRIVATE lineup)
-xen_deploy_runtime_dlls(xen_lineup_offline OPENCV)
-
 add_library(sender STATIC
     Xen/sender/sender.cpp
     Xen/sender/report.cpp)
@@ -984,7 +934,7 @@ target_link_libraries(source_context PRIVATE ws2_32 bcrypt user32 Threads::Threa
 add_executable(xen_source_context Xen/source_context_host/main.cpp)
 target_link_libraries(xen_source_context PRIVATE source_context)
 xen_deploy_runtime_dlls(xen_source_context)
-add_library(weapon STATIC Xen/weapon/weapon.cpp Xen/weapon/weapon_timing.cpp Xen/weapon/context_sharing.cpp)
+add_library(weapon STATIC Xen/weapon/weapon.cpp Xen/weapon/weapon_timing.cpp)
 target_include_directories(weapon PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(weapon PUBLIC nlohmann_json::nlohmann_json PRIVATE ws2_32 advapi32 Threads::Threads)
 add_library(recoil STATIC Xen/recoil/recoil.cpp Xen/recoil/recoil_store.cpp Xen/recoil/motion_ledger.cpp Xen/recoil/recoil_calibration.cpp)
@@ -1064,7 +1014,7 @@ add_library(runtime STATIC
 target_include_directories(runtime PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(runtime
     PUBLIC detector capture aim aim_landmark auto_stop auto_stop_worker trigger_worker source_context recoil_worker recoil_archive weapon mouse keyboard config log data_collection input_training movement
-    PRIVATE Threads::Threads lineup_control lineup_calibration)
+    PRIVATE Threads::Threads)
 
 add_library(app_input STATIC
     Xen/app/input_router.cpp)
@@ -1147,6 +1097,7 @@ add_custom_target(model_workspace_tools
         "${XEN_MODEL_TOOLS_OUTPUT}/tools/model-data"
         "${XEN_MODEL_TOOLS_OUTPUT}/tools/recoil"
         "${XEN_MODEL_TOOLS_OUTPUT}/tools/source"
+        "${XEN_MODEL_TOOLS_OUTPUT}/tools/review"
         "${XEN_MODEL_TOOLS_OUTPUT}/assets/recoil"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${PROJECT_SOURCE_DIR}/assets/weapon_catalog.inc"
@@ -1154,6 +1105,9 @@ add_custom_target(model_workspace_tools
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${PROJECT_SOURCE_DIR}/scripts/start_source_context_session.ps1"
         "${XEN_MODEL_TOOLS_OUTPUT}/tools/source"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${PROJECT_SOURCE_DIR}/scripts/review_run.py"
+        "${XEN_MODEL_TOOLS_OUTPUT}/tools/review"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${PROJECT_SOURCE_DIR}/scripts/model_data_pipeline.py"
         "${PROJECT_SOURCE_DIR}/scripts/model_data_review.html"
@@ -1302,68 +1256,6 @@ if(BUILD_TESTING)
     if(NOT XEN_PYTHON_EXECUTABLE)
         message(FATAL_ERROR "Python executable not found: python or python3")
     endif()
-    find_program(XEN_NODE_EXECUTABLE NAMES node)
-    add_executable(lineup_tests tests/lineup_tests.cpp)
-    target_link_libraries(lineup_tests PRIVATE lineup)
-    xen_deploy_runtime_dlls(lineup_tests OPENCV)
-    add_test(NAME lineup_tests COMMAND lineup_tests)
-    add_executable(lineup_increment_tests tests/lineup_increment_tests.cpp)
-    target_link_libraries(lineup_increment_tests PRIVATE lineup_service)
-    xen_deploy_runtime_dlls(lineup_increment_tests OPENCV)
-    add_test(NAME lineup_increment_tests COMMAND lineup_increment_tests)
-    foreach(action_target lineup_action_tests lineup_execution_tests)
-        add_executable(${action_target} tests/${action_target}.cpp)
-        target_include_directories(${action_target} PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
-        target_link_libraries(${action_target} PRIVATE nlohmann_json::nlohmann_json)
-        add_test(NAME ${action_target} COMMAND ${action_target})
-    endforeach()
-    add_executable(lineup_control_ipc_tests tests/lineup_control_ipc_tests.cpp)
-    target_link_libraries(lineup_control_ipc_tests PRIVATE lineup_control)
-    add_test(NAME lineup_control_ipc_tests COMMAND lineup_control_ipc_tests)
-    add_executable(lineup_publication_tests tests/lineup_publication_tests.cpp)
-    target_link_libraries(lineup_publication_tests PRIVATE lineup_control)
-    add_test(NAME lineup_publication_tests COMMAND lineup_publication_tests)
-    add_executable(lineup_calibration_tests tests/lineup_calibration_tests.cpp)
-    target_link_libraries(lineup_calibration_tests PRIVATE lineup_calibration bcrypt)
-    add_test(NAME lineup_calibration_tests COMMAND lineup_calibration_tests)
-    add_test(NAME lineup_calibration_tool_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/lineup_calibration_tool_tests.py")
-    add_executable(lineup_execution_chain_tests tests/lineup_execution_chain_tests.cpp)
-    target_link_libraries(lineup_execution_chain_tests PRIVATE lineup_control auto_stop_worker mouse)
-    add_test(NAME lineup_execution_chain_tests COMMAND lineup_execution_chain_tests)
-    add_executable(runtime_lineup_bridge_tests tests/runtime_lineup_bridge_tests.cpp)
-    target_link_libraries(runtime_lineup_bridge_tests PRIVATE auto_stop_worker mouse nlohmann_json::nlohmann_json)
-    add_test(NAME runtime_lineup_bridge_tests COMMAND runtime_lineup_bridge_tests)
-    add_executable(runtime_lineup_test_execution_tests tests/runtime_lineup_test_execution_tests.cpp)
-    target_link_libraries(runtime_lineup_test_execution_tests PRIVATE auto_stop_worker mouse nlohmann_json::nlohmann_json)
-    add_test(NAME runtime_lineup_test_execution_tests COMMAND runtime_lineup_test_execution_tests)
-    add_executable(lineup_practice_tests tests/lineup_practice_tests.cpp)
-    target_include_directories(lineup_practice_tests PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
-    target_link_libraries(lineup_practice_tests PRIVATE nlohmann_json::nlohmann_json)
-    add_test(NAME lineup_practice_tests COMMAND lineup_practice_tests)
-    add_executable(lineup_service_tests tests/lineup_service_tests.cpp)
-    target_link_libraries(lineup_service_tests PRIVATE lineup_service)
-    xen_deploy_runtime_dlls(lineup_service_tests OPENCV)
-    add_test(NAME lineup_service_tests COMMAND lineup_service_tests)
-    add_executable(lineup_host_capture_tests tests/lineup_host_capture_tests.cpp)
-    target_link_libraries(lineup_host_capture_tests PRIVATE lineup_host_capture)
-    xen_deploy_runtime_dlls(lineup_host_capture_tests OPENCV)
-    add_test(NAME lineup_host_capture_tests COMMAND lineup_host_capture_tests)
-    add_executable(lineup_host_service_tests tests/lineup_host_service_tests.cpp)
-    target_link_libraries(lineup_host_service_tests PRIVATE lineup_service lineup_host_capture)
-    xen_deploy_runtime_dlls(lineup_host_service_tests OPENCV)
-    add_test(NAME lineup_host_service_tests COMMAND lineup_host_service_tests)
-    add_custom_target(lineup_validation DEPENDS xen_lineup xen_lineup_offline
-        xen_lineup_host lineup_host_capture_tests lineup_host_service_tests lineup_publication_tests
-        runtime_lineup_test_execution_tests runtime_lineup_bridge_tests lineup_execution_chain_tests config_tests
-        lineup_tests lineup_service_tests lineup_practice_tests lineup_increment_tests lineup_action_tests lineup_execution_tests lineup_calibration_tests lineup_control_ipc_tests)
-
-    add_executable(gsi_context_contract_tests tests/gsi_context_contract_tests.cpp)
-    target_link_libraries(gsi_context_contract_tests PRIVATE weapon)
-    add_test(NAME gsi_context_contract_tests COMMAND gsi_context_contract_tests)
-    add_dependencies(lineup_validation gsi_context_contract_tests)
-    add_executable(gsi_context_fixture tests/gsi_context_fixture.cpp)
-    target_link_libraries(gsi_context_fixture PRIVATE weapon)
-    add_dependencies(lineup_validation gsi_context_fixture)
     add_executable(weapon_tests tests/weapon_tests.cpp)
     add_executable(weapon_timing_tests tests/weapon_timing_tests.cpp)
     target_link_libraries(weapon_timing_tests PRIVATE weapon)
@@ -1418,29 +1310,8 @@ if(BUILD_TESTING)
     target_link_libraries(recoil_report_tests PRIVATE xen_debug)
     xen_deploy_runtime_dlls(recoil_report_tests OPENCV)
     add_test(NAME recoil_report_tests COMMAND recoil_report_tests)
-    add_test(NAME lineup_config_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
-        "${PROJECT_SOURCE_DIR}/tests/lineup_config_tests.py" --exe "$<TARGET_FILE:xen_lineup>")
-    add_test(NAME lineup_test_launcher_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
-        "${PROJECT_SOURCE_DIR}/tests/lineup_test_launcher_tests.py" --exe "$<TARGET_FILE:xen_lineup>"
-        --powershell "${XEN_WINDOWS_POWERSHELL}")
-    foreach(lineup_script_test IN ITEMS lineup_capture_panel_tests lineup_capture_transfer_tests lineup_capture_shortcut_tests)
-        add_test(NAME ${lineup_script_test} COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
-            "${PROJECT_SOURCE_DIR}/tests/${lineup_script_test}.py" --powershell "${XEN_WINDOWS_POWERSHELL}")
-    endforeach()
     add_test(NAME review_run_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
         "${PROJECT_SOURCE_DIR}/tests/review_run_tests.py")
-    add_test(NAME lineup_http_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
-        "${PROJECT_SOURCE_DIR}/tests/lineup_http_tests.py" --exe "$<TARGET_FILE:xen_lineup>")
-    add_test(NAME gsi_context_sharing_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
-        "${PROJECT_SOURCE_DIR}/tests/gsi_context_sharing_tests.py" --exe "$<TARGET_FILE:xen_lineup>" --fixture "$<TARGET_FILE:gsi_context_fixture>")
-    add_test(NAME lineup_gsi_http_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
-        "${PROJECT_SOURCE_DIR}/tests/lineup_gsi_http_tests.py" --exe "$<TARGET_FILE:xen_lineup>")
-    if(XEN_NODE_EXECUTABLE)
-        add_test(NAME lineup_web_tests COMMAND "${XEN_NODE_EXECUTABLE}" --test
-            "${PROJECT_SOURCE_DIR}/tests/lineup_web_tests.cjs")
-    elseif(XEN_LINEUP_ONLY_RUNTIME)
-        message(FATAL_ERROR "Lineup web validation requires the existing Node.js runtime")
-    endif()
     # 离线像素专项依赖可加载的本地扩展；模块存在不等于同一解释器可以导入。
     execute_process(
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8 -c
@@ -2618,12 +2489,6 @@ if(BUILD_TESTING)
         recoil_worker_tests recoil_report_tests)
 endif()
 
-if(BUILD_TESTING)
-    add_dependencies(lineup_validation capture_evidence_tests weapon_tests weapon_timing_tests)
-    if(XEN_HAS_NDI)
-        add_dependencies(lineup_validation ndi_capture_contract_tests)
-    endif()
-endif()
 if(WIN32)
     xen_finalize_runtime_deployment()
 endif()

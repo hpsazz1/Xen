@@ -201,8 +201,6 @@ public:
     // 协议能力不是固件/游戏停稳验证。生产调用必须另有上层验收与许可。
     virtual bool supports_wasd_keyboard() const noexcept { return false; }
     virtual bool supports_left_button() const noexcept { return false; }
-    // 完整配方输入能力：左/右键、WASD、键盘 Space 和物理输入读回；缺一项即 false。
-    virtual bool supports_lineup_inputs() const noexcept { return false; }
     virtual ButtonReceipt set_right_button(bool) noexcept { return {}; }
     virtual KeyboardReceipt set_space_key(bool) noexcept { return {}; }
     // 仅软件 Left Ctrl；不屏蔽物理修饰键，统一键盘清理负责释放。

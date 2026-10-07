@@ -44,13 +44,6 @@ std::unique_lock<std::timed_mutex> AutoStopOutputArbiter::try_enter_aim(OutputAr
     return lock;
 }
 
-std::unique_lock<std::timed_mutex> AutoStopOutputArbiter::try_enter_lineup() noexcept {
-    std::unique_lock<std::timed_mutex> lock(mutex_, std::try_to_lock);
-    if (lock.owns_lock() && (faulted_.load(std::memory_order_acquire) ||
-                            auxiliary_pending_.load(std::memory_order_acquire))) lock.unlock();
-    return lock;
-}
-
 std::unique_lock<std::timed_mutex> AutoStopOutputArbiter::enter_aim_until(Clock::time_point deadline,
     OutputArbiterRejection* rejection) noexcept {
     std::unique_lock<std::timed_mutex> lock(mutex_, std::defer_lock);

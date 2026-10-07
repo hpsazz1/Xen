@@ -11,15 +11,13 @@ namespace keyboard::detail {
 
 struct KeyboardEventState {
     bool aim_hold_active = false;
-    bool lineup_blocked_until_release = false;
-    bool lineup_throw_blocked_until_release = false;
     std::array<bool,256> debug_blocked_until_release{};
     std::array<bool,256> anomaly_blocked_until_release{};
     std::array<bool, 256> previous_key_active{};
 };
 
 struct KeyboardEventPollResult {
-    std::array<KeyboardEvent, 7> events{};
+    std::array<KeyboardEvent, 5> events{};
     std::size_t count = 0;
 };
 
@@ -79,20 +77,6 @@ inline KeyboardEventPollResult update_keyboard_events(
             !state.anomaly_blocked_until_release[index]) anomaly_pressed = true;
     }
     if (anomaly_pressed) result.events[result.count++] = {KeyboardEventType::ANOMALY_MARK, true};
-    const int locate_key = config.lineup_locate_virtual_key;
-    if (locate_key > 0 && locate_key <= 0xFF) {
-        const auto index = static_cast<std::size_t>(locate_key);
-        if (!key_active[index]) state.lineup_blocked_until_release = false;
-        if (key_active[index] && !state.previous_key_active[index] && !state.lineup_blocked_until_release)
-            result.events[result.count++] = {KeyboardEventType::LINEUP_LOCATE, true};
-    }
-    const int throw_key = config.lineup_throw_virtual_key;
-    if (throw_key > 0 && throw_key <= 0xFF) {
-        const auto index = static_cast<std::size_t>(throw_key);
-        if (!key_active[index]) state.lineup_throw_blocked_until_release = false;
-        if (key_active[index] && !state.previous_key_active[index] && !state.lineup_throw_blocked_until_release)
-            result.events[result.count++] = {KeyboardEventType::LINEUP_THROW, true};
-    }
     state.aim_hold_active = aim_hold_active;
     state.previous_key_active = key_active;
     return result;

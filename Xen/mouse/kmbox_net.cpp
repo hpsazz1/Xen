@@ -362,7 +362,6 @@ public:
     bool supports_wasd_keyboard() const noexcept override { return true; }
     bool supports_left_ctrl_key() const noexcept override { return true; }
     bool supports_left_button() const noexcept override { return true; }
-    bool supports_lineup_inputs() const noexcept override { return true; }
     ButtonReceipt set_right_button(bool down) noexcept override {
         std::lock_guard<std::mutex> lock(io_mutex_);
         return button_locked(down, 2);

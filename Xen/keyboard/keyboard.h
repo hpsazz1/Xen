@@ -21,16 +21,12 @@ enum class KeyboardEventType {
     RUNTIME_TOGGLE,
     DEBUG_TEST,
     ANOMALY_MARK,
-    LINEUP_LOCATE,
-    LINEUP_THROW,
 };
 
 struct KeyboardConfig {
     std::vector<int> aim_hold_virtual_keys{0x02};  // VK_RBUTTON
     std::vector<int> emergency_virtual_keys{0x23}; // VK_END
     std::vector<int> runtime_toggle_virtual_keys{0x77}; // VK_F8
-    int lineup_throw_virtual_key = 0; // 独立投掷边沿；0=未绑定。
-    int lineup_locate_virtual_key = 0; // 0=未绑定；只读定位动作，不产生设备输出。
     bool debug_test_enabled = false;
     std::vector<int> debug_test_virtual_keys{};
     std::vector<int> anomaly_mark_virtual_keys{0x78}; // VK_F9，仅标记诊断
@@ -57,15 +53,6 @@ inline bool valid_keyboard_config(const KeyboardConfig& config) noexcept {
     for (const int key : config.anomaly_mark_virtual_keys) {
         if (key == 1 || key == 'W' || key == 'A' || key == 'S' || key == 'D') return false;
     }
-    const int locate_key = config.lineup_locate_virtual_key;
-    if (locate_key < 0 || locate_key > 0xFF || locate_key == 1 || locate_key == 0x20 ||
-        locate_key == 'W' || locate_key == 'A' || locate_key == 'S' || locate_key == 'D') return false;
-    if (locate_key != 0) assigned[static_cast<std::size_t>(locate_key)] = true;
-    const int throw_key = config.lineup_throw_virtual_key;
-    if (throw_key < 0 || throw_key > 0xFF || throw_key == 1 || throw_key == 0x20 ||
-        throw_key == 'W' || throw_key == 'A' || throw_key == 'S' || throw_key == 'D' ||
-        (throw_key != 0 && assigned[static_cast<std::size_t>(throw_key)])) return false;
-    if (throw_key != 0) assigned[static_cast<std::size_t>(throw_key)] = true;
     return claim(config.aim_hold_virtual_keys) &&
            claim(config.emergency_virtual_keys) &&
            claim(config.runtime_toggle_virtual_keys) && claim(config.debug_test_virtual_keys) &&

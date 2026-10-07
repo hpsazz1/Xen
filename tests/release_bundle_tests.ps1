@@ -46,8 +46,7 @@ function New-FakeBuild(
     Write-Utf8 (Join-Path $release "XenLauncher.exe") "launcher"
     # 这里只验证发布脚本合同，文本 EXE 仅存在于 owner 隔离夹具；正式组包使用真实构建。
     foreach ($name in @("xen_recoil_tuner.exe", "xen_source_context.exe", "XenClockSource.exe",
-            "XenSender.exe", "XenCaptureEvidence.exe", "XenAutoStopCapture.exe",
-            "XenLineup.exe", "XenLineupOffline.exe")) {
+            "XenSender.exe", "XenCaptureEvidence.exe", "XenAutoStopCapture.exe")) {
         Write-Utf8 (Join-Path $release $name) "tool-$Runtime-$name"
     }
     if ($IncludeCalibration) {
@@ -103,12 +102,6 @@ function New-FakeBuild(
         New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
         Copy-Item -LiteralPath (Join-Path $repository $entry.Value) -Destination $destination
     }
-    foreach ($entry in $fixtureLineupPayload.GetEnumerator()) {
-        if (-not $entry.Key.StartsWith("lineup-web/")) { continue }
-        $destination = Join-Path $release $entry.Key
-        New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
-        Copy-Item -LiteralPath (Join-Path $repository $entry.Value) -Destination $destination
-    }
 }
 
 # 直接读取生产发布器的常量表；不执行发布器，也不再维护第二份载荷清单。
@@ -128,14 +121,6 @@ $payloadTable = $payloadAssignments[0].Right.Find({ param($node)
 if ($null -eq $payloadTable) { throw "发布器缺少 repositoryPayload 常量表" }
 $fixturePayload = $payloadTable.SafeGetValue()
 if ($fixturePayload.Count -eq 0) { throw "发布器载荷清单为空" }
-$lineupAssignment = $publisherAst.Find({ param($node)
-    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-        $node.Left.Extent.Text -eq '$lineupPayload'
-}, $true)
-$lineupTable = $lineupAssignment.Right.Find({ param($node)
-    $node -is [System.Management.Automation.Language.HashtableAst]
-}, $true)
-$fixtureLineupPayload = $lineupTable.SafeGetValue()
 if ([bool]$ActualReleaseDirectory -ne [bool]$ActualRepositoryRoot) {
     throw "实际部署校验必须同时提供构建输出目录和源码根目录"
 }
@@ -168,7 +153,7 @@ try {
     $repository = Join-Path $root "repo"
     New-Item -ItemType Directory -Path $repository | Out-Null
     Write-Utf8 (Join-Path $repository "tracked.txt") "fixture"
-    foreach ($relativePath in @($fixturePayload.Values) + @($fixtureLineupPayload.Values) + @("LICENSE")) {
+    foreach ($relativePath in @($fixturePayload.Values) + @("LICENSE")) {
         $destination = Join-Path $repository $relativePath
         New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
         Copy-Item -LiteralPath (Join-Path $repositoryRoot $relativePath) -Destination $destination
@@ -217,6 +202,10 @@ try {
         "onnxruntime.dll", "onnxruntime_providers_openvino.dll", "openvino.dll") `
         $openVinoComponents
 
+    # 旧构建输出中的退役文件不能被当前发布清单重新带回。
+    Write-Utf8 (Join-Path $nvidia "Release/XenLineup.exe") "retired-tool"
+    Write-Utf8 (Join-Path $nvidia "Release/lineup-web/index.html") "retired-web"
+
     $requiredComponents = @(
         $nvidiaComponents + $directMlComponents + $openVinoComponents |
             Sort-Object -Unique)
@@ -248,21 +237,6 @@ try {
     }
     Assert-PreflightFailure "unregistered-native-tool" "原生工具必须登记依赖闭包" @(
         (Join-Path $nvidia "Release/onnxruntime.dll"))
-
-    foreach ($relative in @("XenLineup.exe", "XenLineupOffline.exe", "lineup-web/index.html")) {
-        $path = Join-Path $nvidia "Release/$relative"
-        $originalBytes = [IO.File]::ReadAllBytes($path)
-        try {
-            Remove-Item -LiteralPath $path
-            Assert-PreflightFailure ("lineup-missing-" + $relative.Replace('/', '-')) ([regex]::Escape((Split-Path -Leaf $relative)))
-        } finally { [IO.File]::WriteAllBytes($path, $originalBytes) }
-    }
-    $lineupWeb = Join-Path $nvidia "Release/lineup-web/app.js"
-    $lineupWebBytes = [IO.File]::ReadAllBytes($lineupWeb)
-    try {
-        Write-Utf8 $lineupWeb "stale-web"
-        Assert-PreflightFailure "lineup-stale-web" "Lineup 构建网页与当前源码不同"
-    } finally { [IO.File]::WriteAllBytes($lineupWeb, $lineupWebBytes) }
 
     # 逐项删除 owned 合成构建中的必需文件；缺件不得靠其他 runtime 或旧包补齐。
     $requiredFiles = @(
@@ -611,19 +585,14 @@ try {
         -not $portableStart.Contains('pause') -or $portableStart.Contains($repository)) {
         throw "完整包入口必须相对定位 Launcher、切换包根并保留失败窗口"
     }
-    foreach ($relative in @("Start-Xen.cmd", "tools/lineup/XenLineup.exe", "tools/lineup/XenLineupOffline.exe",
-            "tools/lineup/Start-Lineup.ps1") + @($fixtureLineupPayload.Keys | ForEach-Object { "tools/lineup/$_" })) {
-        if (@($manifest.files | Where-Object { $_.path -eq $relative }).Count -ne 1 -or
-            -not (Test-Path -LiteralPath (Join-Path $output $relative) -PathType Leaf)) {
-            throw "便携 Lineup/入口文件必须唯一纳入清单：$relative"
-        }
+    if (@($manifest.files | Where-Object { $_.path -eq "Start-Xen.cmd" }).Count -ne 1) {
+        throw "便携入口必须唯一纳入清单"
     }
-    $lineupStart = Get-Content -LiteralPath (Join-Path $output "tools/lineup/Start-Lineup.ps1") -Raw
-    if (-not $lineupStart.Contains("'../..'") -or -not $lineupStart.Contains("'XenLineup.exe'") -or
-        -not $lineupStart.Contains('-CheckOnly:$CheckOnly') -or $lineupStart.Contains($repository)) {
-        throw "Lineup 包装器必须使用包内路径并保留 CheckOnly"
+    if (@($manifest.files | Where-Object { $_.path -match "(?i)lineup" }).Count -ne 0 -or
+        (Test-Path -LiteralPath (Join-Path $output "tools/lineup"))) {
+        throw "退役道具工具、网页或入口不得进入发布包"
     }
-    foreach ($prefix in @("", "tools/source/", "tools/lineup/", "runtimes/nvidia/", "runtimes/directml/", "runtimes/openvino/")) {
+    foreach ($prefix in @("", "tools/source/", "runtimes/nvidia/", "runtimes/directml/", "runtimes/openvino/")) {
         foreach ($name in $fixtureCrtNames) {
             $record = @($manifest.files | Where-Object { $_.path -eq "$prefix$name" })
             if ($record.Count -ne 1) { throw "EXE 所在目录缺少同位 CRT：$prefix$name" }

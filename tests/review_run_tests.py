@@ -75,29 +75,35 @@ class ReviewRunTests(unittest.TestCase):
         self.assertIn('invalid_json', reasons)
         self.assertIn('frame_path_outside_run', reasons)
 
-    def test_lineup_missing_time_and_nonfinite_performance(self):
-        self.put('observations.json', [{'status': 'LOST', 'sequence': 1, 'processing_ms': 0}, {'status': 'VALID', 'processing_ms': float('nan')}])
+    def test_runtime_missing_time_and_nonfinite_performance(self):
+        self.put('runtime.json', {'samples': [{'success': False, 'sequence': 1, 'processing_ms': 0}, {'success': True, 'processing_ms': float('nan')}]})
         segment = module.review(self.run)['segments'][0]
         self.assertEqual(segment['time_basis'], 'unknown')
         self.assertEqual(segment['performance_ms']['processing_ms']['count'], 1)
         self.assertIsNone(segment['anomaly_intervals'][0]['start_ms'])
 
     def test_source_unchanged(self):
-        self.put('observations.json', [{'status': 'VALID', 'processing_ms': 12}])
-        before = module.digest(self.run / 'observations.json')
+        self.put('runtime.json', {'samples': [{'success': True, 'processing_ms': 12}]})
+        before = module.digest(self.run / 'runtime.json')
         module.write_review(self.run, self.root / 'review')
-        self.assertEqual(before, module.digest(self.run / 'observations.json'))
+        self.assertEqual(before, module.digest(self.run / 'runtime.json'))
         self.assertEqual(len(list(self.run.iterdir())), 1)
 
-    def test_service_export_frame_id_and_lowercase_valid(self):
+    def test_runtime_stage_metrics_require_source_identity(self):
         (self.run / 'one-raw.png').write_bytes(b'raw')
-        self.put('observations.json', [{'frame_id': 'one', 'status': 'lost', 'recipe_id': 'recipe-1', 'performance': {'load_ms': 2}}, {'status': 'valid'}])
+        self.put('runtime.json', {'samples': [{'frame_id': 'one', 'success': False, 'performance': {'load_ms': 2}}, {'success': True}]})
         result = module.review(self.run)
         segment = result['segments'][0]
-        self.assertEqual(segment['anomaly_intervals'][0]['alignment'], 'export_frame_id')
+        self.assertEqual(segment['anomaly_intervals'][0]['alignment'], 'unknown')
         self.assertEqual(segment['anomaly_intervals'][0]['last_index'], 0)
         self.assertEqual(segment['performance_ms']['stage.load_ms']['p50'], 2)
-        self.assertEqual(segment['reference_identities'], [{'recipe_id': 'recipe-1'}])
+        self.assertEqual(result['anchors'], [])
+
+    def test_retired_observations_are_only_inventoried(self):
+        self.put('observations.json', [{'status': 'LOST', 'processing_ms': 12}])
+        result = module.review(self.run)
+        self.assertEqual(result['segments'], [])
+        self.assertEqual([entry['file'] for entry in result['inventory']], ['observations.json'])
 
 
 if __name__ == '__main__':

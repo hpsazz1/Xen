@@ -28,8 +28,6 @@ public:
     // Runtime在计算前有限等待短事务；获得门后仍须复核许可，不排队补发旧命令。
     std::unique_lock<std::timed_mutex> enter_aim_until(std::chrono::steady_clock::time_point deadline,
         OutputArbiterRejection* rejection = nullptr) noexcept;
-    // 道具会话先撤销其他所有者并确认空闲，再持同一输出锁；不计为 Aim 指标。
-    std::unique_lock<std::timed_mutex> try_enter_lineup() noexcept;
     OutputArbiterSnapshot snapshot() const noexcept;
     // 撤销本owner既有按钮债务不受普通发送门禁阻挡。
     std::unique_lock<std::timed_mutex> try_enter_cleanup() noexcept;

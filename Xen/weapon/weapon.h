@@ -34,12 +34,6 @@ struct GsiConfig {
 struct WeaponSnapshot {
     bool valid = false;
     bool identity_match = false;
-    // 地图/本地阵营仅供目录筛选，独立于枪械、弹药和控制策略有效性。
-    // 观战他人、身份/活动缺失、过期或同秒上下文回退均撤销。
-    bool context_valid = false;
-    std::uint64_t context_epoch = 0; // 筛选上下文断点，不是武器或控制许可。
-    std::string map_name;
-    Team local_team = Team::UNKNOWN;
     // 仅为普通压枪区分确认死亡与缺失/非游戏状态，不放宽 valid。
     bool player_playing = false;
     std::optional<int> player_health;
@@ -73,8 +67,6 @@ struct WeaponSnapshot {
 
 bool valid_config(const GsiConfig& config) noexcept;
 std::string canonical_weapon_id(const std::string& raw_name);
-// 只规范普通名称或 workshop/<数字 ID>/<名称>，不合并不同创意工坊项目。
-std::string canonical_map_id(const std::string& raw_name);
 
 class GsiReceiver final {
 public:
@@ -83,24 +75,10 @@ public:
     GsiReceiver(const GsiReceiver&) = delete;
     GsiReceiver& operator=(const GsiReceiver&) = delete;
     // 生命周期调用由单owner串行推进；snapshot跨线程可读。
-    bool start(const GsiConfig& config, bool publish_context = false) noexcept;
+    bool start(const GsiConfig& config) noexcept;
     void stop() noexcept;
     WeaponSnapshot snapshot() const;
     std::string last_error() const;
-private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
-};
-// 只读本地投影，单线程调用；返回值永远不授予武器/控制许可。
-class GsiContextReader final {
-public:
-    GsiContextReader();
-    ~GsiContextReader();
-    void configure(const GsiConfig& config);
-    WeaponSnapshot snapshot();
-    std::string last_error() const;
-    // snapshot 后读取事件序号；0 表示无新边沿，首次连接/过期/重连均不重放。
-    std::uint64_t consume_lineup_locate() noexcept;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

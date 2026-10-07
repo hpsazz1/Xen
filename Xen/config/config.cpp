@@ -595,8 +595,6 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"source_context", "port"}, {"source_context", "ttl_ms"},
         {"recoil", "budget_window_ms"}, {"recoil", "max_observation_age_ms"},
         {"gsi", "port"}, {"gsi", "ttl_ms"}, {"gsi", "request_timeout_ms"},
-        {"lineup", "locate_virtual_key"},
-        {"lineup", "throw_virtual_key"},
         {"keyboard", "aim_hold_virtual_key"},
         {"keyboard", "emergency_virtual_key"},
         {"keyboard", "runtime_toggle_virtual_key"},
@@ -647,7 +645,6 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
     }
 
     constexpr TypedConfigKey kBoolKeys[]{
-        {"lineup", "test_mode"},
         {"keyboard", "debug_test_enabled"},
         {"log", "enable_console"},
         {"log", "enable_file"},
@@ -996,20 +993,6 @@ bool validate_app_config(const AppConfig& config,
         if (movement_key_conflicts(config.movement.spin_enabled, config.movement.spin_trigger, config.movement.spin_virtual_key) ||
             movement_key_conflicts(config.movement.large_enabled, config.movement.large_trigger, config.movement.large_virtual_key)) {
             error = "身法触发键与急停或其他功能键冲突"; return false;
-        }
-        const int throw_key = config.keyboard.lineup_throw_virtual_key;
-        if (throw_key != 0 && (throw_key == config.auto_stop.activation_virtual_key || throw_key == config.trigger.hold_virtual_key ||
-            std::find(config.auto_stop.release_virtual_keys.begin(), config.auto_stop.release_virtual_keys.end(), throw_key) != config.auto_stop.release_virtual_keys.end())) {
-            error = "道具投掷快捷键与急停或扳机功能键冲突"; return false;
-        }
-        const int locate_key = config.keyboard.lineup_locate_virtual_key;
-        if (config.lineup.test_mode && (locate_key == 0 || throw_key == 0)) {
-            error = "道具独立测试模式须配置定位与投掷两个独立快捷键"; return false;
-        }
-        if (locate_key != 0 && (locate_key == config.auto_stop.activation_virtual_key ||
-            locate_key == config.trigger.hold_virtual_key ||
-            std::find(config.auto_stop.release_virtual_keys.begin(), config.auto_stop.release_virtual_keys.end(), locate_key) != config.auto_stop.release_virtual_keys.end())) {
-            error = "道具定位快捷键与急停或扳机功能键冲突"; return false;
         }
         const int stop_key = config.auto_stop.activation_virtual_key;
         if (config.auto_stop.counter_hold_ms < 1 || config.auto_stop.counter_hold_ms > 200 ||
@@ -1539,11 +1522,6 @@ bool load_app_config(const std::string& path,
                 ? std::vector<int>{static_cast<int>(legacy)}
                 : fallback;
         };
-        candidate.lineup.calibration_file = ini.GetValue("lineup", "calibration_file", "");
-        candidate.lineup.calibration_context = ini.GetValue("lineup", "calibration_context", "");
-        candidate.lineup.test_mode = ini.GetBoolValue("lineup", "test_mode", false);
-        candidate.keyboard.lineup_throw_virtual_key = static_cast<int>(ini.GetLongValue("lineup", "throw_virtual_key", 0));
-        candidate.keyboard.lineup_locate_virtual_key = static_cast<int>(ini.GetLongValue("lineup", "locate_virtual_key", 0));
         candidate.keyboard.debug_test_enabled = ini.GetBoolValue("keyboard", "debug_test_enabled", false);
         candidate.keyboard.debug_test_virtual_keys = load_virtual_keys("debug_test_virtual_keys", "debug_test_virtual_key", {});
         candidate.keyboard.aim_hold_virtual_keys = load_virtual_keys(
@@ -1832,11 +1810,6 @@ bool save_app_config(const std::string& path,
                          config.auto_stop.activation_virtual_key);
         ini.SetValue("auto_stop", "release_virtual_keys",
                      format_int_list(config.auto_stop.release_virtual_keys).c_str());
-        ini.SetValue("lineup", "calibration_file", config.lineup.calibration_file.c_str());
-        ini.SetValue("lineup", "calibration_context", config.lineup.calibration_context.c_str());
-        ini.SetBoolValue("lineup", "test_mode", config.lineup.test_mode);
-        ini.SetLongValue("lineup", "throw_virtual_key", config.keyboard.lineup_throw_virtual_key);
-        ini.SetLongValue("lineup", "locate_virtual_key", config.keyboard.lineup_locate_virtual_key);
         ini.SetBoolValue("keyboard", "debug_test_enabled", config.keyboard.debug_test_enabled);
         ini.SetValue("keyboard", "debug_test_virtual_keys", format_int_list(config.keyboard.debug_test_virtual_keys).c_str());
         ini.SetValue("keyboard", "anomaly_mark_virtual_keys", format_int_list(config.keyboard.anomaly_mark_virtual_keys).c_str());

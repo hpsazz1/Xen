@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""只读复用 Runtime/Lineup 已有报告，生成单 Run 的可复现离线复盘。"""
+"""只读复用 Runtime/Aim 已有报告，生成单 Run 的可复现离线复盘。"""
 import argparse
 import hashlib
 import html
@@ -90,7 +90,7 @@ def review(run):
             key = (str(anchor['source_clock_session_id']), str(anchor['source_timecode']))
             anchor_index.setdefault(key, []).append(anchor['file'])
     for name, document in documents.items():
-        rows = document if name.endswith('observations.json') and isinstance(document, list) else document.get('samples') if isinstance(document, dict) else None
+        rows = document.get('samples') if isinstance(document, dict) else None
         if not isinstance(rows, list):
             continue
         if any(not isinstance(row, dict) for row in rows):
@@ -109,14 +109,6 @@ def review(run):
         stage_metrics = sorted({key for row in rows if isinstance(row.get('performance'), dict) for key in row['performance'] if key.endswith('_ms')})
         for metric in stage_metrics:
             performance['stage.' + metric] = distribution([row.get('performance', {}).get(metric) for row in rows if isinstance(row.get('performance'), dict)])
-        row_anchors = {}
-        for index, row in enumerate(rows):
-            frame_id = row.get('frame_id')
-            if isinstance(frame_id, str) and frame_id and '/' not in frame_id and '\\' not in frame_id:
-                relative = (Path(name).parent / (frame_id + '-raw.png')).as_posix()
-                if relative in hashes:
-                    row_anchors[index] = [relative]
-                    anchors.append({'file': relative, 'manifest': name, 'integrity': 'snapshot_hashed_no_expected_hash', 'frame_id': frame_id, 'sequence': row.get('sequence')})
         # ns 字符串保留整数精度。只有本段明确有效的接收时间用于区间，不推断录像时间。
         def time_ns(row):
             value = row.get('capture_steady_ns')
@@ -131,19 +123,17 @@ def review(run):
             reasons = []
             if row.get('success') is False:
                 reasons.append('sample_failed')
-            if 'status' in row and str(row['status']).upper() != 'VALID':
-                reasons.append('visual_' + str(row['status']))
             if row.get('source_timing_valid') is False:
                 reasons.append('source_clock_unknown')
             if row.get('control_timing_valid') is False:
                 reasons.append('control_timing_unknown')
             if not reasons:
                 continue
-            matching = row_anchors.get(index, [])
+            matching = []
             if row.get('source_timecode_valid') and row.get('source_clock_session_id'):
-                matching = matching or anchor_index.get((str(row['source_clock_session_id']), str(row.get('source_timecode'))), [])
+                matching = anchor_index.get((str(row['source_clock_session_id']), str(row.get('source_timecode'))), [])
             relative_time = (time_ns(row) - origin) / 1e6 if origin is not None and time_ns(row) is not None else None
-            event = {'first_index': index, 'last_index': index, 'first_sequence': row.get('sequence'), 'last_sequence': row.get('sequence'), 'start_ms': relative_time, 'end_ms': relative_time, 'reasons': reasons, 'anchors': matching, 'alignment': 'export_frame_id' if index in row_anchors else 'source_timecode_same_session' if matching else 'unknown'}
+            event = {'first_index': index, 'last_index': index, 'first_sequence': row.get('sequence'), 'last_sequence': row.get('sequence'), 'start_ms': relative_time, 'end_ms': relative_time, 'reasons': reasons, 'anchors': matching, 'alignment': 'source_timecode_same_session' if matching else 'unknown'}
             if events and events[-1]['last_index'] == index - 1 and events[-1]['reasons'] == reasons:
                 previous = events[-1]
                 previous.update(last_index=index, last_sequence=row.get('sequence'), end_ms=relative_time)
@@ -152,16 +142,14 @@ def review(run):
                     previous['alignment'] = 'unknown'
             else:
                 events.append(event)
-        references = [{key: row[key] for key in ('recipe_id', 'reference_id', 'reference_revision', 'recipe_revision') if key in row} for row in rows]
-        references = list({json.dumps(value, sort_keys=True): value for value in references if value}.values())
-        segments.append({'file': name, 'session_id': metadata.get('session_id'), 'sample_count': len(rows), 'omitted_samples': omitted, 'reference_identities': references, 'time_basis': 'segment_relative_receiver_steady_clock' if origin is not None else 'unknown', 'performance_ms': performance, 'anomaly_intervals': events})
+        segments.append({'file': name, 'session_id': metadata.get('session_id'), 'sample_count': len(rows), 'omitted_samples': omitted, 'time_basis': 'segment_relative_receiver_steady_clock' if origin is not None else 'unknown', 'performance_ms': performance, 'anomaly_intervals': events})
     if not segments:
         issues.append({'file': '.', 'reason': 'no_supported_samples'})
     summaries = [name for name in documents if name.endswith(('summary.json', 'sampling-analysis.json'))]
     if not anchors:
         issues.append({'file': '.', 'reason': 'no_capture_manifest_anchors'})
     identity = hashlib.sha256(json.dumps(inventory, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-    return {'schema': 1, 'run_id': task.get('run_id', run.name), 'input_identity_sha256': identity, 'reuse': {'existing_reports': summaries, 'policy': 'Reuse archived Runtime/Aim/Lineup reports without recapturing or rewriting evidence.'}, 'integrity': {'status': 'partial_or_unknown' if issues else 'checked', 'issues': issues}, 'configuration': config, 'package_commit': task.get('package_commit'), 'segments': segments, 'anchors': anchors, 'inventory': inventory, 'limits': ['离线报告，不代表真实投掷/副机性能验收。', '无显式同源时钟身份的截图关联为 unknown；不按文件时间、序号或采样率伪造逐帧真值。', '性能仅统计有记录且有效的值；缺失计量不按零计入。', '异常区间是留存样本的连续索引范围，不证明中间未留样画面连续。']}
+    return {'schema': 1, 'run_id': task.get('run_id', run.name), 'input_identity_sha256': identity, 'reuse': {'existing_reports': summaries, 'policy': '只读复用已归档 Runtime/Aim 报告，不重新采集或改写证据。'}, 'integrity': {'status': 'partial_or_unknown' if issues else 'checked', 'issues': issues}, 'configuration': config, 'package_commit': task.get('package_commit'), 'segments': segments, 'anchors': anchors, 'inventory': inventory, 'limits': ['离线报告，不代表真实设备、游戏效果或辅机性能验收。', '无显式同源时钟身份的截图关联为 unknown；不按文件时间、序号或采样率伪造逐帧真值。', '性能仅统计有记录且有效的值；缺失计量不按零计入。', '异常区间是留存样本的连续索引范围，不证明中间未留样画面连续。']}
 
 
 def write_review(run, output):

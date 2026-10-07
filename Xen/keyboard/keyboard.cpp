@@ -110,12 +110,6 @@ KeyboardPollResult KeyboardListener::poll() noexcept {
 
             // 初次健康建立或故障恢复不能把缓存按住状态当成调试启动边沿。
             if (!impl_->input_healthy || snapshot.status != InputMonitorStatus::READY) {
-                if (impl_->config.lineup_throw_virtual_key != 0)
-                    impl_->event_state.lineup_throw_blocked_until_release =
-                        snapshot.virtual_keys[static_cast<std::size_t>(impl_->config.lineup_throw_virtual_key)];
-                if (impl_->config.lineup_locate_virtual_key != 0)
-                    impl_->event_state.lineup_blocked_until_release =
-                        snapshot.virtual_keys[static_cast<std::size_t>(impl_->config.lineup_locate_virtual_key)];
                 for (const int key : impl_->config.debug_test_virtual_keys)
                     impl_->event_state.debug_blocked_until_release[static_cast<std::size_t>(key)] =
                         snapshot.virtual_keys[static_cast<std::size_t>(key)];

@@ -163,10 +163,9 @@ void unknown_and_reuse() {
     mouse->close();
     expect(!mouse->left_button_faulted(), "close明确up ACK可清债但不重开会话");
 }
-void lineup_buttons_and_space() {
+void combined_buttons_and_space() {
     Device device; auto mouse = create(config(device));
-    expect(mouse && mouse->open(), "配方fake连接"); if (!mouse) return;
-    expect(mouse->supports_lineup_inputs(), "独占adapter转发完整配方能力");
+    expect(mouse && mouse->open(), "组合输入fake连接"); if (!mouse) return;
     expect(mouse->set_left_button(true).disposition == ButtonDisposition::ACKNOWLEDGED, "left down");
     expect(mouse->set_right_button(true).disposition == ButtonDisposition::ACKNOWLEDGED, "right down");
     expect(mouse->set_left_button(false).disposition == ButtonDisposition::ACKNOWLEDGED, "left up保留right");
@@ -179,7 +178,7 @@ void lineup_buttons_and_space() {
     expect(mouse->set_wasd_keyboard(0).disposition == KeyboardDisposition::ACKNOWLEDGED, "W up保留Space");
     expect(mouse->set_space_key(false).disposition == KeyboardDisposition::ACKNOWLEDGED, "Space up");
     auto packets = device.packets();
-    expect(packets.size() == 9, "配方报告数");
+    expect(packets.size() == 9, "组合输入报告数");
     if (packets.size() == 9) {
         expect(read(packets[1].data()+12) == right && read(packets[1].data()+16) == 3, "右键协议保留left位");
         expect(read(packets[2].data()+16) == 2 && read(packets[3].data()+16) == 2, "left up和move保留right位");
@@ -187,7 +186,7 @@ void lineup_buttons_and_space() {
         expect(packets[7][18] == 0x2c && packets[7][19] == 0, "W释放不得吞Space");
         expect(packets[8][18] == 0, "Space释放为空键盘报告");
         for (std::size_t i = 5; i < packets.size(); ++i)
-            expect(read(packets[i].data()+12) == keyboard, "jump只用键盘命令，禁止wheel");
+            expect(read(packets[i].data()+12) == keyboard, "Space只用键盘命令，禁止wheel");
     }
     expect(device.physical_left(false, true, true), "fake右键和Space物理报告");
     InputSnapshot snapshot;
@@ -210,7 +209,7 @@ void lineup_buttons_and_space() {
     expect(mouse->cleanup_wasd_keyboard().disposition == KeyboardDisposition::ACKNOWLEDGED, "共用键盘cleanup释放Space");
     expect(device.packets().back()[18] == 0, "Space未知清理报告为空");
     mouse->close();
-    expect(!mouse->supports_lineup_inputs() && mouse->set_space_key(true).disposition == KeyboardDisposition::REJECTED,
+    expect(mouse->set_space_key(true).disposition == KeyboardDisposition::REJECTED,
            "关闭后无owner禁止Space");
     device.response = 1;
     mouse = create(config(device));
@@ -228,9 +227,8 @@ void unsupported() {
     MouseConfig cfg;
     auto mouse = create(cfg);
     expect(mouse && mouse->open(), "无输出Win32可打开");
-    expect(!mouse->supports_lineup_inputs() &&
-        mouse->set_right_button(true).disposition == ButtonDisposition::UNSUPPORTED &&
-        mouse->set_space_key(true).disposition == KeyboardDisposition::UNSUPPORTED, "非完整后端拒绝配方输入");
+    expect(mouse->set_right_button(true).disposition == ButtonDisposition::UNSUPPORTED &&
+        mouse->set_space_key(true).disposition == KeyboardDisposition::UNSUPPORTED, "其他后端显式拒绝右键与Space");
     expect(!mouse->supports_left_button() && mouse->set_left_button(true).disposition == ButtonDisposition::UNSUPPORTED,
         "其他后端显式UNSUPPORTED");
 }
@@ -257,7 +255,7 @@ void serialized_release() {
 int main() {
     WSADATA data{};
     if (WSAStartup(MAKEWORD(2,2), &data)) return 2;
-    normal_and_physical(); unknown_and_reuse(); unsupported(); serialized_release(); lineup_buttons_and_space();
+    normal_and_physical(); unknown_and_reuse(); unsupported(); serialized_release(); combined_buttons_and_space();
     WSACleanup();
     return failures ? 1 : 0;
 }

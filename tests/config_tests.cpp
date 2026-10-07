@@ -327,11 +327,6 @@ void test_round_trip() {
     source.keyboard.debug_test_enabled = true;
     source.keyboard.debug_test_virtual_keys = {0x79,0x7A};
     source.keyboard.anomaly_mark_virtual_keys = {0x78};
-    source.keyboard.lineup_locate_virtual_key = 0x7B;
-    source.keyboard.lineup_throw_virtual_key = 0x7C;
-    source.lineup.calibration_file = "calibration/lineup-measured.json";
-    source.lineup.calibration_context = "fixture-game-conditions";
-    source.lineup.test_mode = true;
     source.log.global_level = LogLevel::WARN;
     source.log.enable_console = false;
     source.log.enable_file = false;
@@ -406,11 +401,6 @@ void test_round_trip() {
            loaded.keyboard.debug_test_enabled == source.keyboard.debug_test_enabled &&
            loaded.keyboard.debug_test_virtual_keys == source.keyboard.debug_test_virtual_keys &&
            loaded.keyboard.anomaly_mark_virtual_keys == source.keyboard.anomaly_mark_virtual_keys &&
-           loaded.keyboard.lineup_locate_virtual_key == source.keyboard.lineup_locate_virtual_key &&
-           loaded.keyboard.lineup_throw_virtual_key == source.keyboard.lineup_throw_virtual_key &&
-           loaded.lineup.calibration_file == source.lineup.calibration_file &&
-           loaded.lineup.calibration_context == source.lineup.calibration_context &&
-           loaded.lineup.test_mode == source.lineup.test_mode &&
            loaded.keyboard.aim_hold_virtual_keys ==
                source.keyboard.aim_hold_virtual_keys &&
            loaded.keyboard.emergency_virtual_keys ==
@@ -943,32 +933,18 @@ void test_legacy_keyboard_config() {
            "写入显式禁用标记键配置");
     expect(load_app_config(path.string(), loaded, error) && loaded.keyboard.anomaly_mark_virtual_keys.empty(),
            "显式清空标记键不得恢复默认F9");
-    expect(loaded.keyboard.lineup_locate_virtual_key == 0, "旧 INI 缺少定位字段默认未绑定");
-    expect(!loaded.lineup.test_mode, "旧 INI 不启用独立测试投掷语义");
-    expect(write_file_bytes(path, "[lineup]\nlocate_virtual_key=123\n"), "写入可选定位键");
-    expect(load_app_config(path.string(), loaded, error) && loaded.keyboard.lineup_locate_virtual_key == 123,
-           "同一 INI 的 lineup 专属字段可读入");
-    expect(write_file_bytes(path, "[lineup]\nlocate_virtual_key=123oops\n"), "写入非法定位值");
-    expect(!load_app_config(path.string(), loaded, error), "定位字段必须严格整数");
-    expect(loaded.keyboard.runtime_toggle_virtual_keys == std::vector<int>{118},
-           "缺失 keyboard 字段保留此前迁移的 F7 绑定");
-    expect(write_file_bytes(path, "[lineup]\nlocate_virtual_key=118\n"), "写入继承绑定冲突定位键");
-    expect(!load_app_config(path.string(), loaded, error) &&
-               loaded.keyboard.lineup_locate_virtual_key == 123 &&
-               loaded.keyboard.runtime_toggle_virtual_keys == std::vector<int>{118},
-           "定位不得占用继承的 F7，失败不改已加载配置");
-    expect(write_file_bytes(path, "[keyboard]\nruntime_toggle_virtual_keys=119\n[lineup]\nlocate_virtual_key=119\n"),
-           "显式配置原 F8 运行键及同键定位冲突");
-    expect(!load_app_config(path.string(), loaded, error), "定位不占用原 F8 运行键");
-    expect(write_file_bytes(path, "[keyboard]\naim_hold_virtual_keys=5\nruntime_toggle_virtual_keys=\nanomaly_mark_virtual_keys=\n[lineup]\nlocate_virtual_key=119\nthrow_virtual_key=120\ntest_mode=true\n"),
-           "写入独立 F8 F9 测试配置");
-    expect(load_app_config(path.string(), loaded, error) && loaded.lineup.test_mode &&
-               loaded.keyboard.lineup_locate_virtual_key == 119 && loaded.keyboard.lineup_throw_virtual_key == 120,
-           "仅独立测试 INI 开启回准后单次投掷");
-    expect(write_file_bytes(path, "[lineup]\ntest_mode=perhaps\n"), "写入测试模式非法布尔值");
-    expect(!load_app_config(path.string(), loaded, error) && loaded.lineup.test_mode, "非法测试模式失败且不改已加载配置");
-    expect(write_file_bytes(path, "[lineup]\nlocate_virtual_key=0\nthrow_virtual_key=0\n"), "写入旧配置无测试字段");
-    expect(load_app_config(path.string(), loaded, error) && !loaded.lineup.test_mode, "缺少测试字段默认关闭而非继承测试模式");
+    expect(write_file_bytes(path,
+        "[lineup]\ncalibration_file=retired.json\ncalibration_context=retired\n"
+        "locate_virtual_key=123oops\nthrow_virtual_key=120\ntest_mode=perhaps\n"),
+        "写入已移除模块的旧配置");
+    expect(load_app_config(path.string(), loaded, error) &&
+               loaded.keyboard.runtime_toggle_virtual_keys == std::vector<int>{118} &&
+               loaded.keyboard.aim_hold_virtual_keys == std::vector<int>{120} &&
+               loaded.keyboard.anomaly_mark_virtual_keys.empty(),
+           "忽略旧道具配置及其值类型，保留现有通用绑定");
+    expect(save_app_config(path.string(), loaded, error) &&
+               read_file_bytes(path).find("[lineup]") == std::string::npos,
+           "保存配置不再生成已移除模块的节");
 
     std::error_code ignored;
     std::filesystem::remove(path, ignored);
@@ -1109,28 +1085,6 @@ void test_invalid_config() {
     config.keyboard.emergency_virtual_keys = {0x23};
     expect(validate_app_config(config, error),
            "互不冲突且位于 Win32 范围内的虚拟键应通过校验");
-    expect(config.keyboard.lineup_locate_virtual_key == 0 && config.keyboard.lineup_throw_virtual_key == 0,
-           "旧配置定位和投掷均未绑定");
-    config.lineup.test_mode = true;
-    expect(!validate_app_config(config,error), "测试模式缺少两个本地绑定必须拒绝");
-    config.lineup.test_mode = false;
-    config.keyboard.lineup_throw_virtual_key = 0x77;
-    expect(!validate_app_config(config,error), "投掷不占用运行键");
-    config.keyboard.lineup_throw_virtual_key = 0x20;
-    expect(!validate_app_config(config,error), "Space只用于动作，不用作投掷触发键");
-    config.keyboard.lineup_throw_virtual_key = 0x7B;
-    config.keyboard.lineup_locate_virtual_key = 0x7B;
-    expect(!validate_app_config(config,error), "定位与投掷必须独立按键");
-    config.keyboard.lineup_throw_virtual_key = 0;
-    config.keyboard.lineup_locate_virtual_key = 0x7B;
-    expect(validate_app_config(config,error), "独立定位绑定有效");
-    config.trigger.hold_virtual_key = 0x7B;
-    expect(!validate_app_config(config,error), "定位与扳机键冲突必须拒绝");
-    config.trigger.hold_virtual_key = 0;
-    config.auto_stop.release_virtual_keys.push_back(0x7B);
-    expect(!validate_app_config(config,error), "定位与急停释放键冲突必须拒绝");
-    config.auto_stop.release_virtual_keys.pop_back();
-    config.keyboard.lineup_locate_virtual_key = 0;
     config.keyboard.debug_test_virtual_keys = {0x79};
     config.keyboard.debug_test_enabled = true;
     expect(validate_app_config(config,error), "独立调试开关及无冲突绑定应有效");

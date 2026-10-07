@@ -447,25 +447,6 @@ int main() {
             "异常标记只通知App，不改变运行或输出状态");
         expect(!app::detail::route_keyboard_events(runtime,poll,true).anomaly_mark_pressed,
             "绑定捕获不得生成异常标记");
-        poll.events = {{KeyboardEventType::LINEUP_LOCATE, true}};
-        poll.input_healthy = true;
-        poll.new_input_fact = true;
-        const auto located = app::detail::route_keyboard_events(runtime, poll, false);
-        expect(!located.runtime_toggle_pressed && !located.debug_test_pressed && !located.emergency_pressed &&
-                   !located.anomaly_mark_pressed && runtime.snapshot().state == RuntimeState::STOPPED &&
-                   !runtime.snapshot().output_armed,
-               "定位事件不启动 Runtime、不武装输出或触发其他全局动作");
-        poll.events = {{KeyboardEventType::LINEUP_THROW, true}};
-        app::detail::route_keyboard_events(runtime, poll, true);
-        poll.input_healthy = false;
-        app::detail::route_keyboard_events(runtime, poll, false);
-        poll.input_healthy = true; poll.new_input_fact = false;
-        app::detail::route_keyboard_events(runtime, poll, false);
-        expect(!runtime.post_intent({RuntimeIntentType::LINEUP_THROW,true}) &&
-                   runtime.snapshot().state == RuntimeState::STOPPED && !runtime.snapshot().output_armed,
-               "未运行/未绑定投掷始终拒绝，捕获或不健康事件不启动生产输出");
-
-
     }
     test_startup_loss_and_recovery();
     test_failure_cache_and_new_release();

@@ -4,7 +4,6 @@
 #include <WS2tcpip.h>
 #include "weapon/weapon_internal.h"
 #include "weapon/weapon_catalog.h"
-#include "weapon/context_sharing_internal.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <atomic>
@@ -53,17 +52,12 @@ std::optional<int> integer(const Json& object, const char* key) {
     if (value < 0 || value > 100000) return {};
     return static_cast<int>(value);
 }
-void clear_context(WeaponSnapshot& snapshot) noexcept {
-    snapshot.context_valid = false;
-    snapshot.map_name.clear();
-    snapshot.local_team = Team::UNKNOWN;
-}
 std::string fingerprint(const WeaponSnapshot& s) {
     const auto value = [](std::optional<int> v) { return v ? std::to_string(*v) : "?"; };
     return s.player_id + ":" + s.raw_name + ":" + std::to_string(static_cast<int>(s.state)) + ":" +
         value(s.ammo_clip) + ":" + value(s.ammo_clip_max) + ":" + value(s.ammo_reserve) + ":" +
         std::to_string(static_cast<int>(s.status)) + ":" + value(s.player_health) + ":" +
-        (s.player_playing ? "playing" : "inactive") + std::string(":") + team_name(s.team) + ":" + game_phase_name(s.game_phase) + ":" + (s.context_valid ? "context" : "unknown") + ":" + s.map_name + ":" + team_name(s.local_team);
+        (s.player_playing ? "playing" : "inactive") + std::string(":") + team_name(s.team) + ":" + game_phase_name(s.game_phase);
 }
 } // namespace
 
@@ -105,24 +99,6 @@ bool valid_config(const GsiConfig& c) noexcept {
 std::string canonical_weapon_id(const std::string& name) {
     const auto* profile = find_gsi_name(name);
     return profile ? std::string(profile->canonical_id) : std::string{};
-}
-
-std::string canonical_map_id(const std::string& raw_name) {
-    const auto name = lower(trim(raw_name));
-    if (name.empty() || name.size() > 160) return {};
-    const auto segment = [](std::string_view value) {
-        return !value.empty() && value.size() <= 96 && std::all_of(value.begin(), value.end(), [](char c) {
-            return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
-        });
-    };
-    if (name.starts_with("workshop/")) {
-        const auto separator = name.find('/', 9);
-        if (separator == std::string::npos) return {};
-        const auto id = std::string_view(name).substr(9, separator - 9);
-        if (id.size() > 20 || !digits(id) || !segment(std::string_view(name).substr(separator + 1))) return {};
-        return name;
-    }
-    return segment(name) ? name : std::string{};
 }
 
 namespace detail {
@@ -200,19 +176,6 @@ WeaponSnapshot parse_payload(std::string_view body, const GsiConfig& config, std
         result.provider_timestamp_seconds = static_cast<std::uint64_t>(timestamp);
         result.player_playing = player.contains("activity") && player["activity"].is_string() && player["activity"] == "playing";
         if (player.contains("state") && player["state"].is_object()) result.player_health = integer(player["state"], "health");
-        // 目录上下文只用本地身份与活动；手雷、空弹、缺武器不影响地图/阵营事实。
-        // 死后若 player 已切到观战目标，前面的 steamid 检查会直接拒绝。
-        if (result.player_playing && json.contains("map") && json["map"].is_object()) {
-            const auto& map = json["map"];
-            if (map.contains("name") && map["name"].is_string())
-                result.map_name = canonical_map_id(map["name"].get_ref<const std::string&>());
-            if (player.contains("team") && player["team"].is_string()) {
-                if (player["team"] == "CT") result.local_team = Team::CT;
-                else if (player["team"] == "T") result.local_team = Team::T;
-            }
-            result.context_valid = !result.map_name.empty() && result.local_team != Team::UNKNOWN;
-            if (!result.context_valid) clear_context(result);
-        }
         if (!result.player_playing || !result.player_health || *result.player_health == 0) {
             result.status = Status::PLAYER_INACTIVE; return result;
         }
@@ -265,12 +228,11 @@ WeaponSnapshot parse_payload(std::string_view body, const GsiConfig& config, std
         result.valid = true;
         result.status = Status::READY;
         return result;
-    } catch (...) { clear_context(result); result.valid = false; result.status = Status::INVALID_PAYLOAD; return result; }
+    } catch (...) { result.valid = false; result.status = Status::INVALID_PAYLOAD; return result; }
 }
 
 void GsiState::reset() noexcept {
-    if (context_epoch_ != std::numeric_limits<std::uint64_t>::max()) ++context_epoch_;
-    current_ = {}; current_.context_epoch = context_epoch_; timestamp_ = 0; last_now_ = {}; timestamp_deadline_ = {}; seen_states_.clear();
+    current_ = {}; timestamp_ = 0; last_now_ = {}; timestamp_deadline_ = {}; seen_states_.clear();
     if (epoch_ != std::numeric_limits<std::uint64_t>::max()) ++epoch_;
     if (recoil_safety_epoch_ != std::numeric_limits<std::uint64_t>::max()) ++recoil_safety_epoch_;
     if (control_safety_epoch_ != std::numeric_limits<std::uint64_t>::max()) ++control_safety_epoch_;
@@ -279,25 +241,6 @@ void GsiState::reset() noexcept {
 Status GsiState::ingest(std::string_view body, const GsiConfig& config,
                       Clock::time_point now, std::int64_t local_utc_ms) noexcept {
     try {
-        // 即使 IPC/界面轮询跳过中间失效，也保留来源/地图/阵营的连续性断点。
-        struct ContextBoundary {
-            WeaponSnapshot& current;
-            std::uint64_t& epoch;
-            bool valid;
-            std::string map, player;
-            Team team;
-            Clock::time_point now, until;
-            ~ContextBoundary() noexcept {
-                if (!epoch || valid != current.context_valid || map != current.map_name ||
-                    player != current.player_id || team != current.local_team ||
-                    (valid && now >= until && current.valid_until > until)) {
-                    if (epoch != std::numeric_limits<std::uint64_t>::max()) ++epoch;
-                    else clear_context(current);
-                }
-                current.context_epoch = epoch;
-            }
-        } boundary{current_, context_epoch_, current_.context_valid, current_.map_name,
-            current_.player_id, current_.local_team, now, current_.valid_until};
         auto incoming = parse_payload(body, config, local_utc_ms);
         if (epoch_ == 0) epoch_ = 1;
         if (recoil_safety_epoch_ == 0) recoil_safety_epoch_ = 1;
@@ -306,12 +249,12 @@ Status GsiState::ingest(std::string_view body, const GsiConfig& config,
         if (now < last_now_ || epoch_ == std::numeric_limits<std::uint64_t>::max() ||
             control_safety_epoch_ == std::numeric_limits<std::uint64_t>::max() ||
             recoil_safety_epoch_ == std::numeric_limits<std::uint64_t>::max() || revision_ == std::numeric_limits<std::uint64_t>::max()) {
-            clear_context(current_); current_.valid = false; current_.status = Status::COUNTER_EXHAUSTED; return current_.status;
+            current_.valid = false; current_.status = Status::COUNTER_EXHAUSTED; return current_.status;
         }
         last_now_ = now;
         if (incoming.provider_timestamp_seconds) {
             const auto ts = *incoming.provider_timestamp_seconds;
-            if (ts < timestamp_) { clear_context(current_); return Status::OUT_OF_ORDER; }
+            if (ts < timestamp_) return Status::OUT_OF_ORDER;
             if (ts > timestamp_) {
                 timestamp_ = ts;
                 timestamp_deadline_ = now + std::chrono::milliseconds(config.ttl_ms);
@@ -319,10 +262,6 @@ Status GsiState::ingest(std::string_view body, const GsiConfig& config,
             }
             const auto key = fingerprint(incoming);
             if (std::find(seen_states_.begin(), seen_states_.end(), key) != seen_states_.end()) {
-                // 同秒已见过的旧地图/本地阵营无法判序，只撤销目录事实，不改武器快照。
-                if (incoming.context_valid != current_.context_valid || incoming.map_name != current_.map_name ||
-                    incoming.local_team != current_.local_team || incoming.player_id != current_.player_id)
-                    clear_context(current_);
                 // 同秒策略回退既可能是真实变化也可能是旧包；不再沿用中间阵营或准备态。
                 // 仅撤销策略，不修改旧武器快照/去重/TTL契约。
                 if ((incoming.team != current_.team || incoming.game_phase != current_.game_phase) &&
@@ -334,11 +273,11 @@ Status GsiState::ingest(std::string_view body, const GsiConfig& config,
                 }
                 return Status::DUPLICATE;
             }
-            if (seen_states_.size() >= 128) { clear_context(current_); current_.valid = false; current_.status = Status::INVALID_PAYLOAD; return current_.status; }
+            if (seen_states_.size() >= 128) { current_.valid = false; current_.status = Status::INVALID_PAYLOAD; return current_.status; }
             seen_states_.push_back(key);
             // 同秒不同完整状态正常发布，但期限锁定到该timestamp首次接收，不能靠重放续命。
             incoming.valid_until = timestamp_deadline_;
-            if (now >= timestamp_deadline_) { clear_context(incoming); incoming.valid = false; incoming.status = Status::EXPIRED; }
+            if (now >= timestamp_deadline_) { incoming.valid = false; incoming.status = Status::EXPIRED; }
         }
         const auto ordinary_state = [](const WeaponSnapshot& snapshot) {
             return snapshot.identity_match && snapshot.player_playing && snapshot.player_health &&
@@ -350,7 +289,7 @@ Status GsiState::ingest(std::string_view body, const GsiConfig& config,
             (current_.revision && (!ordinary_state(current_) || current_.valid_until <= now || current_.player_id != incoming.player_id));
         if (trust_break) {
             if (recoil_safety_epoch_ == std::numeric_limits<std::uint64_t>::max()) {
-                clear_context(current_); current_.valid = false; current_.status = Status::COUNTER_EXHAUSTED; return current_.status;
+                current_.valid = false; current_.status = Status::COUNTER_EXHAUSTED; return current_.status;
             }
             ++recoil_safety_epoch_;
         }
@@ -386,13 +325,12 @@ Status GsiState::ingest(std::string_view body, const GsiConfig& config,
         incoming.received_at = now;
         current_ = std::move(incoming);
         return current_.status;
-    } catch (...) { clear_context(current_); current_.valid = false; current_.status = Status::INVALID_PAYLOAD; return current_.status; }
+    } catch (...) { current_.valid = false; current_.status = Status::INVALID_PAYLOAD; return current_.status; }
 }
 WeaponSnapshot GsiState::snapshot(Clock::time_point now) const {
     auto result = current_;
     if (result.valid && (now < result.received_at || now >= result.valid_until)) { result.valid = false; result.status = Status::EXPIRED; }
     if (now < result.received_at || now >= result.valid_until) {
-        clear_context(result);
         result.team = Team::UNKNOWN;
         result.game_phase = GamePhase::UNKNOWN;
     }
@@ -401,7 +339,6 @@ WeaponSnapshot GsiState::snapshot(Clock::time_point now) const {
 } // namespace detail
 
 struct GsiReceiver::Impl {
-    detail::ContextPublisher context_publisher;
     GsiConfig config;
     SOCKET listener = INVALID_SOCKET;
     bool winsock = false;
@@ -475,7 +412,7 @@ struct GsiReceiver::Impl {
 };
 GsiReceiver::GsiReceiver() : impl_(std::make_unique<Impl>()) {}
 GsiReceiver::~GsiReceiver() { stop(); }
-bool GsiReceiver::start(const GsiConfig& config, bool publish_context) noexcept {
+bool GsiReceiver::start(const GsiConfig& config) noexcept {
     stop();
     try {
         if (!valid_config(config)) { std::lock_guard lock(impl_->mutex); impl_->error = "GSI配置未启用或不完整"; return false; }
@@ -497,15 +434,10 @@ bool GsiReceiver::start(const GsiConfig& config, bool publish_context) noexcept 
         { std::lock_guard lock(impl_->mutex); impl_->state.reset(); impl_->error.clear(); }
         impl_->stopping.store(false);
         impl_->worker = std::thread([this] { impl_->run(); });
-        if (publish_context && !impl_->context_publisher.start(config, [this] { return snapshot(); })) {
-            std::lock_guard lock(impl_->mutex);
-            impl_->error = "GSI接收正常，但本地只读上下文发布失败";
-        }
         return true;
     } catch (...) { stop(); return false; }
 }
 void GsiReceiver::stop() noexcept {
-    impl_->context_publisher.stop();
     impl_->stopping.store(true);
     if (impl_->worker.joinable()) impl_->worker.join();
     if (impl_->listener != INVALID_SOCKET) closesocket(impl_->listener);

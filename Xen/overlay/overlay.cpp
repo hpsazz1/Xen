@@ -3834,14 +3834,6 @@ struct Overlay::Impl {
         if (capture_was_active) actions.hotkey_capture_consumed = true;
         if (capture_result.type !=
                 overlay::detail::HotkeyCaptureResultType::NONE) {
-            if (capture_result.type == overlay::detail::HotkeyCaptureResultType::ASSIGNED &&
-                ((app_config.keyboard.lineup_locate_virtual_key != 0 &&
-                  capture_result.virtual_key == app_config.keyboard.lineup_locate_virtual_key) ||
-                 (app_config.keyboard.lineup_throw_virtual_key != 0 &&
-                  capture_result.virtual_key == app_config.keyboard.lineup_throw_virtual_key))) {
-                hotkey_capture_message = "该按键已绑定道具动作，请选择未占用按键";
-                return;
-            }
             std::vector<int>* binding = hotkey_binding(app_config);
             if (hotkey_binding_target == HotkeyBindingTarget::DEBUG_TEST && binding) {
                 if (capture_result.type == overlay::detail::HotkeyCaptureResultType::CLEARED) {
