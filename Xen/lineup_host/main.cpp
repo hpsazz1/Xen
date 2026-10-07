@@ -16,6 +16,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 
 namespace {
@@ -23,7 +24,7 @@ using Microsoft::WRL::ComPtr;
 constexpr int kCaptureHotkey = 1;
 std::atomic<DWORD> main_thread_id{0};
 struct Options {
-    std::filesystem::path inbox, output;
+    lineup::detail::HostCapturePaths paths;
     bool help = false, dry_run = false;
 };
 struct ProcessHandle {
@@ -59,18 +60,23 @@ std::string capture_id() {
 }
 Options parse(int argc, wchar_t **argv) {
     Options options;
+    std::filesystem::path local_library, inbox, output;
     for (int i = 1; i < argc; ++i) {
         const std::wstring argument = argv[i];
         if (argument == L"--help") { options.help = true; continue; }
         if (argument == L"--dry-run") { options.dry_run = true; continue; }
-        require(argument == L"--inbox" || argument == L"--output", "未知参数，请使用 --help");
+        require(argument == L"--local-library" || argument == L"--inbox" || argument == L"--output",
+                "未知参数，请使用 --help");
         require(++i < argc, "参数缺少路径");
-        (argument == L"--inbox" ? options.inbox : options.output) = argv[i];
+        require(argv[i][0] != L'\0' && !std::wstring_view(argv[i]).starts_with(L"--"), "参数缺少有效路径");
+        auto &path = argument == L"--local-library" ? local_library : argument == L"--inbox" ? inbox : output;
+        require(path.empty(), "路径参数不能重复指定");
+        path = argv[i];
     }
     if (!options.help) {
-        require(!options.inbox.empty() && !options.output.empty(), "必须指定 --inbox 和本机 --output");
-        options.inbox = std::filesystem::absolute(options.inbox).lexically_normal();
-        options.output = std::filesystem::absolute(options.output).lexically_normal();
+        std::string error;
+        if (!lineup::detail::resolve_host_capture_paths(local_library, inbox, output, options.paths, error))
+            throw std::runtime_error(error);
     }
     return options;
 }
@@ -138,12 +144,12 @@ CaptureConfig capture_config(const Foreground &selected) {
 void capture_once(const Options &options, std::stop_token stop) {
     nlohmann::json profile;
     std::string error;
-    if (!lineup::read_host_capture_profile(options.inbox / "profile.json", profile, error))
-        throw std::runtime_error("无法读取辅机采集设置：" + error);
+    if (!lineup::read_host_capture_profile(options.paths.profile_file, profile, error))
+        throw std::runtime_error("无法读取采集设置：" + error);
     const auto before = foreground();
     const auto config = capture_config(before);
     require(profile.at("source_width") == config.roi_width && profile.at("source_height") == config.roi_height,
-            "辅机设置的源尺寸与主机实际全屏不符，本次不采集");
+            "采集设置的源尺寸与主机实际全屏不符，本次不采集");
     require(!stop.stop_requested(), "采集已取消");
     const auto request_timestamp = utc_now();
     const auto requested = std::chrono::steady_clock::now();
@@ -181,11 +187,12 @@ void capture_once(const Options &options, std::stop_token stop) {
         {"client", {{"left", before.bounds.left}, {"top", before.bounds.top},
                     {"right", before.bounds.right}, {"bottom", before.bounds.bottom}}}};
     std::filesystem::path local, delivered;
-    if (!lineup::write_host_capture_bundle(options.output, bundle, local, error))
+    if (!lineup::write_host_capture_bundle(options.paths.captures, bundle, local, error))
         throw std::runtime_error("本机截图保存失败：" + error);
     LOG_INFO("LineupHost", "本机证据已保存：{}", utf8(local));
+    if (options.paths.local_only) return;
     require(!stop.stop_requested(), "已保留本机证据；退出请求取消本次传送");
-    if (!lineup::write_host_capture_bundle(options.inbox / "captures", bundle, delivered, error))
+    if (!lineup::write_host_capture_bundle(options.paths.delivery, bundle, delivered, error))
         throw std::runtime_error("本机证据已保留，辅机收件失败：" + error);
     LOG_INFO("LineupHost", "F7 截图已完整发布到辅机收件目录：{}", utf8(delivered));
 }
@@ -207,17 +214,25 @@ int wmain(int argc, wchar_t **argv) {
         const auto options = parse(argc, argv);
         if (options.help) {
             std::cout << "XenLineupHost 主机只读 F7 截图工具\n"
+                "--local-library <本机采集库> [--dry-run]\n"
+                "读取采集库/profile.json，仅保存到采集库/captures，无需辅机、NDI 或 Runtime 在线。\n"
+                "兼容共享收件模式（不能与 --local-library 同用）：\n"
                 "--inbox <辅机收件目录或 UNC> --output <本机证据目录> [--dry-run]\n"
-                "读取 inbox/profile.json；只注册 F7，不监听 F8/F9，不连接鼠标设备。\n"
+                "读取 inbox/profile.json，保存本机证据后传送到 inbox/captures。\n"
+                "只注册 F7，不监听 F8/F9，不连接鼠标设备。\n"
                 "CS2 须前台全屏覆盖主显示器；Ctrl+C 退出。--dry-run/--help 不采集、不注册热键。\n";
             return 0;
         }
         if (options.dry_run) {
             nlohmann::json profile; std::string error;
-            require(lineup::read_host_capture_profile(options.inbox / "profile.json", profile, error), error);
-            std::cout << nlohmann::json{{"mode", "DRY_RUN"}, {"profile_valid", true},
-                {"capture_started", false}, {"hotkeys_registered", false}, {"output", utf8(options.output)},
-                {"inbox", utf8(options.inbox)}}.dump() << '\n';
+            require(lineup::read_host_capture_profile(options.paths.profile_file, profile, error), error);
+            nlohmann::json result{{"mode", "DRY_RUN"}, {"profile_valid", true},
+                {"capture_started", false}, {"hotkeys_registered", false},
+                {"storage_mode", options.paths.local_only ? "local_library" : "shared_inbox"},
+                {"profile", utf8(options.paths.profile_file)}, {"output", utf8(options.paths.captures)}};
+            if (options.paths.local_only) result["local_library"] = utf8(options.paths.profile_file.parent_path());
+            else result["inbox"] = utf8(options.paths.delivery.parent_path());
+            std::cout << result.dump() << '\n';
             return 0;
         }
         LogConfig logging; logging.enable_file = false; logging.global_level = LogLevel::INFO;
@@ -232,7 +247,10 @@ int wmain(int argc, wchar_t **argv) {
         HotkeyRegistration hotkey;
         hotkey.active = RegisterHotKey(nullptr, kCaptureHotkey, MOD_NOREPEAT, VK_F7) != 0;
         require(hotkey.active, "F7 热键注册失败，可能已被其他程序占用；错误码 " + std::to_string(GetLastError()));
-        LOG_INFO("LineupHost", "已注册 F7；先在辅机网页保存采集设置，再回 CS2 前台按一次 F7。Ctrl+C 退出。");
+        if (options.paths.local_only)
+            LOG_INFO("LineupHost", "已注册 F7；使用本机采集设置，仅保存本地截图。回 CS2 前台按一次 F7，Ctrl+C 退出。");
+        else
+            LOG_INFO("LineupHost", "已注册 F7；先在辅机网页保存采集设置，再回 CS2 前台按一次 F7。Ctrl+C 退出。");
         std::atomic<bool> busy{false};
         std::atomic<DWORD> accept_after{GetTickCount()};
         std::jthread worker;

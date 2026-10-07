@@ -42,6 +42,13 @@
   const throwButtons = [['left', '左键'], ['right', '右键'], ['left+right', '双键']];
   const throwDirections = [['forward', '向前'], ['back', '向后'], ['left', '向左'], ['right', '向右'],
     ['forward+left', '左前'], ['forward+right', '右前'], ['back+left', '左后'], ['back+right', '右后']];
+  const grenades = ['烟雾弹', '闪光弹', '高爆手雷', '燃烧瓶', '燃烧弹', '诱饵弹'];
+  function captureOptions() {
+    const choices = list => list.map(([id,text]) => ({id,text}));
+    return { schema:1, maps:mapChoices(), teams:choices([['CT','CT'],['T','T']]),
+      grenades:grenades.map(id=>({id,text:id})), methods:choices(throwMethods),
+      buttons:choices(throwButtons), directions:choices(throwDirections) };
+  }
   function mapChoices(recipes = [], contextMap = '', selectedMap = '') {
     const choices = new Map(cs2Maps);
     for (const id of [...recipes.map(r => r.map), contextMap, selectedMap]) {
@@ -197,7 +204,7 @@
   }
   const labels = { live: '画面源已连接', connected: '画面源已连接', ready: '画面源已连接', disconnected: '画面源已断开', stopped: '已停止', unknown: '画面源未知', valid: '匹配可靠', not_found: '未找到参照', unreliable: '匹配不可靠', expired: '已过期', invalid: '无效', invalid_frame: '画面无效，请检查完整画面源', no_reference: '尚无可用参考', pending: '等待新帧', idle: '等待采集', waiting: '等待下一张有效新帧', saving: '正在保存，请稍候', cancelled: '采集已取消', saved: '已保存', error: '失败，请查看错误信息' };
   const textStatus = value => labels[value] || '未知状态';
-  const api = { mapChoices, throwPreset, captureRequest, hostProfileRequest, hostCaptureSummary, executionSummary, actionPhase, actionSummary, canLocate, locationHint, startupSummary, practiceRecipes, previewValid, imageResultValid, filterRecipes, createController, textStatus, settleBatch, contextView, teamLabel };
+  const api = { captureOptions, mapChoices, throwPreset, captureRequest, hostProfileRequest, hostCaptureSummary, executionSummary, actionPhase, actionSummary, canLocate, locationHint, startupSummary, practiceRecipes, previewValid, imageResultValid, filterRecipes, createController, textStatus, settleBatch, contextView, teamLabel };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (!root.document) return;
   const $ = id => document.getElementById(id);
@@ -472,6 +479,7 @@
   $('browse-mode').onclick = () => send('mode',{value:'browse'}); $('capture-mode').onclick = () => send('mode',{value:'capture'});
   $('run').onclick = () => send(view.state.running ? 'stop' : 'start'); $('export').onclick = () => send('export');
   for (const field of ['map', 'team']) $('capture-' + field).onchange = () => { captureTouched[field] = true; };
+  optionList($('capture-grenade'), grenades, '请选择道具');
   for (const [id, options, first] of [['capture-throw-method', throwMethods, '请选择投掷方式'], ['capture-throw-buttons', throwButtons, null], ['capture-throw-direction', throwDirections, null]]) {
     optionList($(id), options.map(([id, text]) => ({id, text})), first);
   }

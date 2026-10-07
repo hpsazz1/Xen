@@ -23,12 +23,38 @@ void write_png(const std::filesystem::path &path, const cv::Mat &image) {
     check(cv::imencode(".png", image, bytes), "测试 PNG 编码失败");
     write_bytes(path, bytes);
 }
+lineup::detail::HostCapturePaths test_storage_modes(const std::filesystem::path &root) {
+    lineup::detail::HostCapturePaths local, paths;
+    std::string error;
+    const auto library = root / "local-library";
+    check(lineup::detail::resolve_host_capture_paths(library, {}, {}, local, error) && local.local_only &&
+          local.profile_file == library / "profile.json" && local.captures == library / "captures" && local.delivery.empty(),
+          "离线模式只能读取本地设置和写入本地 captures，不得配置辅机投递");
+    check(!std::filesystem::exists(root), "解析路径不能创建目录，dry-run 不能变成采集");
+    check(lineup::detail::resolve_host_capture_paths({}, root / "inbox", root / "evidence", paths, error) &&
+          !paths.local_only && paths.profile_file == root / "inbox" / "profile.json" &&
+          paths.captures == root / "evidence" && paths.delivery == root / "inbox" / "captures",
+          "旧共享收件模式必须保留本机证据与辅机投递路径");
+    check(!lineup::detail::resolve_host_capture_paths(library, root / "inbox", {}, paths, error) &&
+          paths.profile_file.empty() && paths.captures.empty() && paths.delivery.empty() && !error.empty(),
+          "离线与收件参数混用必须拒绝且不能泄露上次路径");
+    check(!lineup::detail::resolve_host_capture_paths(library, {}, root / "evidence", paths, error),
+          "离线库不能额外指定输出根目录");
+    check(!lineup::detail::resolve_host_capture_paths({}, root / "inbox", {}, paths, error) &&
+          !lineup::detail::resolve_host_capture_paths({}, {}, root / "evidence", paths, error) &&
+          !lineup::detail::resolve_host_capture_paths({}, {}, {}, paths, error), "缺少完整模式参数必须拒绝");
+    check(!lineup::detail::resolve_host_capture_paths(LR"(\\xen-offline-invalid\share\library)", {}, {}, paths, error) &&
+          !lineup::detail::resolve_host_capture_paths(LR"(\\?\C:\library)", {}, {}, paths, error),
+          "UNC 和设备路径必须在访问任何远程文件前拒绝");
+    return local;
+}
 } // namespace
 
 int main() {
     const auto root = std::filesystem::temp_directory_path() /
         ("xen-host-capture-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     try {
+        const auto local_paths = test_storage_modes(root);
         const Json action = {{"schema", 1}, {"type", "phases"}, {"phases", Json::array({
             {{"buttons", Json::array({"left", "right"})}, {"movement", Json::array()},
              {"jump", true}, {"duration_ms", nullptr}},
@@ -61,6 +87,18 @@ int main() {
               "回读像素、来源、分类和空时序动作须完整保留");
         check(!lineup::write_host_capture_bundle(root, bundle, published, error) && published.empty(),
               "相同编号不得覆盖已有证据");
+
+        std::filesystem::create_directories(local_paths.profile_file.parent_path());
+        write_json(local_paths.profile_file, profile);
+        Json local_profile;
+        check(lineup::read_host_capture_profile(local_paths.profile_file, local_profile, error) && local_profile == profile,
+              "离线设置必须独立于辅机配置读回");
+        check(lineup::write_host_capture_bundle(local_paths.captures, bundle, published, error) &&
+              published == local_paths.captures / "capture-valid" &&
+              lineup::read_host_capture_bundle(published, loaded, error) && loaded.metadata["profile"] == profile,
+              "本地库必须直接发布既有四件套并完整保留采集设置");
+        check(!std::filesystem::exists(root / "inbox") && !std::filesystem::exists(root / "evidence"),
+              "离线采集不得创建旧收件或重复证据目录");
 
         auto malformed = profile; malformed["source_width"] = 640;
         check(!lineup::make_host_capture_bundle(source, malformed, "capture-wrong-size", "2026-10-07T04:00:00.123Z", loaded, error),

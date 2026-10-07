@@ -1423,6 +1423,10 @@ if(BUILD_TESTING)
     add_test(NAME lineup_test_launcher_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
         "${PROJECT_SOURCE_DIR}/tests/lineup_test_launcher_tests.py" --exe "$<TARGET_FILE:xen_lineup>"
         --powershell "${XEN_WINDOWS_POWERSHELL}")
+    foreach(lineup_script_test IN ITEMS lineup_capture_panel_tests lineup_capture_transfer_tests lineup_capture_shortcut_tests)
+        add_test(NAME ${lineup_script_test} COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+            "${PROJECT_SOURCE_DIR}/tests/${lineup_script_test}.py" --powershell "${XEN_WINDOWS_POWERSHELL}")
+    endforeach()
     add_test(NAME review_run_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
         "${PROJECT_SOURCE_DIR}/tests/review_run_tests.py")
     add_test(NAME lineup_http_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8

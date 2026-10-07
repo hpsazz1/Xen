@@ -12,6 +12,17 @@ struct HostCaptureBundle {
     cv::Mat full, roi, overview;
 };
 
+namespace detail {
+struct HostCapturePaths {
+    bool local_only = false;
+    std::filesystem::path profile_file, captures, delivery;
+};
+// 离线库只使用本机盘；解析不创建目录，也不连接或探测辅机收件目录。
+bool resolve_host_capture_paths(const std::filesystem::path &local_library,
+    const std::filesystem::path &inbox, const std::filesystem::path &output,
+    HostCapturePaths &paths, std::string &error) noexcept;
+}
+
 // 输入必须是一张完整 BGR 原图；原图、中心模板和标框展示图分别拥有像素。
 bool make_host_capture_bundle(const cv::Mat &full, const nlohmann::json &profile,
     const std::string &id, const std::string &utc_timestamp,

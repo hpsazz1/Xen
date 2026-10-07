@@ -21,22 +21,33 @@ pwsh -NoProfile -File .\scripts\start_lineup.ps1 -CheckOnly
 
 独立测试入口使用 **F7 采集、F8 只回准、F9 回准成功后投掷一次**。这三个键只用于采集验证；正式配置仍分别使用可选定位键和投掷键，不自动改绑定。人物必须人工站在原位置，回准只调整视角。
 
-在辅机用 `scripts/start_lineup_test.ps1 -Mode Prepare` 准备新 Run，指定现有包的 `-XenRoot`、配对的 `-WorkerExecutable`、`-LineupExecutable`、`-WebDirectory` 和新的 `-RunDirectory`。需要手机访问时，`-BindAddress` 使用与手机可达的辅机私网地址；例如手机在 `192.168.1.x`，应使用辅机的 `192.168.1.x` 地址，不能直接把双机专线的 `192.168.3.x` 当手机入口。脚本不改变路由或防火墙。
+**先在主机离线采集，之后再开辅机验证。** 采集时无需辅机、网页、NDI 或 Runtime 在线。
 
-Prepare 从已有 INI 生成独立测试配置并硬链接同卷所选模型，保留正式文件；Check 只核对当前 Run 和配置。真实测试由用户在辅机执行生成的 `TASK.md` 中唯一 Launch 命令，必须带 `-AllowPhysicalOutput -PhysicalConfirm LINEUP_TEST_F8_F9`，再在测试 Xen 窗口开始并武装。已有 Xen/Lineup 进程需要用户先关闭；**End 急停**。测试 INI 关闭其他辅助功能，原 F8 启停/F9 诊断绑定仅在测试副本中解除。
-
-1. 打开该 Run 的网页，进入 **“采集与整理”**，选择地图、CT/T、道具、投掷方式与按键，点击 **“保存 F7 采集设置”**。要测试 F9，需按实际配方填写全部阶段时长；留空只保存设计，不执行。
-2. 主机启动采集工具，`-InboxDirectory` 指向该 Run 的 `inbox` 对应 SMB 路径：
-
-   ```powershell
-   powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_lineup_host.ps1 -InboxDirectory '<辅机测试Run的inbox共享路径>'
-   ```
-
-3. 主机 CS2 在主显示器全屏前台，人工站稳瞄准后按 **F7**。一次冻结全屏，同帧保存未修改的 `full.png`、中心 `320×320` 的 `roi.png`、另行标框的 `overview.png` 和元数据。本地先留证据，再原子传入辅机。切出游戏、尺寸不符、采集中连按或发布失败会明确拒绝，不移动鼠标。
-4. 辅机有匹配尺寸的新鲜 ROI 画面且无执行会话时导入并选中参考，网页展示全屏框线和原图。导入不触发定位或投掷；画面尚未接通时等待导入。
-5. 保持站位，稍微移动鼠标后按 **F8**，只测试回到采集瞄点。按 **F9** 会重新定位，在本次三帧对准确认后执行一次完整投掷；长按、旧定位结果或重连不会补发。
+1. 主机双击桌面 **“道具采集”**，选择地图、CT/T、道具、投掷方式及按键，点击 **“开始 F7 采集”**。开始时保存设置，下次自动恢复；修改设置前点“停止采集”。
+2. 主机 CS2 在主显示器全屏前台，人工站稳瞄准后按 **F7**。同帧保存全屏原图、中心 **320×320** 原图、带框对照图和元数据，全部留在本地采集库。面板显示保存数量和采集结果；“打开采集目录”可查看文件。切出游戏、尺寸不符或忙时连按会拒绝本次截图。
+3. 采集完成后，再启动辅机验证入口，在主机面板点 **“发送到辅机”**。相同数据跳过，冲突拒绝覆盖，本地主文件保留；发送不会自动启动辅机程序或执行投掷。
+4. 辅机接通匹配尺寸的新鲜 ROI 画面后导入参考；在网页选择要验证的配方。保持原站位，稍微移动鼠标后按 **F8**，只测试回到采集瞄点。
+5. 要测试 **F9**，先在辅机网页按实际配方补齐全部阶段时长。F9 会重新定位，在本次三帧对准确认后执行一次完整投掷；长按、旧定位结果或重连不会补发。离线采集保存的是投掷方式，时长默认未知。
 
 F8/F9仍要求同源几何、可信量测标定、焦点和设备许可。缺少有效 `calibration_file`/`calibration_context` 时，F7可采集，F8/F9拒绝真实动作；不能用模拟标定或手填通用增益替代。中心320局部图需要足够重叠和静态纹理，不支持任意大角度找回。截图工具时间是桌面读回时间，不冒充源呈现时间；静态参考不作为实时帧送入执行链。
+
+### 安装主机采集入口
+
+上述构建脚本同时生成 `build/lineup/Release/lineup-capture-options.json`，与网页共用地图和投掷预设。本地面板使用 Windows 自带 PowerShell 5.1，无需在线下载。安装器只创建配置和桌面入口，不启动采集：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\create_lineup_capture_shortcut.ps1 -LibraryDirectory "$env:USERPROFILE\Documents\Xen\道具采集" -Executable "$PWD\build\lineup\Release\XenLineupHost.exe" -OptionsPath "$PWD\build\lineup\Release\lineup-capture-options.json" -SourceId '<后续验证使用的NDI源名>' -SourceWidth 2560 -SourceHeight 1440 -SyncInbox '<辅机测试Run的inbox共享路径>'
+```
+
+尺寸必须对应实际主显示器和后续验证源；示例的 2560×1440 需按环境调整。采集库使用本机固定盘，截图保存在 `captures`，不能放网络映射盘或重解析目录。已有同名非本任务快捷方式或不同配置会保留并报错。可用 `powershell -NoProfile -File .\scripts\lineup_capture_panel.ps1 -LibraryDirectory <本地库> -Executable <采集程序> -OptionsPath <选项JSON> -CheckOnly` 做纯读检查。
+
+原 `start_lineup_host.ps1 -InboxDirectory <共享收件箱>` 保留兼容；它仍依赖辅机网页保存设置，离线采集使用新桌面入口。
+
+### 准备辅机验证入口
+
+此步骤在需要验证时完成，不是主机采集的前提。在辅机用 `scripts/start_lineup_test.ps1 -Mode Prepare` 准备新 Run，指定已有包的 `-XenRoot`、配对的 `-WorkerExecutable`、`-LineupExecutable`、`-WebDirectory` 和新的 `-RunDirectory`。需要手机访问时，`-BindAddress` 使用与手机可达的辅机私网地址；手机在 `192.168.1.x` 时使用辅机同网段地址，不能把双机专线的 `192.168.3.x` 直接当手机入口。脚本不改变路由或防火墙。
+
+Prepare 从已有 INI 生成独立测试配置并硬链接同卷模型，保留正式文件；Check 只核对当前 Run。真实测试由用户在辅机执行生成的 `TASK.md` 中唯一 Launch 命令，必须带 `-AllowPhysicalOutput -PhysicalConfirm LINEUP_TEST_F8_F9`，再在测试 Xen 窗口开始并武装。已有 Xen/Lineup 进程需要用户先关闭；**End 急停**。测试 INI 关闭其他辅助功能，原 F8 启停/F9 诊断绑定仅在测试副本中解除。
 
 ## 320 局部练习流程
 

@@ -191,6 +191,51 @@ void write_png(const std::filesystem::path &path, const cv::Mat &pixels) {
 }
 } // namespace
 
+bool detail::resolve_host_capture_paths(const std::filesystem::path &local_library,
+    const std::filesystem::path &inbox, const std::filesystem::path &output,
+    HostCapturePaths &paths, std::string &error) noexcept {
+    paths = {}; error.clear();
+    try {
+        HostCapturePaths result;
+        if (!local_library.empty()) {
+            require(inbox.empty() && output.empty(), "--local-library 不能与 --inbox 或 --output 同用");
+            const auto library = std::filesystem::absolute(local_library).lexically_normal();
+            const auto drive = library.root_name().native();
+            require(drive.size() == 2 && drive[1] == L':', "离线采集库必须使用本机盘路径，不接受 UNC 或设备路径");
+            const auto drive_type = GetDriveTypeW(library.root_path().c_str());
+            require(drive_type == DRIVE_FIXED || drive_type == DRIVE_REMOVABLE || drive_type == DRIVE_RAMDISK,
+                    "离线采集库必须位于可用本机盘，不能使用映射网络盘");
+            // 从根逐级检查，不能先访问重定向目录下面的文件再判定它是否本地。
+            auto directory = library.root_path();
+            for (const auto &component : library.relative_path()) {
+                directory /= component;
+                const auto attributes = GetFileAttributesW(directory.c_str());
+                if (attributes == INVALID_FILE_ATTRIBUTES) {
+                    const auto reason = GetLastError();
+                    require(reason == ERROR_FILE_NOT_FOUND || reason == ERROR_PATH_NOT_FOUND,
+                            "无法确认离线采集库路径");
+                    break;
+                }
+                require(!(attributes & FILE_ATTRIBUTE_REPARSE_POINT) && (attributes & FILE_ATTRIBUTE_DIRECTORY),
+                        "离线采集库路径不能包含文件或重定向目录");
+            }
+            result.local_only = true;
+            result.profile_file = library / "profile.json";
+            result.captures = library / "captures";
+        } else {
+            require(!inbox.empty() && !output.empty(), "指定 --local-library，或同时指定 --inbox 和 --output");
+            const auto source = std::filesystem::absolute(inbox).lexically_normal();
+            result.profile_file = source / "profile.json";
+            result.captures = std::filesystem::absolute(output).lexically_normal();
+            result.delivery = source / "captures";
+        }
+        paths = std::move(result);
+        return true;
+    } catch (const std::exception &e) { error = e.what(); }
+      catch (...) { error = "解析采集存储路径失败"; }
+    return false;
+}
+
 bool make_host_capture_bundle(const cv::Mat &full, const Json &profile,
     const std::string &id, const std::string &utc_timestamp,
     HostCaptureBundle &bundle, std::string &error) noexcept {

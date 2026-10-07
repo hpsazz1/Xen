@@ -5,6 +5,22 @@ const { createController, previewValid, filterRecipes } = require('../Xen/lineup
 const state = (revision = 1) => ({ epoch: 'session-a', revision, mode: 'browse', running: true, source_status: 'live', locked_id: 'r1', recipes: [], preview: { status: 'valid', recipe_id: 'r1', frame_id: '42', url: '/api/preview?frame_id=42', age_ms: 30 } });
 const deferred = () => { let resolve, reject; const promise = new Promise((a,b) => { resolve=a; reject=b; }); return {promise,resolve,reject}; };
 
+test('离线采集选项覆盖全部可选组合，复用网页动作且不生成默认时长', () => {
+  const {buildOptions}=require('../scripts/build_lineup_capture_options.cjs');
+  const {captureRequest}=require('../Xen/lineup/web/app.js');
+  const options=buildOptions(),seen=new Set();
+  assert.equal(options.maps.length,24); assert.deepEqual(options.teams.map(x=>x.id),['CT','T']);
+  assert.equal(options.grenades.length,6); assert.equal(options.presets.length,102);
+  for(const preset of options.presets) {
+    const key=[preset.method,preset.buttons,preset.direction].join('/');
+    assert.ok(!seen.has(key),key);seen.add(key);
+    const expected=captureRequest({...preset,map:'de_mirage',team:'CT'});
+    assert.deepEqual(preset.throw_action,expected.throw_action);
+    assert.equal(preset.throw_instructions,expected.throw_instructions);
+    assert.ok(preset.throw_action.phases.every(p=>p.duration_ms===null));
+  }
+});
+
 test('F7设置保留具体动作时长、名称与道具，清除动作不会暗中恢复投掷预设', () => {
   const {hostProfileRequest,throwPreset}=require('../Xen/lineup/web/app.js');
   const form={map:'de_dust2',team:'CT',method:'jump',buttons:'left',direction:'forward',grenade:'烟雾弹',name:'A点',target:''};
