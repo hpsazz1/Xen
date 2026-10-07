@@ -63,6 +63,31 @@ function Test-LineupChoice($Options, [string]$Category, [string]$Id) {
     return @($Options.$Category | Where-Object { $_.id -ceq $Id }).Count -eq 1
 }
 
+function Assert-LineupFixedSelection($Method, $Selection) {
+    foreach ($field in @('buttons','direction')) {
+        $fixed = Get-LineupField $Method ('fixed_' + $field)
+        if ($null -ne $fixed -and (Get-LineupField $Selection $field) -cne $fixed) {
+            throw '当前投掷方式的按键或方向固定，请重新选择该预设。'
+        }
+    }
+}
+
+function Set-LineupMethodControls($Controls, [bool]$Running) {
+    $method = $Controls.method.SelectedItem
+    $methodId = Get-LineupField $method 'id' ''
+    foreach ($field in @('buttons','direction')) {
+        $fixed = Get-LineupField $method ('fixed_' + $field) ''
+        if ($field -eq 'direction' -and -not $fixed -and $methodId -cin @('stationary','jump')) { $fixed = 'forward' }
+        $control = $Controls[$field]
+        if ($fixed) {
+            for ($item = 0; $item -lt $control.Items.Count; $item++) {
+                if ($control.Items[$item].id -ceq $fixed) { $control.SelectedIndex = $item; break }
+            }
+        }
+        $control.Enabled = -not $Running -and -not $fixed -and ($field -ne 'direction' -or $methodId -ne '')
+    }
+}
+
 function New-LineupPanelState([string]$Library, [string]$Program, [string]$OptionsFile) {
     $local = Resolve-LineupLocalPath $Library '采集目录'
     $exe = Resolve-LineupLocalPath $Program '采集程序'
@@ -88,6 +113,12 @@ function New-LineupPanelState([string]$Library, [string]$Program, [string]$Optio
         }
     }
     if (@($options.teams | Where-Object { $_.id -cnotin @('CT','T') }).Count -ne 0) { throw '阵营只能为 CT 或 T。' }
+    foreach ($method in $options.methods) {
+        foreach ($mapping in @(@('fixed_buttons','buttons'), @('fixed_direction','directions'))) {
+            $fixed = Get-LineupField $method $mapping[0]
+            if ($null -ne $fixed -and -not (Test-LineupChoice $options $mapping[1] $fixed)) { throw '投掷方式引用了未知的固定选项。' }
+        }
+    }
     $presets = @(Get-LineupField $options 'presets')
     if ($presets.Count -eq 0) { throw '缺少投掷预设。' }
     $presetKeys = @{}
@@ -95,6 +126,8 @@ function New-LineupPanelState([string]$Library, [string]$Program, [string]$Optio
         foreach ($mapping in @(@('method','methods'), @('buttons','buttons'), @('direction','directions'))) {
             if (-not (Test-LineupChoice $options $mapping[1] (Get-LineupField $preset $mapping[0]))) { throw '投掷预设引用了未知选项。' }
         }
+        $method = $options.methods | Where-Object { $_.id -ceq $preset.method } | Select-Object -First 1
+        Assert-LineupFixedSelection $method $preset
         $key = "$($preset.method)|$($preset.buttons)|$($preset.direction)"
         if ($presetKeys.ContainsKey($key)) { throw '投掷预设重复。' }
         $presetKeys[$key] = $true
@@ -165,6 +198,8 @@ function New-LineupCaptureProfile($State, $Selection) {
             throw '请完整选择地图、阵营、道具、投掷方式和按键。'
         }
     }
+    $method = $State.Options.methods | Where-Object { $_.id -ceq $Selection.method } | Select-Object -First 1
+    Assert-LineupFixedSelection $method $Selection
     $direction = if ($Selection.method -cin @('stationary','jump')) { 'forward' } else { Get-LineupField $Selection 'direction' '' }
     $presets = @($State.Options.presets | Where-Object {
         $_.method -ceq $Selection.method -and $_.buttons -ceq $Selection.buttons -and $_.direction -ceq $direction
@@ -363,13 +398,7 @@ function Show-LineupCapturePanel($State) {
     $refresh = {
         $running = Test-LineupProcess $State.CaptureProcess
         foreach ($control in $controls.Values) { $control.Enabled = -not $running }
-        $method = if ($controls.method.SelectedIndex -ge 0) { $controls.method.SelectedItem.id } else { '' }
-        if ($method -cin @('stationary','jump')) {
-            for ($item = 0; $item -lt $controls.direction.Items.Count; $item++) {
-                if ($controls.direction.Items[$item].id -ceq 'forward') { $controls.direction.SelectedIndex = $item; break }
-            }
-        }
-        $controls.direction.Enabled = -not $running -and $method -cnotin @('','stationary','jump')
+        Set-LineupMethodControls $controls $running
         $start.Enabled = -not $running; $stop.Enabled = $running
         $send.Enabled = -not (Test-LineupProcess $State.SyncProcess)
         $summary = Get-LineupCaptureSummary $State

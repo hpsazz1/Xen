@@ -9,8 +9,11 @@ function buildOptions() {
   const presets = [];
   for (const method of options.methods) {
     const moving = method.id.startsWith('step') || method.id.startsWith('runup');
-    for (const buttons of options.buttons) {
-      for (const direction of moving ? options.directions : [{id:'forward'}]) {
+    const buttonChoices = method.fixed_buttons ? [{id:method.fixed_buttons}] : options.buttons;
+    const directionChoices = method.fixed_direction ? [{id:method.fixed_direction}] :
+      (moving ? options.directions : [{id:'forward'}]);
+    for (const buttons of buttonChoices) {
+      for (const direction of directionChoices) {
         const value = captureRequest({map:options.maps[0].id,team:'CT',method:method.id,
           buttons:buttons.id,direction:direction.id});
         presets.push({method:method.id,buttons:buttons.id,direction:direction.id,

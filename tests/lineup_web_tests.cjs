@@ -10,7 +10,7 @@ test('离线采集选项覆盖全部可选组合，复用网页动作且不生�
   const {captureRequest}=require('../Xen/lineup/web/app.js');
   const options=buildOptions(),seen=new Set();
   assert.equal(options.maps.length,24); assert.deepEqual(options.teams.map(x=>x.id),['CT','T']);
-  assert.equal(options.grenades.length,6); assert.equal(options.presets.length,102);
+  assert.equal(options.grenades.length,6); assert.equal(options.presets.length,103);
   for(const preset of options.presets) {
     const key=[preset.method,preset.buttons,preset.direction].join('/');
     assert.ok(!seen.has(key),key);seen.add(key);
@@ -19,6 +19,43 @@ test('离线采集选项覆盖全部可选组合，复用网页动作且不生�
     assert.equal(preset.throw_instructions,expected.throw_instructions);
     assert.ok(preset.throw_action.phases.every(p=>p.duration_ms===null));
   }
+});
+
+test('W左键跳投把W与跳跃放在同一阶段，再释放左键，固定组合只有一份', () => {
+  const {throwPreset,captureRequest}=require('../Xen/lineup/web/app.js');
+  const {buildOptions}=require('../scripts/build_lineup_capture_options.cjs');
+  const action=throwPreset('w_left_jump','left','forward');
+  assert.deepEqual(action.phases,[
+    {buttons:['left'],movement:[],jump:false,duration_ms:null},
+    {buttons:['left'],movement:['forward'],jump:true,duration_ms:null},
+    {buttons:[],movement:['forward'],jump:true,duration_ms:null},
+    {buttons:[],movement:[],jump:false,duration_ms:null}
+  ]);
+  const options=buildOptions(),method=options.methods.find(x=>x.id==='w_left_jump');
+  assert.equal(method.fixed_buttons,'left');assert.equal(method.fixed_direction,'forward');
+  assert.equal(options.presets.filter(x=>x.method==='w_left_jump').length,1);
+  assert.throws(()=>throwPreset('w_left_jump','right','forward'));
+  assert.throws(()=>throwPreset('w_left_jump','left','back'));
+  const request=captureRequest({map:'de_dust2',team:'CT',method:'w_left_jump',buttons:'left',direction:'forward'});
+  assert.match(request.throw_instructions,/W.*左键.*跳投/);
+  assert.match(request.throw_instructions,/同一阶段/);
+  assert.deepEqual(request.throw_action,action);
+});
+
+test('W同步跳投保存恢复忽略已填时长且保持四阶段，旧一步跳投仍保留前进阶段', () => {
+  const {throwPreset,throwSelection,hostProfileRequest}=require('../Xen/lineup/web/app.js');
+  const action=throwPreset('w_left_jump','left','forward');
+  action.phases.forEach((phase,index)=>{phase.duration_ms=[400,25,10,0][index];});
+  const selection=throwSelection(action);
+  assert.deepEqual(selection,{method:'w_left_jump',buttons:'left',direction:'forward'});
+  const saved=hostProfileRequest({...selection,map:'de_dust2',team:'CT',grenade:'烟雾弹'},action);
+  assert.deepEqual(saved.throw_action,action);
+  assert.deepEqual(throwSelection(JSON.parse(JSON.stringify(saved.throw_action))),selection);
+  const previous=throwPreset('step_jump','left','forward');
+  assert.equal(previous.phases.length,5);assert.equal(previous.phases[1].jump,false);
+  assert.equal(throwSelection(previous).method,'step_jump');
+  const changed=structuredClone(action);changed.phases[1].jump=false;
+  assert.notEqual(throwSelection(changed).method,'w_left_jump');
 });
 
 test('F7设置保留具体动作时长、名称与道具，清除动作不会暗中恢复投掷预设', () => {

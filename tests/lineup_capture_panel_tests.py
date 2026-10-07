@@ -26,15 +26,24 @@ def main():
         action = {'schema': 1, 'type': 'phases', 'movement_profile': 'stationary', 'phases': [
             {'buttons': ['left'], 'movement': [], 'jump': False, 'duration_ms': None},
             {'buttons': [], 'movement': [], 'jump': False, 'duration_ms': None}]}
+        w_jump = {'schema': 1, 'type': 'phases', 'movement_profile': 'step', 'phases': [
+            {'buttons': ['left'], 'movement': [], 'jump': False, 'duration_ms': None},
+            {'buttons': ['left'], 'movement': ['forward'], 'jump': True, 'duration_ms': None},
+            {'buttons': [], 'movement': ['forward'], 'jump': True, 'duration_ms': None},
+            {'buttons': [], 'movement': [], 'jump': False, 'duration_ms': None}]}
         options = {'schema': 1,
                    'maps': [{'id': 'de_dust2', 'text': '炙热沙城 2'}],
                    'teams': [{'id': 'CT', 'text': 'CT'}, {'id': 'T', 'text': 'T'}],
                    'grenades': [{'id': '烟雾弹', 'text': '烟雾弹'}],
-                   'methods': [{'id': 'stationary', 'text': '原地投掷'}],
-                   'buttons': [{'id': 'left', 'text': '左键'}],
+                   'methods': [{'id': 'stationary', 'text': '原地投掷'}, {'id': 'step', 'text': '一步投掷'},
+                               {'id': 'w_left_jump', 'text': 'W＋左键跳投（同步起跳）',
+                                'fixed_buttons': 'left', 'fixed_direction': 'forward'}],
+                   'buttons': [{'id': 'left', 'text': '左键'}, {'id': 'right', 'text': '右键'}],
                    'directions': [{'id': 'forward', 'text': '前'}, {'id': 'left', 'text': '左'}],
                    'presets': [{'method': 'stationary', 'buttons': 'left', 'direction': 'forward',
-                                'throw_instructions': '原地左键；时长待填写', 'throw_action': action}]}
+                                'throw_instructions': '原地左键；时长待填写', 'throw_action': action},
+                               {'method': 'w_left_jump', 'buttons': 'left', 'direction': 'forward',
+                                'throw_instructions': 'W 与跳跃同一阶段，随后松左键；时长待填写', 'throw_action': w_jump}]}
         write_json(options_file, options)
         config_file = library / 'config.json'
         config = {'schema': 1, 'source_id': '本机逻辑来源', 'source_width': 640, 'source_height': 480,
@@ -65,6 +74,11 @@ def main():
         write_json(options_file, options)
         invoke(expected=1)
         action['phases'][0]['duration_ms'] = None
+        write_json(options_file, options)
+        options['presets'][1]['buttons'] = 'right'
+        write_json(options_file, options)
+        invoke(expected=1)
+        options['presets'][1]['buttons'] = 'left'
         write_json(options_file, options)
 
         selection = {'map': 'de_dust2', 'team': 'CT', 'grenade': '烟雾弹', 'method': 'stationary',
@@ -108,6 +122,46 @@ $old.throw_action = [pscustomobject]@{phases=$old.throw_action.phases; type='pha
 $state.Profile = $old
 $legacy = Get-LineupSelection $state
 Assert-Panel ($legacy.method -eq 'stationary' -and $legacy.buttons -eq 'left') '旧 profile 的动作对象顺序不影响预设恢复'
+$wSelection = $selection | ConvertTo-Json | ConvertFrom-Json
+$wSelection.method = 'w_left_jump'; $wSelection.direction = 'forward'
+Save-LineupCaptureProfile $state $wSelection
+$wState = New-LineupPanelState $Library $Executable $Options
+$wRestored = Get-LineupSelection $wState
+Assert-Panel ($wRestored.method -eq 'w_left_jump' -and $wRestored.buttons -eq 'left' -and $wRestored.direction -eq 'forward') 'W 同步跳投的面板选择应完整恢复'
+$wPreset = $state.Options.presets | Where-Object { $_.method -eq 'w_left_jump' }
+Assert-Panel ((ConvertTo-LineupCanonicalJson $wState.Profile.throw_action) -ceq (ConvertTo-LineupCanonicalJson $wPreset.throw_action)) 'W 同步跳投应原样保存共享四阶段与空时长'
+Assert-Panel ($wState.Profile.throw_action.phases.Count -eq 4 -and $null -eq $wState.Profile.throw_action.phases[1].duration_ms) '四阶段不得退化或猜测时序'
+$wState.Profile.PSObject.Properties.Remove('panel_selection')
+Assert-Panel ((Get-LineupSelection $wState).method -eq 'w_left_jump') '无面板字段时仍由完整四阶段恢复独立预设'
+$beforeInvalid = [IO.File]::ReadAllText($state.ProfilePath)
+foreach ($change in @(@('buttons','right'), @('direction','left'))) {
+    $candidate = $wSelection | ConvertTo-Json | ConvertFrom-Json
+    $candidate.($change[0]) = $change[1]
+    $rejected = $false
+    try { Save-LineupCaptureProfile $state $candidate } catch { $rejected = $true }
+    Assert-Panel $rejected 'W 同步跳投拒绝右键或侧向组合'
+    Assert-Panel ([IO.File]::ReadAllText($state.ProfilePath) -ceq $beforeInvalid) '非法组合不得改写既有设置'
+}
+# 只创建未显示的控件，复用真实联动函数，不创建窗体或消息循环。
+Add-Type -AssemblyName System.Windows.Forms
+$controls = @{}
+try {
+    foreach ($mapping in @(@('method','methods'), @('buttons','buttons'), @('direction','directions'))) {
+        $combo = [Windows.Forms.ComboBox]::new()
+        foreach ($choice in $state.Options.($mapping[1])) { $null = $combo.Items.Add($choice) }
+        $controls[$mapping[0]] = $combo
+    }
+    $controls.method.SelectedIndex = 2; $controls.buttons.SelectedIndex = 1; $controls.direction.SelectedIndex = 1
+    Set-LineupMethodControls $controls $false
+    Assert-Panel ($controls.buttons.SelectedItem.id -eq 'left' -and $controls.direction.SelectedItem.id -eq 'forward') '选择固定预设时自动改为左键向前'
+    Assert-Panel (-not $controls.buttons.Enabled -and -not $controls.direction.Enabled) '固定预设的两个控件应禁用'
+    $controls.method.SelectedIndex = 1
+    Set-LineupMethodControls $controls $false
+    Assert-Panel ($controls.buttons.Enabled -and $controls.direction.Enabled) '切回普通移动投掷恢复选择'
+    Set-LineupMethodControls $controls $true
+    Assert-Panel (-not $controls.buttons.Enabled -and -not $controls.direction.Enabled) '采集中继续锁定两个控件'
+} finally { foreach ($control in $controls.Values) { $control.Dispose() } }
+Save-LineupCaptureProfile $state $selection
 $configPath = Join-Path $Library 'config.json'
 $config = Get-Content -LiteralPath $configPath -Encoding UTF8 -Raw | ConvertFrom-Json
 $config | Add-Member -MemberType NoteProperty -Name default_profile -Value ([pscustomobject]@{map='de_dust2'; team='T'; grenade='烟雾弹'})
@@ -216,7 +270,7 @@ Write-Output 'PANEL_FUNCTIONS_OK'
         saved = json.loads((library / 'profile.json').read_text(encoding='utf-8'))
         assert saved['source_id'] == config['source_id'] and saved['source_height'] == 480
         assert all(phase['duration_ms'] is None for phase in saved['throw_action']['phases'])
-    print('PS5 只读预检/固定盘与重解析拒绝/空选择/原子保存恢复/预设空时序/假 Host 所有权/运行中文日志/显式发送全部通过；未显示 GUI、采集或启动 Runtime')
+    print('PS5 只读预检/固定盘与重解析拒绝/原子保存恢复/W 同步跳投四阶段与固定选项/假 Host 所有权/运行中文日志/显式发送全部通过；未显示 GUI、采集或启动 Runtime')
 
 
 if __name__ == '__main__':

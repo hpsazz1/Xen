@@ -36,9 +36,10 @@
     ['rush_001', '综合区 · Complex']
   ];
   const throwMethods = [
-    ['stationary', '原地投掷'], ['jump', '原地跳投'], ['step', '一步投掷'],
+    ['stationary', '原地投掷'], ['jump', '原地跳投'], ['w_left_jump', 'W＋左键跳投（同步起跳）'], ['step', '一步投掷'],
     ['step_jump', '一步跳投'], ['runup', '助跑投掷'], ['runup_jump', '助跑跳投']
   ];
+  const fixedThrows = {w_left_jump: {buttons:'left', direction:'forward'}};
   const throwButtons = [['left', '左键'], ['right', '右键'], ['left+right', '双键']];
   const throwDirections = [['forward', '向前'], ['back', '向后'], ['left', '向左'], ['right', '向右'],
     ['forward+left', '左前'], ['forward+right', '右前'], ['back+left', '左后'], ['back+right', '右后']];
@@ -46,7 +47,9 @@
   function captureOptions() {
     const choices = list => list.map(([id,text]) => ({id,text}));
     return { schema:1, maps:mapChoices(), teams:choices([['CT','CT'],['T','T']]),
-      grenades:grenades.map(id=>({id,text:id})), methods:choices(throwMethods),
+      grenades:grenades.map(id=>({id,text:id})), methods:choices(throwMethods).map(method=>({
+        ...method, ...(fixedThrows[method.id] ? {fixed_buttons:fixedThrows[method.id].buttons,
+          fixed_direction:fixedThrows[method.id].direction} : {})})),
       buttons:choices(throwButtons), directions:choices(throwDirections) };
   }
   function mapChoices(recipes = [], contextMap = '', selectedMap = '') {
@@ -59,6 +62,14 @@
   function throwPreset(method, buttons, direction = 'forward') {
     if (!throwMethods.some(([id]) => id === method)) throw new Error('请选择投掷方式。');
     if (!throwButtons.some(([id]) => id === buttons)) throw new Error('请选择投掷按键。');
+    if (method === 'w_left_jump') {
+      if (buttons !== 'left' || direction !== 'forward') throw new Error('W＋左键跳投固定使用左键和向前。');
+      // W 与跳跃从同一逻辑阶段开始；实际设备与游戏时序仍需量测。
+      return {schema:1,type:'phases',movement_profile:'step',phases:[
+        actionPhase('left','',false,''), actionPhase('left','forward',true,''),
+        actionPhase('','forward',true,''), actionPhase('','',false,'')
+      ]};
+    }
     const moving = method.startsWith('step') || method.startsWith('runup');
     if (moving && !throwDirections.some(([id]) => id === direction)) throw new Error('请选择投掷移动方向。');
     const movement = moving ? direction : '', jump = method.includes('jump');
@@ -69,14 +80,31 @@
     phases.push(actionPhase('', '', false, ''));
     return { schema: 1, type: 'phases', movement_profile: moving ? method.split('_')[0] : 'stationary', phases };
   }
+  function throwSelection(action) {
+    const phases = action.phases || [];
+    const preset = throwPreset('w_left_jump','left','forward');
+    const sameInputs = (a,b) => a.jump === b.jump && ['buttons','movement'].every(key =>
+      Array.isArray(a[key]) && a[key].length === b[key].length && b[key].every(value=>a[key].includes(value)));
+    // 仅按按键结构识别，保留用户已经填写的时长和完整动作。
+    if (action.movement_profile === 'step' && phases.length === preset.phases.length &&
+        phases.every((phase,index)=>sameInputs(phase,preset.phases[index])))
+      return {method:'w_left_jump',buttons:'left',direction:'forward'};
+    const moving = ['step','runup'].includes(action.movement_profile);
+    return {method:(moving ? action.movement_profile : '') +
+        (phases.some(p=>p.jump) ? (moving ? '_jump' : 'jump') : (moving ? '' : 'stationary')),
+      buttons:phases.find(p=>p.buttons?.length)?.buttons.join('+') || 'left',
+      direction:phases.find(p=>p.movement?.length)?.movement.join('+') || 'forward'};
+  }
   function captureRequest(form) {
     if (!form.map?.trim()) throw new Error('请选择地图。');
     if (!['CT', 'T'].includes(form.team)) throw new Error('请选择 CT 或 T 阵营。');
     const action = throwPreset(form.method, form.buttons, form.direction);
     const description = [throwMethods.find(([id]) => id === form.method)[1], throwButtons.find(([id]) => id === form.buttons)[1]];
     if (action.movement_profile !== 'stationary') description.push(throwDirections.find(([id]) => id === form.direction)[1]);
+    const instructions = form.method === 'w_left_jump' ?
+      'W＋左键跳投：左键预备 → W与跳跃同一阶段按下 → 松开左键 → 全部释放' : description.join(' · ');
     return { map: form.map.trim(), team: form.team, region: form.region, standpoint_id: form.standpoint_id,
-      stance: form.stance, instructions: form.instructions, throw_instructions: description.join(' · '), throw_action: action };
+      stance: form.stance, instructions: form.instructions, throw_instructions: instructions, throw_action: action };
   }
   function hostProfileRequest(form, action) {
     const result = captureRequest(form);
@@ -204,7 +232,7 @@
   }
   const labels = { live: '画面源已连接', connected: '画面源已连接', ready: '画面源已连接', disconnected: '画面源已断开', stopped: '已停止', unknown: '画面源未知', valid: '匹配可靠', not_found: '未找到参照', unreliable: '匹配不可靠', expired: '已过期', invalid: '无效', invalid_frame: '画面无效，请检查完整画面源', no_reference: '尚无可用参考', pending: '等待新帧', idle: '等待采集', waiting: '等待下一张有效新帧', saving: '正在保存，请稍候', cancelled: '采集已取消', saved: '已保存', error: '失败，请查看错误信息' };
   const textStatus = value => labels[value] || '未知状态';
-  const api = { captureOptions, mapChoices, throwPreset, captureRequest, hostProfileRequest, hostCaptureSummary, executionSummary, actionPhase, actionSummary, canLocate, locationHint, startupSummary, practiceRecipes, previewValid, imageResultValid, filterRecipes, createController, textStatus, settleBatch, contextView, teamLabel };
+  const api = { captureOptions, mapChoices, throwPreset, throwSelection, captureRequest, hostProfileRequest, hostCaptureSummary, executionSummary, actionPhase, actionSummary, canLocate, locationHint, startupSummary, practiceRecipes, previewValid, imageResultValid, filterRecipes, createController, textStatus, settleBatch, contextView, teamLabel };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (!root.document) return;
   const $ = id => document.getElementById(id);
@@ -286,12 +314,9 @@
       $('capture-standpoint').value = profile.standpoint_id || '';
       const action = profile.throw_action;
       if (action?.phases?.length) {
-        const moving = ['step','runup'].includes(action.movement_profile);
-        $('capture-throw-method').value = (moving ? action.movement_profile : '') +
-          (action.phases.some(p=>p.jump) ? (moving ? '_jump' : 'jump') : (moving ? '' : 'stationary'));
-        $('capture-throw-buttons').value = action.phases.find(p=>p.buttons?.length)?.buttons.join('+') || 'left';
-        $('capture-throw-direction').value = action.phases.find(p=>p.movement?.length)?.movement.join('+') || 'forward';
-        $('capture-throw-direction').disabled = !moving;
+        const selection = throwSelection(action);
+        for (const field of ['method','buttons','direction']) $('capture-throw-' + field).value = selection[field];
+        applyCaptureThrowConstraints();
         captureAction = JSON.parse(JSON.stringify(action)); drawCaptureAction();
       }
       captureTouched.map = captureTouched.team = hostProfileLoaded = true;
@@ -487,9 +512,16 @@
     $('capture-action-panel').replaceChildren();
     if (captureAction) renderActionEditor($('capture-action-panel'), {id:'host-profile', throw_action:captureAction}, value=>{captureAction=value;});
   }
+  function applyCaptureThrowConstraints() {
+    const method = $('capture-throw-method').value;
+    const fixed = fixedThrows[method];
+    if (fixed) for (const field of ['buttons','direction']) $('capture-throw-' + field).value = fixed[field];
+    $('capture-throw-buttons').disabled = Boolean(fixed);
+    $('capture-throw-direction').disabled = Boolean(fixed) || (!method.startsWith('step') && !method.startsWith('runup'));
+  }
   const changeCapturePreset = () => {
     const method = $('capture-throw-method').value;
-    $('capture-throw-direction').disabled = !method.startsWith('step') && !method.startsWith('runup');
+    applyCaptureThrowConstraints();
     captureAction = method ? throwPreset(method, $('capture-throw-buttons').value, $('capture-throw-direction').value) : null;
     drawCaptureAction();
   };
