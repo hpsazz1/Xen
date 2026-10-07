@@ -7,6 +7,8 @@
     [string]$WebDirectory,
     [string]$BindAddress = '127.0.0.1',
     [ValidateRange(1024, 65535)][int]$Port = 8879,
+    [string]$CredentialDirectory,
+    [ValidateSet('CurrentUser', 'LocalMachine')][string]$Scope = 'CurrentUser',
     [switch]$AllowPhysicalOutput,
     [string]$PhysicalConfirm
 )
@@ -55,6 +57,48 @@ function Read-Check([string]$Binary, [string]$Config, [string]$Inbox, [string]$L
         throw '二进制或测试配置不支持独立 F8/F9 入口；请使用配对的新版本。'
     }
     return $state
+}
+function New-LineupWorkerStartInfo([string]$Binary, [string]$WorkingDirectory,
+    [bool]$SourceContextEnabled, [string]$Credentials, [string]$ProtectionScope) {
+    $info = New-Object Diagnostics.ProcessStartInfo
+    $info.FileName = $Binary
+    $info.WorkingDirectory = $WorkingDirectory
+    $info.UseShellExecute = $false
+    $info.WindowStyle = [Diagnostics.ProcessWindowStyle]::Normal
+    $info.EnvironmentVariables['XEN_RELEASE_ROOT'] = $WorkingDirectory
+    $info.EnvironmentVariables['XEN_RUNTIME_ID'] = 'nvidia'
+    $info.EnvironmentVariables['XEN_RELEASE_BACKENDS'] = 'cpu,cuda,tensorrt'
+    $plainBytes = $null
+    try {
+        if ($SourceContextEnabled) {
+            if ($Credentials) {
+                $credentialPath = Require-File (Join-Path $Credentials 'token.dpapi')
+                for ($part = $credentialPath; $part; $part = [IO.Path]::GetDirectoryName($part)) {
+                    if (([IO.File]::GetAttributes($part) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                        throw '已有凭据路径包含重解析点，请沿用正式入口的凭据目录。'
+                    }
+                }
+                Add-Type -AssemblyName System.Security
+                $scopeValue = [Security.Cryptography.DataProtectionScope]::$ProtectionScope
+                try {
+                    $plainBytes = [Security.Cryptography.ProtectedData]::Unprotect(
+                        [IO.File]::ReadAllBytes($credentialPath), $null, $scopeValue)
+                } catch { throw '无法读取已有源状态凭据，请核对正式入口的凭据目录、保护范围和登录用户。' }
+                # 沿用正式入口：明文只进入指定 Worker 的环境，不写入父环境、INI 或 Run。
+                $info.EnvironmentVariables['XEN_SOURCE_CONTEXT_TOKEN'] = [Text.Encoding]::UTF8.GetString($plainBytes)
+            }
+            $length = ([string]$info.EnvironmentVariables['XEN_SOURCE_CONTEXT_TOKEN']).Length
+            if ($length -lt 32 -or $length -gt 1024) {
+                throw '测试入口未取得已有源状态凭据；请沿用正式入口的 CredentialDirectory 和 Scope，无需重新配对。'
+            }
+        }
+        return $info
+    } catch {
+        $info.EnvironmentVariables.Remove('XEN_SOURCE_CONTEXT_TOKEN')
+        throw
+    } finally {
+        if ($null -ne $plainBytes) { [Array]::Clear($plainBytes, 0, $plainBytes.Length) }
+    }
 }
 
 if ($Mode -eq 'Prepare') {
@@ -109,6 +153,8 @@ if ($Mode -eq 'Prepare') {
         lineup = $lineup; lineup_sha256 = (Get-FileHash -LiteralPath $lineup -Algorithm SHA256).Hash
         config = $config; config_sha256 = (Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash
         web = $web; bind = $BindAddress; port = $Port; inbox = $inbox
+        credential_directory = $(if ($CredentialDirectory) { [IO.Path]::GetFullPath($CredentialDirectory) } else { '' })
+        credential_scope = $Scope
         calibration_configured = [bool]$checked.calibration_configured
         real_verified = $false
     }
@@ -132,6 +178,7 @@ $launch
 F9各阶段时长必须明确填写；标定必须为已量测并审核的数据，当前是否配置：$($checked.calibration_configured)。配置存在不等于有效。
 参考移出中心320且无重叠、纹理不足、源时钟/几何/标定不满足时停止并报告，不盲搜。
 正式 INI 不变。已禁用其他辅助功能；测试 Aim 按住键为 F24，仅为满足既有配置合同，请勿触发。
+源状态桥接沿用正式入口的凭据目录和保护范围；已有认证只在启动时传给测试 Runtime，不需重新配对。
 关闭测试 Runtime 后启动器会停止本次创建的 Lineup 服务。实际精度与落点由本轮人工结果确认。
 "@
     [IO.File]::WriteAllText((Join-Path $run 'TASK.md'), $taskText, $utf8)
@@ -152,7 +199,20 @@ foreach ($field in @('worker','lineup','config')) {
     if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $task.$hashField) { throw "本次 $field 已变化，请重新 Prepare。" }
 }
 $checked = Read-Check $task.lineup $task.config $task.inbox $task.bind $task.port
-if ($Mode -eq 'Check') { Write-Host "测试入口预检通过；标定路径已配置：$($checked.calibration_configured)。未启动任何进程。"; return }
+$sourceContextEnabled = (Read-IniValue ([IO.File]::ReadAllText($task.config)) 'source_context' 'enabled' 'false') -in @('true', '1', 'yes', 'on')
+if (-not $PSBoundParameters.ContainsKey('CredentialDirectory') -and $task.PSObject.Properties['credential_directory']) {
+    $CredentialDirectory = [string]$task.credential_directory
+}
+if (-not $PSBoundParameters.ContainsKey('Scope') -and $task.PSObject.Properties['credential_scope']) {
+    $Scope = [string]$task.credential_scope
+}
+if ($Scope -notin @('CurrentUser', 'LocalMachine')) { throw '凭据保护范围无效，请沿用正式入口的 Scope。' }
+if ($Mode -eq 'Check') {
+    $checkInfo = New-LineupWorkerStartInfo $task.worker $run $sourceContextEnabled $CredentialDirectory $Scope
+    $checkInfo.EnvironmentVariables.Remove('XEN_SOURCE_CONTEXT_TOKEN')
+    Write-Host "测试入口及已有凭据预检通过；标定路径已配置：$($checked.calibration_configured)。未启动 Runtime 或设备。"
+    return
+}
 if (-not $AllowPhysicalOutput -or $PhysicalConfirm -cne 'LINEUP_TEST_F8_F9') { throw 'Launch 必须由用户前台提供 -AllowPhysicalOutput 和 -PhysicalConfirm LINEUP_TEST_F8_F9。' }
 if (-not [Environment]::UserInteractive) { throw 'Launch 需要用户交互会话。' }
 $workerName = [IO.Path]::GetFileNameWithoutExtension([string]$task.worker)
@@ -161,10 +221,14 @@ foreach ($name in @('Xen', 'XenLauncher', 'XenLineup', $workerName, $lineupName)
     if (Get-Process -Name $name -ErrorAction SilentlyContinue) { throw "已有 $name 正在运行，请先由用户关闭，避免同设备竞争。" }
 }
 $oldEnvironment = @{}
-foreach ($key in @('XEN_RELEASE_ROOT','XEN_RUNTIME_ID','XEN_RELEASE_BACKENDS')) { $oldEnvironment[$key] = [Environment]::GetEnvironmentVariable($key, 'Process') }
+foreach ($key in @('XEN_RELEASE_ROOT','XEN_RUNTIME_ID','XEN_RELEASE_BACKENDS','XEN_SOURCE_CONTEXT_TOKEN')) { $oldEnvironment[$key] = [Environment]::GetEnvironmentVariable($key, 'Process') }
 $helper = $null
+$workerInfo = $null
 try {
     $env:XEN_RELEASE_ROOT = $run; $env:XEN_RUNTIME_ID = 'nvidia'; $env:XEN_RELEASE_BACKENDS = 'cpu,cuda,tensorrt'
+    $workerInfo = New-LineupWorkerStartInfo $task.worker $run $sourceContextEnabled $CredentialDirectory $Scope
+    # 即使调用者已有认证环境，网页服务也不继承；Worker 使用上面独立的环境副本。
+    [Environment]::SetEnvironmentVariable('XEN_SOURCE_CONTEXT_TOKEN', $null, 'Process')
     $helperArgs = @('--config', ('"' + $task.config + '"'), '--data', ('"' + (Join-Path $run 'lineup-data') + '"'),
         '--capture-inbox', ('"' + $task.inbox + '"'), '--web', ('"' + $task.web + '"'), '--bind', $task.bind, '--port', [string]$task.port)
     $helper = Start-Process -FilePath $task.lineup -ArgumentList $helperArgs -WorkingDirectory $run -WindowStyle Hidden -PassThru `
@@ -172,12 +236,14 @@ try {
     Start-Sleep -Milliseconds 500
     if ($helper.HasExited) { throw 'Lineup 服务启动失败，请查看本次 Run 的 lineup-stderr.log。' }
     # 这是供用户操作开始/武装/急停的交互窗口。
-    $worker = Start-Process -FilePath $task.worker -WorkingDirectory $run -WindowStyle Normal -PassThru
+    $worker = [Diagnostics.Process]::Start($workerInfo)
+    $workerInfo.EnvironmentVariables.Remove('XEN_SOURCE_CONTEXT_TOKEN')
     $task.state = 'USER_LAUNCHED'
     [IO.File]::WriteAllText($taskPath, ($task | ConvertTo-Json -Depth 8), $utf8)
     Write-Host "请在测试 Xen 窗口开始并武装；设置网页 http://$($task.bind):$($task.port) 。End 急停。"
     $worker.WaitForExit()
 } finally {
+    if ($null -ne $workerInfo) { $workerInfo.EnvironmentVariables.Remove('XEN_SOURCE_CONTEXT_TOKEN') }
     if ($helper -and -not $helper.HasExited) { Stop-Process -Id $helper.Id }
     foreach ($key in $oldEnvironment.Keys) { [Environment]::SetEnvironmentVariable($key, $oldEnvironment[$key], 'Process') }
 }

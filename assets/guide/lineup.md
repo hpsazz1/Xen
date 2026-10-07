@@ -49,6 +49,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\create_lineup_capt
 
 此步骤在需要验证时完成，不是主机采集的前提。在辅机用 `scripts/start_lineup_test.ps1 -Mode Prepare` 准备新 Run，指定已有包的 `-XenRoot`、配对的 `-WorkerExecutable`、`-LineupExecutable`、`-WebDirectory` 和新的 `-RunDirectory`。需要手机访问时，`-BindAddress` 使用与手机可达的辅机私网地址；手机在 `192.168.1.x` 时使用辅机同网段地址，不能把双机专线的 `192.168.3.x` 直接当手机入口。脚本不改变路由或防火墙。
 
+原配置已开启源状态桥接时，Prepare 同时沿用正式启动入口的 `-CredentialDirectory` 和 `-Scope`，保存在 Run 的非秘密设置中。Launch 自动读取已有加密凭据，仅传给测试 Runtime；无需重新配对、修改 INI 或手工填写认证环境变量。Check 可提前验证既有凭据，不启动 Runtime 或设备；主机游戏前台状态仍由原桥接提供。
+
 Prepare 从已有 INI 生成独立测试配置并硬链接同卷模型，保留正式文件；Check 只核对当前 Run。真实测试由用户在辅机执行生成的 `TASK.md` 中唯一 Launch 命令，必须带 `-AllowPhysicalOutput -PhysicalConfirm LINEUP_TEST_F8_F9`，再在测试 Xen 窗口开始并武装。已有 Xen/Lineup 进程需要用户先关闭；**End 急停**。测试 INI 关闭其他辅助功能，原 F8 启停/F9 诊断绑定仅在测试副本中解除。
 
 ## 320 局部练习流程

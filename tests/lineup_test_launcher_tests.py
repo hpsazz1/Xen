@@ -8,6 +8,111 @@ import subprocess
 import tempfile
 
 
+def verify_auth_launch(args, script, folder):
+    """通过完整生产入口启动无设备夹具，核对凭据实际进入 Worker 子进程。"""
+    root = Path(folder) / '凭据启动夹具'
+    root.mkdir()
+    setup = root / 'fixture.ps1'
+    setup.write_text(r'''
+param([string]$Root)
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Security
+$source = @'
+using System;
+using System.IO;
+using System.Threading;
+public class LineupLaunchFixture {
+    public static void Main(string[] args) {
+        if (Array.IndexOf(args, "--check-config") >= 0) {
+            Console.WriteLine("{\"test_mode\":true,\"locate_virtual_key\":119,\"throw_virtual_key\":120,\"calibration_configured\":false}");
+            return;
+        }
+        var token = Environment.GetEnvironmentVariable("XEN_SOURCE_CONTEXT_TOKEN");
+        if (Array.IndexOf(args, "--web") >= 0) {
+            File.WriteAllText("helper-auth-result.txt", String.IsNullOrEmpty(token) ? "absent" : "present");
+            Thread.Sleep(5000);
+            return;
+        }
+        File.WriteAllText("worker-auth-result.txt", token == new string('x', 64) ? "matched" : "missing_or_wrong");
+        File.WriteAllText("worker-root-result.txt", Environment.GetEnvironmentVariable("XEN_RELEASE_ROOT") ?? "");
+    }
+}
+'@
+Add-Type -TypeDefinition $source -OutputAssembly (Join-Path $Root 'fixture-worker.exe') -OutputType ConsoleApplication
+Copy-Item -LiteralPath (Join-Path $Root 'fixture-worker.exe') -Destination (Join-Path $Root 'fixture-helper.exe')
+$credential = Join-Path $Root 'credentials'
+[void][IO.Directory]::CreateDirectory($credential)
+$plain = [Text.Encoding]::UTF8.GetBytes(('x' * 64))
+try {
+    $cipher = [Security.Cryptography.ProtectedData]::Protect($plain, $null, [Security.Cryptography.DataProtectionScope]::CurrentUser)
+    [IO.File]::WriteAllBytes((Join-Path $credential 'token.dpapi'), $cipher)
+} finally { [Array]::Clear($plain, 0, $plain.Length) }
+''', encoding='utf-8-sig')
+    environment = {key: value for key, value in os.environ.items()
+                   if key.upper() != 'XEN_SOURCE_CONTEXT_TOKEN'}
+    def run_ps(*arguments, expected=0, child_environment=None):
+        result = subprocess.run([args.powershell, '-NoProfile', '-ExecutionPolicy', 'Bypass',
+                                 *map(str, arguments)], env=child_environment or environment,
+                                capture_output=True, timeout=30)
+        assert (result.returncode == 0) == (expected == 0), (result.returncode, result.stdout, result.stderr)
+        assert b'x' * 64 not in result.stdout + result.stderr, '启动输出泄露了测试认证值'
+        return result
+    run_ps('-File', setup, '-Root', root)
+    (root / 'models').mkdir()
+    (root / 'models' / 'fixture.onnx').write_bytes(b'not a model')
+    (root / 'web').mkdir()
+    (root / 'web' / 'index.html').write_text('fixture', encoding='utf-8')
+    config = root / 'config.ini'
+    config.write_text('[detector]\nmodel_path=fixture.onnx\nbackend=cpu\n'
+                      '[source_context]\nenabled=true\nhost=127.0.0.1\nport=5012\n', encoding='utf-8')
+    original = config.read_bytes()
+    run = root / 'run'
+    run_ps('-File', script, '-Mode', 'Prepare', '-RunDirectory', run, '-XenRoot', root,
+           '-WorkerExecutable', root / 'fixture-worker.exe', '-LineupExecutable', root / 'fixture-helper.exe',
+           '-WebDirectory', root / 'web', '-CredentialDirectory', root / 'credentials', '-Scope', 'CurrentUser')
+    task_path = run / 'task.json'
+    task = json.loads(task_path.read_text(encoding='utf-8'))
+    assert Path(task['credential_directory']) == root / 'credentials'
+    assert task['credential_scope'] == 'CurrentUser'
+    run_ps('-File', script, '-Mode', 'Check', '-RunDirectory', run)
+    assert not (run / 'worker-auth-result.txt').exists() and not (run / 'helper-auth-result.txt').exists()
+    cipher_path = root / 'credentials' / 'token.dpapi'
+    cipher = cipher_path.read_bytes()
+    try:
+        cipher_path.write_bytes(b'invalid DPAPI fixture')
+        run_ps('-File', script, '-Mode', 'Check', '-RunDirectory', run, expected=1)
+        run_ps('-File', script, '-Mode', 'Launch', '-RunDirectory', run,
+               '-AllowPhysicalOutput', '-PhysicalConfirm', 'LINEUP_TEST_F8_F9', expected=1)
+        assert not (run / 'helper-auth-result.txt').exists(), '认证失败时不应留下网页服务'
+    finally:
+        cipher_path.write_bytes(cipher)
+    run_ps('-File', script, '-Mode', 'Launch', '-RunDirectory', run,
+           '-AllowPhysicalOutput', '-PhysicalConfirm', 'LINEUP_TEST_F8_F9')
+    assert (run / 'worker-auth-result.txt').read_text() == 'matched', '实际 Worker 子进程缺少已有源状态凭据'
+    assert (run / 'helper-auth-result.txt').read_text() == 'absent', '网页助手不应得到新加载的凭据'
+    assert Path((run / 'worker-root-result.txt').read_text()) == run
+    assert config.read_bytes() == original
+    for name in ('task.json', 'TASK.md', 'config.ini', 'lineup-stdout.log', 'lineup-stderr.log'):
+        assert b'x' * 64 not in (run / name).read_bytes(), f'{name} 泄露了测试认证值'
+    # 旧 Run 缺少新字段时仍允许继承正式入口已有的环境，不要求重新安装凭据。
+    task.pop('credential_directory')
+    task.pop('credential_scope')
+    task_path.write_text(json.dumps(task, ensure_ascii=False), encoding='utf-8')
+    run_ps('-File', script, '-Mode', 'Check', '-RunDirectory', run, expected=1)
+    inherited = dict(environment, XEN_SOURCE_CONTEXT_TOKEN='x' * 64)
+    wrapper = root / 'inherited-launch.ps1'
+    wrapper.write_text(r'''
+param([string]$Entry, [string]$Run)
+$ErrorActionPreference = 'Stop'
+& $Entry -Mode Launch -RunDirectory $Run -AllowPhysicalOutput -PhysicalConfirm LINEUP_TEST_F8_F9
+if ($env:XEN_SOURCE_CONTEXT_TOKEN -cne ('x' * 64)) { throw '调用者认证环境没有恢复' }
+''', encoding='utf-8-sig')
+    (run / 'worker-auth-result.txt').write_text('not_run')
+    run_ps('-File', wrapper, '-Entry', script, '-Run', run, child_environment=inherited)
+    assert (run / 'worker-auth-result.txt').read_text() == 'matched'
+    assert (run / 'helper-auth-result.txt').read_text() == 'absent'
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--exe', required=True)
@@ -76,7 +181,8 @@ def main():
         (run / 'config.ini').write_text(candidate + '\n; changed\n', encoding='utf-8')
         invoke('-Mode', 'Check', expected=1)
         assert hashlib.sha256(config.read_bytes()).hexdigest() == before
-    print('独立配置/模型硬链接/原配置不变/空标定提示/监听地址预检/重复Prepare/变更拒绝/未授权Launch全部通过；未启动设备')
+        verify_auth_launch(args, script, folder)
+    print('独立配置/硬链接/原配置不变/预检/授权拒绝/已有DPAPI子进程传递/旧Run继承/网页凭据隔离/失败清理全部通过；只启动无设备夹具')
 
 
 if __name__ == '__main__':
