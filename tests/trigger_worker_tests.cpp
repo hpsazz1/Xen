@@ -845,11 +845,24 @@ void shared_debt_and_shutdown_contention() {
     overdue.mouse->set_left_button(false); // 仅fake资源收尾，不抹掉worker验收快照。
 }
 void running_cleanup_contention() {
-    Fixture f; expect(f.start(false, 200, 1000), "运行争锁回归启动"); f.fire();
-    expect(until([&] { return f.mouse->count(true)==1; }), "运行争锁前DOWN");
+    std::atomic<bool> down_ready{false}, continue_after_lock{false};
+    Fixture f;
+    // 在 DOWN 回执后的下一次许可查询停住 Worker，保证测试先拿门再允许 UP 决策。
+    // 仅轮询发送次数会晚于 10 ms 按下窗口，可能在正常 UP 完成后才开始争锁。
+    f.focus_hook = [&] {
+        if (f.worker.firing_signal().confirmed_down && !continue_after_lock.load()) {
+            down_ready = true;
+            while (!continue_after_lock.load()) std::this_thread::yield();
+        }
+    };
+    expect(f.start(false, 200, 1000), "运行争锁回归启动"); f.fire();
+    const bool ready = until([&] { return down_ready.load(); });
+    expect(ready, "运行争锁前DOWN已确认且Worker等待测试持门");
+    if (!ready) { continue_after_lock = true; f.worker.stop(); return; }
     auto lock=f.arbiter->try_enter_cleanup();
     expect(lock.owns_lock(), "运行阶段持有输出门");
     f.mouse->held=false;
+    continue_after_lock = true;
     expect(until([&] {
         unsigned blocked=0;
         for(const auto& e:f.worker.execution_log().events)
@@ -869,15 +882,27 @@ void running_cleanup_contention() {
     expect(actual_up==1 && blocked_up>=3, "事件区分争锁与实际发送次数");
     f.worker.stop();
 
-    Fixture expired; expect(expired.start(false,200,30), "运行清理短预算启动"); expired.fire();
-    expect(until([&] { return expired.mouse->count(true)==1; }), "超期前DOWN");
+    std::atomic<bool> expired_down_ready{false}, continue_until_expired{false};
+    Fixture expired;
+    expired.focus_hook = [&] {
+        if (expired.worker.firing_signal().confirmed_down && !continue_until_expired.load()) {
+            expired_down_ready = true;
+            while (!continue_until_expired.load()) std::this_thread::yield();
+        }
+    };
+    expect(expired.start(false,200,30), "运行清理短预算启动"); expired.fire();
+    const bool expired_ready = until([&] { return expired_down_ready.load(); });
+    expect(expired_ready, "超期前DOWN已确认且Worker等待测试持门");
+    if (!expired_ready) { continue_until_expired = true; expired.worker.stop(); return; }
     auto held=expired.arbiter->try_enter_cleanup(); expired.mouse->held=false;
-    std::this_thread::sleep_for(80ms); held.unlock();
+    expect(held.owns_lock(), "运行清理超期测试持有输出门");
+    continue_until_expired = true;
     expect(until([&] {
         const auto events=expired.worker.execution_log();
         for(const auto& e:events.events) if(std::string_view(e.rejection_reason)=="cleanup_deadline_expired") return true;
         return false;
     }), "运行超期必须记清理截止证据");
+    held.unlock();
     std::this_thread::sleep_for(20ms);
     expect(expired.mouse->count(false)==0 && expired.worker.snapshot().button_may_be_down,
         "超期不无限重试或丢弃债务");
