@@ -821,22 +821,49 @@ void shared_debt_and_shutdown_contention() {
     expect(!dirty.start(), "复用设备已知down但无fault也必须拒绝启动");
     dirty.mouse->dirty=false;
 
-    Fixture recover; expect(recover.start(), "停止争锁测试启动"); recover.fire();
-    expect(until([&] { return recover.mouse->count(true)==1; }), "停止前down");
+    std::atomic<bool> recover_down_ready{false}, continue_recover{false};
+    Fixture recover;
+    recover.focus_hook = [&] {
+        if (recover.worker.firing_signal().confirmed_down && !continue_recover.load()) {
+            recover_down_ready = true;
+            while (!continue_recover.load()) std::this_thread::yield();
+        }
+    };
+    expect(recover.start(), "停止争锁测试启动"); recover.fire();
+    const bool recover_ready = until([&] { return recover_down_ready.load(); });
+    expect(recover_ready, "停止前DOWN已确认且Worker等待测试持门");
+    if (!recover_ready) { continue_recover = true; recover.worker.stop(); return; }
     auto lock = recover.arbiter->try_enter_cleanup();
-    expect(lock.owns_lock(), "测试持有80ms输出门");
+    expect(lock.owns_lock(), "停止清理测试持有输出门");
     std::thread stopper([&] { recover.worker.stop(); });
-    std::this_thread::sleep_for(80ms);
+    continue_recover = true;
+    expect(until([&] {
+        unsigned blocked = 0;
+        for (const auto& event : recover.worker.execution_log().events)
+            if (event.button_action == TriggerButtonAction::UP && !event.backend_called) ++blocked;
+        return blocked >= 3;
+    }), "停止清理确实经过三次争锁后才释放输出门");
     if (lock.owns_lock()) lock.unlock();
     stopper.join();
-    expect(!recover.mouse->dirty && recover.mouse->count(false)>=1, "争锁80ms后stop仍需明确up");
+    expect(!recover.mouse->dirty && recover.mouse->count(false)>=1, "多次争锁后stop仍需明确up");
 
-    Fixture overdue; expect(overdue.start(false, 50, 30), "短清理预算测试启动"); overdue.fire();
-    expect(until([&] { return overdue.mouse->count(true)==1; }), "超限前down");
+    std::atomic<bool> overdue_down_ready{false}, continue_overdue{false};
+    Fixture overdue;
+    overdue.focus_hook = [&] {
+        if (overdue.worker.firing_signal().confirmed_down && !continue_overdue.load()) {
+            overdue_down_ready = true;
+            while (!continue_overdue.load()) std::this_thread::yield();
+        }
+    };
+    expect(overdue.start(false, 50, 30), "短清理预算测试启动"); overdue.fire();
+    const bool overdue_ready = until([&] { return overdue_down_ready.load(); });
+    expect(overdue_ready, "超限前DOWN已确认且Worker等待测试持门");
+    if (!overdue_ready) { continue_overdue = true; overdue.worker.stop(); return; }
     auto blocked = overdue.arbiter->try_enter_cleanup();
     expect(blocked.owns_lock(), "超限测试持有门");
     std::atomic<bool> stopped{false};
     std::thread stop_blocked([&] { overdue.worker.stop(); stopped=true; });
+    continue_overdue = true;
     expect(until([&] { return stopped.load(); }), "超限stop必须有界返回");
     if (blocked.owns_lock()) blocked.unlock();
     stop_blocked.join();
