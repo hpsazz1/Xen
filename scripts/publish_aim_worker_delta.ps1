@@ -1,8 +1,8 @@
 ﻿param(
-    [string]$PackageRoot = (Join-Path $PSScriptRoot "..\cache\releases\Xen-888b04e-aim-dual"),
-    [string]$BuildDirectory = (Join-Path $PSScriptRoot "..\build-release-096e1a7-nvidia"),
-    [string]$DestinationRoot = "\\192.168.3.20\XenLab$\releases\Xen-888b04e-aim-dual",
-    [string]$RemotePackageRoot = "C:\XenLab\releases\Xen-888b04e-aim-dual",
+    [string]$PackageRoot = "",
+    [string]$BuildDirectory = (Join-Path $PSScriptRoot "..\build\nvidia"),
+    [string]$DestinationRoot = "",
+    [string]$RemotePackageRoot = "",
     [string]$SshIdentityFile = (Join-Path $env:USERPROFILE ".ssh\xen_foxos_ed25519"),
     [string]$SshUser = "XenDeploy",
     [string]$SshHost = "192.168.3.20",
@@ -41,6 +41,13 @@
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+
+# 发布目标由本轮调用方绑定，不能从已清理的历史包名或目录顺序推断。
+foreach ($requiredRoot in @("PackageRoot", "DestinationRoot", "RemotePackageRoot")) {
+    if ([string]::IsNullOrWhiteSpace((Get-Variable -Name $requiredRoot -ValueOnly))) {
+        throw "差量发布必须显式指定 -$requiredRoot，不能自动选择历史发布包。"
+    }
+}
 
 $resolvedCountsPerPixelX = if ($null -eq $CountsPerPixelX) {
     $CountsPerPixel

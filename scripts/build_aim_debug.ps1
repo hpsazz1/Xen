@@ -1,5 +1,5 @@
 ﻿param(
-    [string]$BuildDirectory = (Join-Path $PSScriptRoot "..\build-release-096e1a7-nvidia"),
+    [string]$BuildDirectory = (Join-Path $PSScriptRoot "..\build\nvidia"),
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release",
     [string]$Target = "xen_app"

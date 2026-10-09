@@ -25,6 +25,7 @@ $scriptPaths = @(
     "scripts/publish_dual_machine_package.ps1",
     "scripts/invoke_aim_manual_acceptance.ps1",
     "scripts/run_ndi_clock_source.ps1",
+    "scripts/build_aim_debug.ps1",
     "scripts/publish_aim_worker_delta.ps1",
     "scripts/runtime_environment.ps1"
 ) | ForEach-Object { Join-Path $RepositoryRoot $_ }
@@ -135,6 +136,24 @@ $packageScriptText = [System.IO.File]::ReadAllText(
 Assert-True ($packageScriptText -match '"aim_report\.ps1"' -and
     $packageScriptText -match '"runtime_report_sequence\.ps1"') `
     "双机便携包必须携带 Aim 与线性 sequence 报告助手。"
+
+$aimDeltaScript = Join-Path $RepositoryRoot "scripts/publish_aim_worker_delta.ps1"
+foreach ($missingParameter in @("PackageRoot", "DestinationRoot", "RemotePackageRoot")) {
+    $publicationRoots = @{
+        PackageRoot = "X:\xen-missing-package-fixture"
+        DestinationRoot = "X:\xen-missing-destination-fixture"
+        RemotePackageRoot = "C:\xen-missing-remote-fixture"
+    }
+    $publicationRoots.Remove($missingParameter)
+    $rejection = ""
+    try {
+        & $aimDeltaScript @publicationRoots
+    } catch {
+        $rejection = $_.Exception.Message
+    }
+    Assert-True ($rejection -like "*必须显式指定 -$missingParameter*") `
+        "差量发布缺少 $missingParameter 时必须在访问文件或网络前拒绝，不能选中历史包。"
+}
 
 $aimDeltaText = [System.IO.File]::ReadAllText(
     (Join-Path $RepositoryRoot "scripts/publish_aim_worker_delta.ps1"))

@@ -1,5 +1,5 @@
 ﻿param(
-    [string]$BuildDirectory = (Join-Path $PSScriptRoot "..\build-release-096e1a7-nvidia"),
+    [string]$BuildDirectory = (Join-Path $PSScriptRoot "..\build\nvidia"),
     [ValidatePattern('^udp://[^:]+:[0-9]+$')]
     [string]$BindUrl = "udp://192.168.3.10:5011"
 )

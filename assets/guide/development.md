@@ -41,16 +41,23 @@ SDK 后沿用旧构建目录。
 ```powershell
 $env:ONNXRUNTIME_ROOT = "C:\path\to\onnxruntime"
 $env:OpenCV_DIR = "C:\path\to\opencv\build\x64\vc16\lib"
+$buildDirectory = "build/nvidia" # 按所选 ORT 后端改为 build/directml 或 build/openvino
 
-cmake -S . -B build -G "Visual Studio 18 2026" -A x64 `
+cmake -S . -B $buildDirectory -G "Visual Studio 18 2026" -A x64 `
   -DOpenCV_DIR="$env:OpenCV_DIR" `
   -DBUILD_TESTING=ON
 
-cmake --build build --config Release --target xen_app --parallel
+cmake --build $buildDirectory --config Release --target xen_app --parallel
 ```
 
-输出位于 `build/Release/`，应用文件名为 `Xen.exe`。普通开发只构建受影响目标并运行相关专项测试；
+输出位于对应构建目录的 `Release/`，应用文件名为 `Xen.exe`。普通开发只构建受影响目标并运行相关专项测试；
 依赖/ABI、共享 Provider 契约或正式发布候选才需要完整矩阵。
+
+日常开发固定复用 `build/nvidia`、`build/directml`、`build/openvino` 中对应后端的目录；
+一次性试验与临时产物集中到 `temp/<任务ID>/`，任务结束后清理。干净重建在固定目录原位完成，
+不按提交号另建构建树。轻量 NVIDIA 构建和 NDI 时钟源脚本默认使用 `build/nvidia`；
+`publish_aim_worker_delta.ps1` 必须显式传入 `PackageRoot`、`DestinationRoot` 和 `RemotePackageRoot`，
+避免复用已经清理的旧包路径。
 
 需要执行当前配置的完整构建、clean `PATH` 测试和运行库来源检查时，使用正式脚本：
 
@@ -69,7 +76,7 @@ VC CRT 从所用 Visual Studio 的官方 Redist 目录解析；可用 `-MsvcRedi
 
 ## 应用启动与发布布局
 
-1. 启动一次 `build/Release/Xen.exe`。程序会在同目录创建 `models/`；`config.ini` 不存在时按代码发行默认生成完整配置。默认 CPU 推理、本机桌面采集，物理输出和辅助总开关关闭。
+1. 启动一次对应构建目录的 `Release/Xen.exe`。程序会在同目录创建 `models/`；`config.ini` 不存在时按代码发行默认生成完整配置。默认 CPU 推理、本机桌面采集，物理输出和辅助总开关关闭。
 2. 把 ONNX 模型放入 `models/` 根目录，在“检测”页刷新、选择并应用模型。
 3. 配置 Capture 与 Provider，启动 Runtime；先保持物理输出关闭，确认预览、日志和 Provider 状态。
 4. 需要真实设备验收时，使用正式 Prepare/Launch 脚本生成独立 Run，并由用户手动执行带确认令牌的
