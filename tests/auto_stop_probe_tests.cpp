@@ -1,4 +1,5 @@
 #include <iostream>
+#include <source_location>
 #include "auto_stop_probe/probe_internal.h"
 #include "auto_stop_probe/session_internal.h"
 #include "auto_stop_probe/mask_internal.h"
@@ -41,7 +42,9 @@ public:
     int polls = 0;
     int cleanup_count = 0, close_count = 0, forbidden = 0;
 };
-void require(bool condition) { if (!condition) throw std::runtime_error("急停实测工具回归失败"); }
+void require(bool condition, const std::source_location location = std::source_location::current()) {
+    if (!condition) throw std::runtime_error("急停实测工具回归失败，行号：" + std::to_string(location.line()));
+}
 class MaskFake final : public IMouseController {
 public:
     bool open() noexcept override { return true; }
@@ -161,14 +164,16 @@ int main() {
         std::filesystem::remove(session_dir / "001.result.json");
         std::filesystem::remove(session_dir / "session.status.json");
         std::filesystem::remove(session_dir);
-        const MaskCheckTiming quick{30, 0, 1, 0, 100};
+        // 第三次轮询才产生 W；1 ms 休眠不保证在 1 ms 后获调度，不能用 30 ms 卡调度精度。
+        const MaskCheckTiming quick{1000, 0, 1, 0, 1000};
         MaskFake masked;
         masked.start_held = true;
         const auto mask_result = execute_mask_check(masked, quick);
         require(mask_result["success"] == true && mask_result["raw_monitor_observed"] == false && mask_result["physical_w_down_time_ns"].is_null() &&
             masked.masks == std::vector<bool>({true, false}) && masked.forbidden == 0 && masked.cleanup_count == 1 && masked.close_count == 1);
         MaskFake stale; stale.freeze_sequence = true; stale.release_while_masked = true;
-        require(execute_mask_check(stale, quick)["raw_monitor_observed"] == false);
+        const auto stale_result = execute_mask_check(stale, quick);
+        require(stale_result["success"] == true && stale_result["raw_monitor_observed"] == false);
         MaskFake released; released.release_while_masked = true;
         const auto released_result = execute_mask_check(released, quick);
         require(released_result["success"] == true && released_result["raw_monitor_observed"] == true &&
