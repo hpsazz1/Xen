@@ -264,6 +264,19 @@ Debug CSV/JSON 运行报告与崩溃诊断独立于 Log，不随此开关关闭�
 输出驱动后续观测，覆盖减速、反向和停止；固定历史画面的整数请求量只作诊断，不作为物理过冲真值。
 闭环包络是软件不退化基线，不能替代真实 KMBOX 验收。
 
+## 辅机 PowerShell 管理
+
+已配置严格主机校验及密钥登录的 SSH 别名可通过
+`scripts/invoke_auxiliary_powershell.ps1 -SshHost xen-aux -ScriptPath <本地脚本路径>`
+直接执行辅机 PowerShell，收集后返回中文输出，失败时在错误消息中保留远端退出码；管理操作加 `-RequireAdministrator`，
+会在普通用户会话中明确失败。脚本编码只用于传输，不是加密，不得在脚本中写入凭据。
+
+只有明确需要管理员维护时，用户才在辅机管理员 PowerShell 执行
+`scripts/enable_auxiliary_ssh_admin.ps1 -UserName XenDeploy -PublicKeyPath <公钥文件> -ResultPath <结果JSON>`。
+该入口将指定现有账户加入管理员组，并追加主机 Ed25519 公钥到 Windows OpenSSH 默认管理员公钥文件，
+保留已有公钥，设置仅管理员与 SYSTEM 可访问的权限。适用于保留默认管理员 Match 规则的 SSH 配置；
+自定义公钥路径需先核对。完成后使用新 SSH 会话验证权限，不关闭主机校验，不启动 Xen 或真实输出。
+
 ## 无设备界面预览
 
 仅检查界面时可构建 `auxiliary_ui_preview` 目标，运行
