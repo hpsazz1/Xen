@@ -3532,14 +3532,18 @@ struct Aim::Impl {
             }
         }
         if (precise_background_x) {
-            // 同源世界边区间约束先验；全程使用物理 ROI 位移/秒，
-            // 不读取 PI、请求率或模型相机补偿。区间含零时，零先验仍为零。
-            const float projected_motion = std::clamp(
-                prediction_world_interval_velocity * prediction_measurement_dt_x,
-                std::min(background_pair.world_left_dx_roi,
-                         background_pair.world_right_dx_roi),
-                std::max(background_pair.world_left_dx_roi,
-                         background_pair.world_right_dx_roi));
+            // 同源双边共同方向负责运动资格，中心平移负责幅度；否则零先验
+            // 会被宽度往返产生的边区间永久锁在较慢一边。单边/异向形变仍
+            // 沿用保守区间投影，不能单凭中心漂移建立人物运动资格。
+            const float projected_motion = prediction_measurement_x != 0.0f
+                ? 0.5f * background_pair.world_left_dx_roi +
+                  0.5f * background_pair.world_right_dx_roi
+                : std::clamp(
+                    prediction_world_interval_velocity * prediction_measurement_dt_x,
+                    std::min(background_pair.world_left_dx_roi,
+                             background_pair.world_right_dx_roi),
+                    std::max(background_pair.world_left_dx_roi,
+                             background_pair.world_right_dx_roi));
             const float observed_velocity = projected_motion / prediction_measurement_dt_x;
             const float alpha = prediction_measurement_dt_x /
                 (kTrackingTargetMotionFilterTimeSeconds + prediction_measurement_dt_x);
