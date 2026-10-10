@@ -24,6 +24,8 @@ public:
     std::atomic<int> created{0};
     std::atomic<bool> invalid_video{false};
     std::atomic<int> invalid_received{0};
+    std::atomic<int> connections{1};
+    std::atomic<int> last_observed_connections{-1};
     CaptureStatus open(const clock_sync::ClientConfig& c, std::string& e) noexcept override { return input.open(c,e); }
     void close() noexcept override { input.close(); }
     NDIlib_find_instance_t find_create(const NDIlib_find_create_t* s) noexcept override { return input.find_create(s); }
@@ -36,7 +38,11 @@ public:
         return receiver;
     }
     void recv_destroy(NDIlib_recv_instance_t r) noexcept override { input.recv_destroy(r); }
-    int recv_connections(NDIlib_recv_instance_t r) noexcept override { return input.recv_connections(r); }
+    int recv_connections(NDIlib_recv_instance_t) noexcept override {
+        const int count = connections.load();
+        last_observed_connections = count;
+        return count;
+    }
     NDIlib_frame_type_e recv_capture(NDIlib_recv_instance_t r, NDIlib_video_frame_v2_t* v,
             NDIlib_metadata_frame_t* m, std::uint32_t t) noexcept override {
         if (interrupt.exchange(false)) return NDIlib_frame_type_error;
@@ -370,6 +376,71 @@ void test_compatible_and_cached_metadata_are_used(bool required) {
     capture->close();
 }
 
+void test_observed_disconnect_invalidates_metadata(bool required, bool renewed_metadata) {
+    auto system = std::make_unique<ReconnectingSystem>();
+    auto* input = system.get();
+    auto config = metadata_config(required);
+    config.ndi_disconnect_timeout_ms = 3000;
+    config.ndi_receive_timeout_ms = 5;
+    auto capture = capture::detail::create_ndi_capture(config, std::move(system));
+    if (!capture || !capture->open()) { expect(false, "D21 fixture must open"); return; }
+    auto make_video = [](std::optional<std::string> metadata) {
+        ndi_test::VideoInput video;
+        video.width = 160; video.height = 160;
+        video.metadata = std::move(metadata);
+        return video;
+    };
+    const std::string old_metadata =
+        "<xen version=\"1\" source_width=\"2560\" source_height=\"1440\" "
+        "roi_x=\"100\" roi_y=\"200\" roi_width=\"160\" roi_height=\"160\"/>";
+    const std::string new_metadata =
+        "<xen version=\"1\" source_width=\"2560\" source_height=\"1440\" "
+        "roi_x=\"300\" roi_y=\"400\" roi_width=\"160\" roi_height=\"160\"/>";
+    CapturedFrame frame;
+    input->input.send_video(make_video(old_metadata));
+    expect(ndi_test::receive(*capture, frame) && frame.source_mapping_verified && frame.roi_x == 100,
+           "D21 seeds old metadata via actual frame publication");
+    ndi_test::release(frame);
+    input->input.send_video(make_video(std::nullopt));
+    expect(ndi_test::receive(*capture, frame) && frame.source_mapping_verified && frame.roi_x == 100,
+           "D21 same uninterrupted connection retains metadata cache");
+    ndi_test::release(frame);
+    auto observe = [&](int count) {
+        input->last_observed_connections = -1;
+        input->connections = count;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        while (input->last_observed_connections.load() != count &&
+               std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        expect(input->last_observed_connections.load() == count, "D21 actual polling must observe connection transition");
+    };
+    observe(0);
+    observe(1);
+    input->input.send_video(make_video(renewed_metadata ? std::optional(new_metadata) : std::nullopt));
+    const bool received = ndi_test::receive(*capture, frame);
+    if (renewed_metadata) {
+        expect(received && frame.source_mapping_verified && frame.roi_x == 300 && frame.roi_y == 400,
+               "D21 fresh metadata after recovery must be accepted");
+        ndi_test::release(frame);
+        input->input.send_video(make_video(std::nullopt));
+        expect(ndi_test::receive(*capture, frame) && frame.source_mapping_verified &&
+               frame.roi_x == 300 && frame.roi_y == 400,
+               "D21 renewed connection can cache its own verified metadata");
+    } else if (required) {
+        expect(!received && capture->status() == CaptureStatus::INVALID_CONFIG,
+               "D21 required metadata must not reuse pre-disconnect cache");
+    } else {
+        expect(received && !frame.source_mapping_verified && frame.roi_x == 1200 && frame.roi_y == 640,
+               "D21 optional metadata must use honest configuration fallback after disconnect");
+    }
+    expect(input->created.load() == 1, "D21 observed connection loss does not claim receiver recreation");
+    expect(!received || frame.timing.receiver_generation == 1,
+           "D21 receiver generation continues to describe actual instance lifetime");
+    std::cout << "D21 required=" << required << " fresh_metadata=" << renewed_metadata
+              << " received=" << received << " verified=" << (received && frame.source_mapping_verified) << '\n';
+    capture->close();
+}
+
 void test_roi320_mapping_evidence_and_slot_reuse(bool encoded_full_frame) {
     expect(!CapturedFrame{}.source_mapping_verified,
            "默认帧不能声明源坐标映射已验证");
@@ -459,6 +530,10 @@ int main() {
     test_compatible_and_cached_metadata_are_used(false);
     test_compatible_and_cached_metadata_are_used(true);
     test_required_missing_metadata_is_rejected();
+    for (const bool required : {false, true}) {
+        test_observed_disconnect_invalidates_metadata(required, false);
+        test_observed_disconnect_invalidates_metadata(required, true);
+    }
     test_roi320_mapping_evidence_and_slot_reuse(false);
     test_roi320_mapping_evidence_and_slot_reuse(true);
     if (failures != 0) {

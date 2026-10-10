@@ -693,6 +693,10 @@ private:
         const int previous =
             session_state_.snapshot().receiver_active_connections;
         const int current = system_->recv_connections(receiver_);
+        if (previous > 0 && current <= 0) {
+            // Receiver可由SDK原位重连；已观测断线后不再继承旧源坐标。
+            last_metadata_.reset();
+        }
         if (!session_state_.record_active_connections(current)) return;
         if (previous <= 0 && current > 0) {
             LOG_INFO("capture", "NDI 活动连接已建立: source={}",
