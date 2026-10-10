@@ -13,7 +13,7 @@ public:
     // window_ms仅保留旧调用兼容；普通Aim不再使用滚动累计额度。
     void reset(double limit, int window_ms, std::chrono::steady_clock::time_point now);
     bool permits(const MouseMoveCommand& command, std::chrono::steady_clock::time_point now);
-    // 外部运动必须提供真实控制规划时刻；缺失不能猜为后端完成时刻。
+    // 外部运动必须提供真实输出提交时刻C，而非曲线计划P；缺失不能猜为后端完成B。
     bool record(const MouseMoveCommand& command, const MouseMoveReceipt& receipt, bool external,
                 std::chrono::steady_clock::time_point issued_at = {});
     bool healthy() const { std::lock_guard lock(mutex_); return !fault_; }

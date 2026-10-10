@@ -19,7 +19,10 @@ auto milliseconds(double value) {
     return std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double,std::milli>(value));
 }
 struct Event { Clock::time_point control, completed, effect; int dx, dy; };
-struct Summary { int samples=0, inventory_errors=0; double preview_error=0, median_error=0; };
+struct Summary {
+    int samples=0, inventory_errors=0, transition_samples=0, transition_errors=0;
+    double preview_error=0, median_error=0;
+};
 
 // O是取像，L是交付，C是Aim控制，B是后端完成，E是独立plant实际应用。
 // 每帧间隔18ms且C=O+14ms，确保下一C严格晚于上一B（最大K15ms）。
@@ -84,6 +87,27 @@ Summary replay(double backend_ms, bool total_delay, bool prediction, bool step, 
             "延迟实验必须消费真实同源背景");
         const double expected_preview=500/plant_pixels_per_count*
             std::chrono::duration<double>(effect-observation).count();
+        if (step && n >= 100 && n <= 105) {
+            // 固定D30而阶跃前实际C到E20：仍在窗口内的旧命令存在已知配置失配。
+            // 明确验证过渡段，不能只用末段稳态掩盖两帧多计，也不声称自动适配K。
+            double configured_unseen = 0;
+            for (const auto& event : events)
+                if (event.completed <= control && event.control + milliseconds(config.control_delay_ms) > observation)
+                    configured_unseen += event.dx;
+            expect(result.control.residual_role_x, "阶跃过渡段必须实际消费执行误差角色");
+            expect(std::abs(result.control.execution_unseen_command_x_counts-configured_unseen)<.001,
+                   "阶跃过渡也必须遵循已配置C+D，不能回到B+D");
+            expect(std::abs(result.control.execution_world_preview_x_counts-expected_preview)<.15,
+                   "阶跃后的新预览每帧均覆盖当前真实时域");
+            const double excess = configured_unseen-unseen;
+            expect(n < 102 ? excess > 0 : std::abs(excess)<.001,
+                   "固定D的旧段失配只在前两帧过渡保留，之后物理库存一致");
+            ++summary.transition_samples;
+            if(std::abs(result.control.execution_unseen_command_x_counts-unseen)>.001) ++summary.transition_errors;
+            std::cout << "transition external=" << external << " prediction=" << prediction << " frame=" << n
+                      << " physical_unseen=" << unseen << " configured_unseen=" << configured_unseen
+                      << " aim_unseen=" << result.control.execution_unseen_command_x_counts << '\n';
+        }
         if(n>=140) {
             expect(result.control.residual_role_x,"统计窗口必须实际进入执行误差角色");
             ++summary.samples;
@@ -112,6 +136,8 @@ Summary replay(double backend_ms, bool total_delay, bool prediction, bool step, 
         previous=frame; previous_camera=camera;
     }
     expect(summary.samples==80,"独立oracle统计必须非空");
+    if (step) expect(summary.transition_samples==6 && summary.transition_errors==2,
+                     "阶跃验收须明确六个过渡帧中的两个物理配置失配，不能只看稳态");
     summary.preview_error/=summary.samples;
     std::sort(errors.begin(),errors.end()); summary.median_error=errors[errors.size()/2];
     std::cout<<"K="<<backend_ms<<" D="<<config.control_delay_ms<<" prediction="<<prediction<<" step="<<step<<" external="<<external
@@ -133,11 +159,16 @@ int main(int argc,char**argv) {
         expect(total.inventory_errors==0,"C到E的同一配置必须正确扣除已经进入观测的命令");
     }
     const auto stepped=replay(15,true,false,true,csv.is_open()?&csv:nullptr);
-    expect(stepped.preview_error<.15 && stepped.inventory_errors==0,"后端耗时阶跃后同一时间合同仍须成立");
+    expect(stepped.preview_error<.15 && stepped.inventory_errors==0,"后端耗时阶跃后的匹配配置稳态仍须成立");
     for(bool prediction:{false,true}) for(double backend:{5.,15.}) {
         const auto outside=replay(backend,true,prediction,false,nullptr,true);
         expect(outside.preview_error<.15 && outside.inventory_errors==0,
             "真实共享账本的外部命令也必须使用同一控制起点，不能仅修正自身命令");
+    }
+    for(bool prediction:{false,true}) {
+        const auto outside_step=replay(15,true,prediction,true,nullptr,true);
+        expect(outside_step.preview_error<.15 && outside_step.inventory_errors==0,
+               "外部账本阶跃须同时验证过渡段和匹配配置稳态");
     }
     Log::shutdown();
     return failures ? 1:0;

@@ -3,9 +3,12 @@
 #include "recoil/recoil_worker.h"
 #include "weapon/weapon_catalog.h"
 #include <atomic>
+#include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <stdexcept>
 #include <thread>
+#include <vector>
 
 namespace {
 using namespace std::chrono_literals;
@@ -21,6 +24,7 @@ template<class F> void wait_for(F condition, const char* message) {
 class FakeMouse final : public IMouseController {
 public:
     std::atomic<bool> held{false};
+    std::atomic<bool> block_move{false}, entered{false}, release_move{false};
     std::atomic<unsigned> calls{0};
     bool open() noexcept override { return true; }
     void close() noexcept override {}
@@ -32,6 +36,8 @@ public:
     }
     MouseMoveReceipt move(const MouseMoveCommand&) noexcept override {
         ++calls;
+        entered = true;
+        while (block_move && !release_move) std::this_thread::sleep_for(1ms);
         MouseMoveReceipt receipt; receipt.succeeded = true;
         receipt.backend_completed_at = RecoilClock::now(); return receipt;
     }
@@ -114,10 +120,129 @@ void test_live_worker_handoff() {
     check(mouse->calls > 5, "同一个假后端确有Aim和Recoil两类输出");
     worker.stop();
 }
+
+void test_late_worker_issue_time(std::chrono::milliseconds backend_hold) {
+    auto profile = std::make_shared<RecoilProfile>();
+    std::string error;
+    check(load_recoil_profile(R"({"schema_version":3,"id":"late_synthetic","revision":1,
+        "weapon_id":"ak47","sensitivity":1.4,"verified":true,"sample_semantics":"discrete_delta",
+        "events":[[16,6,0]]})", *profile, error), "迟到曲线经真实Loader验证");
+    auto mouse = std::make_shared<FakeMouse>();
+    auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+    auto ledger = std::make_shared<MotionLedger>();
+    ledger->reset(14, 16, RecoilClock::now() - 1s);
+    RecoilWorker worker(mouse, arbiter, ledger, [profile] {
+        RecoilInput input; input.permission = input.focused = input.profile_conditions_match = true;
+        input.profile = profile; input.device_epoch = input.weapon_generation = input.weapon_trust_generation = 1;
+        return input;
+    }, [] { return TriggerFiringSignal{}; });
+    // 异常路径先解开内存假后端，避免Worker析构被夹具自身卡住。
+    struct Release { std::shared_ptr<FakeMouse> mouse; ~Release() { mouse->release_move = true; } } release{mouse};
+    RecoilConfig recoil; recoil.enabled = recoil.mixed_aim = true;
+    check(worker.start(recoil), "迟到假设备Worker启动");
+    wait_for([&] { return worker.snapshot().phase == RecoilPhase::READY; }, "迟到场景建立健康释放");
+    auto owner = arbiter->enter_aim_until(RecoilClock::now() + 1s);
+    check(owner.owns_lock(), "占有真实仲裁器，延后合法离散事件的实际提交");
+    mouse->block_move = mouse->held = true;
+    wait_for([&] { return arbiter->snapshot().sources[2].lock_busy > 0; }, "Worker确实遇到仲裁阻塞");
+    const auto not_before = RecoilClock::now() + 150ms;
+    wait_for([&] { return RecoilClock::now() >= not_before; }, "产生大于配置延迟的真实事件迟到");
+    const auto before = ledger->snapshot(RecoilClock::now());
+    check(mouse->calls == 0 && before.complete && before.events.empty(), "发送前计划事件不能冒充已执行账本");
+    owner.unlock();
+    wait_for([&] { return mouse->entered.load(); }, "真实Worker进入假后端");
+    const auto in_flight = ledger->snapshot(RecoilClock::now());
+    check(in_flight.complete && in_flight.events.empty(), "后端未完成时不能发布外部执行事实");
+    const auto complete_after = RecoilClock::now() + backend_hold;
+    wait_for([&] { return RecoilClock::now() >= complete_after; }, "实际后端延迟达到本场景下限");
+    mouse->release_move = true;
+    wait_for([&] { return worker.execution_log().records.size() == 1; }, "真实Worker记录执行和ACK");
+    worker.stop();
+    const auto record = worker.execution_log().records.front();
+    const auto control = record.backend_called_at;
+    const auto completed = record.receipt.completed_at;
+    const auto backend_ms = std::chrono::duration<double,std::milli>(completed-control).count();
+    const int delay_ms = static_cast<int>(std::ceil(backend_ms)) + 15;
+    const auto effect = control + std::chrono::milliseconds(delay_ms);
+    std::cout << "late actual K=" << backend_ms << " D=" << delay_ms << " C-P="
+              << std::chrono::duration<double,std::milli>(control-record.intent.planned_at).count() << '\n';
+    const auto after = ledger->snapshot(std::max(RecoilClock::now(), effect + 1ms));
+    check(record.backend_called && record.receipt.status == RecoilReceiptStatus::ACKNOWLEDGED &&
+          record.intent.dx_counts == 6 && record.intent.dy_counts == 0 &&
+          after.complete && after.events.size() == 1 && mouse->calls == 1,
+          "真实Worker恰好执行一次并发布健康账本，不通过丢失事件获得零库存");
+    check(record.intent.planned_at == record.firing_started_at + 16ms && control - record.intent.planned_at >= 60ms,
+          "曲线计划P必须保留16ms绝对偏移，同时实际提交C确实迟到");
+    check(completed >= control + backend_hold && delay_ms <= 100 && control-record.intent.planned_at > 100ms,
+          "使用实测后端区间校准D=ceil(K)+15，且迟到大于允许的D上界；调度超预算不可当通过");
+
+    AimConfig config; config.min_confirmed_hits = 1; config.control_delay_ms = static_cast<float>(delay_ms);
+    config.max_delay_compensation_ms = 100; config.enable_prediction = false;
+    config.enable_delay_compensation = true; config.acquisition_range_percent = 100;
+    config.counts_per_pixel_x = config.counts_per_pixel_y = .5f;
+    config.soft_zone_radius_percent = 0;
+    Aim aim(config);
+    AimFrame previous;
+    std::uint64_t identity = 0;
+    float previous_camera = 0;
+    unsigned mismatches = 0, pending_samples = 0, effected_samples = 0;
+    const auto origin = before.covered_until - 160ms;
+    auto frame_at = [&](RecoilTime observed, RecoilTime aim_control, const ExternalMotionWindow& window, bool verify) {
+        const float camera = observed >= effect ? 12.0f : 0.0f; // 独立plant：6count / 0.5count每source像素。
+        const float world = 180 + 100 * std::chrono::duration<float>(observed - origin).count();
+        const float center = world - camera;
+        AimFrame frame; frame.sequence = previous.sequence + 1; frame.observation_epoch = 1;
+        frame.captured_at = observed; frame.control_at = aim_control;
+        frame.roi_width = frame.roi_height = 320; frame.control_center_x = frame.control_center_y = 160;
+        frame.lock_active = true; frame.external_motion = window;
+        frame.detections = {{center-40,141.1f,center+40,195.1f,.95f,0}};
+        if (previous.sequence) frame.background_motion_x = {AimBackgroundMotionStatus::VALID,
+            previous.sequence,frame.sequence,previous.captured_at,observed,1,-(camera-previous_camera),1,0,2};
+        const auto result = aim.process(frame);
+        if (!identity && result.has_target) identity = result.target.track_id;
+        check(result.status == AimStatus::SUCCESS && result.has_target && identity != 0 &&
+              result.target.track_id == identity && result.target.state == TrackState::CONFIRMED &&
+              result.target.matched_observation_valid && !result.target.predicted, "迟到链逐帧保持同一实测目标");
+        if (previous.sequence) check(result.control.background_motion_use_x == AimBackgroundMotionUse::CONSUMED,
+                                     "迟到链逐帧消费真实同源背景");
+        if (!verify && previous.sequence > 20)
+            check(result.control.residual_role_x && std::abs(result.control.execution_unseen_command_x_counts) < .001,
+                  "发送前的真实账本在Aim中必须是零未见库存");
+        if (verify) {
+            check(result.control.residual_role_x, "迟到库存必须由真实Aim执行误差角色消费");
+            const double expected = observed < effect ? 6 : 0;
+            if (expected) ++pending_samples; else ++effected_samples;
+            if (std::abs(result.control.execution_unseen_command_x_counts - expected) > .001) ++mismatches;
+            std::cout << "late Kmin=" << backend_hold.count() << " O-C="
+                      << std::chrono::duration<double,std::milli>(observed-control).count()
+                      << " true_unseen=" << expected << " aim_unseen="
+                      << result.control.execution_unseen_command_x_counts << '\n';
+        }
+        check(aim.record_backend_completed_command(frame.sequence, aim_control, 0, 0), "Aim自身以真实零回执隔离外部库存");
+        previous = frame; previous_camera = camera;
+    };
+    for (int n = 0; n < 40; ++n) frame_at(origin + n*4ms, origin + n*4ms + 1ms, before, false);
+    // 使用完成后的不可变真实账本做确定性源时间回放，覆盖C+D之前、恰好到达和之后。
+    std::vector<int> offsets;
+    for (int offset = 0; offset < delay_ms; offset += 4) offsets.push_back(offset);
+    offsets.insert(offsets.end(), {delay_ms-1, delay_ms, delay_ms+1, delay_ms+4});
+    std::sort(offsets.begin(), offsets.end());
+    offsets.erase(std::unique(offsets.begin(), offsets.end()), offsets.end());
+    for (int offset : offsets) {
+        const auto observed = control + std::chrono::milliseconds(offset);
+        const auto aim_control = completed + 1ms + std::chrono::milliseconds(offset);
+        frame_at(observed, aim_control, ledger->snapshot(aim_control), true);
+    }
+    check(pending_samples == offsets.size()-3 && pending_samples > 1 && effected_samples == 3,
+          "必须检查非空预计效果前后与边界样本");
+    check(mismatches == 0, "迟到但刚执行的Recoil命令必须保留到实际C+D，不能按曲线P提前出库");
+    check(after.events.front().issued_at == control, "Worker外部账本使用实际提交C并保留独立计划P");
+}
 }
 int main() {
     LogConfig config; config.enable_console = config.enable_file = config.enable_ringbuf = false;
     Log::init(config);
-    try { test_live_worker_handoff(); Log::shutdown(); std::cout << "aim_recoil_integration_tests passed\n"; }
+    try { test_live_worker_handoff(); test_late_worker_issue_time(5ms); test_late_worker_issue_time(15ms);
+        Log::shutdown(); std::cout << "aim_recoil_integration_tests passed\n"; }
     catch (const std::exception& error) { Log::shutdown(); std::cerr << error.what() << '\n'; return 1; }
 }

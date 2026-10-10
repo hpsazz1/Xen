@@ -11,7 +11,7 @@ struct ExternalMotionEvent {
     std::uint64_t id = 0;
     std::chrono::steady_clock::time_point completed_at{};
     int dx_counts = 0, dy_counts = 0;
-    // 控制规划时刻C；完成B仅是回执事实。Aim用C+D预计作用，不能用B再加D。
+    // 真实输出提交时刻C（非曲线计划P）；完成B仅是回执事实。Aim用C+D预计作用。
     std::chrono::steady_clock::time_point issued_at{};
 };
 struct ExternalMotionWindow {

@@ -271,7 +271,9 @@ public:
                             if(output.backend_completed_at==RecoilTime{} || output.backend_completed_at<backend_called_at ||
                                 output.backend_completed_at>returned_at) output.succeeded=false;
                             // 未知不能视作零后重试；同owner后续输出也失去可信账本。
-                            const bool recorded=ledger->record(command, output, true, intent.planned_at);
+                            // planned_at是离散曲线的计划P，可因仲裁/ACK等待迟到；
+                            // 库存预计作用必须从本次真实后端提交C计时，不能回溯到P。
+                            const bool recorded=ledger->record(command, output, true, backend_called_at);
                             receipt.status = output.succeeded&&recorded ? RecoilReceiptStatus::ACKNOWLEDGED : RecoilReceiptStatus::UNKNOWN;
                             receipt.completed_at = output.backend_completed_at;
                             if (receipt.status==RecoilReceiptStatus::UNKNOWN) arbiter->latch_output_fault();
