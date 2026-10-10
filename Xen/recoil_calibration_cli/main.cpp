@@ -1,6 +1,7 @@
 #include "recoil/recoil_calibration_io.h"
 #include "recoil/recoil_worker.h"
 #include "recoil/recoil_archive.h"
+#include "recoil/recoil_source_context_internal.h"
 #include <windows.h>
 #include <atomic>
 #include <cstdlib>
@@ -22,6 +23,7 @@ struct Resources {
     std::shared_ptr<IMouseController> mouse;
     source_context::SourceContextClient source;
     weapon::GsiReceiver gsi;
+    recoil_detail::CalibrationSourceContext source_guard;
     std::shared_ptr<RecoilWorker> worker;
     RecoilBatchArchive archive;
     void stop() noexcept {
@@ -58,8 +60,7 @@ int run(RecoilCalibrationPrepared prepared) {
         recoil.input_path=prepared.manifest.environment.input_path;recoil.sensitivity=prepared.manifest.environment.sensitivity;
         recoil.budget_window_ms=permit->limits().rolling_window_ms;
         resources.worker=std::make_shared<RecoilWorker>(resources.mouse,arbiter,ledger,
-            [&resources,permit,previous_weapon=std::string{},previous_epoch=std::uint64_t{},generation=std::uint64_t{1},
-                focus_session=std::uint64_t{}]() mutable {
+            [&resources,permit,previous_weapon=std::string{},previous_epoch=std::uint64_t{},generation=std::uint64_t{1}]() mutable {
                 RecoilInput input;
                 const auto weapon=resources.gsi.snapshot();const auto focus=resources.source.snapshot();
                 if(weapon.canonical_id!=previous_weapon || weapon.source_epoch!=previous_epoch) {
@@ -70,8 +71,7 @@ int run(RecoilCalibrationPrepared prepared) {
                 input.profile_conditions_match=weapon.valid&&weapon.identity_match&&weapon.state==weapon::WeaponState::ACTIVE&&
                     weapon.canonical_id==permit->manifest().environment.weapon_id&&weapon.ammo_clip&&*weapon.ammo_clip>0&&
                     weapon.valid_until>RecoilClock::now();
-                input.focused=focus.available&&focus.focused&&focus.session_id==focus_session;
-                focus_session=focus.available&&focus.focused?focus.session_id:0;
+                resources.source_guard.apply(input,focus,weapon.source_epoch);
                 input.permission=!canceled.load();return input;
             },[]{return TriggerFiringSignal{};});
         RecoilArchiveConfig archive;

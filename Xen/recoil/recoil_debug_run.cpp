@@ -2,6 +2,7 @@
 #include "recoil/recoil_calibration.h"
 #include "recoil/recoil_worker.h"
 #include "recoil/recoil_archive.h"
+#include "recoil/recoil_source_context_internal.h"
 #include "recoil_tuner/wall_capture_run.h"
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
@@ -134,16 +135,13 @@ Json run_recoil_debug(const Json& plan,const AppConfig& config,const std::shared
         return {{"success",false},{"cleanup_known",true},{"message","源焦点接收器启动失败，未开始输出"}};
     if(!gsi.start(config.gsi))
         return {{"success",false},{"cleanup_known",true},{"message","GSI接收器启动失败，未开始输出"}};
-    std::atomic<std::uint64_t> source_session{0},weapon_epoch{0};
-    const auto valid_context=[&]{
-        const auto focus=source.snapshot();const auto weapon=gsi.snapshot();
+    const auto source_guard=std::make_shared<recoil_detail::DebugSourceContext>();
+    const auto valid_context=[&,source_guard](const source_context::SourceContextSnapshot& focus,const weapon::WeaponSnapshot& weapon){
         const bool valid=!canceled.load()&&focus.available&&focus.focused&&weapon.valid&&weapon.identity_match&&
             weapon.state==weapon::WeaponState::ACTIVE&&weapon.canonical_id==weapon_id&&weapon.ammo_clip&&
             *weapon.ammo_clip>=0&&weapon.valid_until>RecoilClock::now();
         if(!valid)return false;
-        std::uint64_t unset=0;source_session.compare_exchange_strong(unset,focus.session_id);
-        unset=0;weapon_epoch.compare_exchange_strong(unset,weapon.source_epoch);
-        return source_session.load()==focus.session_id&&weapon_epoch.load()==weapon.source_epoch;
+        return source_guard->permits(focus,weapon.source_epoch);
     };
     recoil_tuner::WallRunRequest request;
     request.mode=testing?recoil_tuner::WallRunMode::TEST:calibrating?recoil_tuner::WallRunMode::CALIBRATE:recoil_tuner::WallRunMode::CAPTURE;
@@ -162,14 +160,14 @@ Json run_recoil_debug(const Json& plan,const AppConfig& config,const std::shared
         return *initial_ammo-*weapon.ammo_clip;
     };
     request.trigger_virtual_key=plan.at("hold_key");request.cancel_virtual_key=plan.at("cancel_key");
-    request.context_valid=[&]{
-        if(!valid_context())return false;
+    request.context_valid=[&,valid_context]{
+        if(!valid_context(source.snapshot(),gsi.snapshot()))return false;
         if(!worker || firing_finished)return true;
         const auto state=worker->snapshot();const auto budget=worker->calibration_snapshot();
         return !state.faulted&&archive.snapshot().available&&
             (!budget.terminal||budget.end==RecoilCalibrationEnd::COMPLETED);
     };
-    request.context_block_reason=[&]() -> std::string {
+    request.context_block_reason=[&,source_guard]() -> std::string {
         const auto focus=source.snapshot();const auto weapon=gsi.snapshot();
         if(!focus.available)return "等待源焦点状态（尚未收到有效源端状态）";
         if(!focus.focused)return "等待游戏切到源端前台";
@@ -179,8 +177,7 @@ Json run_recoil_debug(const Json& plan,const AppConfig& config,const std::shared
         if(weapon.state!=weapon::WeaponState::ACTIVE)return "等待武器切换为持用状态";
         if(!weapon.ammo_clip)return "等待GSI弹夹数据";
         if(weapon.valid_until<=RecoilClock::now())return "GSI状态已过期，等待新状态";
-        if((source_session.load()&&source_session.load()!=focus.session_id)||
-            (weapon_epoch.load()&&weapon_epoch.load()!=weapon.source_epoch))return "源焦点或GSI会话已更换，请重新准备";
+        if(source_guard->changed(focus,weapon.source_epoch))return "源焦点或GSI可信状态已中断，请重新准备";
         if(worker){
             if(worker->snapshot().faulted)return "压枪命令执行故障，已停止本组";
             if(!archive.snapshot().available)return "压枪执行归档不可用，已停止本组";
@@ -200,11 +197,11 @@ Json run_recoil_debug(const Json& plan,const AppConfig& config,const std::shared
             recoil.game_build.clear();recoil.conditions.clear();recoil.input_path="kmbox_net";recoil.sensitivity=environment.sensitivity;
             recoil.budget_window_ms=permit->limits().rolling_window_ms;
             worker=std::make_shared<RecoilWorker>(device,std::make_shared<AutoStopOutputArbiter>(),std::make_shared<MotionLedger>(),
-                [&,previous_epoch=std::uint64_t{},generation=std::uint64_t{1}]() mutable {
-                    RecoilInput input;const auto weapon=gsi.snapshot();
+                [&,valid_context,source_guard,previous_epoch=std::uint64_t{},generation=std::uint64_t{1}]() mutable {
+                    RecoilInput input;const auto weapon=gsi.snapshot();const auto focus=source.snapshot();
                     if(weapon.source_epoch!=previous_epoch){previous_epoch=weapon.source_epoch;++generation;}
                     input.profile=profile;input.device_epoch=1;input.weapon_generation=generation;
-                    input.profile_conditions_match=valid_context();input.focused=input.profile_conditions_match;
+                    source_guard->apply(input,focus,valid_context(focus,weapon));
                     input.permission=!canceled.load();return input;
                 },[&]{std::lock_guard lock(signal_mutex);return signal;});
             RecoilArchiveConfig cfg;cfg.acquisition_run_id=permit->session_id();cfg.directory=directory/"batches";cfg.recoil=recoil;
@@ -212,7 +209,7 @@ Json run_recoil_debug(const Json& plan,const AppConfig& config,const std::shared
                 !worker->start_calibration(recoil,permit,true))return false;
             // DOWN前等待Worker实际观察到已释放状态，不能用固定sleep冒充就绪。
             const auto deadline=RecoilClock::now()+std::chrono::seconds(1);
-            while(!canceled.load()&&valid_context()&&RecoilClock::now()<deadline){
+            while(!canceled.load()&&valid_context(source.snapshot(),gsi.snapshot())&&RecoilClock::now()<deadline){
                 if(worker->snapshot().phase==RecoilPhase::READY)return true;
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }

@@ -390,8 +390,8 @@ RecoilDecision RecoilController::advance(const RecoilInput& input,RecoilTime now
     if(calibration_permit_) {
         if(!calibration_claimed_ || !calibration_permit_->matches(profile_) || now<calibration_permit_->armed_at() || now>=calibration_permit_->expires_at())
             return cancel(RecoilReason::UNCALIBRATED,now);
-        // 一次授权只允许一个弹序；不得借释放或recovery_qualified再次起压。
-        if(has_fired_&&!active_)return cancel(RecoilReason::EXHAUSTED,now);
+        // 一次授权只允许一个弹序；保留来源撤销等实际终态，不能把中止改成正常耗尽。
+        if(has_fired_&&!active_)return result();
         if(active_&&elapsed(now,started_at_)>=calibration_permit_->limits().max_firing_duration_ms)
             return cancel(RecoilReason::LIMIT,now);
     } else if(offline_phase_budget_ms_>0) {
