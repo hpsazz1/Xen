@@ -67,6 +67,23 @@ class PipelineTests(unittest.TestCase):
         pipeline.export_dataset(self.context("export", output=str(output)))
         return output
 
+    def test_export_rejects_image_replaced_after_review_precheck(self):
+        self.approve()
+        output = self.base / "replaced-export"
+        original_copy = pipeline.shutil.copyfile
+        replaced = []
+        def replace_then_copy(source, destination):
+            if not replaced:
+                Image.new("RGB", (64, 48), (99, 88, 77)).save(source)
+                replaced.append(Path(source))
+            return original_copy(source, destination)
+        with patch.object(pipeline.shutil, "copyfile", side_effect=replace_then_copy):
+            with self.assertRaises(pipeline.PipelineError):
+                pipeline.export_dataset(self.context("export", output=str(output)))
+        self.assertEqual(len(replaced), 1)
+        self.assertFalse((output / "dataset_identity.json").exists())
+        self.assertFalse((self.root / "split_registry.json").exists())
+
     def test_complete_cli_export_and_explicit_empty_labels(self):
         dataset = self.freeze()
         manifest = pipeline.validate_dataset(dataset)
@@ -441,6 +458,31 @@ class PipelineTests(unittest.TestCase):
                 pipeline.evaluate(self.context("evaluate", model=str(model_path), dataset=str(dataset), output=str(output)))
         self.assertEqual({p: p.read_bytes() for p in dataset.rglob("*") if p.is_file()}, frozen_files)
         pipeline.validate_dataset(dataset)
+
+    def test_fixed_threshold_uses_frozen_truth_after_source_label_changes(self):
+        dataset = self.freeze()
+        manifest = pipeline.read_json(dataset / "dataset.json")
+        positive = next(item for item in manifest["samples"]
+                        if item["split"] == "test" and item["state"] == "VERIFIED_POSITIVE")
+        weights = self.base / "truth.onnx"
+        weights.write_bytes(b"fixture")
+        output = self.base / "truth-evaluation"
+        class Model:
+            names = ["person"]
+            def add_callback(self, *_): pass
+            def val(self, **kwargs):
+                work_data = Path(pipeline.read_json(kwargs["data"])["path"])
+                self.frozen_label = work_data / positive["label"]
+                assert self.frozen_label.read_text()
+                (dataset / positive["label"]).write_text("")
+                return types.SimpleNamespace(results_dict={"mAP": 1.0}, summary=lambda: [])
+            def predict(self, **kwargs):
+                rows = [[3, 4, 28, 38, 0.9, 0]] if Path(kwargs["source"]).stem == Path(positive["image"]).stem else []
+                return [types.SimpleNamespace(boxes=types.SimpleNamespace(data=types.SimpleNamespace(cpu=lambda: types.SimpleNamespace(tolist=lambda: rows))))]
+        with patch.object(pipeline, "load_yolo", return_value=Model()), patch.object(pipeline, "onnx_contract", return_value={"fixture": True}):
+            pipeline.evaluate(self.context("evaluate", model=str(weights), dataset=str(dataset), output=str(output)))
+        counts = pipeline.read_json(output / "evaluation.json")["fixed_threshold_per_class"][0]
+        self.assertEqual((counts["tp"], counts["fp"], counts["fn"]), (1, 0, 0))
 
     def test_evaluation_pt_snapshot_retains_original_trust(self):
         dataset = self.freeze()

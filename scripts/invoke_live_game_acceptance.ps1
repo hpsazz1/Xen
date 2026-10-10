@@ -43,11 +43,26 @@ if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
 }
 
 function Start-DiagnosticProcess([string]$Executable, [string]$WorkingDirectory) {
-    $previous = [Environment]::GetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', 'Process')
+    $names = @('XEN_RUNTIME_DIAGNOSTICS', 'XEN_DATA_ROOT',
+        'XEN_RELEASE_ROOT', 'XEN_RUNTIME_ID', 'XEN_RELEASE_BACKENDS')
+    $previous = @{}
+    foreach ($name in $names) {
+        $previous[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+    }
     try {
+        # 冻结根是子进程的配置/模型/日志/报告根，不能只靠 WorkingDirectory。
+        [Environment]::SetEnvironmentVariable('XEN_DATA_ROOT',
+            [System.IO.Path]::GetFullPath($WorkingDirectory), 'Process')
+        foreach ($name in @('XEN_RELEASE_ROOT', 'XEN_RUNTIME_ID', 'XEN_RELEASE_BACKENDS')) {
+            [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+        }
         [Environment]::SetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', '1', 'Process')
         Start-Process -FilePath $Executable -WorkingDirectory $WorkingDirectory -PassThru -Wait
-    } finally { [Environment]::SetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', $previous, 'Process') }
+    } finally {
+        foreach ($name in $names) {
+            [Environment]::SetEnvironmentVariable($name, $previous[$name], 'Process')
+        }
+    }
 }
 
 function Get-StageDefinition {

@@ -68,6 +68,29 @@ void budgets() {
     RecoilCalibrationBudget backwards(auth);check(backwards.check_time(time(2))&&!backwards.check_time(time(1)),"时间倒退停止");
     RecoilCalibrationBudget extreme(auth);check(extreme.begin_firing(time(1))&&!extreme.reserve(INT_MIN,INT_MIN,time(2)),"INT_MIN绝对值不能溢出绕过预算");
 }
+void rolling_budgets() {
+    auto p=profile();auto m=manifest(*p);m.limits.max_sent_l1_counts=100;
+    m.limits.rolling_window_counts=8;m.limits.rolling_window_ms=16;
+    std::string error;auto auth=authorize_recoil_calibration(m,p,time(0),error);
+    check(bool(auth),error.c_str());
+    RecoilCalibrationBudget full(auth);
+    check(full.begin_firing(time(1))&&full.reserve(4,-4,time(2)),"window exact limit accepted");
+    check(!full.reserve(-1,1,time(3)),"opposite counts must not cancel rolling L1 usage");
+    check(full.snapshot().end==RecoilCalibrationEnd::COUNT_LIMIT&&full.snapshot().sent_l1_counts==8,
+        "window overflow terminates without charging rejected command");
+    RecoilCalibrationBudget expires(auth);
+    check(expires.begin_firing(time(1))&&expires.reserve(4,4,time(2)),"reserve initial window");
+    check(expires.reserve(-4,-4,time(18)),"window expires at exact boundary");
+    check(expires.snapshot().sent_l1_counts==16,"expiry must preserve total usage");
+    RecoilCalibrationBudget before(auth);
+    check(before.begin_firing(time(1))&&before.reserve(4,4,time(2)),"reserve before expiry");
+    check(!before.reserve(1,0,time(17)),"window remains charged before boundary");
+    RecoilCalibrationBudget unknown(auth);
+    check(unknown.begin_firing(time(1))&&unknown.reserve(3,-3,time(2)),"reserve before unknown");
+    unknown.finish(RecoilCalibrationEnd::UNKNOWN_RECEIPT);
+    check(unknown.snapshot().sent_l1_counts==6&&!unknown.reserve(1,0,time(18)),
+        "unknown receipt never refunds or reopens expired window");
+}
 void controllers() {
     auto p=profile();RecoilInput input;input.profile=p;input.enabled=input.healthy=input.focused=input.permission=input.profile_conditions_match=true;
     input.device_epoch=input.weapon_generation=1;
@@ -159,7 +182,7 @@ void files(const std::filesystem::path& root) {
 }
 int main() {
     const auto root=std::filesystem::temp_directory_path()/("xen-calibration-test-"+std::to_string(RecoilClock::now().time_since_epoch().count()));
-    try {std::filesystem::create_directory(root);contracts();budgets();controllers();discrete_permit_preserves_events_and_limits();files(root);std::filesystem::remove_all(root);
+    try {std::filesystem::create_directory(root);contracts();budgets();rolling_budgets();controllers();discrete_permit_preserves_events_and_limits();files(root);std::filesystem::remove_all(root);
         std::cout<<"recoil_calibration_tests passed\n";return 0;}
     catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
 }

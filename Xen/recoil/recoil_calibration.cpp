@@ -127,5 +127,19 @@ bool RecoilCalibrationBudget::reserve(int dx,int dy,RecoilTime now) noexcept {
     if(count > static_cast<std::uint64_t>(limits.max_command_l1_counts) || count>limits.max_sent_l1_counts-state_.sent_l1_counts) {
         finish(RecoilCalibrationEnd::COUNT_LIMIT);return false;
     }
+    // 校准窗口独立累计预留的 L1 counts；反向不抵消，回执失败不退款。
+    const auto window=std::chrono::milliseconds(limits.rolling_window_ms);
+    while(!window_reservations_.empty() && now-window_reservations_.front().first>=window) {
+        window_l1_counts_-=window_reservations_.front().second;
+        window_reservations_.pop_front();
+    }
+    if(static_cast<double>(window_l1_counts_+count)>limits.rolling_window_counts) {
+        finish(RecoilCalibrationEnd::COUNT_LIMIT);return false;
+    }
+    if(count) {
+        try {window_reservations_.emplace_back(now,count);}
+        catch(...) {finish(RecoilCalibrationEnd::CONTEXT);return false;}
+        window_l1_counts_+=count;
+    }
     state_.sent_l1_counts+=count;return true;
 }

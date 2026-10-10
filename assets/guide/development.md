@@ -392,3 +392,13 @@ cmake --build $buildDirectory --config Release --target model_workspace_ui_previ
 Keyboard 监听器和生产界面，不在面板或捕获分支另写一套占用判断。
 
 技术栈：C++20、CMake、ONNX Runtime、OpenCV、spdlog、SimpleIni、Dear ImGui、nlohmann/json。
+
+### 冻结验收的数据根
+
+直接运行 Worker 时，配置、模型、日志与报告默认使用 `Xen.exe` 所在目录。
+需要冻结一次验收时，设置进程环境变量 `XEN_DATA_ROOT` 为已经存在的绝对目录；
+应用解析该目录后统一从其中读取 `config.ini` 和 `models/`，并写入日志、缓存与报告。
+相对路径、缺失目录或与 `XEN_RELEASE_ROOT`、`XEN_RUNTIME_ID`、`XEN_RELEASE_BACKENDS`
+同时设置会拒绝启动，避免混用直接启动和 Launcher 发布契约。
+`invoke_live_game_acceptance.ps1` 的 Launch 自动传入冻结 Run 根，并在进程结束或启动失败后恢复调用方环境；
+观察阶段禁用输出的冻结配置因此与采集报告使用同一数据根。单独指定工作目录不能替代此契约。

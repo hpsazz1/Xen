@@ -1247,6 +1247,9 @@ struct Runtime::Impl {
     }
 
     void release_modules() noexcept {
+        // 生产线程已回收或尚未启动；先排空并关闭携带旧模型身份的采集会话。
+        // 初始化失败、启动期故障与直接重启必须与显式 stop 同样收尾。
+        if (data_collector) data_collector->stop();
         movement_start_failed = false;
         if (auto worker = movement_worker.exchange(std::shared_ptr<movement::Worker>{})) {
             worker->stop();
@@ -1449,7 +1452,6 @@ void Runtime::stop() noexcept {
     const std::uint64_t final_runtime_overwritten_frames =
         impl_->frame_queue.overwritten_frames();
     impl_->detector_reload_running.store(false, std::memory_order_release);
-    if (impl_->data_collector) impl_->data_collector->stop();
     impl_->release_modules();
     // Pipeline 已退出后清除旧预览，但保留三槽大缓冲和用户的启用选择。
     // 下次启动会从新会话首帧重新发布，不把停止前图像误当成实时画面。

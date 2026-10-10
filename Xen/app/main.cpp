@@ -84,10 +84,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             MB_OK | MB_ICONERROR);
         return 1;
     }
-    const std::string config_path = release_environment.managed
-        ? app::detail::path_to_utf8(
-              release_environment.root / L"config.ini")
-        : "config.ini";
+    const std::string config_path = app::detail::path_to_utf8(
+        release_environment.root / L"config.ini");
     AppConfig config;
     std::string app_message;
     std::string config_error;
@@ -115,11 +113,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     std::filesystem::path model_directory;
     OverlayModelCatalog model_catalog;
     std::string model_error;
-    const bool model_directory_ready = release_environment.managed
-        ? app::detail::prepare_model_directory_at_root(
-              release_environment.root, model_directory, model_error)
-        : app::detail::prepare_program_model_directory(
-              model_directory, model_error);
+    const bool model_directory_ready = app::detail::prepare_model_directory_at_root(
+        release_environment.root, model_directory, model_error);
     if (model_directory_ready) {
         model_catalog.directory =
             app::detail::path_to_utf8(model_directory);

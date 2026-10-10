@@ -103,6 +103,8 @@ bool load_release_environment(ReleaseEnvironment& environment,
         environment = {};
         environment.available_backends.assign(
             kAllBackends.begin(), kAllBackends.end());
+        std::wstring data_root;
+        const bool has_data_root = read_environment(L"XEN_DATA_ROOT", data_root);
         std::wstring root;
         std::wstring runtime;
         std::wstring backends;
@@ -110,6 +112,28 @@ bool load_release_environment(ReleaseEnvironment& environment,
         const bool has_runtime = read_environment(L"XEN_RUNTIME_ID", runtime);
         const bool has_backends = read_environment(
             L"XEN_RELEASE_BACKENDS", backends);
+        if (has_data_root) {
+            const std::filesystem::path requested_root(data_root);
+            std::error_code filesystem_error;
+            if (!requested_root.is_absolute()) {
+                error = "显式数据根必须是绝对路径";
+                return false;
+            }
+            environment.root = std::filesystem::canonical(
+                requested_root, filesystem_error);
+            if (filesystem_error || !std::filesystem::is_directory(
+                    environment.root, filesystem_error)) {
+                error = "显式数据根不存在或不可访问";
+                return false;
+            }
+            // 数据根覆盖只用于直接启动；不能静默改写 Launcher 的发布契约。
+            if (has_root || has_runtime || has_backends) {
+                error = "显式数据根不能与发布环境同时指定";
+                return false;
+            }
+            error.clear();
+            return true;
+        }
         if (!has_root && !has_runtime && !has_backends) {
             std::array<wchar_t, 32768> executable{};
             const auto length = GetModuleFileNameW(nullptr, executable.data(),

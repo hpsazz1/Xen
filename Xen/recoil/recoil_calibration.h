@@ -2,6 +2,8 @@
 #define RECOIL_CALIBRATION_H
 #include "recoil/recoil.h"
 #include <atomic>
+#include <deque>
+#include <utility>
 
 struct RecoilCalibrationEnvironment {
     std::string weapon_id, game_build, input_path, conditions;
@@ -74,5 +76,7 @@ private:
     std::shared_ptr<const RecoilCalibrationPermit> permit_;
     RecoilCalibrationBudgetSnapshot state_;
     RecoilTime fired_at_{}, last_now_{};
+    std::deque<std::pair<RecoilTime, std::uint64_t>> window_reservations_;
+    std::uint64_t window_l1_counts_ = 0;
 };
 #endif

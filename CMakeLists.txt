@@ -1714,6 +1714,8 @@ if(BUILD_TESTING)
     add_test(NAME hud_stop_worker_tests COMMAND auto_stop_worker_tests --hud-reference)
     add_test(NAME hud_weapon_stop_integration_tests COMMAND weapon_stop_integration_tests --hud-reference)
     add_test(NAME hud_aim_random_integration_tests COMMAND weapon_stop_integration_tests --aim-random)
+    add_test(NAME live_game_data_root_tests COMMAND "${XEN_PYTHON_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/tests/live_game_data_root_tests.py")
     add_test(NAME hud_stop_acceptance_tests COMMAND "${XEN_PYTHON_EXECUTABLE}"
         "${PROJECT_SOURCE_DIR}/tests/hud_stop_acceptance_tests.py")
     add_test(NAME reference_compare_cli_tests COMMAND "${XEN_PYTHON_EXECUTABLE}"

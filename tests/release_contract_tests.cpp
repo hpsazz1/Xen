@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 
 namespace {
@@ -101,6 +102,50 @@ void test_unmanaged_data_root_is_independent_of_caller_directory() {
            "配置、日志及相对输出必须与模型/工作区使用同一程序根: " + error);
 }
 
+
+void test_explicit_frozen_data_root() {
+    TemporaryDirectory frozen;
+    TemporaryDirectory caller;
+    const auto original = std::filesystem::current_path();
+    struct Restore {
+        std::filesystem::path path;
+        ~Restore() {
+            SetEnvironmentVariableW(L"XEN_DATA_ROOT", nullptr);
+            SetEnvironmentVariableW(L"XEN_RELEASE_ROOT", nullptr);
+            SetCurrentDirectoryW(path.c_str());
+        }
+    } restore{original};
+    write_file(frozen.path() / "config.ini", "[mouse]\nallow_send_input=false\n");
+    SetCurrentDirectoryW(caller.path().c_str());
+    SetEnvironmentVariableW(L"XEN_DATA_ROOT", frozen.path().c_str());
+    app::detail::ReleaseEnvironment environment;
+    std::string error;
+    expect(app::detail::load_release_environment(environment, error) &&
+               !environment.managed &&
+               environment.root == std::filesystem::canonical(frozen.path()),
+           "explicit frozen root must override executable and caller roots: " + error);
+    expect(app::detail::apply_release_working_directory(environment, error) &&
+               std::filesystem::exists("config.ini") &&
+               std::filesystem::current_path() == std::filesystem::canonical(frozen.path()),
+           "frozen config and reports must share actual resolved root: " + error);
+    std::ifstream config("config.ini");
+    const std::string contents((std::istreambuf_iterator<char>(config)),
+                               std::istreambuf_iterator<char>());
+    expect(contents == "[mouse]\nallow_send_input=false\n",
+           "actual config read must retain observation-only output setting");
+    config.close();
+    SetEnvironmentVariableW(L"XEN_RELEASE_ROOT", frozen.path().c_str());
+    expect(!app::detail::load_release_environment(environment, error),
+           "explicit data root cannot silently override inherited managed context");
+    SetEnvironmentVariableW(L"XEN_RELEASE_ROOT", nullptr);
+    SetEnvironmentVariableW(L"XEN_DATA_ROOT", L"relative-root");
+    expect(!app::detail::load_release_environment(environment, error),
+           "relative explicit root must fail closed");
+    SetEnvironmentVariableW(L"XEN_DATA_ROOT", (frozen.path() / "missing").c_str());
+    expect(!app::detail::load_release_environment(environment, error),
+           "missing explicit root must fail closed");
+}
+
 void test_manifest_validation() {
     TemporaryDirectory temporary;
     const auto root = temporary.path();
@@ -191,6 +236,7 @@ int main(int argc, char** argv) {
     test_backend_ownership();
     test_release_environment();
     test_unmanaged_data_root_is_independent_of_caller_directory();
+    test_explicit_frozen_data_root();
     test_manifest_validation();
     if (failures != 0) {
         std::cerr << "发布契约测试失败数: " << failures << '\n';

@@ -628,8 +628,11 @@ def export_dataset(ctx):
         (output / image).parent.mkdir(parents=True, exist_ok=True)
         (output / label).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(sample["_path"], output / image)
+        image_digest = sha256(output / image)
+        if image_digest != sample["image_sha256"]:
+            raise PipelineError("导出期间原图已变化，复制内容与人工审核身份不匹配，请重新审核")
         (output / label).write_text(yolo_text(review["detections"], sample["width"], sample["height"]), encoding="utf-8")
-        records.append(dict(session_id=entry["key"][0], sample_id=entry["key"][1], split=split, image=image, label=label, image_sha256=sha256(output / image), label_sha256=sha256(output / label), width=sample["width"], height=sample["height"], state=review["state"], revision=review["revision"]))
+        records.append(dict(session_id=entry["key"][0], sample_id=entry["key"][1], split=split, image=image, label=label, image_sha256=image_digest, label_sha256=sha256(output / label), width=sample["width"], height=sample["height"], state=review["state"], revision=review["revision"]))
     # JSON 是 YAML 1.2 子集，无需依赖 YAML 库即可写标准 data.yaml。
     write_json(output / "data.yaml", dict(path=str(output), train="images/train", val="images/val", test="images/test", names=names))
     manifest = dict(schema_version=SCHEMA, created_at=now(), class_names=names, split_groups=split_groups, data_yaml_sha256=sha256(output / "data.yaml"), samples=records, counts=dict(Counter(r["split"] for r in records)), states=dict(Counter(r["state"] for r in records)), leakage_check="sha256 + RGB 16x16 MAD <= 2; session 分组", source_root=str(Path(ctx.job["root"]).resolve()))
@@ -1062,7 +1065,7 @@ def evaluate(ctx):
             ctx.check()
             predictions = model.predict(source=str(work_data / item["image"]), conf=confidence, iou=0.7, imgsz=imgsz, device=ctx.job.get("device", "cpu"), verbose=False, save=False)
             rows = predictions[0].boxes.data.cpu().tolist()
-            truth = read_labels(dataset / item["label"], item["width"], item["height"], manifest["class_names"])
+            truth = read_labels(work_data / item["label"], item["width"], item["height"], manifest["class_names"])
             unmatched = set(range(len(truth)))
             for row in sorted(rows, key=lambda row: -row[4]):
                 cls = int(row[5])

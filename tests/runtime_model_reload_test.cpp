@@ -12,6 +12,7 @@
 #include "runtime/runtime.h"
 #include "runtime/startup_internal.h"
 #include "debug/session_archive.h"
+#include "data_collection/data_collection.h"
 
 #include <algorithm>
 #include <atomic>
@@ -178,7 +179,7 @@ double percentile(std::vector<double> values, double quantile) {
 
 class StartupCapture final : public ICapture {
 public:
-    explicit StartupCapture(bool fail) : fail_(fail) {}
+    explicit StartupCapture(const std::atomic<bool>& fail) : fail_(fail) {}
     bool open() noexcept override { status_.store(CaptureStatus::READY); return true; }
     CaptureStatus grab(CapturedFrame&) noexcept override {
         std::this_thread::sleep_for(1ms);
@@ -190,12 +191,12 @@ public:
     CaptureStatus status() const noexcept override { return status_.load(); }
     std::string last_error() const override { return fail_ ? "启动异步采集故障" : ""; }
 private:
-    bool fail_;
+    const std::atomic<bool>& fail_;
     std::atomic<CaptureStatus> status_{CaptureStatus::CLOSED};
 };
 
 void check_startup_failure_and_restart(const AppConfig& config) {
-    bool fail_capture = true;
+    std::atomic<bool> fail_capture{true};
     unsigned failed_barriers = 0;
     runtime::detail::StartupAdapter adapter;
     adapter.create_capture = [&](const CaptureConfig&) {
@@ -211,13 +212,24 @@ void check_startup_failure_and_restart(const AppConfig& config) {
     };
     auto runtime = runtime::detail::make_runtime_with_startup_adapter(std::move(adapter));
     auto mouse = std::make_shared<NoOutputMouse>();
+    const auto collector_root = std::filesystem::temp_directory_path() /
+        ("xen-runtime-collector-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    auto collector = std::make_shared<data_collection::Collector>();
+    expect(runtime->set_data_collector(collector), "挂接真实采集器");
+    data_collection::Config collection;
+    collection.root_directory = collector_root;
+    collection.model_path = config.detector.model_path;
+    collection.class_names = {"person"};
     for (const bool explicit_stop : {true, false}) {
         fail_capture = true;
+        std::string collection_error;
+        expect(collector->start(collection, collection_error), "故障前启动真实采集会话");
         const bool started = runtime->start(config, mouse);
         const auto failed = runtime->snapshot();
         expect(!started && failed.state == RuntimeState::FAILED &&
                    failed.last_error == "启动异步采集故障" && failed.emergency_stopped,
                "工作线程启动期故障必须返回失败，保留 FAILED、错误和急停状态");
+        expect(!collector->snapshot().active, "启动失败必须收尾旧采集会话");
         if (explicit_stop) {
             runtime->stop();
             expect(runtime->snapshot().state == RuntimeState::STOPPED,
@@ -229,6 +241,37 @@ void check_startup_failure_and_restart(const AppConfig& config) {
                "显式停止或直接重启都必须回收失败会话并成功启动新会话");
         runtime->stop();
     }
+    // 运行期故障保留 joinable 生产线程；换模型前必须回收它们，
+    // 同时结束携带旧模型身份的采集会话。
+    fail_capture = false;
+    expect(runtime->start(config, mouse), "启动运行期故障夹具");
+    std::string collection_error;
+    expect(collector->start(collection, collection_error), "启动旧模型采集会话");
+    CapturedFrame collected_frame;
+    collected_frame.width = collected_frame.height = 2;
+    collected_frame.bgr = cv::Mat(2, 2, CV_8UC3, cv::Scalar(24, 96, 208));
+    collector->request_sample();
+    expect(wait_until([&] {
+        collector->offer(collected_frame, {}, DetectionStatus::SUCCESS, 1);
+        return collector->snapshot().saved == 1;
+    }, 5s), "旧采集会话绑定模型代次一");
+    fail_capture = true;
+    expect(wait_until([&] { return runtime->snapshot().state == RuntimeState::FAILED; }, 5s),
+           "注入运行期采集故障");
+    const auto replacement_model = collector_root / "replacement.onnx";
+    std::filesystem::copy_file(std::filesystem::u8path(config.detector.model_path), replacement_model);
+    AppConfig replacement = config;
+    replacement.detector.model_path = replacement_model.string();
+    fail_capture = false;
+    expect(runtime->start(replacement, mouse), "直接以替换模型重启");
+    expect(!collector->snapshot().active, "直接重启必须关闭旧模型采集会话");
+    collector->request_sample();
+    collector->offer(collected_frame, {}, DetectionStatus::SUCCESS, runtime->snapshot().detector_generation);
+    expect(collector->snapshot().saved == 1 && collector->snapshot().queued == 0 &&
+               !collector->snapshot().manual_pending,
+           "替换模型代次一不得混入旧模型样本");
+    runtime->stop();
+    std::filesystem::remove_all(collector_root);
     expect(failed_barriers == 2 && mouse->moves.load() == 0,
            "两种重启路径都必须确定性覆盖失败先于 RUNNING 发布，且不产生输出");
 }

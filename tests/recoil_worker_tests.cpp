@@ -80,13 +80,20 @@ struct Fixture {
     std::atomic<std::shared_ptr<TriggerWorker>> live_trigger;
     std::unique_ptr<RecoilWorker> worker;
     Fixture(bool rapid=false, bool change_generation=true, bool zero_curve=false, bool calibration=false,
-            int legacy_permission_key=0, double recovery_ms=20, bool automated_debug_firing=false, bool user_confirmed=false) {
+            int legacy_permission_key=0, double recovery_ms=20, bool automated_debug_firing=false, bool user_confirmed=false, double calibration_window_counts=14, int calibration_window_ms=16, bool discrete_calibration=false) {
         profile->id = "synthetic"; profile->weapon_id = "synthetic_weapon";
         profile->state = RecoilProfileState::CALIBRATED; profile->phase_tolerance_ms = 100; profile->recovery_ms = recovery_ms;
         profile->source.sha256 = std::string(64, 'a'); profile->source.source_unit = "synthetic";
         profile->calibration = {"synthetic", "fake", "synthetic", "synthetic:test_only", 1.0};
         profile->points = rapid?std::vector<RecoilPoint>{{0,0,0},{1,0,10}}:std::vector<RecoilPoint>{{0,0,0},{400,0,80}};
         if(zero_curve)profile->points={{0,0,0},{10,0,0}};
+        if(discrete_calibration) {
+            std::string error;
+            check(load_recoil_profile(R"({"schema_version":3,"id":"window_synthetic","revision":1,
+                "weapon_id":"synthetic_weapon","sensitivity":1,"verified":false,
+                "sample_semantics":"discrete_delta","events":[[40,0,1],[80,0,1]]})",*profile,error),
+                "discrete rolling-budget fixture must load through real parser");
+        }
         if(calibration) {
             profile->state=RecoilProfileState::SCHEMA_VALID;profile->calibration={};
             profile->phase_tolerance_ms.reset();profile->recovery_ms.reset();
@@ -123,7 +130,7 @@ struct Fixture {
             manifest.environment={profile->weapon_id,"synthetic","kmbox_net","synthetic",1.0};
             manifest.environment_fingerprint=recoil_calibration_environment_fingerprint(manifest.environment);
             manifest.hold_virtual_key=18;manifest.cancel_virtual_key=27;
-            manifest.limits={1,1000,500,100,14,16,14,100};
+            manifest.limits={1,1000,500,100,14,calibration_window_ms,calibration_window_counts,100};
             std::string error;auto permit=authorize_recoil_calibration(manifest,profile,RecoilClock::now(),error);
             check(permit!=nullptr,"fake校准permit有效");
             config.hold_virtual_key=18;config.game_build="synthetic";config.input_path="kmbox_net";
@@ -378,6 +385,17 @@ int main() {
             f.mouse->calibration_key = false; f.mouse->held = true;
             std::this_thread::sleep_for(25ms);
             check(f.mouse->moves == 0, "独立校准仍需人工保持键，不受普通压枪许可移除影响");
+        }
+        {
+            Fixture f(false,false,false,true,0,20,false,false,1,1000,true);f.ready();f.mouse->held=true;
+            check(until([&]{return f.worker->calibration_snapshot().terminal;}),"rolling overflow terminates fake worker");
+            f.worker->stop();
+            check(f.worker->calibration_snapshot().end==RecoilCalibrationEnd::COUNT_LIMIT&&f.mouse->moves==1,
+                "rolling overflow rejected before fake backend call");
+            const auto records=f.worker->execution_log().records;
+            check(records.size()==2&&!records.back().backend_called&&
+                records.back().dispatch_rejection==RecoilDispatchRejection::CALIBRATION_BUDGET,
+                "overflow records explicit calibration rejection");
         }
         {
             Fixture f(true,false,false,true);f.ready();f.mouse->held=true;
