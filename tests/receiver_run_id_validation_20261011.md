@@ -1,0 +1,11 @@
+# D02 接收运行ID验证
+
+基线0ba71372ed46e02c200469020125376cd888fb78，分支fix/receiver-run-id-20261011。
+
+真实Windows PowerShell5调用invoke_dual_machine_receiver.ps1 -Mode Prepare，PackageRoot内复制实际benchmark_network_receiver.ps1，模型仅占位文本，无二进制/DLL。冻结Get-Date显示值到同一秒，原脚本同参数两次产生同一个ID及一份配置；异参数第二次因碰撞第一份配置而拒绝。实际红灯分别记录重复目标与参数不一致，严格Provider负例原本就通过。
+
+每次运行追加完整GUID身份，保留capture/provider/scenario/日期前缀。相同/变化参数两组各两次Prepare均成功，两份配置、两个ready目标和两个ID；每份配置allow_send_input=false，ready文件均未创建。包不允许的cuda在生成运行目录前拒绝。命名身份不替代独立文件所有权和既有目标拒绝覆盖。
+
+四项CTest（receiver_run_id_tests、benchmark_output_ownership_tests、transfer_directory_ownership_tests、publication_script_tests）通过，6.29秒；test_dual_machine_scripts.ps1通过；公开文档19文件195链接0错误。官方Release构建、干净产物身份及提交后的远端检查记录在本地docs/evidence/XEN-RECEIVER-RUN-ID-20261011-001/RESULT.md，不把它们虚写为此提交生成前已经完成。
+
+未运行真实采集、设备、系统/游戏输入、UI、多Provider或物理闭环。少量合成夹具保留本机Temp，不执行递归删除。D02其他两个子范围分别见benchmark_output_ownership_validation_20261011.md、transfer_directory_ownership_validation_20261011.md。

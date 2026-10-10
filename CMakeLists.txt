@@ -2240,6 +2240,8 @@ if(BUILD_TESTING)
         "${PROJECT_SOURCE_DIR}/tests/benchmark_output_ownership_tests.ps1")
     xen_add_windows_powershell_test(transfer_directory_ownership_tests
         "${PROJECT_SOURCE_DIR}/tests/transfer_directory_ownership_tests.ps1")
+    xen_add_windows_powershell_test(receiver_run_id_tests
+        "${PROJECT_SOURCE_DIR}/tests/receiver_run_id_tests.ps1")
     xen_add_windows_powershell_test(benchmark_mouse_script_tests
         "${PROJECT_SOURCE_DIR}/tests/benchmark_mouse_script_tests.ps1"
         -BuildDirectory "${CMAKE_BINARY_DIR}"

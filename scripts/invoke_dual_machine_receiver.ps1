@@ -78,8 +78,9 @@ $maximumSeconds = if ($isSoak) { 600 } else { 120 }
 $minimumAimPrecomputedCommandFrames = if ($Scenario -in @(
         "MoveLeft", "MoveRight", "Shuttle", "SuperJump", "Occlusion",
         "MultiTarget")) { [uint64]1 } else { [uint64]0 }
-$runId = "{0}-{1}-{2}-{3}" -f $CaptureBackend, $Backend, $Scenario,
-    (Get-Date -Format "yyyyMMdd-HHmmss")
+# 时间保留可读性；同秒重复启动也必须使用独立的配置、报告和ready目标。
+$runId = "{0}-{1}-{2}-{3}-{4}" -f $CaptureBackend, $Backend, $Scenario,
+    (Get-Date -Format "yyyyMMdd-HHmmss"), [guid]::NewGuid().ToString('N')
 New-Item -ItemType Directory -Path $ReportRoot, $RunRoot -Force |
     Out-Null
 $reportPrefix = Join-Path $ReportRoot $runId
