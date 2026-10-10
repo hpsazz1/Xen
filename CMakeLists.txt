@@ -1310,6 +1310,11 @@ if(BUILD_TESTING)
     target_link_libraries(recoil_report_tests PRIVATE xen_debug)
     xen_deploy_runtime_dlls(recoil_report_tests OPENCV)
     add_test(NAME recoil_report_tests COMMAND recoil_report_tests)
+    add_executable(app_report_lifecycle_tests tests/app_report_lifecycle_tests.cpp)
+    target_link_libraries(app_report_lifecycle_tests PRIVATE xen_debug recoil_archive)
+    xen_deploy_runtime_dlls(app_report_lifecycle_tests OPENCV)
+    add_test(NAME app_report_lifecycle_tests COMMAND app_report_lifecycle_tests)
+    set_tests_properties(app_report_lifecycle_tests PROPERTIES TIMEOUT 30)
     add_test(NAME review_run_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
         "${PROJECT_SOURCE_DIR}/tests/review_run_tests.py")
     # 离线像素专项依赖可加载的本地扩展；模块存在不等于同一解释器可以导入。

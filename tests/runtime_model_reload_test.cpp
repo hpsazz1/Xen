@@ -16,10 +16,12 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <numeric>
 #include <string>
 #include <thread>
@@ -64,9 +66,47 @@ public:
     MouseMoveReceipt move(const MouseMoveCommand&) noexcept override { ++moves; return {}; }
     bool poll_input(InputSnapshot& value) noexcept override { value = {}; return false; }
     void close() noexcept override {}
-    MouseStatus status() const noexcept override { return MouseStatus::DISABLED; }
+    MouseStatus status() const noexcept override {
+        std::unique_lock lock(status_mutex_);
+        if (entered_status_calls_ < held_status_calls_) {
+            const unsigned ticket = ++entered_status_calls_;
+            status_wake_.notify_all();
+            if (!status_wake_.wait_for(lock, 30s, [&] {
+                    return released_status_calls_ >= ticket;
+                })) {
+                status_barrier_timed_out.store(true);
+            }
+        }
+        return MouseStatus::DISABLED;
+    }
     std::string last_error() const override { return {}; }
     std::atomic<unsigned> moves{0};
+    mutable std::atomic<bool> status_barrier_timed_out{false};
+
+    // 启动完成后，status() 只由 Pipeline 在诊断发布前调用；双屏障分别
+    // 固定重载前的在途帧和下一帧，不依赖 sleep 碰撞线程调度窗口。
+    void hold_status_calls(unsigned count) {
+        std::lock_guard lock(status_mutex_);
+        held_status_calls_ = count;
+    }
+    bool wait_for_status(unsigned ticket) {
+        std::unique_lock lock(status_mutex_);
+        return status_wake_.wait_for(lock, 10s, [&] {
+            return entered_status_calls_ >= ticket;
+        });
+    }
+    void release_status(unsigned ticket) {
+        std::lock_guard lock(status_mutex_);
+        released_status_calls_ = ticket;
+        status_wake_.notify_all();
+    }
+
+private:
+    mutable std::mutex status_mutex_;
+    mutable std::condition_variable status_wake_;
+    unsigned held_status_calls_ = 0;
+    mutable unsigned entered_status_calls_ = 0;
+    unsigned released_status_calls_ = 0;
 };
 
 unsigned short reserve_loopback_port() noexcept {
@@ -133,6 +173,57 @@ double percentile(std::vector<double> values, double quantile) {
     if (lower == upper) return values[lower];
     const double fraction = position - static_cast<double>(lower);
     return values[lower] * (1.0 - fraction) + values[upper] * fraction;
+}
+
+void check_inflight_reload_generation(AppConfig config, bool probes_enabled) {
+    config.runtime.enable_performance_probes = probes_enabled;
+    config.runtime.diagnostics_enabled = false;
+    auto mouse = std::make_shared<NoOutputMouse>();
+    Runtime runtime;
+    const bool started = runtime.start(config, mouse);
+    expect(started, "代际屏障回归必须启动真实 CPU Detector 与 UDP Capture");
+    if (!started) return;
+    expect(wait_until([&] { return runtime.snapshot().processed_frames >= 3; }, 10s),
+           "代际屏障回归必须先完成初始帧");
+    mouse->hold_status_calls(2);
+    const bool old_frame_held = mouse->wait_for_status(1);
+    expect(old_frame_held, "旧模型在途帧必须停在诊断发布前");
+    if (old_frame_held) {
+        const auto before_reload = runtime.snapshot();
+        expect(runtime.reload_detector(config.detector), "屏障内必须接受真实模型重载");
+        const bool reloaded = wait_until([&] {
+            const auto value = runtime.snapshot();
+            return value.detector_reload_state == DetectorReloadState::SUCCEEDED &&
+                value.detector_generation == before_reload.detector_generation + 1;
+        }, 20s);
+        expect(reloaded, "旧帧尚未发布时新模型必须完成切换");
+        expect(runtime.snapshot().processed_frames == before_reload.processed_frames,
+               "重载完成前旧帧必须仍由屏障持有");
+        runtime.set_diagnostics_enabled(true);
+        mouse->release_status(1);
+        const bool next_frame_held = mouse->wait_for_status(2);
+        expect(next_frame_held, "新模型首帧必须停在诊断发布前");
+        const auto after_old_frame = runtime.snapshot();
+        expect(after_old_frame.processed_frames == before_reload.processed_frames + 1,
+               "第二屏障前只允许旧帧完成，保留基本处理计数");
+        std::vector<RuntimePipelineSample> samples;
+        expect(runtime.drain_pipeline_samples(samples) && samples.empty(),
+               "新模型诊断段不得接收重载前已完成推理的在途旧帧");
+        mouse->release_status(2);
+        expect(wait_until([&] {
+            return runtime.snapshot().processed_frames >= after_old_frame.processed_frames + 3;
+        }, 5s), "释放屏障后新模型必须继续发布样本");
+        runtime.set_diagnostics_enabled(false);
+        expect(runtime.drain_pipeline_samples(samples) && !samples.empty() &&
+                   std::all_of(samples.begin(), samples.end(), [&](const auto& sample) {
+                       return sample.sequence > after_old_frame.last_sequence &&
+                           sample.service.valid == probes_enabled;
+                   }), "新代模型必须保留同帧样本及对应性能探针完成语义");
+    }
+    mouse->release_status(2);
+    runtime.stop();
+    expect(!mouse->status_barrier_timed_out.load(), "代际回归屏障不得靠超时释放");
+    expect(mouse->moves.load() == 0, "代际回归不得向假设备输出");
 }
 
 } // namespace
@@ -426,6 +517,9 @@ int main(int argc, char** argv) {
            "stop() 必须回收重载线程并恢复 IDLE");
     expect(!runtime.reload_detector(config.detector),
            "Runtime 停止后必须拒绝 Detector 重载");
+
+    check_inflight_reload_generation(config, false);
+    check_inflight_reload_generation(config, true);
 
     // 只移除测试进程继承的凭据，不读取或记录部署秘密；桥接故障不得阻断观测链。
     expect(_putenv_s("XEN_SOURCE_CONTEXT_TOKEN", "") == 0,

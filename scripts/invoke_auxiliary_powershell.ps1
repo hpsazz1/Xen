@@ -51,55 +51,96 @@ $global:LASTEXITCODE = 0
 $env:XEN_AUXILIARY_RUN_DIRECTORY = Split-Path -Parent $PSScriptRoot
 $env:XEN_AUXILIARY_STOP_FILE = Join-Path $PSScriptRoot 'STOP'
 $result = [ordered]@{ status='running'; process_id=$PID; session_id=(Get-Process -Id $PID).SessionId;
-    started_utc=[datetime]::UtcNow.ToString('o'); exit_code=$null; payload_exit_code=$null; ended_utc=$null }
+    started_utc=[datetime]::UtcNow.ToString('o'); exit_code=$null; payload_exit_code=$null; ended_utc=$null;
+    child_launch_attempted=$false; child_process_id=$null; child_started_utc=$null;
+    child_exit_confirmed=$false; supervision_ended_utc=$null }
 $resultPath = Join-Path $PSScriptRoot 'result.json'
 function Save-Result {
     $temporary = $resultPath + '.partial'
     [IO.File]::WriteAllText($temporary, ($result | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
     Move-Item -LiteralPath $temporary -Destination $resultPath -Force
 }
+function Request-Cancellation([string]$Reason) {
+    [IO.File]::WriteAllText($env:XEN_AUXILIARY_STOP_FILE, $Reason)
+    $nativePath = Join-Path $env:XEN_AUXILIARY_RUN_DIRECTORY 'task.json'
+    if (Test-Path -LiteralPath $nativePath) {
+        $native = Get-Content -LiteralPath $nativePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($native.PSObject.Properties['owner'] -and $native.owner -ceq 'XEN_AUTO_STOP_COUNTERPULSE') {
+            $output = Join-Path $env:XEN_AUXILIARY_RUN_DIRECTORY 'result'
+            $null = [IO.Directory]::CreateDirectory($output)
+            [IO.File]::WriteAllText((Join-Path $output 'STOP'), $Reason)
+        }
+    }
+}
+$child = $null
+$childExited = $false
+$cleanupWaitAttempted = $false
+$timedOut = $false
 Save-Result
 try {
     if (Test-Path -LiteralPath $env:XEN_AUXILIARY_STOP_FILE) { throw '启动前已取消。' }
     $payload = (Join-Path $PSScriptRoot 'payload.ps1').Replace("'", "''")
     $command = '$ErrorActionPreference=''Stop''; $global:ProgressPreference=''SilentlyContinue''; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $global:LASTEXITCODE=0; try { & ''' + $payload + '''; $ok=$?; if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}; if(-not $ok){exit 1} } catch { [Console]::Error.WriteLine($_.Exception.GetType().FullName); exit 1 }'
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    # 在启动前记录不确定窗口；进程句柄或启动时间查询失败也不能冒充未启动。
+    $result.child_launch_attempted = $true
+    Save-Result
     $child = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand', $encoded) `
         -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $PSScriptRoot 'output.log') -RedirectStandardError (Join-Path $PSScriptRoot 'error.log')
+    $result.child_process_id = $child.Id
+    Save-Result
+    $result.child_started_utc = $child.StartTime.ToUniversalTime().ToString('o')
     $null = $child.Handle
+    Save-Result
     $binding = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'task.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     $clock = [Diagnostics.Stopwatch]::StartNew()
-    $timedOut = $false
-    while (-not $child.WaitForExit(100)) {
-        if (-not $timedOut -and $clock.Elapsed.TotalSeconds -ge $binding.timeout_seconds) {
+    while ($true) {
+        if ($child.WaitForExit(100)) { $childExited = $true; break }
+        if ($clock.Elapsed.TotalSeconds -ge $binding.timeout_seconds) {
             $timedOut = $true
-            [IO.File]::WriteAllText($env:XEN_AUXILIARY_STOP_FILE, 'TIMEOUT_CANCEL_REQUESTED')
-            $nativePath = Join-Path $env:XEN_AUXILIARY_RUN_DIRECTORY 'task.json'
-            if (Test-Path -LiteralPath $nativePath) {
-                $native = Get-Content -LiteralPath $nativePath -Raw -Encoding UTF8 | ConvertFrom-Json
-                if ($native.PSObject.Properties['owner'] -and $native.owner -ceq 'XEN_AUTO_STOP_COUNTERPULSE') {
-                    $output = Join-Path $env:XEN_AUXILIARY_RUN_DIRECTORY 'result'
-                    $null = [IO.Directory]::CreateDirectory($output)
-                    [IO.File]::WriteAllText((Join-Path $output 'STOP'), 'TIMEOUT_CANCEL_REQUESTED')
-                }
-            }
-            $result.status = 'timeout_cleanup_pending'
-            Save-Result
+            Request-Cancellation 'TIMEOUT_CANCEL_REQUESTED'
         }
-        # 有界 native 入口自行关闭；不响应的子树由任务调度器在宽限后终止，清理保留未知。
+        if ($timedOut -or (Test-Path -LiteralPath $env:XEN_AUXILIARY_STOP_FILE)) {
+            $result.status = if ($timedOut) { 'timeout_cleanup_pending' } else { 'stop_cleanup_pending' }
+            Save-Result
+            $cleanupWaitAttempted = $true
+            $childExited = $child.WaitForExit(5000)
+            break
+        }
     }
-    $result.payload_exit_code = $child.ExitCode
-    $result.exit_code = if ($timedOut) { 124 } else { $child.ExitCode }
-    $child.Dispose()
-    $result.status = if ($timedOut) { 'timed_out' } elseif ($result.exit_code -ne 0) { 'failed' }
-        elseif (Test-Path -LiteralPath $env:XEN_AUXILIARY_STOP_FILE) { 'stopped' } else { 'completed' }
+    if ($childExited) {
+        $result.payload_exit_code = $child.ExitCode
+        $result.exit_code = if ($timedOut) { 124 } else { $child.ExitCode }
+        $result.status = if ($timedOut) { 'timed_out' } elseif ($result.exit_code -ne 0) { 'failed' }
+            elseif (Test-Path -LiteralPath $env:XEN_AUXILIARY_STOP_FILE) { 'stopped' } else { 'completed' }
+    } else {
+        $result.exit_code = if ($timedOut) { 124 } else { 1 }
+        $result.status = if ($timedOut) { 'timeout_cleanup_unconfirmed' } else { 'stop_cleanup_unconfirmed' }
+    }
 } catch {
     # 不把任意异常对象写入报告，避免下游错误意外带出配置秘密。
-    $result.exit_code = 1; $result.status = 'failed'
+    $result.exit_code = if ($timedOut) { 124 } else { 1 }
     $result.error_type = $_.Exception.GetType().FullName
     $result.error_line = $_.InvocationInfo.ScriptLineNumber
+    if ($result.child_launch_attempted -and -not $childExited) {
+        $result.status = 'supervision_failed_cleanup_pending'
+        try { Save-Result } catch { }
+        try { Request-Cancellation 'SUPERVISION_FAILED_CANCEL_REQUESTED' }
+        catch { $result.cancel_error_type = $_.Exception.GetType().FullName }
+        if ($child -and -not $cleanupWaitAttempted) {
+            $cleanupWaitAttempted = $true
+            try { $childExited = $child.WaitForExit(5000) }
+            catch { $result.cleanup_error_type = $_.Exception.GetType().FullName }
+        }
+    }
+    $result.status = if (-not $result.child_launch_attempted -or $childExited) { 'failed' }
+        else { 'supervision_failed_cleanup_unconfirmed' }
 } finally {
-    $result.ended_utc = [datetime]::UtcNow.ToString('o')
+    # Dispose 只释放句柄；退出确认与物理输入释放是两层证据。
+    if ($child) { try { $child.Dispose() } catch { $result.dispose_error_type = $_.Exception.GetType().FullName } }
+    $result.child_exit_confirmed = $childExited
+    if (-not $result.child_launch_attempted -or $childExited) { $result.ended_utc = [datetime]::UtcNow.ToString('o') }
+    $result.supervision_ended_utc = [datetime]::UtcNow.ToString('o')
     Save-Result
 }
 exit $result.exit_code
@@ -142,7 +183,10 @@ exit $result.exit_code
     } else { $null }
     $state = if ($task) { [string]$task.State } else { 'Unregistered' }
     $schedulerResult = if ($task) { (Get-ScheduledTaskInfo -TaskName $binding.task_name).LastTaskResult } else { $null }
-    $status = if ($result -and $result.ended_utc) { [string]$result.status }
+    $completionConfirmed = $result -and $result.ended_utc -and $result.PSObject.Properties['child_launch_attempted'] -and
+        (-not $result.child_launch_attempted -or ($result.PSObject.Properties['child_exit_confirmed'] -and $result.child_exit_confirmed))
+    $status = if ($completionConfirmed) { [string]$result.status }
+        elseif ($result -and $result.status -like '*cleanup_*') { [string]$result.status }
         elseif ($state -eq 'Running') { 'running' }
         elseif ($result) { 'interrupted_cleanup_unconfirmed' }
         else { 'not_started_or_failed' }
@@ -155,7 +199,7 @@ exit $result.exit_code
             $log = Join-Path $control $name
             if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Encoding UTF8 }
         }
-        if ($task -and $state -notin @('Running', 'Queued')) {
+        if ($task -and $state -notin @('Running', 'Queued') -and $completionConfirmed) {
             Unregister-ScheduledTask -TaskName $binding.task_name -Confirm:$false
         }
     }

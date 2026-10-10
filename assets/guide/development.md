@@ -223,6 +223,10 @@ Win32 的 execution boundary 内生为 `local_os_api`；KMBOX/MAKCU 不再从 en
 清单分别记录合并次数、批次容量拒绝和帧数容量拒绝；不能把存在缺口的归档当作完整数据。
 正常停止会排空队列并封尾；崩溃时已完成分段保留，尚未写出的尾部可能丢失，未封尾清单不算完整。
 模型热重载使用独立目录，加载窗口沿用原报告边界而不归档，不能跨模型段假定连续覆盖。
+逐帧诊断在发布时核对本次推理所属模型代际；旧模型的在途尾帧不会进入新段。
+各个开段入口统一取得当前扳机、压枪事件水位。关闭时保留冻结事件范围，等待压枪归档封尾后只回填归档终态；
+故障重启先完成旧报告，再重置 Runtime。`app_report_lifecycle_tests` 覆盖最终文件与重启顺序，
+`runtime_model_reload_test` 使用确定性屏障覆盖跨代在途帧，均不代表真实设备验收。
 
 记录已开启时，发现异常可按默认 **F9**，或点击界面“标记异常”。关闭记录时不会写标记或暗中开启归档。
 F9通过当前键鼠后端监听源机按键，
@@ -306,11 +310,15 @@ $run = 'C:\XenLab\runs\my-debug-run'
 `ScriptPath` 是主机上的任务脚本；`RunDirectory` 是辅机上的唯一 Run。脚本通过
 `XEN_AUXILIARY_RUN_DIRECTORY` 取得该目录，检查 `XEN_AUXILIARY_STOP_FILE` 后停止后续动作，并在
 `finally` 收尾。复用已有有界工具，工具返回后核对原生报告和输入释放；反向轻点同时支持原有
-`result/STOP`。到时先请求取消，15 秒宽限后才终止无响应任务，不能把强制结束当成输入已释放。
+`result/STOP`。超时或监督异常先请求取消，最多进行一次 5 秒清理等待。未确认子进程退出时保留
+`*_cleanup_unconfirmed`；子进程可能仍在运行，须核对本 Run 的进程身份及原生报告，不能重新发送动作。
+按需启动的计划任务不能依靠 `ExecutionTimeLimit` 保证终止子树；有限等待和监督器退出不代表输入已释放。
 
 同一个 Run 再次 `Start` 只返回原任务状态；断线后先查 `Status`，避免重复真实动作。`Recover`
-回传日志与结果，注销已结束计划任务，保留 Run 文件供既有 SMB/SCP 回收。
-`completed` 只表示脚本退出成功；`timed_out` 和 `interrupted_cleanup_unconfirmed` 须结合工具报告排查。
+回传日志与结果，仅在确认子进程退出（或确认未尝试启动）且计划任务不再运行时注销，保留 Run 文件供既有 SMB/SCP 回收。
+报告分别保存子进程身份、`child_exit_confirmed`、任务结束时间 `ended_utc` 与监督器结束时间 `supervision_ended_utc`。
+旧报告只有 `ended_utc` 时保留清理未知，不自动注销。`completed` 只表示脚本退出成功；`timed_out`
+及各种清理未知状态须结合工具报告排查，不能作为物理释放证据。
 单纯启动 Launcher 不代表 Runtime 已运行或已停止，自动调试脚本仍须管理自己的运行结束条件。
 
 ## 无设备界面预览

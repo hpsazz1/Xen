@@ -626,6 +626,7 @@ struct Runtime::Impl {
 
     SnapshotUpdateResult update_pipeline_snapshot(
                                   const CapturedFrame& frame,
+                                  std::uint64_t frame_detector_generation,
                                   const PipelineProfile& profile,
                                   const RuntimeServiceProfile& service,
                                   std::uint64_t sample_overwritten_frames,
@@ -678,7 +679,11 @@ struct Runtime::Impl {
         const auto debug_ring_started = probes_enabled
             ? std::chrono::steady_clock::now()
             : std::chrono::steady_clock::time_point{};
-        if (diagnostics_enabled) {
+        // 重载可以在旧帧推理完成后、收尾发布前切换模型并重新开启报告。
+        // 与模型切换共用 snapshot_mutex 校验归属，旧帧仍更新基本处理计数，
+        // 但不能进入新模型分段；不把 Detector 锁延长到 Aim/Mouse 收尾。
+        if (diagnostics_enabled &&
+            frame_detector_generation == current_snapshot.detector_generation) {
             RuntimePipelineSample sample;
             sample.sequence = frame.timing.sequence;
             sample.aim_observation_epoch = aim_frame.observation_epoch;
@@ -1188,7 +1193,7 @@ struct Runtime::Impl {
                 }
             }
             SnapshotUpdateResult snapshot_result = update_pipeline_snapshot(
-                *frame, profile, service, overwritten_frames_at_consume,
+                *frame, frame_detector_generation, profile, service, overwritten_frames_at_consume,
                 aim_result, preview_detections, aim_frame,
                 aim_frame.control_center_x, aim_frame.control_center_y,
                 mouse->status(), mouse_sent, aim_frame.lock_active);
