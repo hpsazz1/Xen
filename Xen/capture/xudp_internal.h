@@ -116,6 +116,9 @@ public:
         std::span<const std::uint8_t> packet,
         std::chrono::steady_clock::time_point received_at,
         XudpCompletedFrame& completed) noexcept;
+    // FRAME只代表完整协议/hash通过。解码与几何校验成功后，必须在
+    // 下一次consume/reset前接受一次，才提交流切换和更新completed计数。
+    bool accept_frame(XudpCompletedFrame& completed) noexcept;
     void reset() noexcept;
 
     std::uint64_t source_received_frames() const noexcept;

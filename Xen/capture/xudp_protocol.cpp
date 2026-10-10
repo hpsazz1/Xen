@@ -463,6 +463,7 @@ struct XudpFrameAssembler::Impl {
     };
 
     void reset_stream(std::uint64_t stream_id) noexcept {
+        pending = nullptr;
         for (auto& assembly : assemblies) {
             assembly.active = false;
             assembly.challenger = false;
@@ -599,6 +600,37 @@ struct XudpFrameAssembler::Impl {
         return XudpConsumeResult::FRAME;
     }
 
+    void stage(Assembly& assembly, XudpCompletedFrame& completed) noexcept {
+        pending = &assembly;
+        assembly.active = false;
+        completed = {};
+        completed.descriptor = assembly.header.frame;
+        completed.jpeg = std::span<const std::uint8_t>(assembly.bytes);
+        completed.started_at = assembly.started_at;
+        if (!assembly.challenger) {
+            // 保留活动流已完成帧的高水位；无效帧不能靠重放复活。
+            rejected_through_frame_id = std::max(
+                rejected_through_frame_id, assembly.header.frame.frame_id);
+        }
+    }
+
+    bool accept(XudpCompletedFrame& completed) noexcept {
+        if (!pending || completed.jpeg.data() != pending->bytes.data() ||
+            completed.jpeg.size() != pending->bytes.size() ||
+            completed.descriptor.stream_id != pending->header.frame.stream_id ||
+            completed.descriptor.frame_id != pending->header.frame.frame_id) {
+            return false;
+        }
+        auto& accepted = *pending;
+        pending = nullptr;
+        if (accepted.header.frame.stream_id != current_stream_id) {
+            retire_current_stream();
+            reset_stream(accepted.header.frame.stream_id);
+        }
+        publish(accepted, completed);
+        return true;
+    }
+
     void publish(Assembly& assembly,
                  XudpCompletedFrame& completed) noexcept {
         const std::uint64_t frame_id = assembly.header.frame.frame_id;
@@ -680,10 +712,7 @@ struct XudpFrameAssembler::Impl {
         const auto result = append_fragment(*challenger, header, payload);
         if (result != XudpConsumeResult::FRAME) return result;
 
-        retire_current_stream();
-        reset_stream(header.frame.stream_id);
-        publish(*challenger, completed);
-        challenger->active = false;
+        stage(*challenger, completed);
         return XudpConsumeResult::FRAME;
     }
 
@@ -691,6 +720,8 @@ struct XudpFrameAssembler::Impl {
         std::span<const std::uint8_t> packet,
         std::chrono::steady_clock::time_point received_at,
         XudpCompletedFrame& completed) noexcept {
+        // 上一完整帧未被解码方接受时，只丢弃待提交状态，保留活动流。
+        pending = nullptr;
         XudpPacketHeader header;
         std::span<const std::uint8_t> payload;
         if (!parse_xudp_packet(packet, header, payload)) {
@@ -704,8 +735,7 @@ struct XudpFrameAssembler::Impl {
             if (is_retired_stream(header.frame.stream_id)) {
                 return XudpConsumeResult::IGNORED;
             }
-            // 只有新流首个完整帧通过范围与哈希校验后才提交切换；单个陌生
-            // 分片不得驱逐仍可继续发布的活动流。
+            // 新流完整帧仍须由解码方accept_frame，才能退役活动流。
             return consume_challenger(
                 header, payload, received_at, completed);
         }
@@ -739,11 +769,12 @@ struct XudpFrameAssembler::Impl {
                 rejected_through_frame_id, header.frame.frame_id);
         }
         if (result != XudpConsumeResult::FRAME) return result;
-        publish(*assembly, completed);
+        stage(*assembly, completed);
         return XudpConsumeResult::FRAME;
     }
 
     std::array<Assembly, kAssemblyCount> assemblies;
+    Assembly* pending = nullptr;
     // 待确认新流与活动流共享既有三槽，不按 stream_id 或包数扩容。
     Sha256Hasher hasher;
     std::uint64_t current_stream_id = 0;
@@ -767,6 +798,10 @@ XudpConsumeResult XudpFrameAssembler::consume_packet(
     XudpCompletedFrame& completed) noexcept {
     if (!impl_) return XudpConsumeResult::INVALID_PACKET;
     return impl_->consume(packet, received_at, completed);
+}
+
+bool XudpFrameAssembler::accept_frame(XudpCompletedFrame& completed) noexcept {
+    return impl_ && impl_->accept(completed);
 }
 
 void XudpFrameAssembler::reset() noexcept {

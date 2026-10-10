@@ -798,6 +798,10 @@ capture::detail::XudpConsumeResult consume_xudp_packets(
     for (const std::size_t index : order) {
         result = assembler.consume_packet(
             packets[index], std::chrono::steady_clock::now(), completed);
+        if (result == capture::detail::XudpConsumeResult::FRAME) {
+            // 协议层合成payload测试显式接受；真实JPEG验证由回环入口覆盖。
+            expect(assembler.accept_frame(completed), "XUDP complete protocol fixture accepts once");
+        }
     }
     return result;
 }
@@ -1757,6 +1761,118 @@ void test_xudp_jpeg_loopback() {
     capture->close();
 }
 
+void test_xudp_acceptance_lifetime() {
+    capture::detail::XudpFrameAssembler assembler;
+    capture::detail::XudpCompletedFrame completed;
+    const std::vector<std::uint8_t> payload{1, 2, 3, 4, 5, 6};
+    const std::array<std::size_t, 3> order{{0, 1, 2}};
+    const auto initial = make_xudp_packets(make_xudp_descriptor(1, payload.size(), 2, 3), payload);
+    expect(consume_xudp_packets(assembler, initial, order, completed) ==
+           capture::detail::XudpConsumeResult::FRAME, "XUDP acceptance lifetime starts with A");
+    auto challenger = make_xudp_descriptor(1, payload.size(), 2, 3);
+    ++challenger.stream_id;
+    const auto packets = make_xudp_packets(challenger, payload);
+    for (const auto& packet : packets)
+        assembler.consume_packet(packet, std::chrono::steady_clock::now(), completed);
+    auto stale = completed;
+    expect(assembler.source_received_frames() == 1, "Unaccepted B does not increment accepted count");
+    const auto next = make_xudp_packets(make_xudp_descriptor(2, payload.size(), 2, 3), payload);
+    expect(consume_xudp_packets(assembler, next, order, completed) ==
+           capture::detail::XudpConsumeResult::FRAME && !assembler.accept_frame(stale) &&
+           !assembler.accept_frame(completed) && assembler.source_received_frames() == 2,
+           "Next packet invalidates pending B; accepted A cannot be accepted twice");
+    for (const auto& packet : packets)
+        assembler.consume_packet(packet, std::chrono::steady_clock::now(), completed);
+    assembler.reset();
+    expect(!assembler.accept_frame(completed) && assembler.source_received_frames() == 0,
+           "Reset invalidates pending acceptance and clears counts");
+    expect(consume_xudp_packets(assembler, initial, order, completed) ==
+           capture::detail::XudpConsumeResult::FRAME, "Reset permits a fresh A");
+    // 活动流完成但解码方拒绝的帧保留高水位，并计入下一有效帧的缺口。
+    for (const auto& packet : next)
+        assembler.consume_packet(packet, std::chrono::steady_clock::now(), completed);
+    expect(consume_xudp_packets(assembler, next, order, completed) ==
+           capture::detail::XudpConsumeResult::IGNORED, "Rejected active frame cannot revive by replay");
+    const auto third = make_xudp_packets(make_xudp_descriptor(3, payload.size(), 2, 3), payload);
+    expect(consume_xudp_packets(assembler, third, order, completed) ==
+           capture::detail::XudpConsumeResult::FRAME && completed.source_received_frames == 2 &&
+           completed.transport_dropped_frames == 1,
+           "Only accepted frames increment received count; rejected active frame remains a gap");
+}
+
+void test_xudp_challenger_requires_decodable_frame(int invalid_kind) {
+    WinsockSession winsock;
+    const auto port = reserve_loopback_port();
+    expect(winsock.ready() && port != 0, "XUDP stream validation needs loopback");
+    if (!winsock.ready() || port == 0) return;
+    CaptureConfig config;
+    config.backend = CaptureBackend::XUDP_JPEG;
+    config.udp_url = "udp://127.0.0.1:" + std::to_string(port);
+    config.udp_read_timeout_ms = 20;
+    config.udp_disconnect_timeout_ms = 500;
+    config.acquire_timeout_ms = 20;
+    config.center_roi = false;
+    config.roi_x = 16; config.roi_y = 16;
+    config.roi_width = 256; config.roi_height = 256;
+    auto capture = create_capture(config);
+    const bool opened = capture && capture->open();
+    expect(opened, "XUDP stream validation opens actual receiver");
+    if (!opened) return;
+    const SOCKET sender = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    expect(sender != INVALID_SOCKET, "XUDP stream validation opens local sender");
+    if (sender == INVALID_SOCKET) { capture->close(); return; }
+    sockaddr_in destination{};
+    destination.sin_family = AF_INET;
+    destination.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    destination.sin_port = htons(port);
+    const std::array<std::size_t, 3> order{{2, 0, 1}};
+    std::vector<std::uint8_t> jpeg, small_jpeg;
+    expect(cv::imencode(".jpg", cv::Mat(320, 320, CV_8UC3, cv::Scalar(40, 80, 120)), jpeg) &&
+           cv::imencode(".jpg", cv::Mat(64, 64, CV_8UC3, cv::Scalar(80, 120, 40)), small_jpeg),
+           "XUDP stream validation uses actual JPEG encoding");
+    auto send_frame = [&](std::uint64_t stream_delta, std::uint64_t id,
+                          const std::vector<std::uint8_t>& payload, int width, int height) {
+        auto descriptor = make_xudp_descriptor(id, payload.size(), width, height);
+        descriptor.stream_id += stream_delta;
+        const auto packets = make_xudp_packets(descriptor, payload);
+        return send_xudp_datagrams(sender, destination, packets, order);
+    };
+    CapturedFrame frame;
+    expect(send_frame(0, 1, jpeg, 320, 320) && wait_for_capture_frame(*capture, 0, frame),
+           "XUDP A first frame publishes before challenger");
+    const auto first = frame.timing.sequence;
+    frame.bgr.release(); frame.bgr_storage.reset();
+    if (invalid_kind >= 0) {
+        const std::vector<std::uint8_t> invalid_jpeg(128, 0x53);
+        const auto& payload = invalid_kind == 0 ? invalid_jpeg : invalid_kind == 2 ? small_jpeg : jpeg;
+        const int width = invalid_kind == 1 ? 321 : invalid_kind == 2 ? 64 : 320;
+        const int height = invalid_kind == 2 ? 64 : 320;
+        expect(send_frame(1, 1, payload, width, height), "XUDP sends fully hashed invalid B");
+        const bool resumed = send_frame(0, 2, jpeg, 320, 320) &&
+            wait_for_capture_frame(*capture, first, frame) && frame.timing.source_sequence == 2 &&
+            frame.timing.transport_invalid_packets >= 1;
+        expect(resumed, "D19 invalid B must preserve A: kind=" + std::to_string(invalid_kind));
+        if (!resumed) { closesocket(sender); capture->close(); return; }
+        std::cout << "D19 recovered A after invalid B kind=" << invalid_kind << '\n';
+    }
+    auto previous = frame.timing.sequence;
+    frame.bgr.release(); frame.bgr_storage.reset();
+    expect(send_frame(1, 2, jpeg, 320, 320) && wait_for_capture_frame(*capture, previous, frame) &&
+           frame.timing.source_sequence == 2, "XUDP valid B must still replace A");
+    previous = frame.timing.sequence;
+    frame.bgr.release(); frame.bgr_storage.reset();
+    expect(send_frame(0, 3, jpeg, 320, 320), "XUDP retired A is sent for rejection control");
+    bool old_published = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(80);
+    while (std::chrono::steady_clock::now() < deadline)
+        old_published = (capture->grab(frame) == CaptureStatus::FRAME) || old_published;
+    expect(!old_published, "XUDP accepted B permanently rejects delayed A");
+    expect(send_frame(1, 3, jpeg, 320, 320) && wait_for_capture_frame(*capture, previous, frame) &&
+           frame.timing.source_sequence == 3, "XUDP valid B continues after delayed A");
+    closesocket(sender);
+    capture->close();
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1765,6 +1881,22 @@ int main(int argc, char** argv) {
     log_config.enable_file = false;
     log_config.enable_ringbuf = false;
     Log::init(log_config);
+    if (argc == 2 && std::string(argv[1]) == "--xudp-only") {
+        test_udp_latest_frame_pool();
+        test_udp_pool_is_bounded();
+        test_xudp_packetizer_boundaries();
+        test_xudp_serialization_and_reassembly();
+        test_xudp_rejects_invalid_fragments();
+        test_xudp_sequence_and_geometry();
+        test_xudp_incomplete_challenger_preserves_active_stream();
+        test_xudp_challenger_shares_three_slot_payload_budget();
+        test_xudp_acceptance_lifetime();
+        test_xudp_jpeg_loopback();
+        for (int kind = -1; kind < 3; ++kind)
+            test_xudp_challenger_requires_decodable_frame(kind);
+        Log::shutdown();
+        return failures == 0 ? 0 : 1;
+    }
     // 定向回归仅使用回环UDP，不调用NDI发现或任何真实输入设备。
     const bool timeout_only = argc == 2 && std::string(argv[1]) == "--network-timeout-only";
     for (const auto backend : {CaptureBackend::UDP_MJPEG, CaptureBackend::XUDP_JPEG}) {

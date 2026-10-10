@@ -243,7 +243,7 @@ private:
         }
     }
 
-    bool decode_and_publish(const XudpCompletedFrame& completed) noexcept {
+    bool decode_and_publish(XudpCompletedFrame& completed) noexcept {
         try {
             if (completed.jpeg.empty() ||
                 completed.jpeg.size() >
@@ -274,6 +274,10 @@ private:
                 return false;
             }
 
+            if (!assembler_.accept_frame(completed)) {
+                assembler_.record_invalid_frame();
+                return false;
+            }
             auto write_slot = frames_.acquire_write();
             if (!write_slot) {
                 // 消费者持有全部槽时丢弃已解码帧，继续排空网络以保持低延迟。
