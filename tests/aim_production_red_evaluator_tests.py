@@ -876,7 +876,28 @@ def test_declared_mandatory_baseline_pair_cannot_be_omitted() -> None:
                "manifest 已冻结的 mandatory block/profile 不得被静默省略")
 
 
+def test_candidate_cannot_change_x_control_center() -> None:
+    with tempfile.TemporaryDirectory(prefix="xen-production-red-") as text:
+        root = pathlib.Path(text)
+        asset_id = "center-identity-fixture"
+        baseline = [valid_row(0, True, 1, block_id="TAIL", asset_id=asset_id)]
+        candidate = json.loads(json.dumps(baseline))
+        candidate[0]["control_center"][0] = 2.0
+        common = dict(block_id="TAIL", role="development", block_kind="tail",
+                      plant_profile_id="P-LEGACY-D3-G05215")
+        report = EVALUATOR.evaluate_manifest(write_multi_manifest(root, [
+            ({**common, "trace_id": "TAIL:B0", "variant": "B0"},
+             baseline, measured_reference(baseline, 1, 1)),
+            ({**common, "trace_id": "TAIL:C", "variant": "C"}, candidate, None),
+            ({**common, "trace_id": "TAIL:C-D0", "variant": "C-D0"},
+             json.loads(json.dumps(baseline)), None),
+        ], asset_id=asset_id))
+        expect(report["status"] == "RED_INVALID" and report["failure_codes"] == ["VARIANT_INPUT_MISMATCH"],
+               "候选不能通过改变 X 控制中心制造评分改善")
+
+
 def main() -> int:
+    test_candidate_cannot_change_x_control_center()
     test_missing_source_and_completed_ledgers_fail_closed()
     test_run_order_is_preserved_in_longest_outside_metric()
     test_block_regression_cannot_be_hidden_by_aggregate_improvement()

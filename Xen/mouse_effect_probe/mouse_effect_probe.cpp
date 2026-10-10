@@ -3078,6 +3078,37 @@ nlohmann::ordered_json report_payload(
     };
 }
 
+// JSON 正整数解析后会成为 unsigned；有符号累计值仍必须处于 int64 范围。
+bool report_signed_integer(const nlohmann::ordered_json& value) {
+    return value.is_number_integer() &&
+        (!value.is_number_unsigned() || value.get<std::uint64_t>() <=
+            static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()));
+}
+
+bool valid_report_event(const nlohmann::ordered_json& event) {
+    // 和生产 writer 共用唯一字段列表，类型约束由实际事件成员定义。
+    static const auto schema = report_event_json(ProbeCommandEvent{});
+    if (!event.is_object() || event.size() != schema.size()) return false;
+    for (const auto& field : schema.items()) {
+        if (!event.contains(field.key())) return false;
+        const auto& value = event.at(field.key());
+        const auto& expected = field.value();
+        if (expected.is_string()) {
+            if (!value.is_string()) return false;
+        } else if (expected.is_boolean()) {
+            if (!value.is_boolean()) return false;
+        } else if (expected.is_number_unsigned()) {
+            if (!value.is_number_unsigned()) return false;
+        } else if (expected.is_number_integer()) {
+            if (!report_signed_integer(value)) return false;
+        } else if (expected.is_number_float()) {
+            if (!value.is_number() || !std::isfinite(value.get<double>())) return false;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
 bool valid_report_document(const nlohmann::ordered_json& document,
                            std::string& error) {
     if (!has_exact_keys(document,
@@ -3123,7 +3154,13 @@ bool valid_report_document(const nlohmann::ordered_json& document,
         !result.at("stop_reason").is_string() ||
         !result.at("complete").is_boolean() ||
         !result.at("consumed_sample_count").is_number_unsigned() ||
-        !result.at("events").is_array()) {
+        !report_signed_integer(result.at("cumulative_requested_x_counts")) ||
+        !report_signed_integer(result.at("cumulative_backend_completed_x_counts")) ||
+        !result.at("events").is_array() ||
+        result.at("consumed_sample_count").get<std::uint64_t>() !=
+            result.at("events").size() ||
+        !std::all_of(result.at("events").begin(), result.at("events").end(),
+                     valid_report_event)) {
         set_error(error, "probe report binding/timebase/result schema 非法");
         return false;
     }

@@ -1829,7 +1829,7 @@ if(BUILD_TESTING)
 
     add_executable(mouse_effect_probe_tests
         tests/mouse_effect_probe_tests.cpp)
-    target_link_libraries(mouse_effect_probe_tests PRIVATE mouse_effect_probe)
+    target_link_libraries(mouse_effect_probe_tests PRIVATE mouse_effect_probe nlohmann_json::nlohmann_json)
     add_test(NAME mouse_effect_probe_tests COMMAND mouse_effect_probe_tests)
 
     add_executable(mouse_effect_probe_runner_tests
@@ -1912,6 +1912,15 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(model_workspace_tests OPENCV)
     add_test(NAME model_workspace_tests COMMAND model_workspace_tests
         "${XEN_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/model_workspace_worker_fixture.py")
+    add_test(NAME evidence_publication_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+        "${PROJECT_SOURCE_DIR}/tests/evidence_publication_tests.py")
+    add_test(NAME annotation_roi_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+        "${PROJECT_SOURCE_DIR}/tests/annotation_roi_tests.py")
+    add_test(NAME model_reference_compare_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+        "${PROJECT_SOURCE_DIR}/tests/model_reference_compare_tests.py")
     add_test(NAME model_data_pipeline_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
         "${PROJECT_SOURCE_DIR}/tests/model_data_pipeline_tests.py")

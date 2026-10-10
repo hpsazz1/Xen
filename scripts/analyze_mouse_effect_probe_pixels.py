@@ -1220,6 +1220,7 @@ def main() -> int:
         finally:
             if pending_csv.exists():
                 pending_csv.unlink()
+        result["pairs_csv_sha256"] = hashlib.sha256(arguments.pairs_csv.read_bytes()).hexdigest()
         _atomic_write_text(
             arguments.output,
             json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n",

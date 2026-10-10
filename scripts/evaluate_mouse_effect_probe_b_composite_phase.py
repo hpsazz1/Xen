@@ -13,6 +13,16 @@ import sys
 import uuid
 from typing import Any
 
+import importlib.util
+
+_PUBLICATION_SPEC = importlib.util.spec_from_file_location(
+    "xen_evidence_publication", pathlib.Path(__file__).with_name("evidence_publication.py"))
+if _PUBLICATION_SPEC is None or _PUBLICATION_SPEC.loader is None:
+    raise RuntimeError("无法加载证据发布模块")
+_PUBLICATION = importlib.util.module_from_spec(_PUBLICATION_SPEC)
+_PUBLICATION_SPEC.loader.exec_module(_PUBLICATION)
+
+
 
 PHASE_CELLS = ("P1_8", "P3_8", "P5_8", "P7_8")
 PHASE_NUMERATORS = dict(zip(PHASE_CELLS, (1, 3, 5, 7)))
@@ -111,22 +121,7 @@ def _load_json(path: pathlib.Path) -> dict[str, Any]:
 
 
 def _write_json_atomic(path: pathlib.Path, value: dict[str, Any]) -> None:
-    path = path.resolve()
-    pending = path.with_name(f".{path.name}.pending-{os.getpid()}")
-    if not path.is_absolute() or path.exists() or pending.exists():
-        raise ValueError("evaluation 输出必须是尚不存在的绝对路径")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with pending.open("x", encoding="utf-8", newline="\n") as stream:
-            json.dump(value, stream, ensure_ascii=False, indent=2,
-                      allow_nan=False)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        pending.replace(path)
-    finally:
-        if pending.exists():
-            pending.unlink()
+    _PUBLICATION.publish_json_new(path, value, collision_type=ValueError, newline="\n")
 
 
 def evaluation_contract() -> dict[str, Any]:

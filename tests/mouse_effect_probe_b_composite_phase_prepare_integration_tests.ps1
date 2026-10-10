@@ -131,6 +131,18 @@ Write-NewUtf8Json $obsPath ([ordered]@{
     }
 })
 
+$selectedLogSource = (Get-Content -LiteralPath $obsPath -Raw -Encoding utf8 | ConvertFrom-Json).selected_source.name
+$log = @(
+    "04:06:24.611: OBS 32.1.0-rc4 (64-bit, windows)",
+    "04:06:25.351: [duplicator-monitor-capture: '$selectedLogSource'] update settings:",
+    "04:06:25.351: `tmethod: DXGI",
+    "04:06:26.351: [duplicator-monitor-capture: '其他源'] update settings:",
+    "04:06:26.351: `tmethod: DXGI",
+    "04:06:27.351: [duplicator-monitor-capture: '$selectedLogSource'] update settings:",
+    "04:06:27.351: `tmethod: WGC",
+    "04:06:28.351: [duplicator-monitor-capture: '其他源'] update settings:",
+    "04:06:28.351: `tmethod: DXGI", "") -join [Environment]::NewLine
+[IO.File]::WriteAllText($logPath, $log, [Text.UTF8Encoding]::new($false))
 $runDirectory = Join-Path $caseRoot "prepared"
 $arguments = @{
     ToolRoot = $ToolRoot
@@ -185,13 +197,19 @@ if ([int]$task.schema_version -ne 10 -or
     [string]$seed.status -ne "AWAITING_AUXILIARY_PREFLIGHT" -or
     $null -ne $seed.frozen_at_utc_unix_ns -or
     $null -ne $seed.scheduler_policy.preflight_file_sha256 -or
-    [string]$policy.capture_stack.capture_method_resolved -ne "DXGI" -or
+    [string]$policy.capture_stack.capture_method_resolved -ne "WGC" -or
     [string]$policy.capture_stack.producer_version -ne "32.1.0-rc4" -or
     [string]$summary.status -ne "PREPARED_NOT_LAUNCHED" -or
     [bool]$summary.scheduler_preflight_executed -or
     [bool]$summary.final_plan_frozen -or
     [bool]$summary.physical_launch_executed) {
     throw "Prepared composite-phase identities do not close"
+}
+$publicationHelper = Join-Path $runDirectory "tool/evidence_publication.py"
+if (-not (Test-Path -LiteralPath $publicationHelper -PathType Leaf) -or
+    [string]$task.files.evidence_publication.sha256 -ne
+        (Get-LowerSha256 $publicationHelper)) {
+    throw "Prepare must freeze the evidence publication helper and its identity"
 }
 foreach ($property in $task.files.PSObject.Properties) {
     Assert-Identity $property.Value "task.files.$($property.Name)"
@@ -211,6 +229,45 @@ if (-not $taskMarkdown.Contains("-AllowPhysicalOutput") -or
         "XEN_MOUSE_EFFECT_PROBE_B_COMPOSITE_PHASE_CALIBRATION_SENDS_REAL_KMBOX_INPUT")) {
     throw "TASK.md lacks the exact user-only Launch command"
 }
+
+$logCases = @(
+    [pscustomobject]@{ name = "source-absent"; lines = @(
+        "04:06:28.351: [duplicator-monitor-capture: '其他源'] update settings:",
+        "04:06:28.351: `tmethod: DXGI") },
+    [pscustomobject]@{ name = "latest-incomplete"; lines = @(
+        "04:06:25.351: [duplicator-monitor-capture: '$selectedLogSource'] update settings:",
+        "04:06:25.351: `tmethod: DXGI",
+        "04:06:27.351: [duplicator-monitor-capture: '$selectedLogSource'] update settings:",
+        "04:06:28.351: [duplicator-monitor-capture: '其他源'] update settings:",
+        "04:06:28.351: `tmethod: WGC") },
+    [pscustomobject]@{ name = "unknown-method"; lines = @(
+        "04:06:27.351: [duplicator-monitor-capture: '$selectedLogSource'] update settings:",
+        "04:06:27.351: `tmethod: UNKNOWN",
+        "04:06:28.351: [duplicator-monitor-capture: '其他源'] update settings:",
+        "04:06:28.351: `tmethod: DXGI") },
+    [pscustomobject]@{ name = "ambiguous-method"; lines = @(
+        "04:06:27.351: [duplicator-monitor-capture: '$selectedLogSource'] update settings:",
+        "04:06:27.351: `tmethod: DXGI",
+        "04:06:27.351: `tmethod: WGC") }
+)
+foreach ($logCase in $logCases) {
+    $badLog = (@("04:06:24.611: OBS 32.1.0-rc4 (64-bit, windows)") + $logCase.lines + @("")) -join [Environment]::NewLine
+    [IO.File]::WriteAllText($logPath, $badLog, [Text.UTF8Encoding]::new($false))
+    $badRun = Join-Path $caseRoot $logCase.name
+    $badArguments = @{} + $arguments
+    $badArguments.RunDirectory = $badRun
+    $badArguments.PublishedRunDirectory = $badRun
+    $rejected = $false
+    try { & $PrepareScript @badArguments }
+    catch {
+        if (-not $_.Exception.Message.Contains("OBS log")) { throw }
+        $rejected = $true
+    }
+    if (-not $rejected -or (Test-Path -LiteralPath $badRun)) {
+        throw "OBS日志未能独立证明所选源最新捕获方法时必须拒绝准备"
+    }
+}
+[IO.File]::WriteAllText($logPath, $log, [Text.UTF8Encoding]::new($false))
 
 [IO.File]::AppendAllText(
     $scenePath, "drift", [Text.UTF8Encoding]::new($false))

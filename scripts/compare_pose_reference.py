@@ -4,8 +4,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
+
+
+def require_finite(value, description):
+    """在聚合、阈值化和整数转换前拒绝非有限输入。"""
+    if isinstance(value, dict):
+        for item in value.values():
+            require_finite(item, description)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            require_finite(item, description)
+    elif isinstance(value, (int, float)) and not math.isfinite(value):
+        raise RuntimeError(f"{description}含 NaN 或 Infinity")
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -29,6 +42,11 @@ def parse_arguments() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_arguments()
+    for name, value in vars(args).items():
+        if name.startswith(("maximum_", "minimum_")):
+            require_finite(value, "对照门槛")
+            if value < 0 or (name == "minimum_mask_iou" and value > 1):
+                raise RuntimeError(f"对照门槛 {name} 超出有效范围")
     for path, description in (
         (args.model, "ONNX 模型"),
         (args.image, "测试图像"),
@@ -53,6 +71,7 @@ def main() -> int:
     summary = json.loads(
         (args.xen_result / "summary.json").read_text(encoding="utf-8")
     )
+    require_finite(summary, "Xen 诊断摘要")
     reference = YOLO(str(args.model), task="pose").predict(
         str(args.image),
         imgsz=320,
@@ -67,8 +86,14 @@ def main() -> int:
 
     reference_boxes = reference.boxes.xyxy.cpu().numpy()
     reference_confidences = reference.boxes.conf.cpu().numpy()
-    reference_classes = reference.boxes.cls.cpu().numpy().astype(int)
+    reference_classes = reference.boxes.cls.cpu().numpy()
+    if not all(np.isfinite(values).all() for values in
+               (reference_boxes, reference_confidences, reference_classes)):
+        raise RuntimeError("参考检测结果含 NaN 或 Infinity")
+    reference_classes = reference_classes.astype(int)
     reference_keypoints = reference.keypoints.data.cpu().numpy()
+    if not np.isfinite(reference_keypoints).all():
+        raise RuntimeError("参考关键点含 NaN 或 Infinity")
     instances = summary.get("instances", [])
     if len(instances) != len(reference_boxes) or not instances:
         raise RuntimeError(
@@ -83,6 +108,13 @@ def main() -> int:
         reference_keypoints.shape[1]
     ) or int(summary.get("keypoint_dimensions", 0)) != 3:
         raise RuntimeError("Xen 与参考关键点 shape 不一致")
+
+    for instance in instances:
+        require_finite([float(instance[field]) for field in ('class_id', 'confidence', 'x1', 'y1', 'x2', 'y2')],
+                       "Xen 检测结果")
+        for keypoint in instance.get("keypoints", []):
+            require_finite([float(keypoint[field]) for field in ("x", "y", "confidence")],
+                           "Xen 关键点")
 
     maximum_box_delta = 0.0
     maximum_detection_confidence_delta = 0.0

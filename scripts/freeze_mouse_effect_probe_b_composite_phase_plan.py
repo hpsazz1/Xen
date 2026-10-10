@@ -12,6 +12,16 @@ import sys
 import uuid
 from typing import Any
 
+import importlib.util
+
+_PUBLICATION_SPEC = importlib.util.spec_from_file_location(
+    "xen_evidence_publication", pathlib.Path(__file__).with_name("evidence_publication.py"))
+if _PUBLICATION_SPEC is None or _PUBLICATION_SPEC.loader is None:
+    raise RuntimeError("无法加载证据发布模块")
+_PUBLICATION = importlib.util.module_from_spec(_PUBLICATION_SPEC)
+_PUBLICATION_SPEC.loader.exec_module(_PUBLICATION)
+
+
 
 Q32 = 1 << 32
 PHASE_CELLS = ("P1_8", "P3_8", "P5_8", "P7_8")
@@ -71,24 +81,7 @@ def read_object(path: pathlib.Path, label: str) -> dict[str, Any]:
 
 
 def write_atomic(path: pathlib.Path, value: dict[str, Any]) -> None:
-    if not path.is_absolute():
-        raise PlanError("output 必须为绝对路径")
-    path = path.resolve()
-    pending = path.with_name(f".{path.name}.pending-{os.getpid()}")
-    if path.exists() or pending.exists():
-        raise PlanError("output 已存在，拒绝覆盖")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with pending.open("x", encoding="utf-8", newline="\n") as stream:
-            json.dump(value, stream, ensure_ascii=False, indent=2,
-                      allow_nan=False)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        pending.replace(path)
-    finally:
-        if pending.exists():
-            pending.unlink()
+    _PUBLICATION.publish_json_new(path, value, collision_type=PlanError, newline="\n")
 
 
 def schema_semantic_sha256() -> str:

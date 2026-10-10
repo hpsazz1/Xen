@@ -13,6 +13,16 @@ import subprocess
 import sys
 from typing import Any
 
+import importlib.util
+
+_PUBLICATION_SPEC = importlib.util.spec_from_file_location(
+    "xen_evidence_publication", pathlib.Path(__file__).with_name("evidence_publication.py"))
+if _PUBLICATION_SPEC is None or _PUBLICATION_SPEC.loader is None:
+    raise RuntimeError("无法加载证据发布模块")
+_PUBLICATION = importlib.util.module_from_spec(_PUBLICATION_SPEC)
+_PUBLICATION_SPEC.loader.exec_module(_PUBLICATION)
+
+
 import cv2
 import numpy as np
 
@@ -167,38 +177,11 @@ def write_pair_atomic(capture_path: pathlib.Path,
                       command_path: pathlib.Path,
                       capture: dict[str, Any],
                       commands: dict[str, Any]) -> None:
-    for path in (capture_path, command_path):
-        if not path.is_absolute() or path.exists():
-            raise ProducerError("ledger 输出必须是尚不存在的绝对路径")
-        path.parent.mkdir(parents=True, exist_ok=True)
-    capture_pending = capture_path.with_name(
-        f".{capture_path.name}.pending-{os.getpid()}")
-    command_pending = command_path.with_name(
-        f".{command_path.name}.pending-{os.getpid()}")
-    if capture_pending.exists() or command_pending.exists():
-        raise ProducerError("ledger pending 输出已存在")
-    published_capture = False
-    try:
-        for path, value in ((capture_pending, capture),
-                            (command_pending, commands)):
-            with path.open("x", encoding="utf-8", newline="\n") as stream:
-                json.dump(value, stream, ensure_ascii=False, indent=2,
-                          allow_nan=False)
-                stream.write("\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-        capture_pending.replace(capture_path)
-        published_capture = True
-        command_pending.replace(command_path)
-    except Exception:
-        if published_capture and capture_path.exists() and \
-                not command_path.exists():
-            capture_path.unlink()
-        raise
-    finally:
-        for path in (capture_pending, command_pending):
-            if path.exists():
-                path.unlink()
+    if not capture_path.is_absolute() or not command_path.is_absolute():
+        raise ProducerError("ledger 输出必须是尚不存在的绝对路径")
+    _PUBLICATION.publish_json_pair_new(
+        ((capture_path, capture), (command_path, commands)),
+        collision_type=ProducerError, newline="\n")
 
 
 def produce(options: argparse.Namespace) -> tuple[dict[str, Any],

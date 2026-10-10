@@ -300,15 +300,26 @@ $versionMatch = [regex]::Match(
     '(?m)^\d\d:\d\d:\d\d\.\d+: OBS ([^ ]+) \(64-bit, windows\)\s*$')
 $sourceName = [string]$obsBinding.selected_source.name
 $sourceMarker = "[duplicator-monitor-capture: '$sourceName'] update settings:"
-$methodMatch = [regex]::Match(
-    $obsLogText, '(?m)^.*?method:\s*(DXGI|WGC)\s*$')
-if (-not $versionMatch.Success -or
-    -not $obsLogText.Contains($sourceMarker) -or
-    -not $methodMatch.Success) {
-    throw "OBS log 未证明选定 monitor source 的版本/实际 capture method"
+# 只取所选源最后一次配置更新紧随的缩进设置行，不能借用其他源或旧配置的方法。
+$sourceHeaders = [regex]::Matches(
+    $obsLogText,
+    '(?m)^\d\d:\d\d:\d\d\.\d+: ' + [regex]::Escape($sourceMarker) + '[ \t]*\r?$')
+if (-not $versionMatch.Success -or $sourceHeaders.Count -eq 0) {
+    throw "OBS log 未证明选中 monitor source 的版本/实际 capture method"
+}
+$latestSourceHeader = $sourceHeaders[$sourceHeaders.Count - 1]
+$sourceSettings = [regex]::Match(
+    $obsLogText.Substring($latestSourceHeader.Index + $latestSourceHeader.Length),
+    '\A\r?\n(?<settings>(?:\d\d:\d\d:\d\d\.\d+: [ \t]+[^\r\n]*(?:\r?\n|$))*)')
+$methodMatches = [regex]::Matches(
+    $sourceSettings.Groups['settings'].Value,
+    '(?m)^\d\d:\d\d:\d\d\.\d+: [ \t]+method:[ \t]*(?<method>[^\r\n]*?)[ \t]*\r?$')
+if ($methodMatches.Count -ne 1 -or
+    $methodMatches[0].Groups['method'].Value -notin @('DXGI', 'WGC')) {
+    throw "OBS log 所选源最新配置块缺少唯一有效的 capture method"
 }
 $obsVersion = $versionMatch.Groups[1].Value
-$resolvedCaptureMethod = $methodMatch.Groups[1].Value
+$resolvedCaptureMethod = $methodMatches[0].Groups['method'].Value
 
 $runParent = Split-Path -Parent $resolvedRun
 if (-not (Test-Path -LiteralPath $runParent -PathType Container)) {
@@ -358,6 +369,8 @@ $ndiLicense = Copy-Tool `
     "Processing.NDI.Lib.Licenses.txt" "composite-phase NDI license"
 $launchScript = Copy-Script `
     "launch_mouse_effect_probe_a.ps1" "composite-phase Launch script"
+$evidencePublication = Copy-Script `
+    "evidence_publication.py" "composite-phase evidence publication"
 $planGenerator = Copy-Script `
     "freeze_mouse_effect_probe_b_composite_phase_plan.py" `
     "composite-phase plan generator"
@@ -567,6 +580,7 @@ $task = [ordered]@{
         opencv_runtime = $opencvRuntime
         ndi_runtime = $ndiRuntime
         ndi_license = $ndiLicense
+        evidence_publication = $evidencePublication
         plan_generator = $planGenerator
         ledger_producer = $ledgerProducer
         binder = $binder

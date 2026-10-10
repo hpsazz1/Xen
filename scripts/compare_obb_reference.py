@@ -4,8 +4,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
+
+
+def require_finite(value, description):
+    """在聚合、阈值化和整数转换前拒绝非有限输入。"""
+    if isinstance(value, dict):
+        for item in value.values():
+            require_finite(item, description)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            require_finite(item, description)
+    elif isinstance(value, (int, float)) and not math.isfinite(value):
+        raise RuntimeError(f"{description}含 NaN 或 Infinity")
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -66,6 +79,11 @@ def pair_instances(instances, reference_data):
 
 def main() -> int:
     args = parse_arguments()
+    for name, value in vars(args).items():
+        if name.startswith(("maximum_", "minimum_")):
+            require_finite(value, "对照门槛")
+            if value < 0 or (name == "minimum_mask_iou" and value > 1):
+                raise RuntimeError(f"对照门槛 {name} 超出有效范围")
     for path, description in (
         (args.model, "ONNX 模型"),
         (args.image, "测试图像"),
@@ -88,6 +106,7 @@ def main() -> int:
     summary = json.loads(
         (args.xen_result / "summary.json").read_text(encoding="utf-8")
     )
+    require_finite(summary, "Xen 诊断摘要")
     reference = YOLO(str(args.model), task="obb").predict(
         str(args.image),
         imgsz=320,
@@ -100,12 +119,18 @@ def main() -> int:
     if reference.obb is None:
         raise RuntimeError("Ultralytics 参考结果没有旋转框")
     reference_data = reference.obb.data.cpu().numpy()
+    if not np.isfinite(reference_data).all():
+        raise RuntimeError("参考旋转框含 NaN 或 Infinity")
     instances = summary.get("instances", [])
     if len(instances) != len(reference_data) or not instances:
         raise RuntimeError(
             "Xen 与 Ultralytics OBB 实例数不一致或结果为空："
             f"{len(instances)} != {len(reference_data)}"
         )
+
+    for instance in instances:
+        require_finite([float(instance[field]) for field in ('class_id', 'confidence', 'center_x', 'center_y', 'width', 'height', 'angle_radians')],
+                       "Xen 检测结果")
 
     maximum_geometry_delta = 0.0
     maximum_angle_delta = 0.0

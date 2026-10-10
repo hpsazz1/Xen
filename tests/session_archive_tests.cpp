@@ -290,6 +290,71 @@ void native_chinese_report_paths(const std::filesystem::path& root) {
     check(directory_count == 1, "中文归档父目录只能包含预期目录");
 }
 }
+void failed_snapshot_only_test(const std::filesystem::path& root) {
+    for (const bool with_sample : {false, true}) {
+        SessionArchiveConfig config;
+        config.directory = (root / (with_sample ? "failed-after-flush" : "failed-before-frame")).string();
+        config.segment_samples = 1;
+        config.segment_interval = std::chrono::milliseconds(20);
+        config.report_config.session_id = with_sample ? "failed-after-flush" : "failed-before-frame";
+        SessionArchive archive;
+        std::string error;
+        check(archive.start(config, error), "启动空终态归档回归");
+        RuntimeSnapshot snapshot;
+        snapshot.state = RuntimeState::RUNNING;
+        if (with_sample) {
+            RuntimePipelineSample sample;
+            sample.sequence = 1;
+            send(archive, std::span(&sample, 1), snapshot);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (archive.status().written_segments != 1 && std::chrono::steady_clock::now() < deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            check(archive.status().written_segments == 1, "故障前已真实发布完整分段");
+        }
+        snapshot.state = RuntimeState::FAILED;
+        snapshot.last_error = "确定性采集故障";
+        send(archive, {}, snapshot);
+        const auto terminal_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (archive.status().written_segments != (with_sample ? 2 : 1) &&
+                   std::chrono::steady_clock::now() < terminal_deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        check(archive.status().written_segments == (with_sample ? 2 : 1), "故障终态已真实发布");
+        send(archive, {}, snapshot);
+        archive.stop();
+        const auto state = archive.status();
+        check(state.written_segments == (with_sample ? 2 : 1), "无帧无事件的FAILED快照必须持久化");
+        const auto base = std::filesystem::path(config.directory) / ("segment-" + std::to_string(state.written_segments));
+        const auto report = read(base.string() + ".json");
+        check(report["final_snapshot"]["runtime_state"] == "FAILED" &&
+                  report["final_snapshot"]["last_error"] == snapshot.last_error,
+              "封尾报告必须保留实际故障终态和错误");
+        check(read(base.string() + ".meta.json")["sample_count"] == 0 &&
+                  state.written_samples == (with_sample ? 1 : 0) && state.dropped_samples == 0,
+              "终态证据不得伪造帧或重复旧样本");
+    }
+}
+void changed_failed_snapshot_test(const std::filesystem::path& root) {
+    SessionArchiveConfig config;
+    config.directory = (root / "failed-error-change").string();
+    config.segment_interval = std::chrono::milliseconds(20);
+    SessionArchive archive;
+    std::string error;
+    check(archive.start(config, error), "启动故障终态变更回归");
+    RuntimeSnapshot snapshot;
+    snapshot.state = RuntimeState::FAILED;
+    snapshot.last_error = "首次故障";
+    send(archive, {}, snapshot);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (archive.status().written_segments != 1 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    check(archive.status().written_segments == 1, "首次故障终态已发布");
+    snapshot.last_error = "后续故障原因";
+    send(archive, {}, snapshot);
+    archive.stop();
+    check(archive.status().written_segments == 2 &&
+              read(std::filesystem::path(config.directory) / "segment-2.json")["final_snapshot"]["last_error"] == snapshot.last_error,
+          "故障终态相关字段变化仍须发布新证据");
+}
 int main(int argc, char** argv) {
     try {
         if (argc==3 && std::string(argv[1])=="--benchmark") return benchmark(argv[2]);
@@ -297,6 +362,8 @@ int main(int argc, char** argv) {
         if (argc==3 && std::string(argv[1])=="--queue-pressure") return queue_pressure(argv[2]);
         const auto root=std::filesystem::temp_directory_path()/
             ("xen-session-archive-test-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        failed_snapshot_only_test(root);
+        changed_failed_snapshot_test(root);
         SessionArchiveConfig config; config.directory=(root/"first").string();
         config.segment_samples=2; config.report_config.session_id="test-first";
         config.segment_interval=std::chrono::milliseconds(20);

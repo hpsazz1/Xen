@@ -393,7 +393,34 @@ def test_png_witness_extraction_preserves_known_core_delay() -> None:
                f"reasons={result['core_gate']['invalid_reasons']}")
 
 
+def test_observation_unknown_negation_does_not_claim_clean() -> None:
+    with tempfile.TemporaryDirectory(prefix="xen-probe-b-observation-") as text:
+        path = pathlib.Path(text).resolve() / "OBSERVATION.md"
+        for field in ("物理鼠标/WASD", "遮挡/scene cut", "异常/急停"):
+            for unknown in ("无法确认", "没有确认是否发生", "未核实", "无记录", "无异常但曾急停"):
+                values = {"用户原话": "fixture", "可见视角变化": "已观察", "物理鼠标/WASD": "未使用",
+                          "正/负方向与左右 witness": "符合", "遮挡/scene cut": "无", "异常/急停": "无"}
+                values[field] = unknown
+                path.write_text("\n".join(f"- {name}：{value}" for name, value in values.items()), encoding="utf-8")
+                try:
+                    observation = ANALYZER._observation_fields(path)
+                except ValueError:
+                    continue
+                expect(any(observation[name] for name in ("manual_mouse_or_wasd_used", "occlusion_or_scene_cut_reported", "anomaly_or_emergency_stop_reported")),
+                       f"{field}={unknown} 不能声明无污染")
+        path.write_text("\n".join(f"- {name}：{value}" for name, value in {
+            "用户原话": "fixture", "可见视角变化": "已观察", "物理鼠标/WASD": "未使用",
+            "正/负方向与左右 witness": "符合", "遮挡/scene cut": "不存在", "异常/急停": "无异常或急停"}.items()), encoding="utf-8")
+        observation = ANALYZER._observation_fields(path)
+        expect(not any(observation[name] for name in ("manual_mouse_or_wasd_used", "occlusion_or_scene_cut_reported", "anomaly_or_emergency_stop_reported")),
+               "明确逐字段无污染声明应继续兼容")
+        path.write_text(path.read_text(encoding="utf-8").replace("物理鼠标/WASD：未使用", "物理鼠标/WASD：已使用"), encoding="utf-8")
+        expect(ANALYZER._observation_fields(path)["manual_mouse_or_wasd_used"] is True,
+               "明确报告污染时应保留污染标记")
+
+
 if __name__ == "__main__":
+    test_observation_unknown_negation_does_not_claim_clean()
     test_contract_freezes_predata_selection_and_validation_rules()
     test_primary_sequence_has_three_pairs_and_nonshared_guard_rows()
     test_pure_core_freezes_f1_without_forcing_a_tail()

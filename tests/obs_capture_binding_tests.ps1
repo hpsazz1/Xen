@@ -819,6 +819,38 @@ OutputCY=360
             "所选视频必须以 1:1、无旋转/二次裁剪方式对齐*") {
         throw "所选视频存在二次 scene-item 裁剪时必须失败封闭"
     }
+    foreach ($filterTarget in @("source", "scene")) {
+        foreach ($enabled in @($true, $false, $null)) {
+            Write-SceneCollection $collection $static $jump $move $true $false
+            $document = Get-Content -LiteralPath $collection -Raw -Encoding UTF8 | ConvertFrom-Json
+            $target = if ($filterTarget -eq "source") {
+                $document.sources | Where-Object { $_.id -eq "ffmpeg_source" -and $_.settings.local_file -eq $static }
+            } else { $document.sources | Where-Object { $_.id -eq "scene" } }
+            $filter = [ordered]@{ id = "crop_filter"; settings = @{ left = 1; top = 1; cx = 100; cy = 100 } }
+            if ($null -ne $enabled) { $filter.enabled = $enabled }
+            $target | Add-Member -NotePropertyName filters -NotePropertyValue @($filter)
+            Write-Utf8NoBom $collection ($document | ConvertTo-Json -Depth 20)
+            $filterOutput = Join-Path $root ("filter-{0}-{1}.json" -f $filterTarget, [string]$enabled)
+            $caught = $false
+            try {
+                & $BindingScript -SceneCollectionPath $collection -ObsUserConfigPath $obsUserConfig `
+                    -ObsProfileConfigPath $obsProfileConfig -ExpectedNdiOutputName "Xen-ROI-320" `
+                    -SceneName $document.current_program_scene `
+                    -SourceNames @($document.sources | Where-Object { $_.id -eq "ffmpeg_source" } | ForEach-Object { $_.name }) `
+                    -SelectedSourceName ([string]($document.sources | Where-Object { $_.settings.PSObject.Properties.Name -contains "local_file" -and $_.settings.local_file -eq $static }).name) `
+                    -ExpectedSourceWidth 2560 -ExpectedSourceHeight 1440 -ExpectedRoiWidth 320 -ExpectedRoiHeight 320 `
+                    -OutputPath $filterOutput
+            } catch {
+                if (-not $_.Exception.Message.Contains("filters")) { throw }
+                $caught = $true
+            }
+            if ($enabled -eq $false) {
+                if ($caught -or -not (Test-Path -LiteralPath $filterOutput)) { throw "禁用滤镜不得破坏既有1:1绑定" }
+            } elseif (-not $caught -or (Test-Path -LiteralPath $filterOutput)) {
+                throw "FixedMedia的源/scene活动或未知状态滤镜必须拒绝1:1声明"
+            }
+        }
+    }
     Write-Host "OBS source/transform/file/NDI binding 测试通过。"
 } finally {
     if (Test-Path -LiteralPath $root) {

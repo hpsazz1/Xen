@@ -85,8 +85,8 @@ foreach ($video in $videos) {
             source_height = $sourceHeight
             frame_count = $frames
             input_mode = "center"
-            roi_x = [int](($sourceWidth - $evaluatedWidth) / 2)
-            roi_y = [int](($sourceHeight - $evaluatedHeight) / 2)
+            roi_x = [int][Math]::Floor(($sourceWidth - $evaluatedWidth) / 2)
+            roi_y = [int][Math]::Floor(($sourceHeight - $evaluatedHeight) / 2)
             roi_width = $evaluatedWidth
             roi_height = $evaluatedHeight
             policy = "target_frame_visibility_v1"

@@ -1298,15 +1298,29 @@ def _observation_fields(path: pathlib.Path) -> dict:
     if not required.issubset(fields) or any(
             not fields[name] for name in required):
         raise ValueError("Physical B 人工观察字段尚未完整回收")
-    normalized_manual = fields["物理鼠标/WASD"].lower()
-    normalized_cut = fields["遮挡/scene cut"].lower()
-    normalized_stop = fields["异常/急停"].lower()
-    contaminated = not any(
-        token in normalized_manual for token in ("未", "无", "没有"))
-    scene_cut = not any(
-        token in normalized_cut for token in ("未", "无", "没有"))
-    abnormal = not any(
-        token in normalized_stop for token in ("未", "无", "没有"))
+    # 仅接受完整、明确的否定声明；“无法确认/无记录/未核实”保持 UNKNOWN。
+    clean_statements = {
+        "物理鼠标/WASD": {"无", "没有", "未使用", "没有使用", "未操作", "未使用物理鼠标/wasd", "无物理鼠标/wasd输入"},
+        "遮挡/scene cut": {"无", "没有", "不存在", "未发生", "无遮挡", "无遮挡或scene cut", "无遮挡/scene cut"},
+        "异常/急停": {"无", "没有", "不存在", "未发生", "无异常或急停", "无异常/急停"},
+    }
+    contaminated_statements = {
+        "物理鼠标/WASD": {"有", "使用", "已使用", "有手动输入", "使用了物理鼠标/wasd"},
+        "遮挡/scene cut": {"有", "存在", "发生", "有遮挡", "有scene cut"},
+        "异常/急停": {"有", "存在", "发生", "有异常", "急停", "已急停"},
+    }
+    clean = {}
+    for name, allowed in clean_statements.items():
+        statement = fields[name].strip().rstrip("。.!！").lower()
+        if statement in allowed:
+            clean[name] = True
+        elif statement in contaminated_statements[name]:
+            clean[name] = False
+        else:
+            raise ValueError(f"Physical B {name} 未明确确认无污染，保持 UNKNOWN")
+    contaminated = not clean["物理鼠标/WASD"]
+    scene_cut = not clean["遮挡/scene cut"]
+    abnormal = not clean["异常/急停"]
     return {
         "fields": fields,
         "manual_mouse_or_wasd_used": contaminated,

@@ -1,5 +1,6 @@
 #include "mouse_effect_probe/mouse_effect_probe.h"
 
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -9,6 +10,7 @@
 #include <iostream>
 #include <iterator>
 #include <memory>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -1157,6 +1159,60 @@ void test_report_is_atomic_bound_and_tamper_evident() {
     expect(mouse_effect_probe::verify_mouse_effect_probe_report(
                report_path, error),
            "新发布 report 必须通过独立完整性校验: " + error);
+    std::ifstream valid_report(report_path, std::ios::binary);
+    const auto valid_document = nlohmann::ordered_json::parse(valid_report);
+    const auto reject_signed_mutation = [&](nlohmann::ordered_json document,
+                                           const std::string& label) {
+        document.erase("report_sha256");
+        const auto payload_path = temporary.path() / "schema-payload.json";
+        {
+            std::ofstream payload(payload_path, std::ios::binary | std::ios::trunc);
+            payload << document.dump();
+        }
+        std::string digest;
+        expect(mouse_effect_probe::calculate_mouse_effect_probe_file_sha256(
+                   payload_path, digest, error), "Schema fixture computes exact canonical hash");
+        document["report_sha256"] = digest;
+        const auto mutated_path = temporary.path() / "schema-report.json";
+        {
+            std::ofstream mutated(mutated_path, std::ios::binary | std::ios::trunc);
+            mutated << document.dump(2);
+        }
+        expect(!mouse_effect_probe::verify_mouse_effect_probe_report(mutated_path, error), label);
+    };
+    for (const auto* field : {"cumulative_requested_x_counts",
+                             "cumulative_backend_completed_x_counts"}) {
+        auto document = valid_document;
+        document["result"][field] = "0";
+        reject_signed_mutation(document, "Signed report rejects noninteger cumulative field");
+        document["result"][field] = 0.5;
+        reject_signed_mutation(document, "Signed report rejects floating cumulative field");
+        document["result"][field] = (std::numeric_limits<std::uint64_t>::max)();
+        reject_signed_mutation(document, "Signed report rejects cumulative int64 overflow");
+    }
+    {
+        auto document = valid_document;
+        document["result"]["events"][0] = "not-an-event";
+        reject_signed_mutation(document, "Signed report rejects nonobject event");
+    }
+    for (const auto& item : valid_document["result"]["events"][0].items()) {
+        auto document = valid_document;
+        document["result"]["events"][0].erase(item.key());
+        reject_signed_mutation(document, "Signed report rejects missing event field: " + item.key());
+        document = valid_document;
+        document["result"]["events"][0][item.key()] = nullptr;
+        reject_signed_mutation(document, "Signed report rejects null event field: " + item.key());
+        document = valid_document;
+        auto& wrong = document["result"]["events"][0][item.key()];
+        wrong = item.value().is_string() ? nlohmann::ordered_json(7) :
+                                        nlohmann::ordered_json("wrong-type");
+        reject_signed_mutation(document, "Signed report rejects wrong event type: " + item.key());
+    }
+    {
+        auto document = valid_document;
+        document["result"]["events"][0]["unknown"] = true;
+        reject_signed_mutation(document, "Signed report rejects extra event field");
+    }
     std::string duplicate_sha;
     expect(!mouse_effect_probe::write_mouse_effect_probe_report(
                report_path, options, sequence, binding, executor.result(),

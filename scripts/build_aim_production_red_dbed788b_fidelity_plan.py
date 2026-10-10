@@ -13,6 +13,16 @@ import pathlib
 import sys
 from typing import Any
 
+import importlib.util
+
+_PUBLICATION_SPEC = importlib.util.spec_from_file_location(
+    "xen_evidence_publication", pathlib.Path(__file__).with_name("evidence_publication.py"))
+if _PUBLICATION_SPEC is None or _PUBLICATION_SPEC.loader is None:
+    raise RuntimeError("无法加载证据发布模块")
+_PUBLICATION = importlib.util.module_from_spec(_PUBLICATION_SPEC)
+_PUBLICATION_SPEC.loader.exec_module(_PUBLICATION)
+
+
 
 WINDOWS = ((40, 340), (700, 1000), (1400, 1700), (2099, 2399))
 SAMPLES_PER_BLOCK = 300
@@ -385,19 +395,7 @@ def build_plan(baseline_path: pathlib.Path,
 
 
 def write_json_atomic(path: pathlib.Path, value: dict[str, Any]) -> None:
-    path = path.resolve()
-    incoming = path.with_name(f".{path.name}.incoming")
-    if path.exists() or incoming.exists():
-        raise FileExistsError("拒绝覆盖既有 fidelity plan 或 incoming")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        incoming.write_text(
-            json.dumps(value, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8")
-        incoming.replace(path)
-    finally:
-        if incoming.exists():
-            incoming.unlink()
+    _PUBLICATION.publish_json_new(path, value, collision_type=FileExistsError, newline=None)
 
 
 def main(argv: list[str] | None = None) -> int:

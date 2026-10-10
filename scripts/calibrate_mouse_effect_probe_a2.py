@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import io
 import json
 import math
 import os
@@ -2136,6 +2137,7 @@ def _write_new_text(path: pathlib.Path, content: str) -> None:
 
 def _parse_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
+        epilog="candidate/holdout 要求 response JSON 的 pairs_csv_sha256 与 CSV 精确字节一致。旧报告缺少此字段时须用 analyze_mouse_effect_probe_pixels.py 从原始冻结证据重新生成 JSON/CSV，不能手工补哈希或复用其他 Run 的 CSV。",
         description="Physical A2 S0/S1 calibration；不打开 Capture/Probe/Mouse"
     )
     subparsers = parser.add_subparsers(dest="mode", required=True)
@@ -2188,6 +2190,17 @@ def _parse_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespa
     holdout.add_argument("--observation", type=pathlib.Path, required=True)
     holdout.add_argument("--output", type=pathlib.Path, required=True)
     return parser.parse_args(arguments)
+
+
+def _read_response_rows(response: dict, path: pathlib.Path, expected_sha256: str) -> list[dict]:
+    payload = path.resolve().read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    if response.get("pairs_csv_sha256") != digest or expected_sha256 != digest:
+        raise ValueError("Physical response 与 rows CSV 的精确 SHA-256 不匹配或缺失，请重新生成分析证据")
+    rows = list(csv.DictReader(io.StringIO(payload.decode("utf-8-sig"), newline="")))
+    if not rows:
+        raise ValueError("Physical rows CSV 为空")
+    return rows
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
@@ -2244,12 +2257,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 name: _file_identity(path, name)
                 for name, path in input_paths.items()
             }
-            with options.physical_rows_csv.resolve().open(
-                "r", encoding="utf-8", newline=""
-            ) as source:
-                rows = list(csv.DictReader(source))
-            if not rows:
-                raise ValueError("P-CAL physical rows CSV 为空")
+            physical_response = _read_json(options.physical_response, "P-CAL physical response")
+            rows = _read_response_rows(physical_response, options.physical_rows_csv,
+                                       identities["physical_rows_csv"]["sha256"])
             observation_text = options.observation.resolve().read_text(
                 encoding="utf-8"
             )
@@ -2258,7 +2268,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 _read_json(options.zero_input_calibration, "S1 zero-input calibration"),
                 _read_json(options.calibration_plan, "A2 calibration plan"),
                 _read_json(options.task, "P-CAL task"),
-                _read_json(options.physical_response, "P-CAL physical response"),
+                physical_response,
                 rows,
                 observation_text=observation_text,
                 observation_sha256=identities["observation"]["sha256"],
@@ -2292,23 +2302,25 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 name: _file_identity(path, name)
                 for name, path in input_paths.items()
             }
-            with options.holdout_rows_csv.resolve().open(
-                "r", encoding="utf-8", newline=""
-            ) as source:
-                rows = list(csv.DictReader(source))
-            if not rows:
-                raise ValueError("P-HOLDOUT physical rows CSV 为空")
+            holdout_response = _read_json(options.holdout_response, "P-HOLDOUT physical response")
+            rows = _read_response_rows(holdout_response, options.holdout_rows_csv,
+                                       identities["holdout_rows_csv"]["sha256"])
+            candidate = _read_json(options.candidate, "P-CAL candidate")
+            calibration_response = _read_json(options.calibration_response, "P-CAL physical response")
+            calibration_csv_sha256 = candidate.get("input_files", {}).get("physical_rows_csv", {}).get("sha256")
+            if not calibration_csv_sha256 or calibration_response.get("pairs_csv_sha256") != calibration_csv_sha256:
+                raise ValueError("P-CAL response 未绑定 candidate 实际使用的 rows CSV SHA-256")
             observation_text = options.observation.resolve().read_text(
                 encoding="utf-8"
             )
             result = evaluate_physical_holdout(
-                _read_json(options.candidate, "P-CAL candidate"),
+                candidate,
                 _read_json(options.synthetic_calibration, "S0 synthetic calibration"),
                 _read_json(options.zero_input_calibration, "S1 zero-input calibration"),
                 _read_json(options.calibration_plan, "A2 calibration plan"),
-                _read_json(options.calibration_response, "P-CAL physical response"),
+                calibration_response,
                 _read_json(options.holdout_task, "P-HOLDOUT task"),
-                _read_json(options.holdout_response, "P-HOLDOUT physical response"),
+                holdout_response,
                 rows,
                 observation_text=observation_text,
                 observation_sha256=identities["observation"]["sha256"],

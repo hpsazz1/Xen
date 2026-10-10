@@ -58,6 +58,7 @@ struct SessionArchive::Impl {
     std::uint64_t trigger_sequence = 0, segment_number = 0;
     std::vector<RuntimePipelineSample> pending;
     RuntimeSnapshot latest;
+    bool failed_snapshot_pending = false;
     std::vector<TriggerExecutionEvent> events;
     std::function<void()> before_flush;
     Clock::time_point segment_started;
@@ -91,7 +92,8 @@ struct SessionArchive::Impl {
             {"clock_domain","local_steady_clock_nanoseconds"}, {"physical_effect_verified",false}});
     }
     void flush() {
-        if (pending.empty() && events.empty()) return;
+        // 故障可能发生在首帧前或完整分段之后，仍须保留终态证据。
+        if (pending.empty() && events.empty() && !failed_snapshot_pending) return;
         std::function<void()> callback;
         { std::lock_guard lock(mutex); callback=before_flush; }
         if (callback) callback();
@@ -130,6 +132,7 @@ struct SessionArchive::Impl {
             std::lock_guard lock(mutex); state.last_error = ex.what();
             state.dropped_samples += pending.size(); state.trigger_events_dropped += events.size();
         }
+        failed_snapshot_pending = false;
         pending.clear(); events.clear(); segment_started = Clock::now();
         manifest(false);
     }
@@ -179,6 +182,16 @@ struct SessionArchive::Impl {
                     trigger_sequence = event.sequence; events.push_back(event);
                 }
                 batch.snapshot.trigger_execution_log.events.clear();
+                // 重复空FAILED轮询不重复写段；真正的终态变化仍须保留。
+                failed_snapshot_pending = batch.snapshot.state == RuntimeState::FAILED &&
+                    (failed_snapshot_pending || latest.state != batch.snapshot.state ||
+                     latest.capture_status != batch.snapshot.capture_status ||
+                     latest.detection_status != batch.snapshot.detection_status ||
+                     latest.last_error != batch.snapshot.last_error ||
+                     latest.active_model_path != batch.snapshot.active_model_path ||
+                     latest.detector_generation != batch.snapshot.detector_generation ||
+                     latest.output_armed != batch.snapshot.output_armed ||
+                     latest.emergency_stopped != batch.snapshot.emergency_stopped);
                 latest = std::move(batch.snapshot);
                 for (const auto& sample : batch.samples) {
                     pending.push_back(sample);

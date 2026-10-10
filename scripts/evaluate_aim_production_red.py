@@ -10,6 +10,16 @@ import math
 import pathlib
 from typing import Any
 
+import importlib.util
+
+_PUBLICATION_SPEC = importlib.util.spec_from_file_location(
+    "xen_evidence_publication", pathlib.Path(__file__).with_name("evidence_publication.py"))
+if _PUBLICATION_SPEC is None or _PUBLICATION_SPEC.loader is None:
+    raise RuntimeError("无法加载证据发布模块")
+_PUBLICATION = importlib.util.module_from_spec(_PUBLICATION_SPEC)
+_PUBLICATION_SPEC.loader.exec_module(_PUBLICATION)
+
+
 
 RED_SCHEMA_VERSION = 1
 EVIDENCE_TYPE = "aim_production_red_manifest"
@@ -129,6 +139,7 @@ _PAIRED_INPUT_FIELDS = (
     "world_delta_y",
     "box_width",
     "box_height",
+    "control_center",
     "pose",
     "visible",
     "target_id",
@@ -1114,20 +1125,7 @@ def evaluate_manifest(manifest_path: pathlib.Path | str) -> dict[str, Any]:
 
 
 def _write_json_atomic(path: pathlib.Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        raise FileExistsError(f"拒绝覆盖既有 evaluator report: {path}")
-    temporary = path.with_name(f".{path.name}.incoming")
-    if temporary.exists():
-        raise FileExistsError(f"输出临时文件已存在: {temporary}")
-    try:
-        temporary.write_text(
-            json.dumps(value, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8")
-        temporary.replace(path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
+    _PUBLICATION.publish_json_new(path, value, collision_type=FileExistsError, newline=None)
 
 
 def main(argv: list[str] | None = None) -> int:

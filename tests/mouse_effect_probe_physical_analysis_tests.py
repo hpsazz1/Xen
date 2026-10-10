@@ -6,6 +6,7 @@ import json
 import pathlib
 import sys
 import tempfile
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -283,7 +284,19 @@ def test_physical_contract_rejects_missing_ack_y_and_timestamp_mismatch() -> Non
             raise AssertionError("command event 无同 timestamp sidecar frame 必须拒绝")
 
 
+def test_cli_binds_physical_response_to_exact_csv_bytes() -> None:
+    with tempfile.TemporaryDirectory(prefix="xen-probe-csv-identity-") as text:
+        arguments = _make_fixture(pathlib.Path(text).resolve())
+        arguments.analysis_mode = "physical-response"
+        with patch.object(MODULE, "_parse_arguments", return_value=arguments):
+            expect(MODULE.main() == 0, "完整合成像素CLI应发布结果")
+        result = json.loads(arguments.output.read_text(encoding="utf-8"))
+        expect(result.get("pairs_csv_sha256") == hashlib.sha256(arguments.pairs_csv.read_bytes()).hexdigest(),
+               "像素JSON必须绑定同次写出的CSV精确字节")
+
+
 if __name__ == "__main__":
+    test_cli_binds_physical_response_to_exact_csv_bytes()
     test_physical_response_recovers_step_direction_and_exact_onset()
     test_physical_contract_rejects_missing_ack_y_and_timestamp_mismatch()
     print("Mouse Effect Probe Physical pixel analysis 测试全部通过。")

@@ -162,6 +162,16 @@ function Get-OptionalProperty([object]$Value, [string]$Name) {
     return $property.Value
 }
 
+function Assert-NoActiveFilters([object]$Source, [string]$Description) {
+    foreach ($filter in @(Get-OptionalProperty $Source "filters")) {
+        if ($null -eq $filter) { continue }
+        $enabled = Get-OptionalProperty $filter "enabled"
+        # 只有显式禁用才不改变像素几何；缺失或未知状态不能证明1:1。
+        if ($enabled -isnot [bool] -or $enabled) {
+            throw "$Description filters 必须全部显式禁用才能声明1:1 ROI"
+        }
+    }
+}
 function Get-RequiredPositiveIniInteger(
         [Collections.Specialized.OrderedDictionary]$Values,
         [string]$Name,
@@ -309,6 +319,7 @@ if ($null -eq $collectionResolution -or
 $scene = Get-UniqueMatch @($collection.sources) {
     $_.id -eq "scene" -and $_.name -eq $SceneName
 } "OBS Program Scene"
+Assert-NoActiveFilters $scene "OBS Program Scene"
 $items = @($scene.settings.items)
 
 $candidateVisibility = @()
@@ -377,6 +388,7 @@ $commonItemGeometryInvalid = [double]$selectedItem.rot -ne 0.0 -or
     [double]$selectedItem.scale.y -ne 1.0
 $selectedSourceSnapshot = $null
 if ($BindingMode -eq "FixedMedia") {
+    Assert-NoActiveFilters $selectedSource "FixedMedia selected source"
     if ($commonItemGeometryInvalid -or
         [double]$selectedItem.pos.x -ne -$expectedRoiX -or
         [double]$selectedItem.pos.y -ne -$expectedRoiY) {

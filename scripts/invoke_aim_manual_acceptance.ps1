@@ -849,35 +849,34 @@ function Get-PixelEvidenceSummary(
             }).Count -eq 1)
     $contentFilesValid = $true
     $contentFilesError = ""
-    if ($ValidateContentOnly.IsPresent) {
-        for ($index = 0; $index -lt $frames.Count; ++$index) {
-            $frame = $frames[$index]
-            $expectedRelativePath = "frames/{0:D6}.png" -f $index
-            $frameFieldsAvailable =
-                $frame.PSObject.Properties.Name -contains "file" -and
-                $frame.PSObject.Properties.Name -contains "png_sha256"
-            if (-not $frameFieldsAvailable -or
-                [string]$frame.file -cne $expectedRelativePath -or
-                [string]$frame.png_sha256 -notmatch '^[0-9A-Fa-f]{64}$') {
-                $contentFilesValid = $false
-                $contentFilesError =
-                    "manifest 第 $index 帧的文件身份或 PNG 哈希字段无效。"
-                break
-            }
-            $framePath = Join-Path $outputDirectory `
-                ([string]$frame.file).Replace('/', '\')
-            if (-not (Test-Path -LiteralPath $framePath -PathType Leaf)) {
-                $contentFilesValid = $false
-                $contentFilesError = "manifest 第 $index 帧文件不存在。"
-                break
-            }
-            $actualFrameHash = (Get-FileHash -LiteralPath $framePath `
-                -Algorithm SHA256).Hash
-            if ($actualFrameHash -ine [string]$frame.png_sha256) {
-                $contentFilesValid = $false
-                $contentFilesError = "manifest 第 $index 帧 PNG 哈希不一致。"
-                break
-            }
+    # final 与 incoming 都必须验证实际冻结文件；此开关只控制执行证据。
+    for ($index = 0; $index -lt $frames.Count; ++$index) {
+        $frame = $frames[$index]
+        $expectedRelativePath = "frames/{0:D6}.png" -f $index
+        $frameFieldsAvailable =
+            $frame.PSObject.Properties.Name -contains "file" -and
+            $frame.PSObject.Properties.Name -contains "png_sha256"
+        if (-not $frameFieldsAvailable -or
+            [string]$frame.file -cne $expectedRelativePath -or
+            [string]$frame.png_sha256 -notmatch '^[0-9A-Fa-f]{64}$') {
+            $contentFilesValid = $false
+            $contentFilesError =
+                "manifest 第 $index 帧的文件身份或 PNG 哈希字段无效。"
+            break
+        }
+        $framePath = Join-Path $outputDirectory `
+            ([string]$frame.file).Replace('/', '\')
+        if (-not (Test-Path -LiteralPath $framePath -PathType Leaf)) {
+            $contentFilesValid = $false
+            $contentFilesError = "manifest 第 $index 帧文件不存在。"
+            break
+        }
+        $actualFrameHash = (Get-FileHash -LiteralPath $framePath `
+            -Algorithm SHA256).Hash
+        if ($actualFrameHash -ine [string]$frame.png_sha256) {
+            $contentFilesValid = $false
+            $contentFilesError = "manifest 第 $index 帧 PNG 哈希不一致。"
+            break
         }
     }
     $contractPassed = [int]$manifest.schema_version -eq 1 -and
@@ -2302,6 +2301,9 @@ if ($Mode -eq "Launch") {
                         if ($publishingStarted -and
                             $runtimeActiveAfterPublishingProbe) {
                             $pixelEvidenceAttemptState.phase = "PUBLISHING"
+                            # 对齐门证明录制窗口，不能等原子发布成功后才保存。
+                            # 发布失败仍由 attempt/执行错误拒绝，Recover 单独核验发布来源和内容。
+                            $pixelEvidenceRuntimeAlignment.gate_passed = $true
                             $pixelEvidenceAttemptState.runtime_active_at_recording_completion =
                                 $true
                             Write-Host ("sidecar 已录满并进入 publishing；" +

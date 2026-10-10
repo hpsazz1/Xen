@@ -2,7 +2,9 @@
     [string]$TestRoot = (Join-Path $PSScriptRoot `
         "..\cache\release-transfer-aim-manual-test"),
     [switch]$ReleasePathSafetyOnly,
-    [switch]$HostContractOnly
+    [switch]$HostContractOnly,
+    [switch]$PixelContentOnly,
+    [switch]$PixelPublicationOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -196,6 +198,43 @@ $ownedTest = New-XenOwnedTestDirectory -BasePath $TestRoot `
 $root = $ownedTest.RootPath
 
 try {
+
+    if ($PixelContentOnly) {
+        $source = Join-Path $PSScriptRoot 'invoke_aim_manual_acceptance.ps1'
+        $tokens=$null; $errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
+        foreach($name in @('Get-PixelEvidenceSummary','Get-FileEvidence','Test-ObjectFields')) {
+            $function=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$false)
+            . ([scriptblock]::Create($function.Extent.Text))
+        }
+        function Read-PixelEvidenceBinding { param($Path,$Name,[switch]$AllowLegacy) }
+        $ndiOutputName='fixture'
+        $output=Join-Path $root 'pixel-evidence'
+        New-Item -ItemType Directory -Path (Join-Path $output 'frames') -Force | Out-Null
+        Write-Utf8 (Join-Path $output 'source-binding.json') '{}'
+        $bindingHash=(Get-FileHash (Join-Path $output 'source-binding.json')).Hash
+        $task=[pscustomobject]@{capture=[pscustomobject]@{source='fixture'};pixel_evidence=[pscustomobject]@{
+            enabled=$true;frames=1;output_relative_path='pixel-evidence';source_binding=[pscustomobject]@{sha256=$bindingHash}}}
+        $frame=Join-Path $output 'frames/000000.png'
+        Write-Utf8 $frame 'frozen-png-content'
+        $manifest=[ordered]@{schema_version=1;evidence_type='output_off_capture';physical_output_capability=$false;
+            capture_backend='NDI';capture_source_name='fixture';capture_config=@{require_source_timing=$true};
+            requested_frame_count=1;recorded_frame_count=1;source_binding=@{sha256=$bindingHash};
+            frames=@(@{file='frames/000000.png';png_sha256=(Get-FileHash $frame).Hash;source_time_timing_valid=$true;source_clock_status='VALID'})}
+        Write-Utf8 (Join-Path $output 'manifest.json') ($manifest | ConvertTo-Json -Depth 8)
+        $valid=Get-PixelEvidenceSummary -Task $task -ResolvedRunDirectory $root -CollectionMode Recover -ProcessExitCode 0 -ExecutionError '' -RuntimeAlignment $null -RuntimeSessionIds @()
+        if (-not $valid.gate_passed) { throw '完整 final PNG 必须通过内容校验' }
+        Remove-Item -LiteralPath $frame
+        $missing=Get-PixelEvidenceSummary -Task $task -ResolvedRunDirectory $root -CollectionMode Recover -ProcessExitCode 0 -ExecutionError '' -RuntimeAlignment $null -RuntimeSessionIds @()
+        Write-Utf8 $frame 'tampered-png-content'
+        $tampered=Get-PixelEvidenceSummary -Task $task -ResolvedRunDirectory $root -CollectionMode Launch -ProcessExitCode 0 -ExecutionError '' -RuntimeAlignment $null -RuntimeSessionIds @()
+        if ($missing.gate_passed -or $tampered.gate_passed) {
+            throw "final PNG 必须 fail-closed：missing=$($missing.gate_passed)，tampered=$($tampered.gate_passed)"
+        }
+        Write-Host 'final PNG 缺失与哈希篡改专项通过'
+        return
+    }
+
     $package = Join-Path $root "Xen-fixture"
     Test-DiagnosticProcessEnvironment `
         -SourcePath (Join-Path $PSScriptRoot 'invoke_aim_manual_acceptance.ps1') `
@@ -668,6 +707,8 @@ namespace XenAimManualPixelFixture {
                 "XEN_TEST_PIXEL_RECORDING_HOLD_MS");
             string publishHoldText = Environment.GetEnvironmentVariable(
                 "XEN_TEST_PIXEL_PUBLISH_DELAY_MS");
+            Console.SetError(new StreamWriter(Console.OpenStandardError(),
+                new System.Text.UTF8Encoding(false)) { AutoFlush = true });
             string output = ArgumentValue(args, "--output");
             if (String.IsNullOrEmpty(started) || String.IsNullOrEmpty(ready) ||
                 String.IsNullOrEmpty(success) ||
@@ -706,14 +747,22 @@ namespace XenAimManualPixelFixture {
                 CopyDirectory(evidenceSource, incoming);
                 string frames = Path.Combine(incoming, "frames");
                 Directory.CreateDirectory(frames);
-                File.WriteAllText(Path.Combine(frames, "000000.png"),
-                    "publishing");
+
                 File.WriteAllText(publishingStarted, "publishing");
                 int publishHoldMilliseconds = 0;
                 if (Int32.TryParse(publishHoldText,
                         out publishHoldMilliseconds) &&
                     publishHoldMilliseconds > 0) {
                     System.Threading.Thread.Sleep(publishHoldMilliseconds);
+                }
+                if (Environment.GetEnvironmentVariable("XEN_TEST_PIXEL_PUBLISH_FAIL") == "1") {
+                    File.WriteAllText(output, "owned rename blocker");
+                    try { Directory.Move(incoming, output); }
+                    catch (IOException) {
+                        Console.Error.WriteLine("捕获证据失败：无法完成证据目录原子发布：fixture lock；incoming=" + incoming + "；final=" + output);
+                        File.WriteAllText(success, "failed publication completed");
+                        return 1;
+                    }
                 }
                 Directory.Move(incoming, output);
             } else {
@@ -883,8 +932,15 @@ namespace XenAimManualPixelFixture {
         (($pixelSchema13Report | ConvertTo-Json -Depth 10) + "`n")
     $pixelOutputRoot = Join-Path $pixelTaskRoot "pixel-evidence"
     New-Item -ItemType Directory -Path $pixelOutputRoot | Out-Null
+    $pixelFrameRoot = Join-Path $pixelOutputRoot "frames"
+    New-Item -ItemType Directory -Path $pixelFrameRoot | Out-Null
     $pixelFrames = @(for ($frame = 0; $frame -lt 2400; ++$frame) {
+        $frameRelativePath = "frames/{0:D6}.png" -f $frame
+        $framePath = Join-Path $pixelOutputRoot $frameRelativePath
+        Write-Utf8 $framePath "fixture-png"
         [ordered]@{
+            file = $frameRelativePath
+            png_sha256 = (Get-FileHash -LiteralPath $framePath -Algorithm SHA256).Hash
             source_time_timing_valid = $true
             source_clock_status = "VALID"
         }
@@ -1203,10 +1259,73 @@ namespace XenAimManualPixelFixture {
         (($pixelManifest | ConvertTo-Json -Depth 5) + "`n")
     Copy-Item -LiteralPath $pixelBinding -Destination `
         (Join-Path $pixelLifecycleEvidenceSource "source-binding.json")
+    Copy-Item -LiteralPath $pixelFrameRoot -Destination (Join-Path $pixelLifecycleEvidenceSource "frames") -Recurse
     $pixelLifecycleReportSource = Join-Path $root `
         "pixel-lifecycle-runtime.json"
     Write-Utf8 $pixelLifecycleReportSource `
         (($pixelSchema13Report | ConvertTo-Json -Depth 10) + "`n")
+
+    if ($PixelPublicationOnly -or -not $ReleasePathSafetyOnly) {
+        $publicationRun=Join-Path $root 'actual-publication-failure'
+        $workflow=Join-Path $published 'tools/invoke_aim_manual_acceptance.ps1'
+        $arguments=@('-TaskId','AIM-SUPERJUMP-ACCEPT-001','-Scenario','SuperJump','-SuperJumpCase','Static',
+            '-Profile','tracking','-RequireSourceTiming','-CapturePixelEvidence','-PixelEvidenceToolRoot',$pixelToolRoot,
+            '-PixelEvidenceBindingPath',$pixelBinding,'-PixelEvidenceFrames','2400','-PixelEvidenceMaxSeconds','30',
+            '-PackageRoot',$published,'-RunDirectory',$publicationRun)
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $workflow -Mode Prepare @arguments | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw '发布故障夹具 Prepare 失败' }
+        $environment=[ordered]@{
+            XEN_TEST_PIXEL_STARTED=(Join-Path $root 'publish-failure.started');XEN_TEST_PIXEL_READY=(Join-Path $root 'publish-failure.ready');
+            XEN_TEST_PIXEL_SUCCESS=(Join-Path $root 'publish-failure.done');XEN_TEST_PIXEL_COUNTER=(Join-Path $root 'publish-failure.count');
+            XEN_TEST_PIXEL_EVIDENCE_SOURCE=$pixelLifecycleEvidenceSource;XEN_TEST_PIXEL_PUBLISHING_STARTED=(Join-Path $root 'publish-failure.publishing');
+            XEN_TEST_PIXEL_PUBLISH_DELAY_MS='800';XEN_TEST_PIXEL_PUBLISH_FAIL='1';XEN_TEST_RUNTIME_HOLD_AFTER_SUCCESS_MS='1000';
+            XEN_TEST_RUNTIME_REPORT_SOURCE=$pixelLifecycleReportSource;XEN_TEST_RUNTIME_REPORT_NAME='actual-publish-failure.json';
+            XEN_TEST_RUNTIME_ROOT=(Join-Path $published 'cache/runtime');XEN_TEST_RUNTIME_SESSION_ID='pixel-schema13'}
+        $saved=@{}
+        foreach($name in $environment.Keys) {
+            $saved[$name]=[Environment]::GetEnvironmentVariable($name,'Process')
+            [Environment]::SetEnvironmentVariable($name,[string]$environment[$name],'Process')
+        }
+        try {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $workflow -Mode Launch @arguments `
+                -AllowPhysicalOutput -PhysicalOutputConfirmation XEN_AIM_DUAL_ACCEPT_SENDS_REAL_KMBOX_INPUT | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw '假进程发布故障 Launch 失败' }
+        } finally { foreach($name in $environment.Keys) { [Environment]::SetEnvironmentVariable($name,$saved[$name],'Process') } }
+        $attemptPath=Join-Path $publicationRun 'pixel-evidence-attempts.json'
+        $before=(Get-FileHash -LiteralPath $attemptPath).Hash
+        $attempts=Get-Content -LiteralPath $attemptPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $last=@($attempts.attempts)[-1]
+        if ($last.succeeded -or $last.manifest_published -or -not $last.runtime_active_at_start -or
+            -not $last.runtime_active_at_recording_completion -or $last.diagnostic -ne 'FAILED') {
+            throw '真实 Launch 未留下录制完成且发布失败的原始证据'
+        }
+        Remove-Item -LiteralPath (Join-Path $publicationRun 'pixel-evidence')
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $workflow -Mode Recover @arguments | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw '发布故障 Recover 执行失败' }
+        $summary=Get-Content -LiteralPath (Join-Path $publicationRun 'automatic-summary.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (-not $summary.pixel_evidence.gate_passed -or -not $summary.pixel_evidence.publication_recovered -or
+            (Get-FileHash -LiteralPath $attemptPath).Hash -ne $before) {
+            throw "真实 Launch 发布失败必须可 Recover 且保留原始 attempts：alignment=$($attempts.runtime_alignment.gate_passed)，diagnostic=$($summary.pixel_evidence.publication_recovery.diagnostic)"
+        }
+
+        $finalFrame=Join-Path $publicationRun 'pixel-evidence/frames/000000.png'
+        $originalFrame=[IO.File]::ReadAllBytes($finalFrame)
+        foreach($fault in @('missing','hash')) {
+            if($fault -eq 'missing') { Remove-Item -LiteralPath $finalFrame }
+            else { Write-Utf8 $finalFrame 'tampered-final-png' }
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $workflow -Mode Recover @arguments | Out-Null
+            if($LASTEXITCODE -ne 0) { throw "final 内容故障 Recover 执行失败：$fault" }
+            $invalid=Get-Content -LiteralPath (Join-Path $publicationRun 'automatic-summary.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+            if($invalid.pixel_evidence.gate_passed -or $invalid.pixel_evidence.content_files_valid) {
+                throw "final PNG 内容故障必须拒绝：$fault"
+            }
+            [IO.File]::WriteAllBytes($finalFrame,$originalFrame)
+        }
+        Write-Host '真实 Launch 发布失败后 Recover 及 final PNG 故障专项通过'
+
+        if ($PixelPublicationOnly) { return }
+    }
+
     $pixelLifecycleStarted = Join-Path $root "pixel-lifecycle.started"
     $pixelLifecycleReady = Join-Path $root "pixel-lifecycle.ready"
     $pixelLifecycleSuccess = Join-Path $root "pixel-lifecycle.success"

@@ -1,4 +1,6 @@
 import csv
+import argparse
+from unittest.mock import patch
 import hashlib
 import importlib.util
 import json
@@ -1129,6 +1131,8 @@ def test_p_cal_candidate_freezes_tail_mapping_margin_and_gain_before_holdout() -
             writer = csv.DictWriter(output, fieldnames=list(rows[0].keys()))
             writer.writeheader()
             writer.writerows(rows)
+        physical["pairs_csv_sha256"] = hashlib.sha256(rows_path.read_bytes()).hexdigest()
+        _write_json(root / "physical-response.json", physical)
         observation_path = root / "OBSERVATION.md"
         observation_path.write_text(observation, encoding="utf-8")
         output_path = root / "candidate.json"
@@ -1169,6 +1173,8 @@ def test_p_cal_candidate_freezes_tail_mapping_margin_and_gain_before_holdout() -
             )
             writer.writeheader()
             writer.writerows(holdout_rows)
+        holdout_physical["pairs_csv_sha256"] = hashlib.sha256(holdout_rows_path.read_bytes()).hexdigest()
+        _write_json(root / "holdout-response.json", holdout_physical)
         decision_path = root / "holdout-decision.json"
         holdout_exit_code = MODULE.main([
             "holdout",
@@ -1215,7 +1221,34 @@ def test_p_cal_candidate_freezes_tail_mapping_margin_and_gain_before_holdout() -
         raise AssertionError("tail 到达 horizon 时不得生成 P-CAL candidate")
 
 
+def test_candidate_cli_rejects_csv_from_another_response() -> None:
+    with tempfile.TemporaryDirectory(prefix="xen-a2-csv-binding-") as text:
+        root = pathlib.Path(text).resolve()
+        common = {}
+        for name in ("synthetic_calibration", "zero_input_calibration", "calibration_plan", "task", "physical_response"):
+            path = root / (name + ".json")
+            path.write_text(json.dumps({"pairs_csv_sha256": "a" * 64}), encoding="utf-8")
+            common[name] = path
+        rows = root / "rows.csv"
+        rows.write_text("pulse_index,frame_lag\n0,1\n", encoding="utf-8")
+        observation = root / "OBSERVATION.md"
+        observation.write_text("fixture", encoding="utf-8")
+        options = argparse.Namespace(mode="candidate", physical_rows_csv=rows,
+                                     observation=observation, output=root / "candidate.json", **common)
+        fake = {"single_count_gain_upper_scope": {"candidate_upper_px": 1.0}}
+        response = common["physical_response"]
+        for identity in ({"pairs_csv_sha256": "a" * 64}, {}):
+            response.write_text(json.dumps(identity), encoding="utf-8")
+            with patch.object(MODULE, "_parse_arguments", return_value=options), patch.object(MODULE, "build_physical_candidate", return_value=fake) as builder:
+                expect(MODULE.main() == 1, "CSV 精确字节身份不匹配或缺失时 CLI 必须拒绝")
+                expect(not builder.called and not options.output.exists(), "错配 CSV 不得派生或发布 candidate")
+        response.write_text(json.dumps({"pairs_csv_sha256": hashlib.sha256(rows.read_bytes()).hexdigest()}), encoding="utf-8")
+        with patch.object(MODULE, "_parse_arguments", return_value=options), patch.object(MODULE, "build_physical_candidate", return_value=fake):
+            expect(MODULE.main() == 0, "精确匹配 response 与 CSV 时应进入候选计算")
+
+
 if __name__ == "__main__":
+    test_candidate_cli_rejects_csv_from_another_response()
     test_s0_uses_untouched_holdout_and_calibrates_spatial_operations()
     test_s1_requires_two_nonoverlapping_nondegenerate_capture_sessions()
     test_s1_rejects_reused_or_degenerate_frames_without_epsilon()

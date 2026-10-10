@@ -173,7 +173,7 @@ function Assert-Package(
         -not [bool]$Manifest.composite_phase_tooling_included -or
         [bool]$Manifest.composite_phase_run_included -or
         [int]$Manifest.file_count -ne @($Manifest.files).Count -or
-        @($Manifest.files).Count -ne 23) {
+        @($Manifest.files).Count -ne 24) {
         throw "Physical B 工具包 manifest 身份或安全边界无效"
     }
     $declared = [Collections.Generic.HashSet[string]]::new(
@@ -234,6 +234,7 @@ $scriptNames = @(
     "analyze_mouse_effect_probe_b.py",
     "analyze_mouse_effect_probe_b_holdout.py",
     "analyze_mouse_effect_probe_b_command_magnitude.py",
+    "evidence_publication.py",
     "freeze_mouse_effect_probe_b_composite_phase_plan.py",
     "produce_mouse_effect_probe_b_composite_phase_ledgers.py",
     "bind_mouse_effect_probe_b_composite_phase_calibration.py",

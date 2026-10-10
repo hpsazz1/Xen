@@ -70,6 +70,7 @@ foreach ($name in @(
         "analyze_mouse_effect_probe_b.py",
         "analyze_mouse_effect_probe_b_holdout.py",
         "analyze_mouse_effect_probe_b_command_magnitude.py",
+        "evidence_publication.py",
         "freeze_mouse_effect_probe_b_composite_phase_plan.py",
         "produce_mouse_effect_probe_b_composite_phase_ledgers.py",
         "bind_mouse_effect_probe_b_composite_phase_calibration.py",
@@ -275,11 +276,12 @@ Assert-True ([int]$manifest.schema_version -eq 1 -and
              -not [bool]$manifest.command_magnitude_run_included -and
              [bool]$manifest.composite_phase_tooling_included -and
              -not [bool]$manifest.composite_phase_run_included -and
-             [int]$manifest.file_count -eq 23 -and
-             @($manifest.files).Count -eq 23) `
+             [int]$manifest.file_count -eq 24 -and
+             @($manifest.files).Count -eq 24) `
     "Physical B manifest 身份、clean/Launch 边界或文件数错误"
 $manifestNames = @($manifest.files | ForEach-Object { [string]$_.name })
 foreach ($requiredName in @(
+        "evidence_publication.py",
         "probe_ndi_runtime_support.ps1",
         "xen-runtime-deployment.json",
         "prepare_mouse_effect_probe_b_holdout.ps1",
