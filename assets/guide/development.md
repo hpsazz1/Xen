@@ -231,6 +231,10 @@ Win32 的 execution boundary 内生为 `local_os_api`；KMBOX/MAKCU 不再从 en
 `app_report_lifecycle_tests` 通过 App 共用路由覆盖 LOADING 期间开启记录、重载成功/失败及取消；
 同时验证最终报告真实发布失败、恢复重试、两类重启门槛与独立新段，
 `runtime_model_reload_test` 使用确定性屏障覆盖跨代在途帧，均不代表真实设备验收。
+主循环通过 `ReportLifecycle` 统一回收封尾与停止任务，再在本帧输入处理后消费重启请求。
+`app_report_interleave_tests` 使用同一调度入口、真实报告文件和两阶段同步屏障，覆盖封尾后停止、
+两类重启、保存失败显式重试，以及停止/急停在封尾中、停止中和停止刚回收时取消。
+Runtime 停止使用无设备适配；此测试不启动完整窗口、实际 Provider 或 Launcher 子进程。
 
 记录已开启时，发现异常可按默认 **F9**，或点击界面“标记异常”。关闭记录时不会写标记或暗中开启归档。
 F9通过当前键鼠后端监听源机按键，

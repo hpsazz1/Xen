@@ -3,6 +3,8 @@
 
 #include "runtime/runtime.h"
 #include <algorithm>
+#include <chrono>
+#include <future>
 #include <optional>
 #include <utility>
 
@@ -135,6 +137,95 @@ public:
     void cancel() noexcept { pending_ = ReportRestartTarget::NONE; }
 private:
     ReportRestartTarget pending_ = ReportRestartTarget::NONE;
+};
+
+enum class ReportStopRequest { IDLE, STARTED, DEFERRED, BUSY };
+enum class ReportJobKind { FINISH, STOP };
+
+// 主循环与测试共用两阶段调度：回收封尾结果后才停止，回收停止结果后才允许重启。
+// future 及请求只由主线程访问；报告活动标志在相应 future 回收后读取。
+class ReportLifecycle {
+public:
+    ReportLifecycle(const bool& report_active, const bool& archive_active,
+                    const ReportFinalization& finalization)
+        : report_active_(report_active), archive_active_(archive_active), finalization_(finalization) {}
+    ReportLifecycle(const ReportLifecycle&) = delete;
+    ReportLifecycle& operator=(const ReportLifecycle&) = delete;
+
+    bool finishing() const noexcept { return finish_job_.valid(); }
+    bool stopping() const noexcept { return stop_job_.valid(); }
+    bool stop_pending() const noexcept { return stop_pending_; }
+    bool busy() const noexcept { return finishing() || stopping(); }
+    void defer_stop() noexcept { stop_pending_ = true; }
+    void cancel_restart() noexcept { restart_.cancel(); }
+
+    template<class Work>
+    void finish_async(Work&& work) {
+        if (busy()) return;
+        finish_job_ = std::async(std::launch::async, std::forward<Work>(work));
+    }
+
+    template<class Runtime, class Finish>
+    ReportStopRequest stop(Runtime& runtime, Finish finish, bool retry_report = true) {
+        if (stopping()) return ReportStopRequest::BUSY;
+        if (finishing()) {
+            runtime.post_intent({RuntimeIntentType::DISARM_OUTPUT, true});
+            defer_stop();
+            return ReportStopRequest::DEFERRED;
+        }
+        if (runtime.snapshot().state == RuntimeState::STOPPED &&
+            ((!report_active_ && !archive_active_) || (!retry_report && finalization_.failed())))
+            return ReportStopRequest::IDLE;
+        runtime.post_intent({RuntimeIntentType::DISARM_OUTPUT, true});
+        stop_job_ = std::async(std::launch::async, [this, &runtime, finish = std::move(finish), retry_report]() mutable {
+            runtime.stop();
+            // 自动收尾仍停止设备，但不在磁盘持续失败时按 UI 帧率重试。
+            if (!retry_report && finalization_.failed()) return false;
+            return finish();
+        });
+        return ReportStopRequest::STARTED;
+    }
+
+    template<class Stop>
+    bool defer_runtime_restart(Stop&& stop) {
+        return restart_.defer_if_active(busy() || report_active_ || archive_active_, std::forward<Stop>(stop));
+    }
+    template<class Stop>
+    void request_application_restart(Stop&& stop) {
+        restart_.request_application(std::forward<Stop>(stop));
+    }
+
+    template<class Stop, class Collect>
+    void poll(bool stop_blocked, Stop&& stop, Collect&& collect) {
+        collect_ready(finish_job_, ReportJobKind::FINISH, collect);
+        collect_ready(stop_job_, ReportJobKind::STOP, collect);
+        if (stop_pending_ && !stop_blocked && !finishing()) {
+            stop_pending_ = false;
+            stop(false);
+        }
+    }
+
+    // 必须在本帧输入处理之后消费；外部忙碌不能吞掉待处理的取消。
+    ReportRestartTarget take_restart(bool external_busy, bool cancelled = false) noexcept {
+        return restart_.take_ready(busy() || stop_pending_ || external_busy, cancelled);
+    }
+
+private:
+    template<class Collect>
+    void collect_ready(std::future<bool>& job, ReportJobKind kind, Collect& collect) {
+        if (!job.valid() || job.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) return;
+        const bool succeeded = job.get();
+        restart_.finish_completed(succeeded);
+        collect(succeeded, kind);
+    }
+
+    const bool& report_active_;
+    const bool& archive_active_;
+    const ReportFinalization& finalization_;
+    ReportRestart restart_;
+    bool stop_pending_ = false;
+    std::future<bool> stop_job_;
+    std::future<bool> finish_job_;
 };
 
 } // namespace app::detail

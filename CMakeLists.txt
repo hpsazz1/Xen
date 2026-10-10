@@ -1315,6 +1315,11 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(app_report_lifecycle_tests OPENCV)
     add_test(NAME app_report_lifecycle_tests COMMAND app_report_lifecycle_tests)
     set_tests_properties(app_report_lifecycle_tests PROPERTIES TIMEOUT 30)
+    add_executable(app_report_interleave_tests tests/app_report_interleave_tests.cpp)
+    target_link_libraries(app_report_interleave_tests PRIVATE xen_debug recoil_archive)
+    xen_deploy_runtime_dlls(app_report_interleave_tests OPENCV)
+    add_test(NAME app_report_interleave_tests COMMAND app_report_interleave_tests)
+    set_tests_properties(app_report_interleave_tests PROPERTIES TIMEOUT 60)
     add_test(NAME review_run_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
         "${PROJECT_SOURCE_DIR}/tests/review_run_tests.py")
     # 离线像素专项依赖可加载的本地扩展；模块存在不等于同一解释器可以导入。
