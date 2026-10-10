@@ -170,7 +170,12 @@ int main(int argc, char** argv) try {
     expect(!settings.schema_model_sha256.empty() && settings.class_names == "person,head" &&
            !settings.class_schema_confirmed, "metadata回填但不代替用户确认");
     settings.class_schema_confirmed = true;
-    expect(workspace.execute(Action::START_COLLECTION, settings, true, false, utf8(model)),
+    expect(!workspace.execute(Action::START_COLLECTION, settings, true, false, utf8(model)) &&
+           !collector->snapshot().active, "缺少生命周期提交入口不能只凭快照开始采集");
+    const auto standalone_collection = [&](const data_collection::Config& config, std::string& message) {
+        return collector->start(config, message);
+    };
+    expect(workspace.execute(Action::START_COLLECTION, settings, true, false, utf8(model), standalone_collection),
            "已确认相同模型身份可创建采集会话，不启动Runtime");
     expect(workspace.execute(Action::STOP_COLLECTION, settings, false, false, "") &&
            !collector->snapshot().active, "结束采集立即封口");
@@ -186,7 +191,7 @@ int main(int argc, char** argv) try {
         model_workspace::Workspace reopened(collector);
         model_workspace::Settings restored;
         expect(reopened.initialize(root, restored, error), "兼容读取旧配额字段");
-        expect(reopened.execute(Action::START_COLLECTION, restored, true, false, utf8(model)),
+        expect(reopened.execute(Action::START_COLLECTION, restored, true, false, utf8(model), standalone_collection),
                "旧数量和磁盘配额不再阻止采集");
         expect(reopened.execute(Action::STOP_COLLECTION, restored, false, false, "") &&
                !collector->snapshot().active, "重开后的结束同样立即封口");

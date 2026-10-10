@@ -574,7 +574,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         }
 
         app::detail::route_workspace_action(model_workspace, actions.workspace_action,
-            workspace_settings, snapshot, config.detector, resolve_detector_config, app_message);
+            workspace_settings, runtime, snapshot, config.detector, resolve_detector_config, app_message);
 
         if (actions.refresh_models_requested) {
             if (refresh_models()) {

@@ -13,6 +13,7 @@
 #endif
 
 #include "model_workspace/model_workspace.h"
+#include "model_workspace/actions_internal.h"
 #include "log/log.h"
 
 #include <nlohmann/json.hpp>
@@ -217,6 +218,7 @@ struct Workspace::Impl {
     explicit Impl(std::shared_ptr<data_collection::Collector> value)
         : collector(std::move(value)) {}
     std::shared_ptr<data_collection::Collector> collector;
+    detail::ActionAdapter action_adapter;
     fs::path data_root;
     fs::path workspace_root;
     fs::path job_directory;
@@ -374,6 +376,13 @@ Workspace::Workspace(std::shared_ptr<data_collection::Collector> collector)
     Log::register_module("model-data", LogLevel::INFO);
 }
 Workspace::~Workspace() { shutdown(); }
+
+std::unique_ptr<Workspace> detail::make_workspace_with_action_adapter(
+        std::shared_ptr<data_collection::Collector> collector, ActionAdapter adapter) {
+    auto workspace = std::make_unique<Workspace>(std::move(collector));
+    workspace->impl_->action_adapter = std::move(adapter);
+    return workspace;
+}
 
 bool Workspace::initialize(const fs::path& data_root, Settings& settings,
                            std::string& error) noexcept {
@@ -539,7 +548,8 @@ Snapshot Workspace::poll(Settings* settings) noexcept {
 
 bool Workspace::execute(Action action, Settings& settings,
                         bool runtime_running, bool gpu_frames,
-                        const std::string& active_model_path) noexcept {
+                        const std::string& active_model_path,
+                        const CollectionStart& start_collection) noexcept {
     try {
         check(!impl_->workspace_root.empty(), "模型工作区未初始化");
         impl_->refresh_job();
@@ -622,7 +632,11 @@ bool Workspace::execute(Action action, Settings& settings,
             config.interval_ms = settings.interval_ms;
             config.exploration_interval_ms = settings.exploration_interval_ms;
             std::string error;
-            check(impl_->collector->start(config, error), error.empty() ? "无法开始采集" : error.c_str());
+            if (impl_->action_adapter.before_collection_start)
+                impl_->action_adapter.before_collection_start();
+            check(static_cast<bool>(start_collection), "采集提交必须由Runtime生命周期入口授权");
+            const bool started = start_collection(config, error);
+            check(started, error.empty() ? "无法开始采集" : error.c_str());
             impl_->view.message = "智能采集已开始；自动框仍需审核，不会直接进入训练。";
             return true;
         }

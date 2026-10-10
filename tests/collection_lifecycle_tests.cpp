@@ -3,7 +3,9 @@
 #include "app/workspace_actions_internal.h"
 #include "data_collection/lifecycle_internal.h"
 #include "runtime/startup_internal.h"
+#include "model_workspace/actions_internal.h"
 #include "log/log.h"
+#include <nlohmann/json.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -76,6 +78,7 @@ private:
     std::atomic<CaptureStatus> status_{CaptureStatus::CLOSED};
 };
 struct Fixture {
+    bool enforce_unique_join = true;
     Gate capture, writer;
     std::atomic<unsigned> stop_requests{0}, joins{0}, writes{0};
     std::filesystem::path root = std::filesystem::temp_directory_path() /
@@ -99,7 +102,7 @@ struct Fixture {
         adapter.before_write = [&] { ++writes; writer.enter(); };
         adapter.stop_requested = [&] { ++stop_requests; };
         adapter.before_join = [&] {
-            if (++joins > 1) {
+            if (++joins > 1 && enforce_unique_join) {
                 // 旧实现在真实交错中到达第二个 join；不要实际执行未定义行为。
                 std::cerr << "失败：同一写入线程出现第二个回收者" << std::endl;
                 std::_Exit(1);
@@ -140,7 +143,7 @@ struct Fixture {
     }
     bool action(model_workspace::Action action) {
         return app::detail::route_workspace_action(*workspace, action, settings,
-            runtime->snapshot(), config.detector, [](DetectorConfig&) { return true; }, message);
+            *runtime, runtime->snapshot(), config.detector, [](DetectorConfig&) { return true; }, message);
     }
     void input_frame() {
         KeyboardPollResult release;
@@ -232,6 +235,96 @@ void stop_interleave(Fixture& f) {
     expect(f.joins == 1 && finishes == 1 && f.runtime->snapshot().state == RuntimeState::STOPPED,
            "真实交错中唯一join、唯一报告收尾、最终STOPPED");
 }
+
+void collection_admission(Fixture& f, const std::string& scenario) {
+    nlohmann::json manifest;
+    { std::ifstream input(f.collector->snapshot().session_directory / "session.json"); input >> manifest; }
+    f.collector->stop();
+    f.enforce_unique_join = false; // 本场景有多个合法会话，每个线程仍独立回收。
+    Gate validated;
+    model_workspace::detail::ActionAdapter adapter;
+    adapter.before_collection_start = [&] { validated.enter(); };
+    f.workspace = model_workspace::detail::make_workspace_with_action_adapter(f.collector, std::move(adapter));
+    std::string error;
+    if (!f.workspace->initialize(f.root, f.settings, error)) throw std::runtime_error(error);
+    f.settings.schema_model_path = f.config.detector.model_path;
+    f.settings.schema_model_sha256 = manifest.at("model_sha256").get<std::string>();
+    f.settings.class_names = "person";
+    f.settings.class_schema_confirmed = true;
+    const auto requested = f.runtime->snapshot();
+    auto ui = std::async(std::launch::async, [&] {
+        return app::detail::route_workspace_action(*f.workspace, model_workspace::Action::START_COLLECTION,
+            f.settings, *f.runtime, requested, f.config.detector, [](DetectorConfig&) { return true; }, f.message);
+    });
+    if (!validated.wait_entered()) {
+        validated.release();
+        ui.get();
+        throw std::runtime_error("请求未通过真实模型哈希校验进入提交前屏障：" + f.workspace->poll().message);
+    }
+    bool active = false, archive_active = false;
+    app::detail::ReportFinalization finalization;
+    app::detail::ReportLifecycle lifecycle(active, archive_active, finalization);
+    unsigned finishes = 0;
+    if (scenario == "--admission-stopping") {
+        expect(lifecycle.stop(*f.runtime, [&] { ++finishes; return true; }) == app::detail::ReportStopRequest::STARTED,
+               "启动后台stop并保持Capture退出屏障");
+        expect(await([&] { return f.runtime->snapshot().state == RuntimeState::STOPPING; }),
+               "后台stop必须已获得生命周期所有权并进入STOPPING");
+        validated.release();
+        const bool responsive = ui.wait_for(1s) == std::future_status::ready;
+        expect(responsive, "生命周期锁忙时旧采集请求必须直接拒绝，不阻塞UI等待停止");
+        f.capture.release();
+        expect(!ui.get() && !f.collector->snapshot().active, "停止清理期间不得提交新采集");
+        expect(f.workspace->poll().message.find("Runtime正在") != std::string::npos,
+               "Runtime拒绝原因必须传递到实际工作区提示");
+        expect(await([&] {
+            lifecycle.poll(false, [](bool) {}, [](bool, app::detail::ReportJobKind) {});
+            return !lifecycle.busy();
+        }), "停止清理最终完成");
+        return;
+    }
+    auto stop = [&] {
+        expect(lifecycle.stop(*f.runtime, [&] { ++finishes; return true; }) == app::detail::ReportStopRequest::STARTED,
+               "真实App生命周期入口必须排队后台stop");
+        f.capture.release();
+        expect(await([&] {
+            lifecycle.poll(false, [](bool) {}, [](bool, app::detail::ReportJobKind) {});
+            return !lifecycle.busy();
+        }), "提交前屏障期间后台stop必须完成并被回收");
+        expect(f.runtime->snapshot().state == RuntimeState::STOPPED && !f.collector->snapshot().active,
+               "后台stop完成时Runtime与Collector必须均停止");
+    };
+    const bool commit_first = scenario == "--admission-commit";
+    if (commit_first) {
+        validated.release();
+        expect(ui.get() && f.collector->snapshot().active, "提交先胜出应建立真实active采集会话");
+        stop();
+        expect(!f.collector->snapshot().draining, "随后stop应回收已提交会话写入线程");
+    } else {
+        if (scenario == "--admission-reload") {
+            expect(f.runtime->reload_detector(f.config.detector), "屏障内启动真实CPU模型热重载");
+            expect(await([&] { return f.runtime->snapshot().detector_reload_state == DetectorReloadState::SUCCEEDED; }),
+                   "真实模型热重载必须先提交新代际");
+        } else {
+            stop();
+            if (scenario == "--admission-restart")
+                expect(f.runtime->start(f.config, f.mouse), "同一Runtime重启同一模型应成功");
+        }
+        validated.release();
+        const bool accepted = ui.get();
+        expect(!accepted && !f.collector->snapshot().active,
+               "模型校验后发生停止、重启或模型换代，旧请求不得创建active会话");
+        expect(f.workspace->poll().message.find("Runtime或模型已变化") != std::string::npos,
+               "陈旧请求拒绝原因必须显示给用户");
+        if (scenario != "--admission-stop" && !accepted) {
+            expect(f.action(model_workspace::Action::START_COLLECTION) && f.collector->snapshot().active,
+                   "新快照重新发起的合法请求必须可用，不能用永久拒绝通过竞态测试");
+            stop();
+        }
+    }
+    std::cout << scenario << " finish=" << finishes << "; active=" << f.collector->snapshot().active
+              << "; state=" << RuntimeStateName(f.runtime->snapshot().state) << '\n';
+}
 }
 int main(int argc, char** argv) {
     if (argc != 3) return 2;
@@ -242,6 +335,7 @@ int main(int argc, char** argv) {
         Fixture fixture(argv[1]);
         if (std::string(argv[2]) == "--stop-interleave") stop_interleave(fixture);
         else if (std::string(argv[2]) == "--concurrent-stop") concurrent_stop(fixture);
+        else if (std::string(argv[2]).starts_with("--admission-")) collection_admission(fixture, argv[2]);
         else ui_response(fixture, std::string(argv[2]) == "--writer-failure");
         expect(fixture.mouse->moves == 0, "全过程零设备输出");
     } catch (const std::exception& error) { ++failures; std::cerr << error.what() << std::endl; }

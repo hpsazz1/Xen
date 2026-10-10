@@ -9,7 +9,7 @@ namespace app::detail {
 template<class Resolve>
 bool route_workspace_action(model_workspace::Workspace& workspace,
         model_workspace::Action action, model_workspace::Settings& settings,
-        const RuntimeSnapshot& snapshot, const DetectorConfig& detector,
+        Runtime& runtime, const RuntimeSnapshot& snapshot, const DetectorConfig& detector,
         Resolve&& resolve, std::string& message) {
     if (action == model_workspace::Action::NONE) return true;
     if (action == model_workspace::Action::START_COLLECTION &&
@@ -25,7 +25,10 @@ bool route_workspace_action(model_workspace::Workspace& workspace,
     const bool busy_runtime = snapshot.state != RuntimeState::STOPPED &&
                               snapshot.state != RuntimeState::FAILED;
     return workspace.execute(action, settings, busy_runtime,
-        snapshot.d3d11_cuda_interop || snapshot.d3d11_directml_interop, active_model_path);
+        snapshot.d3d11_cuda_interop || snapshot.d3d11_directml_interop, active_model_path,
+        [&](const data_collection::Config& config, std::string& error) {
+            return runtime.start_data_collection(config, snapshot, error);
+        });
 }
 }
 #endif

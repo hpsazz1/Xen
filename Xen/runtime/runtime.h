@@ -20,7 +20,7 @@
 #include "input_training/input_training.h"
 #include "movement/movement.h"
 
-namespace data_collection { class Collector; }
+namespace data_collection { class Collector; struct Config; }
 class Runtime;
 namespace runtime::detail {
 struct StartupAdapter;
@@ -301,6 +301,8 @@ struct RuntimeSnapshot {
     weapon::WeaponSnapshot weapon_snapshot;
     std::string recoil_profile_status;
     RuntimeState state = RuntimeState::STOPPED;
+    // 同一Runtime对象跨启动递增；旧UI请求不能借同模型重启恢复准入。
+    std::uint64_t runtime_generation = 0;
     CaptureStatus capture_status = CaptureStatus::CLOSED;
     DetectionStatus detection_status = DetectionStatus::NOT_RUN;
     AimStatus aim_status = AimStatus::NOT_RUN;
@@ -387,6 +389,10 @@ public:
     bool load_input_training(const std::filesystem::path& directory) noexcept;
     // 仅在停止且没有后台线程时接入；采集器不拥有输出设备。
     bool set_data_collector(std::shared_ptr<data_collection::Collector> collector) noexcept;
+    // Workspace完成模型/类别校验后提交；与start/stop/reload共用生命周期所有者。
+    // expected是发起请求时快照，锁忙或运行/模型已换代时拒绝，不等待停止清理。
+    bool start_data_collection(const data_collection::Config& config,
+                               const RuntimeSnapshot& expected, std::string& error) noexcept;
     // 仅在 RUNNING 状态接受请求。候选模型异步加载，失败不替换旧模型。
     bool reload_detector(const DetectorConfig& config) noexcept;
     bool post_intent(const RuntimeIntent& intent) noexcept;

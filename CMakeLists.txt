@@ -2539,7 +2539,8 @@ if(BUILD_TESTING)
         add_executable(collection_lifecycle_tests tests/collection_lifecycle_tests.cpp)
         target_link_libraries(collection_lifecycle_tests PRIVATE app_input model_workspace xen_debug)
         xen_deploy_runtime_dlls(collection_lifecycle_tests OPENCV ORT NDI)
-        foreach(case ui-response stop-interleave writer-failure concurrent-stop)
+        foreach(case ui-response stop-interleave writer-failure concurrent-stop
+                     admission-stop admission-commit admission-restart admission-reload admission-stopping)
             add_test(NAME collection_lifecycle_${case}
                 COMMAND collection_lifecycle_tests "${XEN_TEST_MODEL}" "--${case}")
             set_tests_properties(collection_lifecycle_${case} PROPERTIES TIMEOUT 45)

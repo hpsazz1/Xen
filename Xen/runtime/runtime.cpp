@@ -48,6 +48,7 @@ struct Runtime::Impl {
     };
 
     mutable std::mutex lifecycle_mutex;
+    std::uint64_t runtime_generation = 0;
     mutable std::mutex snapshot_mutex;
     // Detector 不支持 detect() 与资源切换并发；候选加载始终在锁外完成。
     mutable std::mutex detector_mutex;
@@ -285,6 +286,7 @@ struct Runtime::Impl {
             std::lock_guard<std::mutex> lock(snapshot_mutex);
             current_snapshot = {};
             current_snapshot.state = RuntimeState::STARTING;
+            current_snapshot.runtime_generation = ++runtime_generation;
             current_snapshot.capture_status = capture->status();
             current_snapshot.mouse_status = mouse->status();
             current_snapshot.auto_stop = assess_auto_stop_availability(
@@ -1364,6 +1366,46 @@ bool Runtime::set_data_collector(
 
 bool Runtime::start(const AppConfig& config) noexcept {
     return start(config, {});
+}
+
+bool Runtime::start_data_collection(const data_collection::Config& config,
+        const RuntimeSnapshot& expected, std::string& error) noexcept {
+    try {
+        if (!impl_) { error = "Runtime未初始化，无法开始采集"; return false; }
+        std::unique_lock owner(impl_->lifecycle_mutex, std::try_to_lock);
+        if (!owner.owns_lock()) {
+            error = "Runtime正在启动、停止或切换模型，请完成后重新开始采集";
+            return false;
+        }
+        {
+            std::lock_guard snapshot_lock(impl_->snapshot_mutex);
+            const auto& current = impl_->current_snapshot;
+            if (current.state != RuntimeState::RUNNING || expected.state != RuntimeState::RUNNING ||
+                impl_->stop_requested.load(std::memory_order_acquire) ||
+                current.detector_reload_state == DetectorReloadState::LOADING ||
+                expected.runtime_generation == 0 || expected.detector_generation == 0 ||
+                current.runtime_generation != expected.runtime_generation ||
+                current.detector_generation != expected.detector_generation ||
+                current.active_model_path != expected.active_model_path ||
+                config.model_path != current.active_model_path) {
+                error = "Runtime或模型已变化，请核对当前模型后重新开始采集";
+                return false;
+            }
+            if (current.d3d11_cuda_interop || current.d3d11_directml_interop) {
+                error = "当前GPU纹理路径不支持图片采集，请停止后选择CPU图像路径";
+                return false;
+            }
+        }
+        if (!impl_->data_collector) { error = "图片采集模块未接入"; return false; }
+        // 模型哈希和会话创建可能访问磁盘，不持snapshot锁；生命周期锁阻止stop或新重载穿过提交。
+        return impl_->data_collector->start(config, error);
+    } catch (const std::exception& exception) {
+        error = exception.what();
+        return false;
+    } catch (...) {
+        error = "采集提交失败";
+        return false;
+    }
 }
 
 bool Runtime::start(const AppConfig& config,

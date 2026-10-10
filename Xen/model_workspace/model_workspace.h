@@ -4,10 +4,18 @@
 #include "data_collection/data_collection.h"
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 
 namespace model_workspace {
+
+class Workspace;
+namespace detail {
+struct ActionAdapter;
+std::unique_ptr<Workspace> make_workspace_with_action_adapter(
+    std::shared_ptr<data_collection::Collector> collector, ActionAdapter adapter);
+}
 
 enum class Action {
     NONE, START_COLLECTION, PAUSE_COLLECTION, RESUME_COLLECTION,
@@ -64,6 +72,7 @@ struct Snapshot {
 // App 持有此模块，Overlay 只渲染快照和产生动作，不访问磁盘或创建进程。
 class Workspace {
 public:
+    using CollectionStart = std::function<bool(const data_collection::Config&, std::string&)>;
     explicit Workspace(std::shared_ptr<data_collection::Collector> collector);
     ~Workspace();
     Workspace(const Workspace&) = delete;
@@ -75,10 +84,13 @@ public:
     Snapshot poll(Settings* settings = nullptr) noexcept;
     bool execute(Action action, Settings& settings,
                  bool runtime_running, bool gpu_frames,
-                 const std::string& active_model_path) noexcept;
+                 const std::string& active_model_path,
+                 const CollectionStart& start_collection = {}) noexcept;
     void shutdown() noexcept;
 
 private:
+    friend std::unique_ptr<Workspace> detail::make_workspace_with_action_adapter(
+        std::shared_ptr<data_collection::Collector>, detail::ActionAdapter);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
