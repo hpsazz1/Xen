@@ -1,0 +1,22 @@
+# D02 传输临时目录所有权验证
+
+基线050372ca8b418115270ca7d1e8c38d6efff00b8d；分支fix/transfer-directory-ownership-20261011。
+两个原生产传输脚本预检后若另一任务抢先创建incoming，New-Item失败但catch仍会递归删除它。
+本回归执行实际脚本，所有PackagePath/DestinationRoot均显式指向本机合成目录，调用前核对
+规范化incoming严格位于本轮临时根下。没有SMB、SSH、真实部署、采集、设备或可执行产物运行。
+
+两种脚本各三例：正常复制/哈希回读/改名；实际目录创建前交错外来目录和已知哨兵；本任务
+创建后锁住源文件令真实FileStream打开失败。旧实现外来目录两例失败，其余四个控制通过。
+修后六例通过：外来哨兵保持原样，自有失败目录回收，正常目标完整且无incoming残留。
+
+所有权在系统CreateDirectoryW成功后取得，成功改名后清除；共享path_safety函数规范化路径
+并检查父链，既有目录拒绝，不修改安全属性。不能以高层Directory.CreateDirectory返回来
+证明排他新建。另有两个真实本机进程经屏障调用同一生产函数，恰好一个得到创建权。
+
+四项CTest通过14.94秒：transfer_directory_ownership_tests、path_safety_tests、
+publication_script_tests、benchmark_output_ownership_tests。另Windows PowerShell5执行
+test_release_transfer_and_aim_manual.ps1 -ReleasePathSafetyOnly通过，只运行本机传输/路径子集。
+公开文档检查、正式Release身份、提交和远端信息见本地
+docs/evidence/XEN-TRANSFER-OWNERSHIP-20261011-001/RESULT.md。
+该提交关闭D02 transfer子范围；此前benchmark子范围050372c保持，秒级runId另待验证。
+没有新UI、多Provider或物理闭环结论。无新增常驻规则。

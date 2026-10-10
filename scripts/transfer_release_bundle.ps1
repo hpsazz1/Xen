@@ -176,13 +176,15 @@ if ((Test-Path -LiteralPath $published) -or
     throw "辅机正式目录或临时目录已存在，拒绝覆盖：$packageName"
 }
 
+$incomingOwned = $false
 try {
     Write-Host "[2/4] 复制到辅机临时目录：$incoming"
     $incoming = Resolve-XenDirectChildPath `
         -RootPath $releaseRoot `
         -Name $incomingName `
         -Description "Incoming package directory before creation"
-    New-Item -ItemType Directory -Path $incoming | Out-Null
+    New-XenExclusiveDirectory -Path $incoming
+    $incomingOwned = $true
     $incoming = Resolve-XenDirectChildPath `
         -RootPath $releaseRoot `
         -Name $incomingName `
@@ -205,8 +207,10 @@ try {
         -Name $incomingName `
         -Description "Incoming package directory before publish"
     Rename-Item -LiteralPath $incoming -NewName $packageName
+    $incomingOwned = $false
 } catch {
-    if (Test-Path -LiteralPath $incoming) {
+    # 路径在本轮预检时不存在，并不代表随后出现的目录属于本轮。
+    if ($incomingOwned -and (Test-Path -LiteralPath $incoming)) {
         $verifiedIncoming = Resolve-XenDirectChildPath `
             -RootPath $releaseRoot `
             -Name $incomingName `

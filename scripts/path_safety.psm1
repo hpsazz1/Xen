@@ -253,8 +253,32 @@ function Resolve-XenDirectChildPath(
     return $child
 }
 
+function New-XenExclusiveDirectory([Parameter(Mandatory = $true)][string]$Path) {
+    $normalized = Get-XenNormalizedPath $Path 'Exclusive directory'
+    Assert-XenNoReparsePathChain (Split-Path -Parent $normalized) 'Exclusive directory parent' -RequireExistingLeaf
+    # Directory.CreateDirectory可返回既有目录；所有权必须依据系统调用确实创建成功。
+    if (-not ('XenExclusiveDirectoryNative' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class XenExclusiveDirectoryNative {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateDirectoryW(string path, IntPtr securityAttributes);
+    public static void Create(string path) {
+        if (!CreateDirectoryW(path, IntPtr.Zero))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+    }
+}
+'@
+    }
+    [XenExclusiveDirectoryNative]::Create($normalized)
+}
+
 Export-ModuleMember -Function @(
     'Assert-XenNoReparsePathChain',
     'New-XenOwnedTestDirectory',
     'Remove-XenOwnedTestDirectory',
-    'Resolve-XenDirectChildPath')
+    'Resolve-XenDirectChildPath',
+    'New-XenExclusiveDirectory')

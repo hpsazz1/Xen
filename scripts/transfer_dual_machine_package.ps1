@@ -5,6 +5,7 @@
 )
 
 $ErrorActionPreference = "Stop"
+Import-Module (Join-Path $PSScriptRoot "path_safety.psm1") -Force
 
 function Resolve-RequiredDirectory {
     param(
@@ -57,8 +58,6 @@ function Copy-PackageWithProgress {
         [Parameter(Mandatory = $true)][string]$ManifestPath
     )
 
-    New-Item -ItemType Directory -Path $TargetRoot -ErrorAction Stop |
-        Out-Null
     $entries = @($Manifest.files)
     $manifestFile = Get-Item -LiteralPath $ManifestPath
     $entries += [pscustomobject]@{
@@ -153,8 +152,11 @@ if ((Test-Path -LiteralPath $publishedPath) -or
     throw "辅机目标包或临时目录已存在，拒绝覆盖：$packageId"
 }
 
+$incomingOwned = $false
 try {
     Write-Host "[2/4] 复制到辅机临时目录：$incomingPath"
+    New-XenExclusiveDirectory -Path $incomingPath
+    $incomingOwned = $true
     Copy-PackageWithProgress `
         $PackagePath $incomingPath $manifest $manifestPath
     Write-Host "[3/4] 回读辅机文件并复核 SHA-256..."
@@ -169,8 +171,10 @@ try {
     }
     Write-Host "[4/4] 校验通过，原子发布正式目录..."
     Rename-Item -LiteralPath $incomingPath -NewName $packageId
+    $incomingOwned = $false
 } catch {
-    if (Test-Path -LiteralPath $incomingPath) {
+    # 预检后可能有另一任务抢先创建；只有实际创建成功才允许回收。
+    if ($incomingOwned -and (Test-Path -LiteralPath $incomingPath)) {
         Remove-Item -LiteralPath $incomingPath -Recurse -Force `
             -ErrorAction SilentlyContinue
     }
