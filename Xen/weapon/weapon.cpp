@@ -391,7 +391,12 @@ struct GsiReceiver::Impl {
                 if (!wait_socket(listener, Clock::now() + std::chrono::milliseconds(20))) continue;
                 sockaddr_in peer{}; int size = sizeof(peer);
                 const SOCKET connection = accept(listener, reinterpret_cast<sockaddr*>(&peer), &size);
-                if (connection == INVALID_SOCKET) break;
+                if (connection == INVALID_SOCKET) {
+                    const int error = WSAGetLastError();
+                    // 单个待接收连接消失不代表监听服务失效；下一轮仍检查停止请求。
+                    if (error == WSAECONNRESET || error == WSAEWOULDBLOCK) continue;
+                    break;
+                }
                 u_long nonblocking = 1;
                 if (ioctlsocket(connection, FIONBIO, &nonblocking) == SOCKET_ERROR) {
                     closesocket(connection); continue;

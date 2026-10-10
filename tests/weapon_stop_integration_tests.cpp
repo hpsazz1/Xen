@@ -901,8 +901,13 @@ void stationary_owner_does_not_interrupt_shot() {
     until([&] { return mouse->ups == 1; });
     const auto log = trigger.execution_log();
     for (const auto& event : log.events)
-        if (event.button_action == TriggerButtonAction::UP && event.backend_called)
+        if (event.button_action == TriggerButtonAction::UP && event.backend_called) {
+            if (event.snapshot.reason != TriggerReason::RELEASED)
+                std::cerr << "stationary UP reason=" << TriggerReasonName(event.snapshot.reason)
+                    << " planned_ns=" << ns(event.planned_at) << " observed_ns=" << ns(event.observed_at)
+                    << " stop_not_needed=" << event.snapshot.stop_not_needed << '\n';
             require(event.snapshot.reason == TriggerReason::RELEASED, "原地点射仅正常结束，不因假停稳失效提前抬键");
+        }
     require(stop.snapshot().requests == 0, "原地无需制造急停请求");
     trigger.stop(); stop.stop();
 }
@@ -988,6 +993,10 @@ void source_session_interleaving(bool same_session_break = false) {
 } // namespace
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--stationary-owner") {
+            stationary_owner_does_not_interrupt_shot();
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--source-session") {
             source_session_interleaving();
             source_session_interleaving(true);
