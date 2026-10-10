@@ -73,20 +73,20 @@ void check_foreground_start() {
     snapshot.physical = true; snapshot.generation = 1; snapshot.prepared_id = "ui-prepared-1";
     snapshot.plan = {{"baseline","stationary"},{"shot_hold_ms",80},{"fire_interval_ms",800}};
     frame();
-    action = click("由用户前台启动本次任务");
+    action = click("启动本次任务");
     expect(action.debug_action == debug_session::Action::NONE, "未勾选不能启动物理任务");
     click("允许本次真实物理输出");
-    action = click("由用户前台启动本次任务");
+    action = click("启动本次任务");
     expect(action.debug_action == debug_session::Action::START && action.debug_prepared_id == "ui-prepared-1" &&
         action.debug_allow_physical_output && !action.debug_plan_edited && action.debug_confirmation == debug_session::physical_confirmation(),
         "用户勾选并点击启动后必须交付匹配身份、物理许可及内部core确认，不要求手输令牌");
     frame();
-    action = click("由用户前台启动本次任务");
+    action = click("启动本次任务");
     expect(action.debug_action == debug_session::Action::NONE, "启动授权不得自动重放第二次");
     click("准备"); ++snapshot.generation; snapshot.prepared_id = "ui-prepared-2"; frame();
     click("允许本次真实物理输出");
     ++snapshot.generation; snapshot.prepared_id = "ui-prepared-external"; frame();
-    action = click("由用户前台启动本次任务");
+    action = click("启动本次任务");
     expect(action.debug_action == debug_session::Action::NONE, "准备身份变化必须撤销旧勾选");
     ImGui::GetIO().AddMousePosEvent(-100,-100); frame();
 }

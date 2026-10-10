@@ -79,8 +79,7 @@ VC CRT 从所用 Visual Studio 的官方 Redist 目录解析；可用 `-MsvcRedi
 1. 启动一次对应构建目录的 `Release/Xen.exe`。程序会在同目录创建 `models/`；`config.ini` 不存在时按代码发行默认生成完整配置。默认 CPU 推理、本机桌面采集，物理输出和辅助总开关关闭。
 2. 把 ONNX 模型放入 `models/` 根目录，在“检测”页刷新、选择并应用模型。
 3. 配置 Capture 与 Provider，启动 Runtime；先保持物理输出关闭，确认预览、日志和 Provider 状态。
-4. 需要真实设备验收时，使用正式 Prepare/Launch 脚本生成独立 Run，并由用户手动执行带确认令牌的
-   Launch 命令。
+4. 真实设备验收使用正式脚本生成独立 Run，按用户授权手动或自动执行有界任务，回收退出及输入释放结果。
 
 删除 `config.ini` 后再次启动会按代码发行默认重建，不会恢复此前的私人连接信息；设备地址、NDI 源及双机焦点等需重新填写。已有有效配置不被覆盖，已有但无效的配置会报错而不是静默重置。
 
@@ -123,7 +122,7 @@ Xen-unified-<版本>/
 | `xen_capture_evidence` | `XenCaptureEvidence.exe` | 不可武装的 Capture/NDI 像素证据录制入口 |
 | `xen_benchmark` | `XenBenchmark.exe` | 无界面 Runtime 基准 |
 | `xen_mouse_benchmark` | `XenMouseBenchmark.exe` | 鼠标后端性能与协议验证 |
-| `xen_mouse_effect_probe` | `XenMouseEffectProbe.exe` | source-frame 驱动的 X-only 实际命令/背景响应证据入口；Physical 仅接受用户前台双授权 |
+| `xen_mouse_effect_probe` | `XenMouseEffectProbe.exe` | source-frame 驱动的 X-only 实际命令/背景响应证据入口；Physical 需要明确输出确认参数 |
 | `xen_mouse_effect_probe_sequence` | `XenMouseEffectProbeSequence.exe` | 离线生成平衡净零的 A/A2 序列；S1 活性 profile 以固定 source-frame cadence 生成 X-only 回锚挑战，基线保持零命令 |
 
 `XenSender.exe --report PATH` 必须声明至少一个非零退出上限：`--max-frames` 不超过
@@ -199,11 +198,22 @@ Win32 的 execution boundary 内生为 `local_os_api`；KMBOX/MAKCU 不再从 en
 最近日志、控制台和常规轮转日志文件均可显示 INFO 及以上，仍受全局及模块等级过滤；前提是对应输出已启用。普通文件由后台线程及时刷新，无需等待警告或退出。
 默认 Release 中 TRACE/DEBUG 宏已裁剪，设置页不提供无效的详细日志档位；开发者需启用相应
 编译选项，再通过 INI 设置全局及模块等级。
-Debug CSV/JSON 运行报告与崩溃诊断独立于 Log，不随此开关关闭。
+详细运行数据与崩溃诊断独立于普通日志等级。设置页“日志与运行记录”中的“详细运行记录”单一开关
+控制 Runtime CSV/JSON、逐帧分段归档、扳机事件及自动 recoil-batches；默认关闭，旧配置缺少
+`[runtime].diagnostics_enabled` 时也按关闭处理，已有明确值继续保留。
+
+运行中切换立即停止接收新记录，由后台完成已接收数据的有限封尾；不删除历史文件。再次启动、停止或
+模型重载都不会自行重新开启。停止 Runtime 后保存配置，下次启动沿用该选择。显式采集素材、输入录制、
+独立调试任务以及必要错误和崩溃反馈保持各自用途。
+
+自动调试可只为本次进程设置 `XEN_RUNTIME_DIAGNOSTICS=1`。界面显示记录已启用，但保存其他设置时
+仍写回原日常记录偏好；只有用户主动切换记录开关后，新偏好才可保存。HUD、Soak、原包压枪、Aim 人工验收
+与实战 GUI 验收入口
+在启动子进程时临时设置该变量，并恢复调用方环境；退出后日常偏好不变。
 
 ### 实战全程归档与异常标记
 
-普通界面每次启动Runtime自动后台分段保存逐帧数据和扳机事件，目录为
+开启“详细运行记录”后，Runtime 后台分段保存逐帧数据和扳机事件，目录为
 `cache/runtime/<会话>-g<模型代>-s<段号>-archive/`。约每5秒或累计1200帧生成
 `segment-*.csv`、`segment-*.json`和对应`.meta.json`索引，`manifest.json`保存覆盖、缺口和错误。
 不设置整场时长、文件总量或累计磁盘配额；已落盘分段不会因内存尾窗轮转被覆盖。
@@ -213,13 +223,14 @@ Debug CSV/JSON 运行报告与崩溃诊断独立于 Log，不随此开关关闭�
 正常停止会排空队列并封尾；崩溃时已完成分段保留，尚未写出的尾部可能丢失，未封尾清单不算完整。
 模型热重载使用独立目录，加载窗口沿用原报告边界而不归档，不能跨模型段假定连续覆盖。
 
-发现异常可继续游玩并按默认 **F9**，或点击界面“标记异常”。F9通过当前键鼠后端监听源机按键，
+记录已开启时，发现异常可按默认 **F9**，或点击界面“标记异常”。关闭记录时不会写标记或暗中开启归档。
+F9通过当前键鼠后端监听源机按键，
 不依赖辅机获得游戏焦点；只记录时刻，不武装、不发送输入。在设置页“标记异常（按下）”可更改绑定。
 旧配置若已把F9用于其他功能，新增默认绑定会禁用，保留原功能；设置一个不冲突的键并保存后即可使用。
 `marker-*.json`同时记录本机单调时钟和UTC时刻，以前后各30秒范围关联分段索引，不复制另一套帧数据；
 启动太晚或停止太早导致的窗口不足会明确标记。保存NVIDIA即时回放片段并记住回合，赛后可结合归档和Demo分析。
 
-原有普通CSV/JSON尾部报告仍最多保留最近10000帧（240 FPS约42秒），全程累计摘要语义保持；
+记录已开启时，普通CSV/JSON尾部报告最多保留最近10000帧（240 FPS约42秒），全程累计摘要语义保持；
 分析整场或早期异常时应读取`-archive`目录的分段和覆盖清单，不能只看尾部报告。
 
 ## 源码与验证
@@ -276,6 +287,30 @@ Debug CSV/JSON 运行报告与崩溃诊断独立于 Log，不随此开关关闭�
 该入口将指定现有账户加入管理员组，并追加主机 Ed25519 公钥到 Windows OpenSSH 默认管理员公钥文件，
 保留已有公钥，设置仅管理员与 SYSTEM 可访问的权限。适用于保留默认管理员 Match 规则的 SSH 配置；
 自定义公钥路径需先核对。完成后使用新 SSH 会话验证权限，不关闭主机校验，不启动 Xen 或真实输出。
+
+## 远程自动调试
+
+已有任务授权覆盖自动调试时，可从主机调用同一个 PowerShell 入口。普通准备和只读检查用默认
+`Execute`；GUI、采集和源服务用 `Start` 进入辅机已登录用户的桌面会话。远程脚本使用辅机本地路径，
+不写入口令或令牌；沿用已有凭据目录和正式工具的物理输出参数。
+
+```powershell
+$run = 'C:\XenLab\runs\my-debug-run'
+.\scripts\invoke_auxiliary_powershell.ps1 -Mode Start -ScriptPath .\temp\my-task\run.ps1 -RunDirectory $run -TimeoutSeconds 120
+.\scripts\invoke_auxiliary_powershell.ps1 -Mode Status -RunDirectory $run
+.\scripts\invoke_auxiliary_powershell.ps1 -Mode Stop -RunDirectory $run
+.\scripts\invoke_auxiliary_powershell.ps1 -Mode Recover -RunDirectory $run
+```
+
+`ScriptPath` 是主机上的任务脚本；`RunDirectory` 是辅机上的唯一 Run。脚本通过
+`XEN_AUXILIARY_RUN_DIRECTORY` 取得该目录，检查 `XEN_AUXILIARY_STOP_FILE` 后停止后续动作，并在
+`finally` 收尾。复用已有有界工具，工具返回后核对原生报告和输入释放；反向轻点同时支持原有
+`result/STOP`。到时先请求取消，15 秒宽限后才终止无响应任务，不能把强制结束当成输入已释放。
+
+同一个 Run 再次 `Start` 只返回原任务状态；断线后先查 `Status`，避免重复真实动作。`Recover`
+回传日志与结果，注销已结束计划任务，保留 Run 文件供既有 SMB/SCP 回收。
+`completed` 只表示脚本退出成功；`timed_out` 和 `interrupted_cleanup_unconfirmed` 须结合工具报告排查。
+单纯启动 Launcher 不代表 Runtime 已运行或已停止，自动调试脚本仍须管理自己的运行结束条件。
 
 ## 无设备界面预览
 

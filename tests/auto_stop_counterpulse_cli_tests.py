@@ -48,7 +48,8 @@ def main():
         return result
 
     with tempfile.TemporaryDirectory(prefix='xen-counterpulse-cli-') as folder:
-        root = Path(folder)
+        # Windows临时路径可用8.3别名；与PowerShell返回的长路径统一后比较身份。
+        root = Path(folder).resolve()
         run = root / 'run'
         invoke('-Mode', 'Launch', '-RunDirectory', run)
         assert not run.exists(), '缺授权不能创建Run'
@@ -81,11 +82,12 @@ def main():
             assert 'WaitForExit()' in manual_text and '.Kill(' not in manual_text
             remote_env = dict(os.environ, SSH_CONNECTION='mock-remote')
             for entry in (manual_entry, hud_entry):
-                denied = subprocess.run([shell, '-NoProfile', '-File', str(entry)], env=remote_env,
+                session_zero = "function Get-Process { [pscustomobject]@{SessionId=0} }; & '" + str(entry).replace("'", "''") + "'"
+                denied = subprocess.run([shell, '-NoProfile', '-Command', session_zero], env=remote_env,
                                         capture_output=True, timeout=10)
-                assert denied.returncode != 0, '人工入口拒绝SSH'
+                assert denied.returncode != 0, '有桌面依赖的入口拒绝服务会话'
             # 移除前台检查的测试副本只用于纯文件/参数模拟。
-            session_guard = "if ((Get-Process -Id $PID).SessionId -eq 0 -or $env:SSH_CONNECTION -or $env:SSH_CLIENT)"
+            session_guard = "if ((Get-Process -Id $PID).SessionId -eq 0)"
             process_start = '$child = [Diagnostics.Process]::Start($info)'
             stub_start = """if ($action -eq 'record') {
     if (-not [IO.Directory]::Exists([IO.Path]::GetDirectoryName($output))) { throw '录制父目录必须先准备' }
@@ -449,7 +451,8 @@ $code = 0
             assert 'set "reportExitCode=%errorlevel%"' in report_bat and 'exit /b %reportExitCode%' in report_bat
             report_script = (run / 'open-report.ps1').read_text(encoding='utf-8-sig')
             assert "Join-Path $PSScriptRoot 'result/debug-report.html'" in report_script
-            assert 'Test-Path -LiteralPath' in report_script and '$env:SSH_CONNECTION' in report_script
+            assert 'Test-Path -LiteralPath' in report_script and 'SessionId -eq 0' in report_script
+            assert '$env:SSH_CONNECTION' not in report_script
             missing_report = subprocess.run([shell, '-NoProfile', '-File', str(run / 'open-report.ps1')],
                                             capture_output=True, timeout=10)
             assert missing_report.returncode != 0

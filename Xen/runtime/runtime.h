@@ -288,6 +288,7 @@ struct RuntimeSnapshot {
     source_context::SourceContextSnapshot source_context;
     // 桥接初始化失败仅降级依赖源状态的能力，不替代 Runtime 致命错误。
     std::string source_context_error;
+    std::string gsi_error;
     RecoilSnapshot recoil;
     bool recoil_telemetry_available = false;
     RecoilExecutionLog recoil_execution_log;
@@ -398,6 +399,10 @@ public:
     // 取出自上次调用以来的诊断样本；失败时不影响 Runtime 主链。
     bool drain_pipeline_samples(
         std::vector<RuntimePipelineSample>& samples) noexcept;
+    // 切断逐帧诊断生产，保留基本快照与控制；不访问磁盘。
+    void set_diagnostics_enabled(bool enabled) noexcept;
+    // 冷路径切换自动压枪归档；关闭按固定事件边界封尾，调用方放在后台执行。
+    bool set_recoil_archive(std::optional<RecoilArchiveConfig> archive) noexcept;
 
 private:
     struct Impl;

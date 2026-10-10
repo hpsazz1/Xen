@@ -50,6 +50,7 @@ public:
     std::condition_variable wake;
     std::thread thread;
     std::atomic<bool> stopping{false};
+    std::uint64_t stop_after = 0; // mutex 保护关闭边界的读取与发布
     RecoilArchiveStatus state;
     std::optional<RecoilExecutionEvent> begin;
     Json records=Json::array();
@@ -151,21 +152,28 @@ public:
     }
     void run() noexcept {
         try {
+            std::optional<std::uint64_t> final_sequence;
             for(;;) {
                 const auto slice=reader(cursor,256);
+                {
+                    // request_stop 在同一锁内取水位并发布停止；不能越过两者之间的窗口。
+                    std::lock_guard lock(mutex);
+                    if (stopping.load(std::memory_order_acquire) && !final_sequence) final_sequence = stop_after;
+                }
                 if(slice.sequence_exhausted)fail("事件序号已耗尽，完整性不可继续承诺");
                 if((slice.cursor_gap||slice.sequence_exhausted)&&begin)damage("EVENT_GAP");
                 const auto before=cursor;
-                for(const auto& event:slice.events)consume(event);
+                for(const auto& event:slice.events)
+                    if (!final_sequence || event.sequence <= *final_sequence) consume(event);
                 {std::lock_guard lock(mutex);state.last_sequence=cursor;}
-                if(stopping.load()&&(cursor>=slice.latest_sequence||cursor==before)) {
-                    if(cursor<slice.latest_sequence)fail("停止归档时事件尾部无法读取");
+                if(final_sequence&&(cursor>=*final_sequence||cursor==before)) {
+                    if(cursor<*final_sequence)fail("停止归档时事件尾部无法读取");
                     break;
                 }
                 if(cursor<slice.latest_sequence&&cursor!=before)continue;
                 std::unique_lock lock(mutex);wake.wait_for(lock,std::chrono::milliseconds(20),[this]{return stopping.load();});
             }
-            if(begin)finish(nullptr,"PRODUCER_STOPPED_WITHOUT_END");
+            if(begin)finish(nullptr,"RECORDING_STOPPED_WITHOUT_END");
         }catch(const std::exception& e){fail(e.what());}catch(...){fail("归档线程异常");}
         std::lock_guard lock(mutex);state.running=false;
     }
@@ -182,12 +190,30 @@ bool RecoilBatchArchive::start(const RecoilArchiveConfig& config,Reader reader,S
         std::filesystem::create_directories(config.directory.parent_path());
         if(!std::filesystem::create_directory(config.directory))throw std::runtime_error("归档需要唯一新目录");
         impl_->config=config;impl_->reader=std::move(reader);impl_->sink=sink ? std::move(sink) : disk_sink;
-        impl_->stopping=false;impl_->cursor=0;
+        impl_->stopping=false;impl_->cursor=config.after_sequence;
         {std::lock_guard lock(impl_->mutex);impl_->state={true,true,config.acquisition_run_id,config.directory.string(),{}};}
         impl_->thread=std::thread([this]{impl_->run();});return true;
     }catch(const std::exception& e){impl_->fail(e.what());return false;}catch(...){return false;}
 }
+void RecoilBatchArchive::request_stop() noexcept {
+    try {
+        std::lock_guard lock(impl_->mutex);
+        if (!impl_->stopping.load() && impl_->reader) {
+            impl_->stop_after = impl_->reader(0, 0).latest_sequence;
+            impl_->stopping.store(true, std::memory_order_release);
+        }
+        impl_->wake.notify_one();
+    } catch (...) {
+        // 读取边界失败时只保留已接受事件，明确报告完整性未知。
+        std::lock_guard lock(impl_->mutex);
+        impl_->stop_after = impl_->state.last_sequence;
+        impl_->state.available = false;
+        impl_->state.error = "停止归档时无法取得事件边界";
+        impl_->stopping.store(true, std::memory_order_release);
+        impl_->wake.notify_one();
+    }
+}
 void RecoilBatchArchive::stop() noexcept {
-    impl_->stopping=true;impl_->wake.notify_one();if(impl_->thread.joinable())impl_->thread.join();
+    request_stop();if(impl_->thread.joinable())impl_->thread.join();
 }
 RecoilArchiveStatus RecoilBatchArchive::snapshot() const {std::lock_guard lock(impl_->mutex);return impl_->state;}

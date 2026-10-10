@@ -60,11 +60,16 @@ def main():
             invoke('Validate')
         settings.write_bytes(original)
         invoke('Validate', '-AllowPhysicalOutput')
-        # 即便令牌正确，SSH环境也必须在任何原生Launch前拒绝。
+        # SSH变量本身不阻断已有桌面会话；Session 0仍不能启动桌面工具。
         remote = dict(os.environ, SSH_CONNECTION='test-only-no-network')
-        invoke('Launch', '-AllowPhysicalOutput', '-Confirm', 'WEAPON_FIRE_TEST', env=remote)
+        invoke('Validate', good=True, env=remote)
+        command = "function Get-Process { [pscustomobject]@{SessionId=0} }; & '" + str(script).replace("'", "''")
+        command += "' -Mode Launch -RunDirectory '" + str(run).replace("'", "''") + "' -AllowPhysicalOutput -Confirm WEAPON_FIRE_TEST"
+        denied = subprocess.run([shell, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command],
+                                capture_output=True, timeout=30, env=remote)
+        assert denied.returncode != 0
         assert not (run / 'runs').exists() or not list((run / 'runs').iterdir())
-    print('独立射击配置/静止计划/边界/前台限制专项通过；未连接设备')
+    print('独立射击配置/静止计划/边界/桌面会话专项通过；未连接设备')
 
 
 if __name__ == '__main__':

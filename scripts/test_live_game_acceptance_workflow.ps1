@@ -34,6 +34,66 @@ function Invoke-ExpectedFailure {
     Expect $failed $Message
 }
 
+function Test-DiagnosticProcessEnvironment(
+        [string]$SourcePath, [string]$FixtureDirectory, [bool]$ExpectedWait) {
+    $tokens = $null; $parseErrors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile(
+        $SourcePath, [ref]$tokens, [ref]$parseErrors)
+    if ($parseErrors.Count -ne 0) { throw "验收脚本解析失败：$SourcePath" }
+    $definition = $ast.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Start-DiagnosticProcess'
+    }, $false)
+    $calls = @($ast.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and
+            $node.GetCommandName() -eq 'Start-DiagnosticProcess'
+    }, $true))
+    if ($null -eq $definition -or $calls.Count -ne 1) {
+        throw "仅正式 GUI 启动应使用临时记录入口。"
+    }
+    . ([scriptblock]::Create($definition.Extent.Text))
+    New-Item -ItemType Directory -Path $FixtureDirectory -Force | Out-Null
+    $configPath = Join-Path $FixtureDirectory 'config.ini'
+    $configBefore = "[runtime]`ndiagnostics_enabled=false`n"
+    [IO.File]::WriteAllText($configPath, $configBefore)
+    $probe = [pscustomobject]@{ fail = $false; calls = 0 }
+    function Start-Process {
+        param($FilePath, $WorkingDirectory, [switch]$PassThru, [switch]$Wait)
+        $probe.calls++
+        if ($FilePath -ne 'never-execute.exe' -or
+            $WorkingDirectory -ne $FixtureDirectory -or
+            -not $PassThru -or [bool]$Wait -ne $ExpectedWait -or
+            $env:XEN_RUNTIME_DIAGNOSTICS -cne '1') {
+            throw '子进程启动参数或临时记录环境错误。'
+        }
+        if ($probe.fail) { throw '模拟启动失败' }
+        [pscustomobject]@{ Id = 7; ExitCode = 0 }
+    }
+    $original = [Environment]::GetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', 'Process')
+    try {
+        foreach ($previous in @($null, '0', '1')) {
+            foreach ($failure in @($false, $true)) {
+                $probe.fail = $failure
+                [Environment]::SetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', $previous, 'Process')
+                $errorMessage = ''
+                try { Start-DiagnosticProcess 'never-execute.exe' $FixtureDirectory | Out-Null }
+                catch { $errorMessage = $_.Exception.Message }
+                if (($failure -and $errorMessage -ne '模拟启动失败') -or
+                    (-not $failure -and $errorMessage)) { throw "启动返回错误：$errorMessage" }
+                if ([string][Environment]::GetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', 'Process') -cne [string]$previous) {
+                    throw '调用方记录环境未恢复。'
+                }
+                if ([IO.File]::ReadAllText($configPath) -cne $configBefore) {
+                    throw '临时记录启动不得改写 INI。'
+                }
+            }
+        }
+        if ($probe.calls -ne 6) { throw '启动替身未覆盖全部场景。' }
+    } finally { [Environment]::SetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', $original, 'Process') }
+}
+
 function New-SyntheticAimSample {
     param(
         [uint64]$Sequence = 1,
@@ -129,6 +189,9 @@ Expect (-not [bool]$invalidDelaySummary.contract_valid -and
 
 try {
     # 本专项只 Prepare/Collect；身份文件位于本轮独占根，不能启动真实 Worker。
+    Test-DiagnosticProcessEnvironment `
+        -SourcePath (Join-Path $PSScriptRoot 'invoke_live_game_acceptance.ps1') `
+        -FixtureDirectory (Join-Path $testRoot 'diagnostics-environment') -ExpectedWait $true
     New-Item -ItemType Directory -Path $fixtureScripts -Force | Out-Null
     New-Item -ItemType Directory -Path (Split-Path -Parent $fixedModel) `
         -Force | Out-Null

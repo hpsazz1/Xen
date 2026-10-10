@@ -93,13 +93,13 @@ try {
         [IO.File]::WriteAllText((Join-Path $runPath 'check-config.bat'), $start.Replace('launch-test.ps1', 'check-config.ps1'), [Text.Encoding]::ASCII)
         $binding.launcher_sha256 = Get-Digest (Join-Path $runPath 'launch-test.ps1')
         Write-Json (Join-Path $runPath 'task.json') $binding
-        $taskText = "# 原地射击测试`n`nPREPARED_NOT_LAUNCHED。固定每组15次左键按住，不代表15颗子弹；无移动动作，关闭模型HUD。`n`nfire-settings.json仅接受shot_hold_ms和fire_interval_ms两个整数字段。按住1..2000ms；相邻左键DOWN提交最小间隔1..5000ms且大于按住时长。默认80/800ms是观察与操作余量起点，不是人体反应常数，也不证明后座已恢复。`n`nedit-config.bat编辑参数，check-config.bat仅校验并生成preview-plan.json，不发送输入或创建真实组；start-test.bat由用户前台启动。每组独立保存到runs/时间GUID，期间编辑只影响下一组。End或人工输入取消沿用正式引擎；结束后需人工观察，不自动判断准确度。`n`n``````powershell`n$launch`n```````n"
+        $taskText = "# 原地射击测试`n`nPREPARED_NOT_LAUNCHED。固定每组15次左键按住，不代表15颗子弹；无移动动作，关闭模型HUD。`n`nfire-settings.json仅接受shot_hold_ms和fire_interval_ms两个整数字段。按住1..2000ms；相邻左键DOWN提交最小间隔1..5000ms且大于按住时长。默认80/800ms是观察与操作余量起点，不是人体反应常数，也不证明后座已恢复。`n`nedit-config.bat编辑参数，check-config.bat仅校验并生成preview-plan.json，不发送输入或创建真实组；start-test.bat可在桌面会话按任务授权启动。每组独立保存到runs/时间GUID，期间编辑只影响下一组。End或人工输入取消沿用正式引擎；结束后需人工观察，不自动判断准确度。`n`n``````powershell`n$launch`n```````n"
         [IO.File]::WriteAllText((Join-Path $runPath 'TASK.md'), $taskText, $utf8)
         [Console]::WriteLine('PREPARED_NOT_LAUNCHED；未发送设备输入。')
     } else {
         if ($Mode -eq 'Launch') {
-            if (-not $AllowPhysicalOutput -or $Confirm -cne 'WEAPON_FIRE_TEST') { throw '缺少本轮物理输出授权。' }
-            if ((Get-Process -Id $PID).SessionId -eq 0 -or $env:SSH_CONNECTION -or $env:SSH_CLIENT) { throw '仅允许用户本机前台启动。' }
+            if (-not $AllowPhysicalOutput -or $Confirm -cne 'WEAPON_FIRE_TEST') { throw '缺少物理输出开关或确认参数。' }
+            if ((Get-Process -Id $PID).SessionId -eq 0) { throw '启动需要桌面会话；远程调用请使用交互计划任务。' }
         } elseif ($AllowPhysicalOutput -or $Confirm) { throw 'Validate不接受物理授权。' }
         foreach ($name in @('EngineScript','Executable','ConfigPath','CredentialDirectory','Scope')) {
             if ($PSBoundParameters.ContainsKey($name)) { throw 'Launch只使用Prepare绑定，不接受路径或作用域覆盖。' }
@@ -147,7 +147,7 @@ try {
         if (-not $?) { throw '本组未完成；保留本组诊断，不自动重试。' }
     }
 } catch {
-    [Console]::Error.WriteLine('[WEAPON_FIRE_TEST_FAILED] 未启动或未完成；检查前台授权、两项参数、绑定文件和组内诊断。')
+    [Console]::Error.WriteLine('[WEAPON_FIRE_TEST_FAILED] 未启动或未完成；检查任务授权、两项参数、绑定文件和组内诊断。')
     exit 1
 } finally {
     if ($null -ne $runLock) { $runLock.Dispose() }

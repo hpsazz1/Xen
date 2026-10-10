@@ -777,6 +777,8 @@ void test_auto_stop_config() {
            "旧配置补充默认释放键");
     for (const char* value : {"enabled=perhaps", "activation_virtual_key=1.5",
                               "activation_virtual_key=999999999999999999999999",
+                              "activation_virtual_key=-999999999999999999999999",
+                              "activation_virtual_key=0xFFFFFFFFFFFFFFFFFFFFFFFF",
                               "release_virtual_keys=49,q", "release_virtual_keys=49,1.5"}) {
         {
             std::ofstream output(path, std::ios::binary | std::ios::trunc);
@@ -1089,11 +1091,21 @@ void test_invalid_config() {
     config.keyboard.debug_test_enabled = true;
     expect(validate_app_config(config,error), "独立调试开关及无冲突绑定应有效");
     config.trigger.hold_virtual_key = 0x79;
+    expect(validate_app_config(config,error), "禁用扳机不占用调试快捷键");
+    configure_test_kmbox(config);
+    config.gsi.enabled = true;
+    config.trigger.enabled = true;
+    config.trigger.require_stop = false;
     expect(!validate_app_config(config,error), "调试与扳机功能绑定必须双向互斥");
+    config.trigger.enabled = false;
     config.trigger.hold_virtual_key = 0;
     config.auto_stop.release_virtual_keys.push_back(0x79);
+    expect(validate_app_config(config,error), "禁用急停不占用调试快捷键");
+    config.auto_stop.enabled = true;
     expect(!validate_app_config(config,error), "调试与急停释放绑定必须互斥");
+    config.auto_stop.enabled = false;
     config.auto_stop.release_virtual_keys.pop_back();
+    config.mouse.backend = MouseBackend::WIN32_SEND_INPUT;
     config.keyboard.debug_test_virtual_keys.clear(); config.keyboard.debug_test_enabled = false;
     config.keyboard.anomaly_mark_virtual_keys = {0x77};
     expect(!validate_app_config(config,error), "异常标记不能与运行切换共键");
@@ -1494,6 +1506,7 @@ void test_movement_config() {
             "Ctrl时长持久化不改其他身法参数：" + std::to_string(hold));
     }
     for (int hold : {-1, 0, 2001}) {
+        loaded.movement.enabled = true;
         loaded.movement.large_ctrl_hold_ms = hold;
         const auto before = read_file_bytes(path);
         expect(!save_app_config(path.string(), loaded, error) && read_file_bytes(path) == before,
@@ -1510,12 +1523,58 @@ void test_movement_config() {
              "large_duration_ms=0", "spin_angle_degrees=nan", "large_angle_degrees=-1",
              "sensitivity=0", "yaw_degrees_per_count=inf"}) {
         loaded.movement.spin_duration_ms = 333;
-        expect(write_file_bytes(path, std::string("[movement]\n") + invalid + "\n"), "写入身法非法配置");
+        expect(write_file_bytes(path, std::string("[movement]\nenabled=true\n") + invalid + "\n"), "写入已启用身法的非法配置");
         expect(!load_app_config(path.string(), loaded, error), std::string("拒绝身法非法配置：") + invalid);
         expect(loaded.movement.spin_duration_ms == 333, "非法配置不能部分覆盖现有身法参数");
     }
     config.movement.sensitivity = 0;
     expect(!save_app_config(path.string(), config, error), "保存时同样拒绝非法身法参数");
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+}
+
+void test_disabled_features_preserve_parameters_until_enabled() {
+    const auto directory = make_temp_test_directory("disabled_features");
+    if (directory.empty()) { expect(false, "禁用功能配置隔离目录"); return; }
+    const auto path = directory / "config.ini";
+    for (int feature = 0; feature < 6; ++feature) {
+        AppConfig config;
+        configure_test_kmbox(config);
+        config.gsi.enabled = true;
+        config.trigger.require_stop = false;
+        config.source_context.host = "127.0.0.1";
+        config.source_context.port = 5017;
+        config.source_context.process_name = "synthetic.exe";
+        config.source_context.enabled = feature != 3;
+        switch (feature) {
+            case 0: config.movement.spin_duration_ms = 0; break;
+            case 1: config.auto_stop.counter_hold_ms = 0; break;
+            case 2: config.trigger.general_width_percent = 0; break;
+            case 3: config.source_context.ttl_ms = 0; break;
+            case 4: config.recoil.budget_window_ms = 0; break;
+            case 5: config.team_filter.ct_class_ids = {0, 0}; break;
+        }
+        std::string error;
+        AppConfig loaded;
+        expect(validate_app_config(config, error) &&
+                   save_app_config(path.string(), config, error) &&
+                   load_app_config(path.string(), loaded, error),
+               "禁用功能的未完成参数不阻断正常启动、保存与重载：" + error);
+        bool preserved = false;
+        switch (feature) {
+            case 0: preserved = loaded.movement.spin_duration_ms == 0; loaded.movement.enabled = true; break;
+            case 1: preserved = loaded.auto_stop.counter_hold_ms == 0; loaded.auto_stop.enabled = true; break;
+            case 2: preserved = loaded.trigger.general_width_percent == 0; loaded.trigger.enabled = true; break;
+            case 3: preserved = loaded.source_context.ttl_ms == 0; loaded.source_context.enabled = true; break;
+            case 4: preserved = loaded.recoil.budget_window_ms == 0; loaded.recoil.enabled = true; break;
+            case 5: preserved = loaded.team_filter.ct_class_ids == std::vector<int>{0, 0}; loaded.team_filter.enabled = true; break;
+        }
+        const auto before = read_file_bytes(path);
+        expect(preserved && !validate_app_config(loaded, error) &&
+                   !save_app_config(path.string(), loaded, error) &&
+                   read_file_bytes(path) == before,
+               "重新启用时必须严格拒绝未修复参数，且不覆盖原文件");
+    }
     std::error_code ignored;
     std::filesystem::remove_all(directory, ignored);
 }
@@ -1576,7 +1635,7 @@ void test_trigger_legacy_timing_migration() {
     expect(save_app_config(path.string(), loaded, error) && load_app_config(path.string(), loaded, error) &&
         loaded.trigger.range_percent == 72.0f, "框内范围比例保存往返");
     for (const auto* value : {"nan", "0", "100.1"}) {
-        expect(write_file_bytes(path, std::string("[trigger]\nrange_percent=") + value + "\n") &&
+        expect(write_file_bytes(path, std::string("[trigger]\nenabled=true\nrange_percent=") + value + "\n") &&
             !load_app_config(path.string(), loaded, error), "范围比例不能超出检测框");
     }
     expect(AppConfig{}.trigger.fire_delay_ms == 0 && AppConfig{}.trigger.fire_mode == TriggerFireMode::SINGLE,
@@ -1672,8 +1731,12 @@ void test_shared_weapon_timing_config() {
         loaded.auto_stop.shot_after_release_ms == 18,
         "共享武器资料独立于压枪关闭且完整往返");
     config.weapon_timing_file.clear();
+    config.trigger.enabled = true;
+    config.trigger.require_stop = false;
     expect(!save_app_config(path.string(), config, error), "共享资料路径不能为空");
+    config.trigger.enabled = false;
     config.weapon_timing_file = "custom/weapon-timing.json";
+    config.auto_stop.enabled = true;
     config.auto_stop.counter_hold_ms = 0;
     expect(!save_app_config(path.string(), config, error), "H40反向保持不能为0");
     config.auto_stop.counter_hold_ms = 40;
@@ -1777,7 +1840,7 @@ void test_team_filter_config() {
     }
     for (const auto* body : {"enabled=maybe\n", "enabled=true\nct_class_ids=\n",
              "ct_class_ids=-1\n", "t_class_ids=2,x\n", "ct_class_ids=0,0\n", "ct_class_ids=2\n"}) {
-        expect(write_file_bytes(path, std::string("[gsi]\nenabled=true\n[team_filter]\n") + body) &&
+        expect(write_file_bytes(path, std::string("[gsi]\nenabled=true\n[team_filter]\nenabled=true\n") + body) &&
             !load_app_config(path.string(), loaded, error), "阵营配置严格解析并拒绝非法映射");
     }
     expect(write_file_bytes(path, "[team_filter]\nenabled=false\nct_class_ids=\nt_class_ids=\n") &&
@@ -1793,6 +1856,29 @@ void test_team_filter_config() {
 
 } // namespace
 
+void test_runtime_diagnostics_preference() {
+    const auto path = std::filesystem::temp_directory_path() / "xen-diagnostics-preference.ini";
+    std::string error;
+    AppConfig config;
+    expect(!config.runtime.diagnostics_enabled, "详细记录默认关闭");
+    config.runtime.diagnostics_enabled = true;
+    expect(write_file_bytes(path, "[runtime]\nprofile_window=256\n") &&
+               load_app_config(path.string(), config, error) && !config.runtime.diagnostics_enabled,
+           "旧配置缺省关闭详细记录，不继承调用方上次的开关");
+    for (const bool enabled : {true, false}) {
+        config.runtime.diagnostics_enabled = enabled;
+        AppConfig restored;
+        expect(save_app_config(path.string(), config, error) &&
+                   load_app_config(path.string(), restored, error) &&
+                   restored.runtime.diagnostics_enabled == enabled,
+               "详细记录开关保存与重载一致");
+    }
+    expect(write_file_bytes(path, "[runtime]\ndiagnostics_enabled=perhaps\n") &&
+               !load_app_config(path.string(), config, error), "拒绝非法记录开关");
+    std::error_code ignored;
+    std::filesystem::remove(path, ignored);
+}
+
 int main(int argc, char** argv) {
     // 发布工具复用生产序列化，导出代码默认值；不创建任何设备或运行时。
     if (argc == 3 && std::string(argv[1]) == "--write-default-config") {
@@ -1802,7 +1888,9 @@ int main(int argc, char** argv) {
         return 1;
     }
     test_utf8_config_path();
+    test_runtime_diagnostics_preference();
     test_movement_config();
+    test_disabled_features_preserve_parameters_until_enabled();
     test_team_filter_config();
     test_trigger_legacy_timing_migration();
     test_current_code_defaults();

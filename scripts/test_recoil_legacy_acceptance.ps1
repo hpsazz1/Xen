@@ -6,6 +6,8 @@ $owned = New-XenOwnedTestDirectory -BasePath $TestRoot -RepositoryRoot (Split-Pa
 $root = $owned.RootPath
 $entry = Join-Path $PSScriptRoot 'invoke_recoil_legacy_acceptance.ps1'
 $passed = 0
+$originalDiagnostics = [Environment]::GetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', 'Process')
+$startProbe = [pscustomobject]@{ fail=$false; calls=0 }
 function Assert-Test([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw "FAIL: $Message" }
     $script:passed++
@@ -58,11 +60,18 @@ try {
     function Start-Process {
         param($FilePath, $WorkingDirectory, $WindowStyle, [switch]$PassThru)
         if ($WindowStyle -ne 'Normal') { throw 'UI需要用户可见' }
+        if ($env:XEN_RUNTIME_DIAGNOSTICS -cne '1') { throw '正式子进程缺少临时记录开关' }
+        ++$startProbe.calls
+        if ($startProbe.fail) { throw '模拟启动失败' }
         $process = [pscustomobject]@{ Id=12345; ExitCode=0 }
         $process | Add-Member ScriptMethod WaitForExit { return }
         return $process
     }
+    [Environment]::SetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', '0', 'Process')
     & $entry @launch | Out-Null
+    Assert-Test ($startProbe.calls -eq 1) '正式子进程启动时临时启用详细记录'
+    Assert-Test ($env:XEN_RUNTIME_DIAGNOSTICS -ceq '0') '启动成功后恢复调用方原环境'
+    Assert-Test ((Get-Content -LiteralPath (Join-Path $package 'config.ini') -Raw) -ceq $config) '临时记录不改原配置'
     Assert-Test (Test-Path -LiteralPath (Join-Path $run 'launch.json')) '模拟UI退出后保留Launch记录'
     Reject-Test $launch '禁止同Run重复Launch'
     Write-Fixture (Join-Path $package 'cache/runtime/new-run.json') 'new-debug-report'
@@ -73,8 +82,17 @@ try {
     Assert-Test ($summary.collected_files.Count -eq 2) '仅收新增Debug和batch'
     Assert-Test (-not $summary.physical_effect_verified -and $summary.human_observation_required) '回收不宣称真实效果'
     Assert-Test (-not $summary.config_changed_during_ui) '原配置保持'
+    $failedRun = Join-Path $root 'failed-start'
+    & $entry -Mode Prepare -PackageRoot $package -RunDirectory $failedRun | Out-Null
+    $failedLaunch = $launch.Clone(); $failedLaunch.RunDirectory = $failedRun
+    [Environment]::SetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', $null, 'Process')
+    $startProbe.fail = $true
+    Reject-Test $failedLaunch '模拟启动失败正常回传'
+    Assert-Test ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', 'Process'))) '启动失败也恢复原本未设置的环境'
+    Assert-Test ((Get-Content -LiteralPath (Join-Path $package 'config.ini') -Raw) -ceq $config) '启动失败不改原配置'
     Write-Host "PASS: $script:passed 项压枪人工验收入口测试；Start-Process仅自制替身，无设备或应用启动。"
 } finally {
+    [Environment]::SetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', $originalDiagnostics, 'Process')
     Remove-Item Function:Get-Process -ErrorAction SilentlyContinue
     Remove-Item Function:Start-Process -ErrorAction SilentlyContinue
     Remove-XenOwnedTestDirectory -RootPath $root -BasePath $owned.BasePath -OwnerId $owned.OwnerId -RepositoryRoot (Split-Path -Parent $PSScriptRoot)

@@ -79,6 +79,7 @@ function(run_deployment manifest configuration)
             "-DXEN_RUNTIME_OUTPUT=${output_directory}"
             "-DXEN_RUNTIME_LOCK=${lock_path}"
             "-DXEN_RUNTIME_CONFIGURATION=${configuration}"
+            "-DXEN_RUNTIME_FORCE_VERIFY=${ARGV2}"
             -P "${XEN_DEPLOY_SCRIPT}"
         RESULT_VARIABLE deploy_result
         OUTPUT_VARIABLE deploy_output
@@ -87,6 +88,7 @@ function(run_deployment manifest configuration)
         message(FATAL_ERROR
             "运行库部署测试失败 (${deploy_result})：\n${deploy_output}\n${deploy_error}")
     endif()
+    set(last_deploy_output "${deploy_output}" PARENT_SCOPE)
 endfunction()
 
 # 第一阶段模拟启用了 TensorRT/cuDNN 的构建，并额外放入一个只能依靠状态
@@ -201,6 +203,32 @@ foreach(forbidden_text IN ITEMS
             "部署报告仍包含上一配置记录：${forbidden_text}")
     endif()
 endforeach()
+
+# 未变化的增量必须跳过 DLL 内容读取；源或目标变化、目标删除仍恢复精确闭包。
+if(NOT CMAKE_VERSION VERSION_LESS "3.23")
+    run_deployment("${manifest_b}" "fixture-b")
+    if(NOT last_deploy_output MATCHES "reused=3 verified=0")
+        message(FATAL_ERROR "未变化部署仍在重新哈希：${last_deploy_output}")
+    endif()
+    file(WRITE "${source_b}/DirectML.dll" "updated-directml-source-with-new-size")
+    run_deployment("${manifest_b}" "fixture-b")
+    assert_same_sha256("${output_directory}/DirectML.dll" "${source_b}/DirectML.dll"
+        "增量部署未更新变化的 SDK 文件")
+    if(NOT last_deploy_output MATCHES "reused=2 verified=1")
+        message(FATAL_ERROR "单个 SDK 文件变化不应重算其他文件：${last_deploy_output}")
+    endif()
+    file(WRITE "${output_directory}/onnxruntime.dll" "damaged-deployed-output")
+    file(REMOVE "${output_directory}/msvcp140_atomic_wait.dll")
+    run_deployment("${manifest_b}" "fixture-b")
+    assert_same_sha256("${output_directory}/onnxruntime.dll" "${source_b}/onnxruntime.dll"
+        "增量部署未修复变化的目标文件")
+    assert_same_sha256("${output_directory}/msvcp140_atomic_wait.dll" "${source_b}/msvcp140_atomic_wait.dll"
+        "增量部署未恢复缺失目标")
+    run_deployment("${manifest_b}" "fixture-b" TRUE)
+    if(NOT last_deploy_output MATCHES "reused=0 verified=3")
+        message(FATAL_ERROR "显式完整校验不能复用元数据缓存：${last_deploy_output}")
+    endif()
+endif()
 
 execute_process(
     COMMAND "${windows_powershell}" -NoProfile -ExecutionPolicy Bypass

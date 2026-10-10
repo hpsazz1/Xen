@@ -60,6 +60,37 @@ class HudAcceptanceTests(unittest.TestCase):
         self.invoke("Launch", success=False)
         self.assertFalse(self.run.exists())
 
+    def test_diagnostics_environment_inherited_and_restored(self):
+        # 只加载生产启动函数，Start-Process是进程替身，不执行Launch或打开设备。
+        command = "$source='" + str(SCRIPT).replace("'", "''") + "';" + r'''
+$tokens=$null; $errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
+$function=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Start-DiagnosticProcess'},$false)
+. ([scriptblock]::Create($function.Extent.Text))
+function Start-Process {
+    param($FilePath,$WorkingDirectory,$WindowStyle,[switch]$PassThru)
+    if ($env:XEN_RUNTIME_DIAGNOSTICS -cne '1') { throw '子进程缺少临时记录开关' }
+    if ($script:failStart) { throw '模拟启动失败' }
+    [pscustomobject]@{Id=7}
+}
+$original=[Environment]::GetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS','Process')
+try {
+    foreach($previous in @($null,'0')) {
+        foreach($script:failStart in @($false,$true)) {
+            [Environment]::SetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS',$previous,'Process')
+            $failed=$false
+            try { Start-DiagnosticProcess 'never-execute.exe' 'C:\fixture' | Out-Null } catch { $failed=$true }
+            if ($failed -ne $script:failStart) { throw '启动返回状态错误' }
+            if ([string][Environment]::GetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS','Process') -cne [string]$previous) { throw '调用方环境未恢复' }
+        }
+    }
+} finally { [Environment]::SetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS',$original,'Process') }
+'''
+        original = (self.package / 'config.ini').read_bytes()
+        result = subprocess.run([POWERSHELL, '-NoProfile', '-Command', command], capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.package / 'config.ini').read_bytes(), original)
+
     def prepare_recovery(self, legacy=False):
         self.invoke()
         log = self.package / "logs/xen.log"

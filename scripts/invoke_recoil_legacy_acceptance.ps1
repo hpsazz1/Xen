@@ -11,7 +11,7 @@ Set-StrictMode -Version Latest
 $confirmation = 'XEN_RECOIL_LEGACY_ACCEPT_SENDS_REAL_KMBOX_INPUT'
 if ($Mode -eq 'Launch') {
     if (-not $AllowPhysicalOutput -or $PhysicalOutputConfirmation -cne $confirmation) {
-        throw 'Launch会发送真实KMBOX输入，必须由用户提供-AllowPhysicalOutput和固定确认令牌。'
+        throw 'Launch会发送真实KMBOX输入，必须提供-AllowPhysicalOutput和固定确认令牌。'
     }
 } elseif ($AllowPhysicalOutput -or $PhysicalOutputConfirmation) {
     throw 'Prepare/Recover不接受物理输出授权。'
@@ -39,6 +39,13 @@ function Get-Identity([string]$Path) {
 }
 function Write-Json([string]$Path, $Value) {
     [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 16), [Text.UTF8Encoding]::new($false))
+}
+function Start-DiagnosticProcess([string]$Executable, [string]$WorkingDirectory) {
+    $previous = [Environment]::GetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', 'Process')
+    try {
+        [Environment]::SetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', '1', 'Process')
+        Start-Process -FilePath $Executable -WorkingDirectory $WorkingDirectory -WindowStyle Normal -PassThru
+    } finally { [Environment]::SetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', $previous, 'Process') }
 }
 function Get-IniValue([string]$Text, [string]$Section, [string]$Key, [string]$Fallback = '') {
     $inside = $false
@@ -113,6 +120,7 @@ if ($Mode -eq 'Prepare') {
 
 任务 RECOIL-LEGACY-PARITY-001。仅Prepare；未发送真实输入。
 原包配置完整保留，当前压枪enabled=$($task.original_recoil_enabled)，mixed_aim=$($task.original_mixed_aim)。副本config.ini仅为证据，不作为CLI配置。
+本次验收通过进程环境临时启用详细运行记录，不改日常INI；正常保存其他设置保留原记录偏好，主动修改记录开关除外。
 建议人工窗口$RecommendedSeconds 秒，不是Runtime或硬件强制超时；脚本只启动UI并等待用户退出，不自动武装、不按键、不射击、不强杀。
 
 1. 在源游戏前台确认焦点/GSI有效、灵敏度与曲线一致。End总急停和松开开火保持可用。
@@ -126,7 +134,7 @@ if ($Mode -eq 'Prepare') {
 $launchCommand
 ``````
 
-命令会启用真实KMBOX输出入口，只能由用户本轮前台运行。软件日志/ACK不是游戏效果通过。
+命令会启用真实KMBOX输出入口，可按任务授权在桌面会话执行。软件日志/ACK不是游戏效果通过。
 完成后代理以同一脚本Mode Recover回收本次新增Debug文件；没有Launch记录不能当执行证据。
 "@
     [IO.File]::WriteAllText((Join-Path $run 'TASK.md'), $instructions, [Text.UTF8Encoding]::new($false))
@@ -140,7 +148,7 @@ if ($task.schema -ne 1 -or $task.task_id -cne 'RECOIL-LEGACY-PARITY-001' -or
     throw '任务身份或运行路径不符。'
 }
 if ($Mode -eq 'Launch') {
-    if ($package.StartsWith('\\')) { throw 'Launch只能由用户在目标机本地前台运行。' }
+    if ($package.StartsWith('\\')) { throw 'Launch需要目标机本地路径；远程调用请使用交互计划任务。' }
     if (Test-Path -LiteralPath (Join-Path $run 'launch.json')) { throw '此Run已启动过，禁止重复Launch；请新建Prepare。' }
     foreach ($identity in $task.identities) {
         if ((Get-Identity $identity.path).sha256 -cne $identity.sha256) { throw 'Prepare绑定文件已变化，请重新准备。' }
@@ -153,7 +161,7 @@ if ($Mode -eq 'Launch') {
         launcher_pid = $null; ended_utc = $null; exit_code = $null; manual_window_seconds = $task.recommended_seconds }
     Write-Json (Join-Path $run 'launch.json') $launch
     Write-Host '即将打开原包UI；由用户启用压枪、启动Runtime、武装和手动射击。End急停；建议窗口结束自行停止并退出。'
-    $process = Start-Process -FilePath $launcher -WorkingDirectory $package -WindowStyle Normal -PassThru
+    $process = Start-DiagnosticProcess $launcher $package
     $launch.launcher_pid = $process.Id
     Write-Json (Join-Path $run 'launch.json') $launch
     $process.WaitForExit()

@@ -144,7 +144,7 @@ bool prepare_recoil_calibration(const RecoilCalibrationPrepareRequest& request,R
         if(!std::filesystem::create_directory(directory))throw std::runtime_error("校准目录已存在；拒绝覆盖");
         create_file(directory/"profile.json",profile_text);
         create_file(directory/"manifest.json",text);
-        create_file(directory/"TASK.md","# 单次弹道校准\n\n状态：PREPARED_NOT_LAUNCHED。仅由用户在前台运行以下完整命令。\n\n"
+        create_file(directory/"TASK.md","# 单次弹道校准\n\n状态：PREPARED_NOT_LAUNCHED。按用户明确授权手动或自动运行以下完整命令。\n\n"
             "原曲线为SCHEMA_VALID；操作员声明环境不等于已测量。一次授权只允许一次人工左键弹序，需完整释放后按住保持键并按左键。\n\n"
             "```powershell\n"+command+"\n```\n\n超时、取消或故障后不可续跑；重新准备新会话。软件结束不会升级校准状态或发布活动版本。\n");
         create_file(directory/"PREPARED",digest);

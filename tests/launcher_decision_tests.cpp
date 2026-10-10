@@ -1,4 +1,5 @@
 #include "app/launcher_decision_internal.h"
+#include "config/config.h"
 
 #include <chrono>
 #include <filesystem>
@@ -131,6 +132,25 @@ void test_missing_config_preserves_default_runtime_contract() {
            "缺失配置必须保留 AppConfig 默认后端到 Worker 的路由合同");
 }
 
+void test_non_routing_config_error_allows_worker_repair_page() {
+    TemporaryDirectory temporary;
+    const auto path = temporary.path() / "config.ini";
+    write_file(path, "[detector]\nbackend=directml\n[ui]\nwidth=broken\n");
+    const auto manifest = test_manifest();
+    const app::detail::ReleaseRuntimeEntry* runtime = nullptr;
+    ErrorCapture error;
+    expect(app::detail::resolve_launcher_runtime(
+               manifest, path.string(), adapter_for(error), runtime) == 0 &&
+               runtime && runtime->id == "directml" && error.call_count == 0,
+           "无关配置错误不得阻断已明确后端的 Worker 配置修复页");
+    AppConfig config;
+    std::string config_error;
+    expect(!load_app_config(path.string(), config, config_error) &&
+               config_error.find("ui.width") != std::string::npos &&
+               !config.mouse.allow_send_input,
+           "Worker 完整配置读取仍拒绝原始错误并保留安全默认值");
+}
+
 void test_utf8_config_path_preserves_invalid_file_failure() {
     TemporaryDirectory temporary;
     const auto directory = temporary.path() / std::filesystem::path(u8"发行版_\U0001F680");
@@ -161,6 +181,7 @@ int main() {
     test_existing_invalid_config_fails_before_worker_selection();
     test_valid_config_selects_declared_runtime_without_error();
     test_missing_config_preserves_default_runtime_contract();
+    test_non_routing_config_error_allows_worker_repair_page();
     if (failures != 0) {
         std::cerr << "Launcher 决策测试失败数: " << failures << '\n';
         return 1;

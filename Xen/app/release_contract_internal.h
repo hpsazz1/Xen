@@ -48,7 +48,8 @@ bool load_release_manifest(const std::filesystem::path& manifest_path,
                            std::string& error) noexcept;
 bool validate_release_manifest(const std::filesystem::path& release_root,
                                const ReleaseManifest& manifest,
-                               std::string& error) noexcept;
+                               std::string& error,
+                               const ReleaseRuntimeEntry* selected_runtime = nullptr) noexcept;
 const ReleaseRuntimeEntry* find_runtime_for_backend(
     const ReleaseManifest& manifest, BackendType backend) noexcept;
 

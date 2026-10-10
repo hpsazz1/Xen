@@ -114,6 +114,14 @@ if ([string]::IsNullOrWhiteSpace($PackageRoot)) {
     $PackageRoot = [System.IO.Path]::GetFullPath($PackageRoot)
 }
 
+function Start-DiagnosticProcess([string]$Executable, [string]$WorkingDirectory) {
+    $previous = [Environment]::GetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', 'Process')
+    try {
+        [Environment]::SetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', '1', 'Process')
+        Start-Process -FilePath $Executable -WorkingDirectory $WorkingDirectory -PassThru
+    } finally { [Environment]::SetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', $previous, 'Process') }
+}
+
 function Write-TextAtomically([string]$Path, [string]$Content) {
     $parent = Split-Path -Parent $Path
     New-Item -ItemType Directory -Path $parent -Force | Out-Null
@@ -1592,6 +1600,7 @@ $($checks -join "`n")
 $launch
 ```
 
+Launch 仅为本次 Launcher 临时启用详细运行记录，不改日常 INI 中的记录偏好，并恢复调用方环境。
 应用退出后脚本会收集本轮新增 Runtime CSV/JSON 和日志。完成后请将上述人工观察直接发送到当前对话，
 由代理记录到 `OBSERVATION.md`、回收自动证据并继续后续流程；不需要手工编辑观察文件。
 "@
@@ -2152,8 +2161,7 @@ if ($Mode -eq "Launch") {
         $pixelEvidenceProcess = $pixelEvidenceAttemptState.process
     }
     try {
-        $process = Start-Process -FilePath $launcher `
-            -WorkingDirectory $PackageRoot -PassThru
+        $process = Start-DiagnosticProcess $launcher $PackageRoot
         if ($taskCapturePixelEvidence -and
             $taskHasPixelEvidenceRuntimeAlignmentContract) {
             Write-Host ("Launcher 已启动；等待 Runtime 连续 aim-lock 窗口后" +

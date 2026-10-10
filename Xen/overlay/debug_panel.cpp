@@ -11,7 +11,12 @@
 namespace {
 using namespace debug_session;
 void tip(const char* text) {
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", text);
+    if (!ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) return;
+    ImGui::BeginTooltip();
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+    ImGui::TextUnformatted(text);
+    ImGui::PopTextWrapPos();
+    ImGui::EndTooltip();
 }
 bool button(const char* label, const char* help, bool enabled = true) {
     ImGui::BeginDisabled(!enabled);
@@ -19,12 +24,23 @@ bool button(const char* label, const char* help, bool enabled = true) {
     ImGui::EndDisabled(); tip(help); return clicked;
 }
 bool input(const char* label, std::string& value, const char* help) {
+    ImGui::SetNextItemWidth(std::max(80.0f, ImGui::GetContentRegionAvail().x -
+        ImGui::CalcTextSize(label).x - ImGui::GetStyle().ItemInnerSpacing.x));
     const bool changed = ImGui::InputText(label, &value); tip(help); return changed;
 }
 bool integer(const char* label, int& value, int low, int high, const char* help) {
+    ImGui::SetNextItemWidth(std::max(80.0f, ImGui::GetContentRegionAvail().x -
+        ImGui::CalcTextSize(label).x - ImGui::GetStyle().ItemInnerSpacing.x));
     const bool changed = ImGui::InputInt(label, &value);
     if (changed) value = std::clamp(value, low, high);
     tip(help); return changed;
+}
+bool multiline(const char* label, std::string& value, float height) {
+    ImGui::TextUnformatted(label);
+    ImGui::PushID(label);
+    const bool changed = ImGui::InputTextMultiline("##value", &value, {-1, height});
+    ImGui::PopID();
+    return changed;
 }
 const char* state_label(State state) {
     switch (state) {
@@ -240,14 +256,14 @@ struct DebugPanel::Impl {
         const bool ready = s && s->state == State::PREPARED && !edited &&
             !prepared_id.empty() && prepared_id == s->prepared_id && prepared_mode == request.mode;
         const bool physical = request.mode == Mode::COUNTERPULSE || request.mode == Mode::FIRE_TEST;
-        if (physical) ImGui::TextWrapped("启动前须停止 Runtime 和输入记录，使用已有独占 KMBOX 连接。按实际ACK与时序检查执行，不以配置的最大等待时间拒绝启动；设备清理未知时仍禁止启动。");
+        if (physical) ImGui::TextWrapped("启动前停止运行和输入记录；设备释放未确认时不能启动。");
         if (physical) {
         ImGui::BeginDisabled(!ready);
         ImGui::Checkbox("允许本次真实物理输出", &allow);
-        tip("勾选后由用户点击下方启动按钮；只授权本次已准备任务。修改草稿、重新准备或身份变化均撤销勾选。");
+        tip("允许启动当前已准备的真实输出任务；修改参数或重新准备后需重新勾选。");
         ImGui::EndDisabled();
         }
-        if (button("由用户前台启动本次任务", "仅启动冻结身份匹配的本次任务。启动前后台再次核对唯一设备职责与清理状态。",
+        if (button("启动本次任务", "执行已准备参数；启动前核对设备连接与释放状态。",
                    ready && (!physical || allow))) {
             actions.debug_action = Action::START; actions.debug_request = request;
             actions.debug_prepared_id = prepared_id; actions.debug_allow_physical_output = allow;
@@ -267,7 +283,7 @@ void DebugPanel::render_status(const Snapshot* s, OverlayActions& actions) noexc
         impl_->sync(s);
         ImGui::Text("当前任务：%s", s ? state_label(s->state) : "空闲");
         if (s && !s->message.empty()) ImGui::TextWrapped("%s", s->message.c_str());
-        if (s) ImGui::TextDisabled(s->repeat_ready ? "快捷键模板已准备；启用并保存测试键后，由用户按键执行本组。" : "快捷键模板未就绪；先检查参数并重新准备。");
+        if (s) ImGui::TextDisabled(s->repeat_ready ? "测试已准备；启用并保存测试键后可按键执行。" : "测试未准备；检查参数后点击准备。");
         if (button("停止当前调试任务", "直接请求取消；停止中仍等待设备清理，取消不等于释放确认。", s && s->busy))
             impl_->send(Action::CANCEL, actions);
         ImGui::SameLine();
@@ -286,7 +302,8 @@ void DebugPanel::render_counterpulse(const AppConfig& config, const Snapshot* s,
         ImGui::TextWrapped(config.auto_stop.experimental_hud_model ?
             "当前配置选择：HUD 动态制动。生产按输入模型逐轴计算制动时长，本页仍执行草稿中的固定时长。" :
             "当前配置选择：H40固定时长对照。生产默认使用HUD动态制动；本页测试不改变已保存的策略。");
-        ImGui::TextWrapped("流程：选择对照动作和武器参数 → 校验并准备 → 用户前台启动 → 查看本组报告。反向制动顺序为移动 → 释放 → 反向 → 释放后等待 → 按住左键。");
+        ImGui::TextWrapped("选择动作与武器参数，准备后启动并查看报告。");
+        tip("反向制动顺序：移动、释放、反向、释放后等待，再按住左键。");
         ImGui::TextWrapped("首发为基准射击，后续执行移动和所选制动动作；DOWN提交间隔只是下限，不是移动保持时长。");
         ImGui::BeginDisabled(s && s->busy);
         Json edits = Json::object();
@@ -326,7 +343,7 @@ void DebugPanel::render_counterpulse(const AppConfig& config, const Snapshot* s,
         }
         if (!edits.empty() || d.request.plan_text.empty()) { d.plan_from_fields(edits); d.changed(); }
         d.weapon_timing(config,s,actions,true);
-        if (ImGui::InputTextMultiline("完整动作计划 JSONC", &d.request.plan_text, { -1, 190 })) {
+        if (multiline("完整动作计划 JSONC", d.request.plan_text, 190)) {
             d.changed();
             // 编辑未完成时保留原文；可解析后同步表单，后续只改用户明确操作的字段。
             try { d.fields_from_plan(Json::parse(d.request.plan_text,nullptr,true,true)); } catch (...) {}
@@ -336,7 +353,7 @@ void DebugPanel::render_counterpulse(const AppConfig& config, const Snapshot* s,
         if (button("载入计划", "读取既有JSON/JSONC计划；保留原文件。")) { d.request.load_path = d.load_path; d.changed(); d.send(Action::LOAD_PLAN, actions); }
         ImGui::SameLine();
         if (button("载入模型采样设置", "载入默认基准与模型参数；不宣称做过默认参数重评。")) { d.request.load_path = d.load_path; d.changed(); d.send(Action::LOAD_SAMPLING, actions); }
-        if (ImGui::InputTextMultiline("模型采样设置 JSONC", &d.request.sampling_text, {-1, 130})) d.changed();
+        if (multiline("模型采样设置 JSONC", d.request.sampling_text, 130)) d.changed();
         tip("空值沿用原生默认设置。模型参数与真实观察保持独立。");
         d.controls(s, actions); ImGui::EndDisabled();
         if (s) { json_block("本次冻结实际计划", s->plan); json_block("默认基准与实际模型参数", s->sampling); }
@@ -375,7 +392,7 @@ void DebugPanel::render_manual(const Snapshot* s, OverlayActions& actions) noexc
         if (input("原始记录 / 报告路径", d.request.input_path, "离线分析不连接设备；重评使用新目录，保留原始证据。")) d.changed();
         if (input("派生结果根目录", d.request.output_root, "每次分析或派生创建新产物，不覆盖原始Run。")) d.changed();
         if (integer("模型录制上限 / ms", d.request.recording_duration_ms, 1000, 120000, "有界人工录制；用户真实键鼠为数据，不发送自动输出。")) d.changed();
-        if (button("准备人工模型录制", "复用唯一设备输入订阅；准备后通过明确前台操作启动，不自动打开第二设备。")) {
+        if (button("准备人工模型录制", "使用当前设备输入订阅；准备完成后启动录制。")) {
             d.mode(Mode::MANUAL_RECORDING); d.send(Action::PREPARE, actions);
         }
         if (d.request.mode == Mode::MANUAL_RECORDING) d.controls(s, actions);
@@ -383,7 +400,7 @@ void DebugPanel::render_manual(const Snapshot* s, OverlayActions& actions) noexc
         if (ImGui::Checkbox("使用自定义模型参数重评", &d.request.override_sampling)) d.changed();
         tip("默认关闭，沿用原Run模型参数。开启后仅影响新重评，不覆盖原始记录或生产配置。");
         if (d.request.override_sampling) {
-            if (ImGui::InputTextMultiline("自定义重评参数 JSONC", &d.request.sampling_text, {-1,130})) d.changed();
+            if (multiline("自定义重评参数 JSONC", d.request.sampling_text, 130)) d.changed();
             tip("使用当前模型参数草稿重新评价；请核对来源和修改项。原Run参数和结果保留在原目录。");
         } else ImGui::TextDisabled("本次离线重评沿用原Run的模型参数。");
         if (button("离线重评人工记录", "仅分析原始人工记录；不连接设备，不进行动作复测。")) { d.mode(Mode::EVALUATE_MANUAL); d.send(Action::REEVALUATE, actions); }

@@ -150,13 +150,24 @@ void test_manifest_validation() {
 
     std::filesystem::remove(root / "runtimes/directml/Xen.exe");
     expect(!app::detail::validate_release_manifest(root, parsed, error),
-           "所选发布运行时入口缺失时必须失败关闭");
+           "完整包验证仍须拒绝任一运行时入口缺失");
+    const auto* nvidia = app::detail::find_runtime_for_backend(parsed, BackendType::CPU);
+    const auto* directml = app::detail::find_runtime_for_backend(parsed, BackendType::DIRECTML);
+    expect(app::detail::validate_release_manifest(root, parsed, error, nvidia),
+           "未选用的 DirectML Worker 缺失不得阻断可用的 NVIDIA Worker：" + error);
+    expect(!app::detail::validate_release_manifest(root, parsed, error, directml),
+           "所选 DirectML Worker 缺失仍必须拒绝启动");
+    const auto outside_runtime = *nvidia;
+    expect(!app::detail::validate_release_manifest(root, parsed, error, &outside_runtime),
+           "所选运行时必须是清单中的真实条目");
     write_file(root / "runtimes/directml/Xen.exe", "restored");
 
     const auto original_executable = parsed.runtimes.front().executable;
     parsed.runtimes.front().executable = "../outside.exe";
     expect(!app::detail::validate_release_manifest(root, parsed, error),
            "发布运行时入口不得越过发布根目录");
+    expect(!app::detail::validate_release_manifest(root, parsed, error, directml),
+           "未选条目的路径越界仍属于清单错误，不能静默忽略");
     parsed.runtimes.front().executable = original_executable;
 }
 

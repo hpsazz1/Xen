@@ -7,6 +7,7 @@ struct RecoilArchiveConfig {
     std::string acquisition_run_id;
     std::filesystem::path directory;
     RecoilConfig recoil;
+    std::uint64_t after_sequence = 0;
     std::size_t max_records = 32768, max_batch_bytes = 16 * 1024 * 1024;
     std::uint64_t max_total_bytes = 256 * 1024 * 1024, max_files = 4096;
 };
@@ -23,7 +24,8 @@ public:
     RecoilBatchArchive();
     ~RecoilBatchArchive();
     bool start(const RecoilArchiveConfig& config, Reader reader, Sink sink = {}) noexcept;
-    // 调用方必须先停止producer；此处读尽最后high-water再收尾。
+    // 在停止请求后固定事件高水位并封尾；生产者可继续运行，不追赶新增事件。
+    void request_stop() noexcept;
     void stop() noexcept;
     RecoilArchiveStatus snapshot() const;
 private:

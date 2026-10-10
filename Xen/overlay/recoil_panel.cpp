@@ -1021,10 +1021,10 @@ struct RecoilPanel::Impl {
 
     void prepare_panel(const AppConfig& config) {
         const bool show_calibration = ImGui::TreeNode("校准此版本");
-        help("为磁盘上已保存的版本准备独立校准会话；只有用户执行前台命令才会连接设备。");
+        help("为磁盘上已保存的版本准备独立校准会话；准备本身不连接设备。");
         if (!show_calibration) return;
         ImGui::TextWrapped("对象：%s。准备使用磁盘上的已保存候选，不包含未保存草稿。", selected_file.c_str());
-        ImGui::TextWrapped("只准备一次弹序的独立会话。退出应用释放设备后，由你在前台执行生成的命令；结果不会自动发布。");
+        ImGui::TextWrapped("准备一次弹序校准。执行生成命令前，退出应用并释放设备；结果不会自动发布。");
         ImGui::InputText("已保存应用配置", &calibration_config);
         help("读取并绑定这份已保存INI的身份；当前界面尚未保存的更改不会进入校准会话。");
         ImGui::InputText("新的校准目录", &calibration_output);
@@ -1100,7 +1100,8 @@ struct RecoilPanel::Impl {
         ImGui::EndDisabled();
         if (!calibration_command.empty()) {
             ImGui::TextWrapped("以下命令固定绑定已准备对象：%s。修改上方选项不会改变它，需要重新准备。", calibration_prepared_identity.c_str());
-            ImGui::InputTextMultiline("前台命令", &calibration_command, {-1, 90}, ImGuiInputTextFlags_ReadOnly);
+            ImGui::TextUnformatted("校准命令");
+            ImGui::InputTextMultiline("##calibration_command", &calibration_command, {-1, 90}, ImGuiInputTextFlags_ReadOnly);
             help("此命令绑定已准备的版本、配置与会话；更改上方输入后必须重新准备，不能把旧命令当成新参数。");
             if (ImGui::Button("复制前台命令")) ImGui::SetClipboardText(calibration_command.c_str());
             help("只复制命令。请先退出应用释放设备，再由你在前台明确执行。");

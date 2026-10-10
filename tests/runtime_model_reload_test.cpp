@@ -10,6 +10,7 @@
 #include "config/config.h"
 #include "log/log.h"
 #include "runtime/runtime.h"
+#include "debug/session_archive.h"
 
 #include <algorithm>
 #include <atomic>
@@ -17,6 +18,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <numeric>
 #include <string>
@@ -53,6 +55,18 @@ public:
 
 private:
     bool ready_ = false;
+};
+
+// 复用 Runtime 的共享设备入口；配置校验仍走生产路径，绝不连接 KMBOX。
+class NoOutputMouse final : public IMouseController {
+public:
+    bool open() noexcept override { return true; }
+    MouseMoveReceipt move(const MouseMoveCommand&) noexcept override { ++moves; return {}; }
+    bool poll_input(InputSnapshot& value) noexcept override { value = {}; return false; }
+    void close() noexcept override {}
+    MouseStatus status() const noexcept override { return MouseStatus::DISABLED; }
+    std::string last_error() const override { return {}; }
+    std::atomic<unsigned> moves{0};
 };
 
 unsigned short reserve_loopback_port() noexcept {
@@ -196,8 +210,12 @@ int main(int argc, char** argv) {
     config.capture.acquire_timeout_ms = 20;
     config.mouse.backend = MouseBackend::WIN32_SEND_INPUT;
     config.mouse.allow_send_input = false;
+    config.runtime.enable_performance_probes = true;
 
     Runtime runtime;
+    SessionArchive diagnostic_archive;
+    const auto diagnostic_root = std::filesystem::temp_directory_path() /
+        ("xen-runtime-recording-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     const bool started = runtime.start(config);
     expect(started, "Runtime 必须使用真实 CPU 模型和 UDP Capture 启动" +
                         (runtime.snapshot().last_error.empty()
@@ -209,6 +227,10 @@ int main(int argc, char** argv) {
             return runtime.snapshot().processed_frames >= 3;
         }, 10s);
         expect(initial_frames, "初始 Detector 必须持续处理 UDP 帧");
+        std::vector<RuntimePipelineSample> diagnostics;
+        expect(runtime.drain_pipeline_samples(diagnostics) && diagnostics.empty(),
+               "默认关闭详细记录时，真实生产链不积累逐帧样本");
+        expect(!std::filesystem::exists(diagnostic_root), "默认关闭不会创建诊断文件");
 
         RuntimeSnapshot snapshot = runtime.snapshot();
         expect(snapshot.state == RuntimeState::RUNNING,
@@ -279,6 +301,14 @@ int main(int argc, char** argv) {
             return runtime.snapshot().processed_frames >=
                    processed_before_success + 3;
         }, 5s), "成功切换期间 Pipeline 必须继续前进");
+        expect(runtime.drain_pipeline_samples(diagnostics) && diagnostics.empty(),
+               "模型热重载不能重新开启已关闭的详细记录");
+        runtime.set_diagnostics_enabled(true);
+        SessionArchiveConfig archive_config;
+        archive_config.directory = diagnostic_root.string();
+        archive_config.report_config.session_id = "runtime-recording-toggle";
+        std::string archive_error;
+        expect(diagnostic_archive.start(archive_config, archive_error), "显式开启生产归档");
 
         // 先让新 Session 经过与正式样本相同的 16 帧完整链路预热，再用生产
         // 诊断样本建立端到端基线；失败帧不混入分位数。
@@ -299,6 +329,8 @@ int main(int argc, char** argv) {
         std::vector<RuntimePipelineSample> profile_samples;
         expect(runtime.drain_pipeline_samples(profile_samples),
                "Runtime 必须允许取出热重载后的诊断样本");
+        expect(wait_until([&] { return diagnostic_archive.submit(profile_samples, runtime.snapshot()); }, 2s),
+               "开启后实际逐帧数据提交归档");
         std::vector<double> successful_total_ms;
         bool landmark_contract_valid = true;
         bool processed_timing_valid = true;
@@ -352,6 +384,41 @@ int main(int argc, char** argv) {
         }
     }
 
+    runtime.set_diagnostics_enabled(false);
+    std::vector<RuntimePipelineSample> closing_samples;
+    runtime.drain_pipeline_samples(closing_samples);
+    if (started) {
+        expect(wait_until([&] { return diagnostic_archive.submit(closing_samples, runtime.snapshot()); }, 2s),
+               "关闭只封尾已接收数据");
+        diagnostic_archive.stop();
+        expect(diagnostic_archive.status().written_samples > 0 &&
+                   diagnostic_archive.status().last_error.empty(), "生产CSV与JSON实际写盘成功");
+    }
+    const auto archive_bytes = [&] {
+        std::uintmax_t bytes = 0;
+        if (std::filesystem::exists(diagnostic_root))
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(diagnostic_root))
+                if (entry.is_regular_file()) bytes += entry.file_size();
+        return bytes;
+    };
+    const auto closed_bytes = archive_bytes();
+    const auto before_disabled = runtime.snapshot().processed_frames;
+    expect(wait_until([&] { return runtime.snapshot().processed_frames >= before_disabled + 8; }, 5s),
+           "关闭记录不停止生产链");
+    expect(runtime.drain_pipeline_samples(closing_samples) && closing_samples.empty(),
+           "动态关闭后诊断队列停止增长");
+    expect(archive_bytes() == closed_bytes, "关闭封尾后实际文件字节数停止增长");
+    const auto reopen_sequence = runtime.snapshot().last_sequence;
+    runtime.set_diagnostics_enabled(true);
+    expect(wait_until([&] { return runtime.snapshot().processed_frames >= before_disabled + 16; }, 5s),
+           "重新开启后生产链继续运行");
+    runtime.set_diagnostics_enabled(false);
+    expect(runtime.drain_pipeline_samples(closing_samples) && !closing_samples.empty() &&
+               std::all_of(closing_samples.begin(), closing_samples.end(), [&](const auto& sample) {
+                   return sample.sequence > reopen_sequence && sample.service.valid;
+               }), "性能探针两阶段样本须在关闭前完成，重新开启不补旧段尾样本");
+    std::error_code archive_cleanup_error;
+    std::filesystem::remove_all(diagnostic_root, archive_cleanup_error);
     runtime.stop();
     const RuntimeSnapshot stopped = runtime.snapshot();
     expect(stopped.state == RuntimeState::STOPPED &&
@@ -388,6 +455,73 @@ int main(int argc, char** argv) {
     runtime.stop();
 
     config.source_context.enabled = false;
+    const SOCKET occupied_gsi = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    sockaddr_in occupied_address{};
+    occupied_address.sin_family = AF_INET;
+    occupied_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    const BOOL exclusive = TRUE;
+    const bool occupied_bound = occupied_gsi != INVALID_SOCKET &&
+        setsockopt(occupied_gsi, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+            reinterpret_cast<const char*>(&exclusive), sizeof(exclusive)) == 0 &&
+        bind(occupied_gsi, reinterpret_cast<const sockaddr*>(&occupied_address), sizeof(occupied_address)) == 0;
+    int occupied_size = sizeof(occupied_address);
+    const bool occupied_ready = occupied_bound &&
+        getsockname(occupied_gsi, reinterpret_cast<sockaddr*>(&occupied_address), &occupied_size) == 0;
+    expect(occupied_ready, "GSI 故障夹具必须独占临时 TCP 端口");
+    if (occupied_ready) {
+        config.gsi.enabled = true;
+        config.gsi.bind_address = "127.0.0.1";
+        config.gsi.port = ntohs(occupied_address.sin_port);
+        config.team_filter.enabled = true;
+        config.team_filter.ct_class_ids = {0};
+        config.team_filter.t_class_ids = {1};
+        const bool gsi_degraded_started = runtime.start(config);
+        expect(gsi_degraded_started, "GSI 端口占用不得阻断 Runtime 采集检测");
+        if (gsi_degraded_started) {
+            expect(wait_until([&] { return runtime.snapshot().processed_frames >= 3; }, 10s),
+                   "GSI 失效后真实 CPU Detector 继续处理 UDP 帧");
+            const auto degraded = runtime.snapshot();
+            expect(degraded.state == RuntimeState::RUNNING && degraded.last_error.empty() &&
+                       !degraded.gsi_error.empty(), "GSI 失败须保留独立告警");
+            expect(!degraded.weapon_snapshot.valid && !degraded.output_armed &&
+                       !degraded.last_aim.has_target, "GSI 故障不得关闭队伍约束或继承有效目标");
+        }
+        runtime.stop();
+    }
+    if (occupied_gsi != INVALID_SOCKET) closesocket(occupied_gsi);
+
+    // 无效目录走真实 RecoilStore；同一 Runtime 重启后不得留下半启动压枪调度。
+    std::filesystem::create_directories(diagnostic_root);
+    const auto invalid_profile_directory = diagnostic_root / "profiles-file";
+    { std::ofstream output(invalid_profile_directory); output << "not a directory"; }
+    AppConfig recoil_failure_config = config;
+    recoil_failure_config.mouse.backend = MouseBackend::KMBOX_NET;
+    recoil_failure_config.mouse.kmbox_ip = "127.0.0.1";
+    recoil_failure_config.mouse.kmbox_port = 13384;
+    recoil_failure_config.mouse.kmbox_uuid = "00000000";
+    recoil_failure_config.gsi.enabled = true;
+    recoil_failure_config.source_context.enabled = true;
+    recoil_failure_config.recoil.enabled = true;
+    recoil_failure_config.recoil.sensitivity = 1.0;
+    recoil_failure_config.recoil.profile_directory = invalid_profile_directory.string();
+    auto no_output_mouse = std::make_shared<NoOutputMouse>();
+    const bool recoil_degraded_started = runtime.start(recoil_failure_config, no_output_mouse);
+    expect(recoil_degraded_started, "弹道目录损坏不得阻断 Runtime 采集检测");
+    if (recoil_degraded_started) {
+        expect(wait_until([&] { return runtime.snapshot().processed_frames >= 3; }, 10s),
+               "弹道目录读取失败后真实 CPU Detector 继续处理 UDP 帧");
+        const auto degraded = runtime.snapshot();
+        expect(degraded.last_error.empty() && !degraded.recoil_telemetry_available &&
+                   degraded.recoil_profile_status.find("弹道目录读取失败") != std::string::npos,
+               "弹道失败状态明确保留且不启动压枪调度");
+        expect(no_output_mouse->moves.load() == 0, "故障降级回归不得向假设备输出");
+    }
+    runtime.stop();
+    expect(runtime.snapshot().recoil_profile_status.find("弹道目录读取失败") != std::string::npos,
+           "停止不得把弹道加载错误覆盖成无匹配曲线");
+    std::filesystem::remove(invalid_profile_directory);
+    std::filesystem::remove(diagnostic_root);
+
     const bool recovered_started = runtime.start(config);
     expect(recovered_started, "禁用桥接后必须能够重新启动 Runtime");
     if (recovered_started) {
@@ -395,9 +529,10 @@ int main(int argc, char** argv) {
             return runtime.snapshot().processed_frames >= 3;
         }, 10s), "禁用桥接重启后采集检测必须正常处理帧");
         const RuntimeSnapshot recovered = runtime.snapshot();
-        expect(recovered.source_context_error.empty() &&
+        expect(recovered.source_context_error.empty() && recovered.gsi_error.empty() &&
+                   recovered.recoil_profile_status.empty() &&
                    recovered.last_error.empty(),
-               "新的启动周期必须清除旧桥接告警");
+               "新的启动周期必须清除旧桥接、GSI 和弹道告警");
     }
     runtime.stop();
 

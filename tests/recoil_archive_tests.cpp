@@ -1,6 +1,7 @@
 #include "recoil/recoil_archive.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <atomic>
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -137,6 +138,37 @@ int main(int argc,char** argv) {
             const auto next=batch(2,4,1);events.insert(events.end(),next.begin(),next.end());
             check(f.start(events,c),"总上限测试启动");f.archive.stop();
             check(!f.archive.snapshot().available&&f.archive.snapshot().files_written==1,"总文件上限不删除旧证据");
+        }
+        {
+            Fixture f; auto events = batch(1,1,2);
+            const auto next = batch(2,5,2);
+            events.insert(events.end(),next.begin(),next.end());
+            auto config = f.config(); config.after_sequence = 4;
+            check(f.start(events,config),"重新开启从当前事件水位开始"); f.archive.stop();
+            check(f.written.size()==1 && f.written[0]["recoil"]["execution"]["batch"]["firing_id"]==2,
+                "重新开启不追补关闭期间的压枪批次");
+        }
+        {
+            Fixture f; const auto events = batch(1,1,8190);
+            std::atomic<unsigned> reads{0};
+            std::atomic<bool> boundary_read{false};
+            check(f.archive.start(f.config(),[&](std::uint64_t after,std::size_t maximum) {
+                RecoilEventSlice slice;
+                // 活生产者每轮增加512个事件，始终快于归档每轮256个事件的读取。
+                // 请求停止才发布第一批，避免主线程调度延迟让有限夹具提前读完。
+                if (maximum == 0) { boundary_read = true; slice.latest_sequence = 1024; return slice; }
+                if (!boundary_read.load()) return slice;
+                slice.latest_sequence=std::min<std::uint64_t>(events.size(),1536+512*reads++);
+                for (const auto& event:events)
+                    if(event.sequence>after && event.sequence<=slice.latest_sequence && slice.events.size()<maximum)
+                        slice.events.push_back(event);
+                return slice;
+            },[&](const auto&,const std::string& value,std::string&) {
+                f.written.push_back(Json::parse(value));return true;
+            }),"活生产者停止边界测试启动");
+            f.archive.stop();
+            check(f.archive.snapshot().last_sequence<events.size() && f.archive.snapshot().incomplete_batches==1,
+                "停止固定高水位，不追赶持续增长的生产者，未结束批次保持不完整");
         }
         std::cout<<"recoil_archive_tests passed\n";return 0;
     }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}

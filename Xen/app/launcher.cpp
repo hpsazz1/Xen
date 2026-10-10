@@ -70,8 +70,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     app::detail::ReleaseManifest manifest;
     std::string error;
     if (!app::detail::load_release_manifest(
-            root / L"manifest.json", manifest, error) ||
-        !app::detail::validate_release_manifest(root, manifest, error)) {
+            root / L"manifest.json", manifest, error)) {
         show_error(error);
         return 1;
     }
@@ -85,6 +84,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             app::detail::path_to_utf8(root / L"config.ini"),
             decision_adapter, runtime);
         if (decision_exit != 0) return decision_exit;
+        if (!app::detail::validate_release_manifest(root, manifest, error, runtime)) {
+            show_error(error);
+            return 1;
+        }
 
         const std::wstring root_value = root.wstring();
         const std::wstring runtime_value(

@@ -154,14 +154,14 @@ if ($Mode -ne 'Launcher') {
 }
 if ($Mode -eq 'Launcher') {
     if ([IO.Path]::GetFileName($binaryPath) -ine 'XenLauncher.exe') { throw 'Launcher 模式只允许 XenLauncher.exe。' }
-    if ((Get-Process -Id $PID).SessionId -eq 0) { throw 'Launcher 只能由用户在辅机交互会话启动，拒绝 SSH/服务会话。' }
+    if ((Get-Process -Id $PID).SessionId -eq 0) { throw 'Launcher 需要桌面会话；远程启动请使用 invoke_auxiliary_powershell.ps1 -Mode Start。' }
 }
 if ($Mode -eq 'Source') {
     $currentSession = (Get-Process -Id $PID).SessionId
     $game = @(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($ProcessName)) -ErrorAction SilentlyContinue |
         Where-Object { $_.SessionId -eq $currentSession })
     if ($currentSession -eq 0 -or $game.Count -eq 0) {
-        throw '源服务须从游戏所在主机的同一交互会话启动；拒绝 SSH/服务会话。'
+        throw '源服务需要游戏所在的桌面会话；远程启动请使用交互计划任务，并先确认游戏已经运行。'
     }
 }
 $sourceArguments = "--enable --host $HostAddress --port $Port --process $ProcessName --ttl-ms $TtlMs --timeout-ms $TimeoutMs"
@@ -232,7 +232,7 @@ try {
         Write-Output "只读源桥接已启动，PID=$($child.Id)；不发送设备输入。"
         Start-SourceClock
     } else {
-        Write-Output "用户启动的 Launcher 已创建，PID=$($child.Id)。"
+        Write-Output "Launcher 已在桌面会话创建，PID=$($child.Id)。"
     }
 } finally {
     $childInfo.EnvironmentVariables.Remove('XEN_SOURCE_CONTEXT_TOKEN')

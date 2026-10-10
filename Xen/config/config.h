@@ -20,6 +20,8 @@
 
 struct RuntimeConfig {
     int profile_window = 256;
+    // 自动逐帧报告、全程归档和压枪批次；显式采集、普通日志和崩溃诊断独立。
+    bool diagnostics_enabled = false;
     // 仅由正式性能入口按轮次临时覆盖，不进入 INI 或 Overlay。正常应用默认
     // 关闭，避免新增时钟读取和两阶段诊断发布扰动生产热路径。
     bool enable_performance_probes = false;
@@ -119,6 +121,10 @@ struct AppConfig {
 
 bool validate_app_config(const AppConfig& config,
                          std::string& error) noexcept;
+// Launcher 只需严格确定 Worker；其他配置错误交给 Worker 配置页修复。
+// 此函数不验证或授权启动 Runtime，后者仍须使用完整配置校验。
+bool load_app_backend(const std::string& path, BackendType& backend,
+                      std::string& error) noexcept;
 bool load_app_config(const std::string& path,
                      AppConfig& config,
                      std::string& error) noexcept;

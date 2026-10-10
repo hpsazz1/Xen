@@ -1456,6 +1456,8 @@ bool benchmark::detail::run_runtime_benchmark_with_adapter(
         config.detector.ort_profile_prefix.clear();
         config.runtime.enable_performance_probes =
             options.enable_performance_probes;
+        // 基准需要逐帧数据，仅覆盖本轮内存配置，不改写日常偏好。
+        config.runtime.diagnostics_enabled = true;
         // 基准从不武装 SafetyGate，并强制使用禁用的 Win32 后端。即使配置文件
         // 原本允许 KMBOX/SendInput，也不会打开设备连接或发送物理输入。
         config.mouse.backend = MouseBackend::WIN32_SEND_INPUT;

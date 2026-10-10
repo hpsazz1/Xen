@@ -42,6 +42,14 @@ if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     $OutputRoot = Join-Path $repositoryRoot "cache\live-game-acceptance"
 }
 
+function Start-DiagnosticProcess([string]$Executable, [string]$WorkingDirectory) {
+    $previous = [Environment]::GetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', 'Process')
+    try {
+        [Environment]::SetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', '1', 'Process')
+        Start-Process -FilePath $Executable -WorkingDirectory $WorkingDirectory -PassThru -Wait
+    } finally { [Environment]::SetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', $previous, 'Process') }
+}
+
 function Get-StageDefinition {
     param([Parameter(Mandatory = $true)][string]$Name)
 
@@ -623,6 +631,7 @@ $safety
 
 $($steps -join "`n")
 
+GUI Worker 仅为本次进程临时启用详细运行记录，不改日常 INI 中的记录偏好，并恢复调用方环境。
 除 Stability 外，Xen 启动后独立置顶检测预览应自动显示；保持游戏全屏并按 F8 启动 Runtime，
 完成场景后再次按 F8 停止。等待 Xen 主界面显示“Runtime 已停止”，再关闭 Xen。外层 PowerShell 只有在
 Xen 进程退出后才会汇总并输出“自动报告已汇总”；看到该提示后方可关闭 PowerShell。无需人工
@@ -1080,9 +1089,7 @@ function Launch-Task {
                 (Join-Path $env:SystemRoot "System32"),
                 $env:SystemRoot
             ) -join ";"
-            $process = Start-Process -FilePath $fixedExecutable `
-                -WorkingDirectory $ResolvedRunDirectory `
-                -PassThru -Wait
+            $process = Start-DiagnosticProcess $fixedExecutable $ResolvedRunDirectory
             if ($process.ExitCode -ne 0) {
                 throw "Xen 实机测试进程失败，退出码：$($process.ExitCode)"
             }

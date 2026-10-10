@@ -252,7 +252,8 @@ bool load_release_manifest(const std::filesystem::path& manifest_path,
 
 bool validate_release_manifest(const std::filesystem::path& release_root,
                                const ReleaseManifest& manifest,
-                               std::string& error) noexcept {
+                               std::string& error,
+                               const ReleaseRuntimeEntry* selected_runtime) noexcept {
     try {
         if (manifest.schema != 1 || manifest.git_commit.size() != 40 ||
             manifest.runtimes.empty()) {
@@ -261,6 +262,7 @@ bool validate_release_manifest(const std::filesystem::path& release_root,
         }
         std::set<std::string> runtime_ids;
         std::set<int> backend_ids;
+        bool selected_found = selected_runtime == nullptr;
         for (const auto& runtime : manifest.runtimes) {
             if ((runtime.id != "nvidia" && runtime.id != "directml" &&
                  runtime.id != "openvino") ||
@@ -270,14 +272,19 @@ bool validate_release_manifest(const std::filesystem::path& release_root,
                 error = "发布运行时目录或 ID 非法";
                 return false;
             }
-            const auto executable = release_root / runtime.executable;
-            std::error_code filesystem_error;
-            const auto status = std::filesystem::symlink_status(
-                executable, filesystem_error);
-            if (filesystem_error || std::filesystem::is_symlink(status) ||
-                !std::filesystem::is_regular_file(status)) {
-                error = "发布运行时入口不存在或不是普通文件";
-                return false;
+            // 日常启动只依赖所选 Worker；完整包验证仍检查所有入口。
+            // 清单的路径、归属和重复条目检查始终覆盖全部运行时。
+            if (!selected_runtime || selected_runtime == &runtime) {
+                selected_found = true;
+                const auto executable = release_root / runtime.executable;
+                std::error_code filesystem_error;
+                const auto status = std::filesystem::symlink_status(
+                    executable, filesystem_error);
+                if (filesystem_error || std::filesystem::is_symlink(status) ||
+                    !std::filesystem::is_regular_file(status)) {
+                    error = "发布运行时入口不存在或不是普通文件：" + runtime.id;
+                    return false;
+                }
             }
             for (const BackendType backend : runtime.backends) {
                 if (runtime_for_backend(backend) != runtime.id ||
@@ -286,6 +293,10 @@ bool validate_release_manifest(const std::filesystem::path& release_root,
                     return false;
                 }
             }
+        }
+        if (!selected_found) {
+            error = "所选运行时不属于发布清单";
+            return false;
         }
         error.clear();
         return true;

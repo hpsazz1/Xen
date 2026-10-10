@@ -202,7 +202,7 @@ void require_page_table(const char* table_name, ImGuiID scope = 0) {
 // 仅使用合成快照渲染生产 Overlay，并保存本进程窗口；动作不被执行。
 int wmain(int argc, wchar_t** argv) {
     try {
-        require(argc >= 2, "用法：model_workspace_ui_preview.exe <截图目录> [--minimum] [--dark] [--archive-only]");
+        require(argc >= 2, "用法：model_workspace_ui_preview.exe <截图目录> [--minimum] [--dark] [--archive-only] [--layout-audit] [--dpi-125]");
         const auto output = std::filesystem::absolute(argv[1]);
         std::filesystem::create_directories(output);
         LogConfig logs;
@@ -217,20 +217,23 @@ int wmain(int argc, wchar_t** argv) {
         config.mouse.allow_send_input = false;
         config.mouse.backend = MouseBackend::KMBOX_NET;
         config.mouse.kmbox_ip = "127.0.0.1";
+        config.mouse.kmbox_port = 50000;
         config.mouse.kmbox_uuid = "00000000";
         config.trigger.require_stop = true;
         bool archive_only = false;
+        bool layout_audit = false;
+        float font_scale = 1.0f;
         for (int index = 2; index < argc; ++index) {
             const std::wstring_view argument(argv[index]);
             if (argument == L"--minimum") {
                 config.ui.width = kMinimumUiWidth; config.ui.height = kMinimumUiHeight;
             } else if (argument == L"--dark") config.ui.theme = UiTheme::DARK;
             else if (argument == L"--archive-only") archive_only = true;
+            else if (argument == L"--layout-audit") layout_audit = true;
+            else if (argument == L"--dpi-125") font_scale = 1.25f;
             else throw std::runtime_error("未知预览参数");
         }
-        const auto fixture_directory = std::filesystem::temp_directory_path() /
-            ("xen-ui-preview-" + std::to_string(GetCurrentProcessId()) + '-' +
-                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        const auto fixture_directory = output / "fixture";
         require(std::filesystem::create_directory(fixture_directory), "独立UI夹具目录创建失败");
         RecoilProfile fixture;
         fixture.id = "ui_only_candidate"; fixture.weapon_id = "ui_only_weapon";
@@ -238,10 +241,19 @@ int wmain(int argc, wchar_t** argv) {
         fixture.points = {{0,0,0},{20,0,0},{60,1,4},{100,-1,8},{160,2,12}};
         const auto fixture_text = serialize_recoil_profile(fixture);
         const auto fixture_path = fixture_directory / "ui-only-candidate.json";
+        struct FixtureCleanup {
+            std::filesystem::path file, directory;
+            ~FixtureCleanup() {
+                std::error_code ignored;
+                std::filesystem::remove(file, ignored);
+                std::filesystem::remove(directory, ignored);
+            }
+        } fixture_cleanup{fixture_path, fixture_directory};
         { std::ofstream file(fixture_path, std::ios::binary); file << fixture_text; require(file.good(), "UI夹具写入失败"); }
         const auto directory_utf8 = fixture_directory.u8string();
         config.recoil.profile_directory.assign(reinterpret_cast<const char*>(directory_utf8.data()), directory_utf8.size());
         require(overlay.init(config.ui), "Overlay 初始化失败");
+        ImGui::GetStyle().FontScaleDpi = font_scale;
         RuntimeSnapshot runtime;
         runtime.state = RuntimeState::STOPPED;
         model_workspace::Settings settings;
@@ -286,16 +298,19 @@ int wmain(int argc, wchar_t** argv) {
         const auto capture_hook_id = ImGui::AddContextHook(ImGui::GetCurrentContext(), &capture_hook);
         // 防止后端光标采样与模拟事件被分散到后续帧；不会设置系统光标。
         ImGui::GetIO().ConfigInputTrickleEventQueue = false;
+        bool allow_config_save = false;
+        bool saw_config_save = false;
         auto frame = [&] {
             require(overlay.pump_messages(), "窗口意外关闭");
             require(overlay.render(runtime, {}, {}, {}, config, settings, workspace,
                                    "无设备 UI 验收", actions, &capture_input, nullptr, visible_archive), "Overlay 渲染失败");
             require(!actions.start_requested && actions.runtime_intents.empty() &&
                     !actions.stop_requested && !actions.reload_detector_requested && !actions.refresh_models_requested &&
-                    !actions.save_config_requested && !actions.log_level_changed && !actions.preview_enabled &&
+                    (!actions.save_config_requested || allow_config_save) && !actions.log_level_changed && !actions.preview_enabled &&
                     actions.workspace_action == model_workspace::Action::NONE && !config.mouse.allow_send_input &&
                     !config.auto_stop.enabled && !config.trigger.enabled && !config.recoil.enabled,
                     "验收输入误触业务动作，停止执行");
+            saw_config_save |= actions.save_config_requested;
         };
         for (int index = 0; index < 3; ++index) frame();
         archive_status.active = true;
@@ -303,6 +318,7 @@ int wmain(int argc, wchar_t** argv) {
         archive_status.written_samples = 44400;
         archive_status.marker_count = 2;
         visible_archive = &archive_status;
+        config.runtime.diagnostics_enabled = true;
         frame(); frame();
         require(capture.text.find("标记异常") != std::string::npos &&
             capture.text.find("归档进行中") != std::string::npos &&
@@ -318,6 +334,10 @@ int wmain(int argc, wchar_t** argv) {
             capture.text.find("磁盘空间不足") != std::string::npos,
             "归档丢样与写盘失败不得隐藏");
         save_window(capture, output / "session-archive-error.png");
+        config.runtime.diagnostics_enabled = false;
+        frame(); frame();
+        require(capture.text.find("详细运行记录已关闭") != std::string::npos,
+            "关闭详细记录后必须显示异常标记不可用原因");
         if (archive_only) {
             std::size_t fixture_files = 0;
             for (const auto& entry : std::filesystem::directory_iterator(fixture_directory)) {
@@ -353,6 +373,112 @@ int wmain(int argc, wchar_t** argv) {
             input.down = false; frame();
             input.position = {400,40}; frame(); frame();
         };
+        if (layout_audit) {
+            std::ostringstream failures;
+            runtime.active_model_path = "E:/一个用于检查换行和窗口适配的很长目录/模型版本/生产模型/"
+                "current-onnx-model-with-a-long-name-20261010.onnx";
+            settings.root_directory = "E:/一个用于检查窄窗口中的中文路径编辑与保存的很长目录/"
+                "训练素材/已经完成类别审核的生产候选素材";
+            workspace.environment_message = "示例环境未就绪：请检查 Python 路径；这是用于检查长状态文字自动换行的合成消息。";
+            auto click = [&](const char* label, ImGuiWindow* window, const char* table = nullptr) {
+                const auto id = table ? ImHashStr(label, 0, window->GetID(table)) : window->GetID(label);
+                input.down = false; input.focus_window = window; input.focus_id = id; frame();
+                auto* context = ImGui::GetCurrentContext();
+                require(context->NavId == id && context->NavIdIsAlive, "页面控件必须具有真实可导航身份");
+                auto rect = ImGui::WindowRectRelToAbs(window, window->NavRectRel[ImGuiNavLayer_Main]);
+                ImGui::ScrollToRect(window, rect, ImGuiScrollFlags_AlwaysCenterY); frame(); frame();
+                rect = ImGui::WindowRectRelToAbs(window, window->NavRectRel[ImGuiNavLayer_Main]);
+                require(window->ClipRect.Contains(rect.GetCenter()), "页面控件未滚入可点击区域");
+                input.position = rect.GetCenter(); frame();
+                input.down = true; frame(); input.down = false; frame();
+            };
+            auto capture_page = [&](const std::string& name, bool audit_cards) {
+                auto* content = preview_window("content");
+                ImGui::SetScrollY(content, 0); frame(); frame(); frame();
+                int segment = 0;
+                for (float offset = 0; segment < 20; ++segment) {
+                    ImGui::SetScrollY(content, offset); frame(); frame(); frame();
+                    save_window(capture, output / (name + '-' + std::to_string(segment) + ".png"));
+                    if (content->ScrollMax.x > 1.0f) failures << name
+                        << ": 页面横向溢出 " << content->ScrollMax.x << " px\n";
+                    if (audit_cards) {
+                        auto* context = ImGui::GetCurrentContext();
+                        for (auto* child : context->Windows) {
+                            if (child->ParentWindow != content || child->LastFrameActive != context->FrameCount ||
+                                std::string_view(child->Name).find("_panel") == std::string_view::npos) continue;
+                            if (child->ScrollMax.y > 1.0f) failures << name << ": " << child->Name
+                                << " 内部滚动 " << child->ScrollMax.y << " px\n";
+                            if (child->ScrollMax.x > 1.0f) failures << name << ": " << child->Name
+                                << " 横向溢出 " << child->ScrollMax.x << " px\n";
+                        }
+                    }
+                    if (content->Scroll.y >= content->ScrollMax.y - 1.0f) break;
+                    offset = std::min(content->ScrollMax.y, content->Scroll.y +
+                        std::max(100.0f, content->InnerRect.GetHeight() - 32.0f));
+                }
+                require(segment < 20, "页面滚动未能在有界截图预算内到达末尾");
+            };
+            const char* names[] = {"overview", "detection", "aim", "auxiliary",
+                "collection", "training", "debug", "settings"};
+            for (int page = 0; page < 8; ++page) {
+                select_page(page);
+                capture_page(names[page], true);
+            }
+            // 开关通过真实控件实时交付，再通过保存按钮和生产配置接口完成回读。
+            auto* content = preview_window("content");
+            ImGui::SetScrollY(content, 0); frame(); frame();
+            runtime.state = RuntimeState::RUNNING;
+            click("##diagnostics_enabled", preview_window("log_panel"), "log_form");
+            require(config.runtime.diagnostics_enabled && actions.diagnostics_enabled_changed,
+                "运行中开启详细记录必须立即交付变更");
+            click("##diagnostics_enabled", preview_window("log_panel"), "log_form");
+            require(!config.runtime.diagnostics_enabled && actions.diagnostics_enabled_changed,
+                "运行中关闭详细记录必须立即交付变更");
+            runtime.state = RuntimeState::STOPPED;
+            click("##diagnostics_enabled", preview_window("log_panel"), "log_form");
+            allow_config_save = true;
+            click("保存配置", content);
+            require(saw_config_save, "点击保存配置必须产生保存请求");
+            const auto saved_path = output / "edited-config.ini";
+            const auto saved_utf8 = saved_path.u8string();
+            const std::string saved_name(reinterpret_cast<const char*>(saved_utf8.data()), saved_utf8.size());
+            std::string config_error;
+            const bool saved = save_app_config(saved_name, config, config_error);
+            require(saved, config_error.c_str());
+            AppConfig loaded;
+            const bool reloaded = load_app_config(saved_name, loaded, config_error);
+            require(reloaded, config_error.c_str());
+            require(loaded.runtime.diagnostics_enabled, "编辑后的详细记录设置必须保存并回读为开启");
+            config.runtime.diagnostics_enabled = false;
+            // 六个调试子页分别走真实 Tab 控件，输入记录和曲线列表保留其数据视口。
+            select_page(6);
+            const char* tabs[] = {"急停测试", "人工录制与回看", "射击节奏", "扳机调试", "弹道工具", "运行诊断"};
+            for (int tab = 0; tab < 6; ++tab) {
+                ImGui::SetScrollY(content, 0); frame(); frame();
+                click(tabs[tab], content, "debug_tabs");
+                auto* bar = ImGui::GetCurrentContext()->TabBars.GetByKey(content->GetID("debug_tabs"));
+                require(bar && bar->SelectedTabId == ImHashStr(tabs[tab], 0, bar->ID),
+                    "调试子页点击未切换到目标页面");
+                capture_page("debug-tab-" + std::to_string(tab), true);
+            }
+            runtime.gsi_error = "GSI 启动失败：合成测试中的端口已占用；采集检测继续，依赖武器状态的功能等待恢复。"
+                "请检查设置中的接收地址与端口；此长消息用于确认错误提示换行后不会遮挡配置。";
+            select_page(7);
+            capture_page("settings-gsi-warning", true);
+            require(capture.text.find("GSI 启动失败") != std::string::npos,
+                "GSI 降级必须保留可见故障原因");
+            { std::ofstream report(output / "layout-audit.txt", std::ios::binary);
+              report << failures.str(); }
+            require(failures.str().empty(), "参数卡片仍有内部滚动，见 layout-audit.txt");
+            ImGui::RemoveContextHook(ImGui::GetCurrentContext(), capture_hook_id);
+            ImGui::RemoveContextHook(ImGui::GetCurrentContext(), frame_hook_id);
+            ImGui::RemoveContextHook(ImGui::GetCurrentContext(), hook_id);
+            overlay.shutdown(); Log::shutdown();
+            require(std::filesystem::remove(fixture_path), "UI临时夹具清理失败");
+            require(std::filesystem::remove(fixture_directory), "UI临时目录清理失败");
+            std::cout << "PASS 八页及六个调试子页、卡片无内部滚动、记录实时启停与配置保存回读\n";
+            return 0;
+        }
         select_page(2);
         require_page_table("team_filter_form");
         require(capture.text.find("GSI 比赛阶段：未知 / 未就绪") != std::string::npos,

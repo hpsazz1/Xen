@@ -481,7 +481,7 @@ configure_file(
     @ONLY)
 
 # Visual Studio 的同一配置共享一个可执行输出目录。这里只登记当前配置授权的
-# 运行文件，全部目标声明完毕后再由单一构建目标加锁完成清理、复制和哈希报告；
+# 运行文件，全部目标声明完毕后再由单一构建目标加锁完成清理、增量复制和来源报告；
 # 这样即使可执行目标没有重新链接，SDK 清空或切换也不会跳过部署收敛。
 function(xen_copy_runtime_files target)
     if(NOT TARGET ${target})
@@ -683,7 +683,7 @@ function(xen_finalize_runtime_deployment)
             "-DXEN_RUNTIME_LOCK=${CMAKE_BINARY_DIR}/xen-runtime-deploy.lock"
             "-DXEN_RUNTIME_CONFIGURATION=$<CONFIG>"
             -P "${PROJECT_SOURCE_DIR}/scripts/deploy_runtime_file.cmake"
-        COMMENT "收敛当前配置授权的第三方运行文件并生成来源哈希报告"
+        COMMENT "检查当前配置运行库变更并增量部署"
         VERBATIM)
     foreach(runtime_target IN LISTS runtime_targets)
         add_dependencies(${runtime_target} xen_runtime_deployment)
@@ -2304,6 +2304,9 @@ if(BUILD_TESTING)
         -WorkflowScript
             "${PROJECT_SOURCE_DIR}/scripts/test_release_transfer_and_aim_manual.ps1")
 
+    xen_add_windows_powershell_test(auxiliary_powershell_tests
+        "${PROJECT_SOURCE_DIR}/scripts/test_auxiliary_powershell.ps1")
+
     add_executable(debug_tests
         tests/debug_tests.cpp)
     target_link_libraries(debug_tests PRIVATE xen_debug log)
@@ -2462,7 +2465,7 @@ if(BUILD_TESTING)
 
         add_executable(runtime_model_reload_test
             tests/runtime_model_reload_test.cpp)
-        target_link_libraries(runtime_model_reload_test PRIVATE runtime ws2_32)
+        target_link_libraries(runtime_model_reload_test PRIVATE runtime xen_debug ws2_32)
         if(WIN32)
             xen_deploy_runtime_dlls(
                 runtime_model_reload_test OPENCV ORT NDI)

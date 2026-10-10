@@ -21,6 +21,7 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <cmath>
 #include <filesystem>
 #include <limits>
@@ -505,12 +506,13 @@ std::string qualified_key(const TypedConfigKey& key) {
 bool has_strict_integer(const CSimpleIniA& ini,
                         const TypedConfigKey& key) noexcept {
     if (!ini.GetValue(key.section, key.key, nullptr)) return true;
-    return ini.GetLongValue(
-               key.section, key.key,
-               (std::numeric_limits<long>::min)()) ==
-           ini.GetLongValue(
-               key.section, key.key,
-               (std::numeric_limits<long>::max)());
+    // SimpleIni 4.19 的 strtol 溢出会返回相同饱和值，不能只比较默认值。
+    errno = 0;
+    const long first = ini.GetLongValue(key.section, key.key, (std::numeric_limits<long>::min)());
+    if (errno == ERANGE) return false;
+    errno = 0;
+    const long second = ini.GetLongValue(key.section, key.key, (std::numeric_limits<long>::max)());
+    return errno != ERANGE && first == second;
 }
 
 bool has_strict_number(const CSimpleIniA& ini,
@@ -645,6 +647,7 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
     }
 
     constexpr TypedConfigKey kBoolKeys[]{
+        {"runtime", "diagnostics_enabled"},
         {"keyboard", "debug_test_enabled"},
         {"log", "enable_console"},
         {"log", "enable_file"},
@@ -771,7 +774,7 @@ bool validate_app_config(const AppConfig& config,
         constexpr int kMaxCaptureSourceDimension = 16384;
         constexpr int kMaxLogRingBufferCapacity = 65'536;
         constexpr int kMaxLogFileCount = 200'000;
-        if (!movement::valid_config(config.movement)) {
+        if (config.movement.enabled && !movement::valid_config(config.movement)) {
             error = "身法配置非法：检查模式、时长、角度、灵敏度与输入报告设置";
             return false;
         }
@@ -965,67 +968,71 @@ bool validate_app_config(const AppConfig& config,
             error = "Mouse 配置非法";
             return false;
         }
+        const auto auxiliary_key_conflict = [&](int key) {
+            return (config.trigger.enabled && key == config.trigger.hold_virtual_key) ||
+                (config.auto_stop.enabled && (key == config.auto_stop.activation_virtual_key ||
+                 std::find(config.auto_stop.release_virtual_keys.begin(), config.auto_stop.release_virtual_keys.end(), key) != config.auto_stop.release_virtual_keys.end()));
+        };
         for (const int key : config.keyboard.debug_test_virtual_keys) {
-            if (key == config.auto_stop.activation_virtual_key || key == config.trigger.hold_virtual_key ||
-                std::find(config.auto_stop.release_virtual_keys.begin(), config.auto_stop.release_virtual_keys.end(), key) != config.auto_stop.release_virtual_keys.end()) {
+            if (config.keyboard.debug_test_enabled && auxiliary_key_conflict(key)) {
                 error = "调试测试快捷键与急停或扳机功能键冲突"; return false;
             }
         }
         for (const int key : config.keyboard.anomaly_mark_virtual_keys) {
-            if (key == config.auto_stop.activation_virtual_key || key == config.trigger.hold_virtual_key ||
-                std::find(config.auto_stop.release_virtual_keys.begin(), config.auto_stop.release_virtual_keys.end(), key) != config.auto_stop.release_virtual_keys.end()) {
+            if (auxiliary_key_conflict(key)) {
                 error = "异常标记快捷键与急停或扳机功能键冲突"; return false;
             }
         }
         const auto movement_key_conflicts = [&](bool enabled, movement::Trigger trigger, int key) {
-            if (!enabled || trigger != movement::Trigger::KEY || key == 0) return false;
+            if (!config.movement.enabled || !enabled || trigger != movement::Trigger::KEY || key == 0) return false;
             const auto contains = [key](const std::vector<int>& keys) {
                 return std::find(keys.begin(), keys.end(), key) != keys.end();
             };
             return contains(config.keyboard.emergency_virtual_keys) ||
                 contains(config.keyboard.runtime_toggle_virtual_keys) ||
                 contains(config.keyboard.aim_hold_virtual_keys) ||
-                contains(config.keyboard.debug_test_virtual_keys) ||
+                (config.keyboard.debug_test_enabled && contains(config.keyboard.debug_test_virtual_keys)) ||
                 contains(config.keyboard.anomaly_mark_virtual_keys) ||
-                contains(config.auto_stop.release_virtual_keys) ||
-                key == config.auto_stop.activation_virtual_key || key == config.trigger.hold_virtual_key;
+                auxiliary_key_conflict(key);
         };
         if (movement_key_conflicts(config.movement.spin_enabled, config.movement.spin_trigger, config.movement.spin_virtual_key) ||
             movement_key_conflicts(config.movement.large_enabled, config.movement.large_trigger, config.movement.large_virtual_key)) {
             error = "身法触发键与急停或其他功能键冲突"; return false;
         }
-        const int stop_key = config.auto_stop.activation_virtual_key;
-        if (config.auto_stop.counter_hold_ms < 1 || config.auto_stop.counter_hold_ms > 200 ||
-            config.auto_stop.shot_after_release_ms < 0 || config.auto_stop.shot_after_release_ms > 200) {
-            error = "H40急停反向保持须为1至200ms，释放后等待须为0至200ms"; return false;
-        }
-        std::array<bool, 256> release_keys{};
-        for (const int key : config.auto_stop.release_virtual_keys) {
-            if (key <= 0 || key > 255 || key == 'W' || key == 'A' ||
-                key == 'S' || key == 'D' || key == stop_key || release_keys[key]) {
-                error = "急停释放键非法、重复、使用 WASD 或与允许键冲突";
+        if (config.auto_stop.enabled) {
+            const int stop_key = config.auto_stop.activation_virtual_key;
+            if (config.auto_stop.counter_hold_ms < 1 || config.auto_stop.counter_hold_ms > 200 ||
+                config.auto_stop.shot_after_release_ms < 0 || config.auto_stop.shot_after_release_ms > 200) {
+                error = "H40急停反向保持须为1至200ms，释放后等待须为0至200ms"; return false;
+            }
+            std::array<bool, 256> release_keys{};
+            for (const int key : config.auto_stop.release_virtual_keys) {
+                if (key <= 0 || key > 255 || key == 'W' || key == 'A' ||
+                    key == 'S' || key == 'D' || key == stop_key || release_keys[key]) {
+                    error = "急停释放键非法、重复、使用 WASD 或与允许键冲突";
+                    return false;
+                }
+                release_keys[key] = true;
+            }
+            const auto contains_stop_key = [stop_key](const std::vector<int>& keys) {
+                return std::find(keys.begin(), keys.end(), stop_key) != keys.end();
+            };
+            if (stop_key < 0 || stop_key > 0xFF || stop_key == 'W' ||
+                stop_key == 'A' || stop_key == 'S' || stop_key == 'D' ||
+                (stop_key != 0 &&
+                 (contains_stop_key(config.keyboard.emergency_virtual_keys) ||
+                  contains_stop_key(config.keyboard.runtime_toggle_virtual_keys)))) {
+                error = "自动急停允许键非法、使用 WASD 或与其他功能冲突";
                 return false;
             }
-            release_keys[key] = true;
+            if (config.mouse.backend != MouseBackend::KMBOX_NET) {
+                error = "自动急停仅支持 KMBOX NET 后端";
+                return false;
+            }
         }
-        const auto contains_stop_key = [stop_key](const std::vector<int>& keys) {
-            return std::find(keys.begin(), keys.end(), stop_key) != keys.end();
-        };
-        if (stop_key < 0 || stop_key > 0xFF || stop_key == 'W' ||
-            stop_key == 'A' || stop_key == 'S' || stop_key == 'D' ||
-            (stop_key != 0 &&
-             (contains_stop_key(config.keyboard.emergency_virtual_keys) ||
-              contains_stop_key(config.keyboard.runtime_toggle_virtual_keys)))) {
-            error = "自动急停允许键非法、使用 WASD 或与其他功能冲突";
-            return false;
-        }
-        if (config.auto_stop.enabled &&
-            config.mouse.backend != MouseBackend::KMBOX_NET) {
-            error = "自动急停仅支持 KMBOX NET 后端";
-            return false;
-        }
-        if (config.source_context.ttl_ms < 20 || config.source_context.ttl_ms > 2000 ||
-            (config.source_context.enabled && (config.source_context.host.empty() || config.source_context.port == 0 || config.source_context.process_name.empty()))) {
+        if (config.source_context.enabled &&
+            (config.source_context.ttl_ms < 20 || config.source_context.ttl_ms > 2000 ||
+             config.source_context.host.empty() || config.source_context.port == 0 || config.source_context.process_name.empty())) {
             error = "源状态桥接参数不完整或有效期非法"; return false;
         }
         auto trigger_config = config.trigger;
@@ -1035,12 +1042,12 @@ bool validate_app_config(const AppConfig& config,
         const auto trigger_conflict = [trigger_key](const std::vector<int>& keys) {
             return trigger_key != 0 && std::find(keys.begin(), keys.end(), trigger_key) != keys.end();
         };
-        if (!valid_trigger_config(trigger_config) || trigger_key == 1 || trigger_key == 0x23 || trigger_key == 0x77 ||
+        if (config.trigger.enabled && (!valid_trigger_config(trigger_config) || trigger_key == 1 || trigger_key == 0x23 || trigger_key == 0x77 ||
             trigger_key == 'W' || trigger_key == 'A' || trigger_key == 'S' || trigger_key == 'D' ||
             trigger_conflict(config.keyboard.emergency_virtual_keys) ||
             trigger_conflict(config.keyboard.runtime_toggle_virtual_keys) ||
-            (config.trigger.enabled && (config.mouse.backend != MouseBackend::KMBOX_NET || !config.gsi.enabled)) ||
-            (config.trigger.enabled && config.trigger.require_stop && !config.auto_stop.enabled)) {
+            config.mouse.backend != MouseBackend::KMBOX_NET || !config.gsi.enabled ||
+            (config.trigger.require_stop && !config.auto_stop.enabled))) {
             error = "自动扳机参数、绑定键、后端、GSI或急停依赖非法";
             return false;
         }
@@ -1051,7 +1058,7 @@ bool validate_app_config(const AppConfig& config,
             error = "生产自动扳机固定共享点射、无额外首发延迟和完整头身范围";
             return false;
         }
-        if (config.auto_stop.cycle_enabled && (!config.auto_stop.enabled || !config.trigger.enabled ||
+        if (config.auto_stop.enabled && config.auto_stop.cycle_enabled && (!config.trigger.enabled ||
             !config.trigger.fire_enabled || !config.trigger.require_stop || !config.trigger.allow_estimated_stop ||
             config.trigger.fire_mode != TriggerFireMode::SINGLE ||
             config.trigger.hold_virtual_key != config.auto_stop.activation_virtual_key ||
@@ -1060,13 +1067,13 @@ bool validate_app_config(const AppConfig& config,
             return false;
         }
         const auto& recoil = config.recoil;
-        if (config.weapon_timing_file.empty() || config.weapon_timing_file.size() > 1024) {
+        if (config.trigger.enabled && (config.weapon_timing_file.empty() || config.weapon_timing_file.size() > 1024)) {
             error = "武器点射资料路径非法"; return false;
         }
-        if (recoil.budget_window_ms < 1 || recoil.budget_window_ms > 100 ||
+        if (recoil.enabled && (recoil.budget_window_ms < 1 || recoil.budget_window_ms > 100 ||
             recoil.max_observation_age_ms < 1 || recoil.max_observation_age_ms > 500 || recoil.input_path != "kmbox_net" ||
             !std::isfinite(recoil.sensitivity) || recoil.sensitivity < 0 ||
-            recoil.fire_mode != "automatic") {
+            recoil.fire_mode != "automatic")) {
             error = "压枪参数非法：检查时间范围、kmbox_net输入路径、灵敏度和automatic模式"; return false;
         }
         if (recoil.enabled) {
@@ -1097,10 +1104,10 @@ bool validate_app_config(const AppConfig& config,
             }
             return true;
         };
-        if (!valid_team_ids(team_filter.ct_class_ids) || !valid_team_ids(team_filter.t_class_ids) ||
+        if (team_filter.enabled && (!valid_team_ids(team_filter.ct_class_ids) || !valid_team_ids(team_filter.t_class_ids) ||
             std::any_of(team_filter.ct_class_ids.begin(), team_filter.ct_class_ids.end(), [&](int id) {
                 return std::find(team_filter.t_class_ids.begin(), team_filter.t_class_ids.end(), id) != team_filter.t_class_ids.end();
-            })) {
+            }))) {
             error = "敌我筛选类别必须非负、无重复，CT与T不能重叠"; return false;
         }
         if (team_filter.enabled && (!config.gsi.enabled || team_filter.ct_class_ids.empty() || team_filter.t_class_ids.empty())) {
@@ -1125,6 +1132,33 @@ bool validate_app_config(const AppConfig& config,
         return true;
     } catch (...) {
         set_error(error, "校验配置时发生未知异常");
+        return false;
+    }
+}
+
+bool load_app_backend(const std::string& path, BackendType& backend,
+                      std::string& error) noexcept {
+    try {
+        CSimpleIniA ini;
+        ini.SetUnicode(true);
+        const auto native_path = config_path_from_utf8(path);
+        if (ini.LoadFile(native_path.c_str()) < 0) {
+            error = "无法读取配置文件: " + path;
+            return false;
+        }
+        const char* value = ini.GetValue("detector", "backend", nullptr);
+        const auto candidate = value
+            ? parse_backend(value, static_cast<BackendType>(-1))
+            : AppConfig{}.detector.backend;
+        if (candidate == static_cast<BackendType>(-1)) {
+            error = "配置项 detector.backend 类型非法";
+            return false;
+        }
+        backend = candidate;
+        error.clear();
+        return true;
+    } catch (...) {
+        set_error(error, "读取 Launcher 后端配置时发生未知异常");
         return false;
     }
 }
@@ -1548,6 +1582,8 @@ bool load_app_config(const std::string& path,
         }
         candidate.runtime.profile_window = static_cast<int>(ini.GetLongValue(
             "runtime", "profile_window", candidate.runtime.profile_window));
+        candidate.runtime.diagnostics_enabled = ini.GetBoolValue(
+            "runtime", "diagnostics_enabled", false);
         candidate.ui.width = static_cast<int>(ini.GetLongValue(
             "ui", "width", candidate.ui.width));
         candidate.ui.height = static_cast<int>(ini.GetLongValue(
@@ -1852,6 +1888,8 @@ bool save_app_config(const std::string& path,
         }
         ini.SetLongValue("runtime", "profile_window",
                          config.runtime.profile_window);
+        ini.SetBoolValue("runtime", "diagnostics_enabled",
+                         config.runtime.diagnostics_enabled);
         ini.SetLongValue("ui", "width", config.ui.width);
         ini.SetLongValue("ui", "height", config.ui.height);
         ini.SetBoolValue("ui", "enable_vsync", config.ui.enable_vsync);

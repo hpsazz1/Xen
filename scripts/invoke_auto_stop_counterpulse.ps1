@@ -326,7 +326,7 @@ try {
         if (-not (Test-Path -LiteralPath $samplingPath)) { Write-CommentedPlan $samplingPath $samplingDefaults $samplingHelp }
         Write-CommentedPlan $candidatePlan $plan
         Invoke-Probe $binary @('--plan', $candidatePlan, '--dry-run', '--require-current-plan', '--sampling-settings', $samplingPath) $false
-        # 所有验证通过之后才移除上组结果，并重新武装用户前台的一次性命令。
+        # 所有验证通过之后才移除上组结果，并重新武装本次已授权的一次性命令。
         if (Test-Path -LiteralPath $resultPath) { Remove-Item -LiteralPath $resultPath -Recurse -Force }
         $consumed = Join-Path $runPath 'CONSUMED'
         if (Test-Path -LiteralPath $consumed) { Remove-Item -LiteralPath $consumed -Force }
@@ -344,7 +344,7 @@ try {
             $launch += ' -CredentialDirectory ' + (Quote-PS ([IO.Path]::GetFullPath($CredentialDirectory))) + ' -Scope ' + $Scope
         }
         # BAT不嵌入绝对路径或参数，避免cmd再次解释路径中的%、!和&。
-        $launchScript = "# 仅用户在前台触发；真实输入确认字符串不是凭据。`r`n" + $launch + "`r`nif (-not `$?) { exit 1 }`r`nexit 0`r`n"
+        $launchScript = "# 按任务授权启动；远程执行使用桌面会话，真实输入确认字符串不是凭据。`r`n" + $launch + "`r`nif (-not `$?) { exit 1 }`r`nexit 0`r`n"
         [IO.File]::WriteAllText((Join-Path $runPath 'launch-test.ps1'), $launchScript, (New-Object Text.UTF8Encoding($true)))
         $startBat = '@echo off' + "`r`n" + 'setlocal DisableDelayedExpansion' + "`r`n" +
             '"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0launch-test.ps1"' + "`r`n" +
@@ -365,7 +365,7 @@ function Assert-LocalPlain([string]$Path) {
     }
 }
 try {
-    if ((Get-Process -Id $PID).SessionId -eq 0 -or $env:SSH_CONNECTION -or $env:SSH_CLIENT) { throw '只允许本机用户前台录制或查看。' }
+    if ((Get-Process -Id $PID).SessionId -eq 0) { throw '录制与查看需要桌面会话；远程调用请使用交互计划任务。' }
     Assert-LocalPlain $PSScriptRoot
     $taskPath = Join-Path $PSScriptRoot 'task.json'; Assert-LocalPlain $taskPath
     if ((Get-Item -LiteralPath $taskPath).Length -gt 64KB) { throw '绑定清单超限。' }
@@ -551,7 +551,7 @@ try {
         $usedSettings | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $testDirectory 'sampling-settings.json') -Encoding UTF8
         [Console]::WriteLine('编辑动作参数：' + (Join-Path $testDirectory 'edit-config.bat'))
         [Console]::WriteLine('编辑模型参数：' + (Join-Path $testDirectory 'edit-sampling.bat'))
-        [Console]::WriteLine('仅用户前台启动：' + (Join-Path $testDirectory 'start-test.bat'))
+        [Console]::WriteLine('已授权启动入口：' + (Join-Path $testDirectory 'start-test.bat'))
     }
     exit 0
 } catch {
@@ -585,7 +585,7 @@ if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
     [Console]::Error.WriteLine('报告尚未生成，请先启动测试；失败时请检查result中的诊断记录。')
     exit 1
 }
-if ((Get-Process -Id $PID).SessionId -eq 0 -or $env:SSH_CONNECTION -or $env:SSH_CLIENT) {
+if ((Get-Process -Id $PID).SessionId -eq 0) {
     [Console]::Error.WriteLine('请在本机前台双击open-report.bat查看报告，远程会话不自动打开浏览器。')
     exit 1
 }
@@ -609,10 +609,10 @@ try {
         $parameterLines.Add('# 参数说明')
         $parameterLines.Add('')
         $parameterLines.Add('人工练习：start-recording.bat仅监听KMBOX人工输入，不发送动作；每次在manual-recordings创建独立记录，最多采集120秒，HUD保持至用户关闭。show-hud.bat从result、manual-recordings及manual-reviews重开修改时间最新的采样报告，显示该报告模型参数；隐藏或关闭查看器不触发真实输入。')
-        $parameterLines.Add('素材转动作：用户前台打开analyze-recording.bat，仅从manual-recordings选择最新有效人工报告，按当前sampling-settings.json离线重评到独立manual-reviews目录，保留原始录制。查看间隔和不支持原因后，选择候选编辑editable-plan.json；超界和负值保留供人工修改，不自动截断。保存后正式程序dry-run校验，通过才Prepare本次review/test，输入0仅分析。新测试沿用本次重评实际模型设置和原CredentialDirectory/Scope。显示edit-config.bat/start-test.bat完整路径供用户前台启动，绝不自动Launch，也不复制程序包。')
+        $parameterLines.Add('素材转动作：用户前台打开analyze-recording.bat，仅从manual-recordings选择最新有效人工报告，按当前sampling-settings.json离线重评到独立manual-reviews目录，保留原始录制。查看间隔和不支持原因后，选择候选编辑editable-plan.json；超界和负值保留供人工修改，不自动截断。保存后正式程序dry-run校验，通过才Prepare本次review/test，输入0仅分析。新测试沿用本次重评实际模型设置和原CredentialDirectory/Scope。显示edit-config.bat/start-test.bat完整路径；按任务授权可通过交互计划任务启动，不复制程序包。')
         $parameterLines.Add('录制排除：人工记录labels.json中的recording_usable=false表示不用于参数推荐，分析入口会跳过并提示；缺少此字段沿用可用默认值。原始记录和诊断报告保留，show-hud仍可查看。')
         $parameterLines.Add('默认基线：前台打开prepare-default-test.bat，用参考seed推导模型和动作参数，不读取人工录制或当前模型覆盖。default-baselines/独立ID下的default-baseline.json区分推导值与待校准假设；test子目录提供edit-config.bat、edit-sampling.bat和start-test.bat，只准备不启动。需要按自行编辑模型重新推导时，在PowerShell前台调用prepare-default-test.ps1 -SamplingSettingsPath "模型JSONC绝对路径"；每次创建独立目录，保留原方案。')
-        $parameterLines.Add('三步调试：双击edit-config.bat编辑plan.json并保存；由用户前台双击start-test.bat启动；结束后双击open-report.bat查看报告。启动会发送真实移动与开火输入。')
+        $parameterLines.Add('三步调试：双击edit-config.bat编辑plan.json并保存；在桌面会话运行start-test.bat或由已授权远程任务启动；结束后双击open-report.bat查看报告。启动会发送真实移动与开火输入。')
         $parameterLines.Add('Repeatable模式每次启动冻结本轮计划，编辑只影响下一轮；成功校验后覆盖上一组result。正式比较请另存证据。')
         $parameterLines.Add('报告是基于ACK回执与输入模型的采样分析，不是游戏速度、实际子弹或命中率测量；失败Run已生成的报告仍可查看。')
         $parameterLines.Add('三组参数分开：plan.json控制真实动作；sampling-settings.json经edit-sampling.bat调整模型和HUD；报告采样结果只用于核对模型，不能作为游戏测量。auto_fire_interval_ms是模型采样间隔，fire_interval_ms是开火命令最小间隔，shot_hold_ms是实际按住时长。模型设置只在文件不存在时创建，重复Prepare保留用户校准值；每轮冻结后生效。')
@@ -640,17 +640,17 @@ try {
         $cadence = "每次左键按住$($ShotHoldMs)ms（DOWN ACK起计）；fire_interval_ms=$($FireIntervalMs)ms是相邻左键DOWN提交的最小间隔，不是精确周期。额外冷却等待在下一轮移动开始前完成，避免急停后再补等；0表示不添加此间隔。fire_delay_ms仍表示上一轮松左键ACK后的等待"
         if ($OverlapFireInterval) { $cadence = "每次左键按住$($ShotHoldMs)ms（DOWN ACK起计）；动态移动占用fire_interval_ms=$($FireIntervalMs)ms的剩余窗口，move_ms=$($MoveMs)ms为上限；完整保留反向和松键后等待，相邻DOWN提交仍不早于武器间隔，不是精确周期。" }
         $reuseInstructions = if ($Repeatable) {
-            '本目录允许重复手动Launch，无需再次Prepare或打包。直接复用绑定的正式脚本和Executable路径，不复制程序、DLL或模型。编辑plan.json：shots（开火次数1..30，不代表实际子弹数）、fire_delay_ms（0..2000ms）、fire_interval_ms（0..5000ms，相邻DOWN提交最小间隔；0为关闭）、move_during_fire_delay（true为等待与移动并行，false为先等待再移动）、overlap_fire_interval（缺省false；true在武器间隔内动态移动）、move_ms（1..500ms，动态模式为上限）、counter_delay_ms（0..200ms）、counter_hold_ms（1..200ms）、shot_after_release_ms（0..20ms，0即立即计划开枪）、shot_hold_ms（1..2000ms，1000即按住1秒）、late_tolerance_ms（0..10ms）及baseline/direction。schema_version固定2，capture_enabled固定false，不接受旧shot_interval_ms/brake_window_ms。每次Launch冻结execution-plan.json，运行中编辑原文件仅影响下一组。验证通过后覆盖上组result；失败不自动重试。正式对比另建目录。'
+            '本目录允许显式重复Launch，无需再次Prepare或打包。直接复用绑定的正式脚本和Executable路径，不复制程序、DLL或模型。编辑plan.json：shots（开火次数1..30，不代表实际子弹数）、fire_delay_ms（0..2000ms）、fire_interval_ms（0..5000ms，相邻DOWN提交最小间隔；0为关闭）、move_during_fire_delay（true为等待与移动并行，false为先等待再移动）、overlap_fire_interval（缺省false；true在武器间隔内动态移动）、move_ms（1..500ms，动态模式为上限）、counter_delay_ms（0..200ms）、counter_hold_ms（1..200ms）、shot_after_release_ms（0..20ms，0即立即计划开枪）、shot_hold_ms（1..2000ms，1000即按住1秒）、late_tolerance_ms（0..10ms）及baseline/direction。schema_version固定2，capture_enabled固定false，不接受旧shot_interval_ms/brake_window_ms。每次Launch冻结execution-plan.json，运行中编辑原文件仅影响下一组。验证通过后覆盖上组result；失败不自动重试。正式对比另建目录。'
         } else {
-            '参数探索可通过Prepare -ReuseRunDirectory复用本目录；新计划验证通过后替换参数并清理上次result和CONSUMED。每次Prepare后仍由用户前台触发Launch。固定正式文件不复制打包；需要重复调参时Prepare -Repeatable。'
+            '参数探索可通过Prepare -ReuseRunDirectory复用本目录；新计划验证通过后替换参数并清理上次result和CONSUMED。每次Prepare后按任务授权触发Launch；失联先查原Run状态，不盲目重试。固定正式文件不复制打包；需要重复调参时Prepare -Repeatable。'
         }
-        $manualMode = if ($Repeatable) { '仅用户在当前前台每次手动执行一组，可重复启动' } else { '仅用户在当前前台执行一次' }
+        $manualMode = if ($Repeatable) { '按任务授权每次执行一组，可显式重复启动' } else { '按任务授权执行一次' }
         $markdown = "# 反向轻点人工Run`n`n状态：PREPARED_NOT_LAUNCHED。$manualMode；会发送真实开火输入。`n`n$behavior`n`n请先确认测试场景、源焦点和独占设备；End或人工输入取消。`n`n``````powershell`n$launch`n```````n`n一组$Shots 次开火；$observation。$cadence；结果不代表已经稳定。结果目录：result。`n`n$reuseInstructions`n`n三步调试：edit-config.bat编辑并保存参数 → start-test.bat前台启动 → open-report.bat查看报告。报告为ACK输入模型，不是游戏测量；失败Run的已生成报告仍可查看。模型参数和HUD开关由edit-sampling.bat编辑sampling-settings.json，每轮启动冻结生效。字段说明见PARAMETERS.md。`n`n迁移旧目录后仅使用本TASK中的新入口。`n"
         [IO.File]::WriteAllText((Join-Path $runPath 'TASK.md'), $markdown, (New-Object Text.UTF8Encoding($false)))
         Write-Output 'PREPARED_NOT_LAUNCHED；未发送设备输入。'
     } else {
-        if (-not $AllowPhysicalOutput -or $Confirm -cne 'AUTO_STOP_COUNTERPULSE') { throw '缺少本轮物理输出授权参数。' }
-        if ((Get-Process -Id $PID).SessionId -eq 0 -or $env:SSH_CONNECTION -or $env:SSH_CLIENT) { throw 'Launch仅允许用户本机交互会话。' }
+        if (-not $AllowPhysicalOutput -or $Confirm -cne 'AUTO_STOP_COUNTERPULSE') { throw '缺少物理输出开关或确认参数。' }
+        if ((Get-Process -Id $PID).SessionId -eq 0) { throw 'Launch需要桌面会话；远程调用请使用交互计划任务。' }
         $lockPath = Join-Path $runPath '.counterpulse.lock'
         Assert-PlainPath $lockPath
         $runLock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)

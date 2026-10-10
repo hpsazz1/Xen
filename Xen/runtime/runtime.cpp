@@ -54,6 +54,7 @@ struct Runtime::Impl {
 
     struct SnapshotUpdateResult {
         DebugSampleRing::PendingToken pending_token;
+        std::unique_lock<std::mutex> publication_lock;
         double snapshot_ms = 0.0;
         double snapshot_lock_wait_ms = 0.0;
         double debug_ring_ms = 0.0;
@@ -103,6 +104,7 @@ struct Runtime::Impl {
     std::deque<double> pipeline_samples;
     std::deque<double> control_latency_samples;
     DebugSampleRing debug_samples;
+    bool diagnostics_enabled = false; // snapshot_mutex 保护
     std::chrono::steady_clock::time_point fps_started{};
     std::uint64_t fps_frame_count = 0;
 
@@ -307,6 +309,7 @@ struct Runtime::Impl {
             active_detector_generation = 1;
             current_snapshot.output_allowed_by_config =
                 config.mouse.allow_send_input;
+            diagnostics_enabled = config.runtime.diagnostics_enabled;
             current_snapshot.input_healthy = safety_gate.input_healthy();
             current_snapshot.preview_enabled = preview_enabled;
             current_snapshot.d3d11_cuda_interop =
@@ -394,7 +397,14 @@ struct Runtime::Impl {
             }
         if (config.gsi.enabled) {
             if (!gsi_receiver.start(config.gsi)) {
-                set_error("GSI接收启动失败：" + gsi_receiver.last_error()); return false;
+                const auto error = "GSI 接收未启动：" + gsi_receiver.last_error() +
+                    "。采集和检测继续；依赖武器或阵营身份的能力等待有效状态。修复后停止并重新启动 Runtime。";
+                {
+                    std::lock_guard lock(snapshot_mutex);
+                    current_snapshot.gsi_error = error;
+                }
+                // 保留 enabled，不把身份缺失伪装成未启用 GSI 而放宽控制。
+                LOG_WARN("runtime", "{}", error);
             }
         }
         if (config.trigger.enabled) {
@@ -462,7 +472,16 @@ struct Runtime::Impl {
             RecoilStore store(std::filesystem::u8path(config.recoil.profile_directory));
             std::vector<RecoilStoredProfile> profiles;
             std::string error;
-            if (!store.list(profiles, error)) { set_error("弹道目录读取失败：" + error); return false; }
+            if (!store.list(profiles, error)) {
+                const auto message = "弹道目录读取失败：" + error + "。压枪未启动，采集和检测继续。";
+                {
+                    std::lock_guard lock(snapshot_mutex);
+                    current_snapshot.recoil_profile_status = message;
+                }
+                LOG_WARN("runtime", "{}", message);
+                // profiles 已清空；不启动调度，不能沿用上一次会话的曲线。
+                return true;
+            }
             for (const auto& entry : profiles) {
                 const auto& id = entry.profile->weapon_id;
                 { std::lock_guard lock(snapshot_mutex); if (recoil_profile_statuses.contains(id)) continue; }
@@ -506,8 +525,7 @@ struct Runtime::Impl {
                 if (!archive->start(*recoil_archive_config, [worker](std::uint64_t after, std::size_t maximum) {
                         return worker->read_execution_events(after, maximum);
                     })) {
-                    set_error("压枪归档启动失败：" + archive->snapshot().error);
-                    return false;
+                    LOG_WARN("runtime", "压枪归档不可用，控制继续: {}", archive->snapshot().error);
                 }
             }
         }
@@ -620,9 +638,6 @@ struct Runtime::Impl {
                                   bool mouse_sent,
                                   bool aim_lock_active) {
         SnapshotUpdateResult result;
-        const aim_landmark::Diagnostic landmark =
-            aim_landmark::inspect_head_landmark(
-                frame.timing.sequence, detections, config.aim, aim_result);
         const bool probes_enabled = config.runtime.enable_performance_probes;
         const auto snapshot_started = probes_enabled
             ? std::chrono::steady_clock::now()
@@ -663,98 +678,101 @@ struct Runtime::Impl {
         const auto debug_ring_started = probes_enabled
             ? std::chrono::steady_clock::now()
             : std::chrono::steady_clock::time_point{};
-        RuntimePipelineSample sample;
-        sample.sequence = frame.timing.sequence;
-        sample.aim_observation_epoch = aim_frame.observation_epoch;
-        sample.background_motion_x = aim_frame.background_motion_x;
-        sample.frame_timing = runtime::detail::make_frame_timing_evidence(
-            frame.timing, aim_frame, profile.control_timing_valid);
-        sample.geometry.encoded_width = frame.encoded_width;
-        sample.geometry.encoded_height = frame.encoded_height;
-        sample.geometry.source_width = frame.source_width;
-        sample.geometry.source_height = frame.source_height;
-        sample.geometry.roi_width = frame.width;
-        sample.geometry.roi_height = frame.height;
-        sample.geometry.roi_x = frame.roi_x;
-        sample.geometry.roi_y = frame.roi_y;
-        sample.geometry.source_pixels_per_pixel_x =
-            frame.source_pixels_per_pixel_x;
-        sample.geometry.source_pixels_per_pixel_y =
-            frame.source_pixels_per_pixel_y;
-        sample.profile = profile;
-        sample.capture_stages = frame.timing.capture_stages;
-        sample.service = service;
-        sample.source_dropped_frames = frame.timing.source_dropped_frames;
-        sample.transport_dropped_frames =
-            frame.timing.transport_dropped_frames;
-        sample.transport_invalid_packets =
-            frame.timing.transport_invalid_packets;
-        sample.runtime_overwritten_frames = sample_overwritten_frames;
-        sample.detection_status = profile.detector.status;
-        sample.aim_status = aim_result.status;
-        sample.mouse_status = mouse_status;
-        sample.mouse_sent = mouse_sent;
-        sample.aim_lock_active = aim_lock_active;
-        sample.aim_control_center_x = aim_control_center_x;
-        sample.aim_control_center_y = aim_control_center_y;
-        sample.aim_acquisition_range_radius =
-            aim_result.acquisition_range_radius;
-        sample.aim_active_range_radius = aim_result.active_range_radius;
-        sample.aim_has_target = aim_result.has_target;
-        sample.aim_has_command = aim_result.has_command;
-        sample.aim_range_locked = aim_result.range_locked;
-        sample.aim_range_allows_control = aim_result.range_allows_control;
-        sample.aim_target = aim_result.target;
-        sample.aim_control = aim_result.control;
-        sample.aim_command = aim_result.command;
-        sample.aim_landmark = landmark;
-        if (aim_result.has_target) {
-            sample.aim_base_point_inside_box =
-                aim_result.target.base_aim_x >= aim_result.target.x1 &&
-                aim_result.target.base_aim_x <= aim_result.target.x2 &&
-                aim_result.target.base_aim_y >= aim_result.target.y1 &&
-                aim_result.target.base_aim_y <= aim_result.target.y2;
-            sample.aim_prediction_point_outside_box =
-                aim_result.target.lead_active &&
-                (aim_result.target.aim_x < aim_result.target.x1 ||
-                 aim_result.target.aim_x > aim_result.target.x2 ||
-                 aim_result.target.aim_y < aim_result.target.y1 ||
-                 aim_result.target.aim_y > aim_result.target.y2);
+        if (diagnostics_enabled) {
+            RuntimePipelineSample sample;
+            sample.sequence = frame.timing.sequence;
+            sample.aim_observation_epoch = aim_frame.observation_epoch;
+            sample.background_motion_x = aim_frame.background_motion_x;
+            sample.frame_timing = runtime::detail::make_frame_timing_evidence(
+                frame.timing, aim_frame, profile.control_timing_valid);
+            sample.geometry.encoded_width = frame.encoded_width;
+            sample.geometry.encoded_height = frame.encoded_height;
+            sample.geometry.source_width = frame.source_width;
+            sample.geometry.source_height = frame.source_height;
+            sample.geometry.roi_width = frame.width;
+            sample.geometry.roi_height = frame.height;
+            sample.geometry.roi_x = frame.roi_x;
+            sample.geometry.roi_y = frame.roi_y;
+            sample.geometry.source_pixels_per_pixel_x =
+                frame.source_pixels_per_pixel_x;
+            sample.geometry.source_pixels_per_pixel_y =
+                frame.source_pixels_per_pixel_y;
+            sample.profile = profile;
+            sample.capture_stages = frame.timing.capture_stages;
+            sample.service = service;
+            sample.source_dropped_frames = frame.timing.source_dropped_frames;
+            sample.transport_dropped_frames =
+                frame.timing.transport_dropped_frames;
+            sample.transport_invalid_packets =
+                frame.timing.transport_invalid_packets;
+            sample.runtime_overwritten_frames = sample_overwritten_frames;
+            sample.detection_status = profile.detector.status;
+            sample.aim_status = aim_result.status;
+            sample.mouse_status = mouse_status;
+            sample.mouse_sent = mouse_sent;
+            sample.aim_lock_active = aim_lock_active;
+            sample.aim_control_center_x = aim_control_center_x;
+            sample.aim_control_center_y = aim_control_center_y;
+            sample.aim_acquisition_range_radius =
+                aim_result.acquisition_range_radius;
+            sample.aim_active_range_radius = aim_result.active_range_radius;
+            sample.aim_has_target = aim_result.has_target;
+            sample.aim_has_command = aim_result.has_command;
+            sample.aim_range_locked = aim_result.range_locked;
+            sample.aim_range_allows_control = aim_result.range_allows_control;
+            sample.aim_target = aim_result.target;
+            sample.aim_control = aim_result.control;
+            sample.aim_command = aim_result.command;
+            sample.aim_landmark = aim_landmark::inspect_head_landmark(
+                frame.timing.sequence, detections, config.aim, aim_result);
+            if (aim_result.has_target) {
+                sample.aim_base_point_inside_box =
+                    aim_result.target.base_aim_x >= aim_result.target.x1 &&
+                    aim_result.target.base_aim_x <= aim_result.target.x2 &&
+                    aim_result.target.base_aim_y >= aim_result.target.y1 &&
+                    aim_result.target.base_aim_y <= aim_result.target.y2;
+                sample.aim_prediction_point_outside_box =
+                    aim_result.target.lead_active &&
+                    (aim_result.target.aim_x < aim_result.target.x1 ||
+                     aim_result.target.aim_x > aim_result.target.x2 ||
+                     aim_result.target.aim_y < aim_result.target.y1 ||
+                     aim_result.target.aim_y > aim_result.target.y2);
+            }
+            if (aim_result.has_command) {
+                const double desired_x =
+                    (aim_result.target.aim_x - aim_control_center_x) *
+                    frame.source_pixels_per_pixel_x *
+                    config.aim.counts_per_pixel_x;
+                const double desired_y =
+                    (aim_result.target.aim_y - aim_control_center_y) *
+                    frame.source_pixels_per_pixel_y *
+                    config.aim.counts_per_pixel_y;
+                const double command_x = aim_result.command.dx_counts;
+                const double command_y = aim_result.command.dy_counts;
+                const double error_magnitude = std::hypot(
+                    (aim_result.target.aim_x - aim_control_center_x) *
+                        frame.source_pixels_per_pixel_x,
+                    (aim_result.target.aim_y - aim_control_center_y) *
+                        frame.source_pixels_per_pixel_y);
+                const double hold_band = std::max(
+                    2.0, static_cast<double>(config.aim.deadzone_pixels) * 1.5);
+                sample.aim_command_toward_target =
+                    (error_magnitude <= hold_band ||
+                     command_x * desired_x + command_y * desired_y > 0.0) &&
+                    std::hypot(command_x, command_y) <=
+                        config.aim.max_counts_per_frame + 0.001;
+            }
+            if (profile.detector.status == DetectionStatus::SUCCESS) {
+                runtime::detail::summarize_detections(
+                    detections, config.aim, sample);
+            }
+            if (probes_enabled) {
+                result.pending_token = debug_samples.push_pending(sample);
+            } else {
+                debug_samples.push(sample);
+            }
+            current_snapshot.debug_samples_dropped = debug_samples.dropped();
         }
-        if (aim_result.has_command) {
-            const double desired_x =
-                (aim_result.target.aim_x - aim_control_center_x) *
-                frame.source_pixels_per_pixel_x *
-                config.aim.counts_per_pixel_x;
-            const double desired_y =
-                (aim_result.target.aim_y - aim_control_center_y) *
-                frame.source_pixels_per_pixel_y *
-                config.aim.counts_per_pixel_y;
-            const double command_x = aim_result.command.dx_counts;
-            const double command_y = aim_result.command.dy_counts;
-            const double error_magnitude = std::hypot(
-                (aim_result.target.aim_x - aim_control_center_x) *
-                    frame.source_pixels_per_pixel_x,
-                (aim_result.target.aim_y - aim_control_center_y) *
-                    frame.source_pixels_per_pixel_y);
-            const double hold_band = std::max(
-                2.0, static_cast<double>(config.aim.deadzone_pixels) * 1.5);
-            sample.aim_command_toward_target =
-                (error_magnitude <= hold_band ||
-                 command_x * desired_x + command_y * desired_y > 0.0) &&
-                std::hypot(command_x, command_y) <=
-                    config.aim.max_counts_per_frame + 0.001;
-        }
-        if (profile.detector.status == DetectionStatus::SUCCESS) {
-            runtime::detail::summarize_detections(
-                detections, config.aim, sample);
-        }
-        if (probes_enabled) {
-            result.pending_token = debug_samples.push_pending(sample);
-        } else {
-            debug_samples.push(sample);
-        }
-        current_snapshot.debug_samples_dropped = debug_samples.dropped();
         if (probes_enabled) {
             result.debug_ring_ms =
                 std::chrono::duration<double, std::milli>(
@@ -805,7 +823,9 @@ struct Runtime::Impl {
                     std::chrono::steady_clock::now() -
                     profile_window_started).count();
         }
-        lock.unlock();
+        // 两阶段样本完成前保留同一关闭边界，避免封尾漏读后污染下一段。
+        if (result.pending_token) result.publication_lock = std::move(lock);
+        else lock.unlock();
         if (probes_enabled) {
             result.snapshot_ms =
                 std::chrono::duration<double, std::milli>(
@@ -1190,11 +1210,13 @@ struct Runtime::Impl {
                 service.pipeline_complete_ms =
                     std::chrono::duration<double, std::milli>(
                         tail_finished - frame->timing.captured_at).count();
-                if (!debug_samples.finalize(
+                const bool publication_failed = snapshot_result.pending_token && !debug_samples.finalize(
                         snapshot_result.pending_token,
                         [&service](RuntimePipelineSample& sample) noexcept {
                             sample.service = service;
-                        })) {
+                        });
+                if (snapshot_result.publication_lock.owns_lock()) snapshot_result.publication_lock.unlock();
+                if (publication_failed) {
                     fail_runtime("性能探针样本两阶段发布失败");
                     return;
                 }
@@ -1203,9 +1225,16 @@ struct Runtime::Impl {
     }
 
     bool configure_movement(const movement::Config& value) noexcept {
-        if (!movement::valid_config(value)) return false;
+        if (value.enabled && !movement::valid_config(value)) return false;
         if (auto worker = movement_worker.load()) {
-            if (!(config.movement == value)) worker->configure(value);
+            if (!(config.movement == value)) {
+                auto applied = value;
+                if (!value.enabled && !movement::valid_config(value)) {
+                    applied = config.movement;
+                    applied.enabled = false;
+                }
+                worker->configure(applied);
+            }
             config.movement = value;
             return true;
         }
@@ -1276,7 +1305,7 @@ struct Runtime::Impl {
         {
             std::lock_guard lock(snapshot_mutex);
             current_snapshot.weapon_snapshot = gsi_receiver.snapshot();
-            if (config.recoil.enabled) {
+            if (config.recoil.enabled && current_snapshot.recoil_telemetry_available) {
                 const auto& id = current_snapshot.weapon_snapshot.canonical_id;
                 const auto found = recoil_profile_statuses.find(id);
                 current_snapshot.recoil_profile_status = id.empty() ? "等待有效武器身份" :
@@ -1746,7 +1775,7 @@ RuntimeSnapshot Runtime::snapshot() const noexcept {
 }
 
 bool Runtime::set_movement_config(const movement::Config& value) noexcept {
-    if (!impl_ || !movement::valid_config(value)) return false;
+    if (!impl_ || (value.enabled && !movement::valid_config(value))) return false;
     std::unique_lock lock(impl_->lifecycle_mutex, std::try_to_lock);
     if (!lock.owns_lock()) return false;
     {
@@ -1845,6 +1874,39 @@ bool Runtime::drain_pipeline_samples(
         std::vector<RuntimePipelineSample>& samples) noexcept {
     if (!impl_) return false;
     return impl_->debug_samples.drain(samples);
+}
+
+void Runtime::set_diagnostics_enabled(bool enabled) noexcept {
+    if (!impl_) return;
+    {
+        std::lock_guard lock(impl_->snapshot_mutex);
+        impl_->diagnostics_enabled = enabled;
+    }
+    if (!enabled) if (auto archive = impl_->recoil_archive.load()) archive->request_stop();
+}
+
+bool Runtime::set_recoil_archive(std::optional<RecoilArchiveConfig> config) noexcept {
+    if (!impl_) return false;
+    try {
+        std::lock_guard lifecycle_lock(impl_->lifecycle_mutex);
+        if (auto previous = impl_->recoil_archive.exchange({})) {
+            previous->stop();
+            std::lock_guard lock(impl_->snapshot_mutex);
+            impl_->current_snapshot.recoil_archive = previous->snapshot();
+        }
+        if (!config) return true;
+        const auto worker = impl_->recoil_worker.load();
+        if (!worker) return true;
+        config->recoil = impl_->config.recoil;
+        config->after_sequence = worker->read_execution_events(0, 0).latest_sequence;
+        auto archive = std::make_shared<RecoilBatchArchive>();
+        impl_->recoil_archive.store(archive);
+        const bool started = archive->start(*config, [worker](std::uint64_t after, std::size_t maximum) {
+            return worker->read_execution_events(after, maximum);
+        });
+        if (!started) LOG_WARN("runtime", "压枪归档不可用，控制继续: {}", archive->snapshot().error);
+        return started;
+    } catch (...) { return false; }
 }
 
 RecoilExecutionLog Runtime::recoil_execution_log() const {

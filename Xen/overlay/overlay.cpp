@@ -272,7 +272,7 @@ const char* page_title(WorkspacePage page) noexcept {
 
 const char* page_context(WorkspacePage page) noexcept {
     switch (page) {
-        case WorkspacePage::OVERVIEW: return "P0 / 本地闭环";
+        case WorkspacePage::OVERVIEW: return "运行状态";
         case WorkspacePage::DETECTION: return "模型与画面";
         case WorkspacePage::COLLECTION: return "按需保存训练素材";
         case WorkspacePage::TRAINING: return "审核、训练与候选模型";
@@ -281,7 +281,7 @@ const char* page_context(WorkspacePage page) noexcept {
         case WorkspacePage::DEBUG: return "测试、回看与运行诊断";
         case WorkspacePage::SETTINGS: return "输入安全、运行与窗口";
     }
-    return "P0 / 本地闭环";
+    return "运行状态";
 }
 
 const char* runtime_label(RuntimeState state) noexcept {
@@ -412,13 +412,14 @@ void pop_colored_button() {
     ImGui::PopStyleColor(4);
 }
 
-void begin_surface(const char* id, const ImVec2& size) {
+void begin_surface(const char* id, const ImVec2& size,
+                   ImGuiChildFlags flags = ImGuiChildFlags_None) {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, rgba(kGroupSurface));
     ImGui::PushStyleColor(ImGuiCol_Border, rgba(kBorder));
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, kPanelRounding);
     ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 8.0f));
-    ImGui::BeginChild(id, size, ImGuiChildFlags_Borders);
+    ImGui::BeginChild(id, size, ImGuiChildFlags_Borders | flags);
 }
 
 void end_surface() {
@@ -463,7 +464,10 @@ void form_row(const char* label, const char* help) {
     ImGui::TableNextRow(ImGuiTableRowFlags_None, 36.0f);
     ImGui::TableSetColumnIndex(0);
     ImGui::AlignTextToFramePadding();
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() +
+        std::max(1.0f, ImGui::GetContentRegionAvail().x - ImGui::GetFontSize() - 5.0f));
     ImGui::TextColored(rgba(kMutedInk), "%s", label);
+    ImGui::PopTextWrapPos();
     help_marker(help);
     ImGui::TableSetColumnIndex(1);
     ImGui::SetNextItemWidth(-1.0f);
@@ -1560,7 +1564,7 @@ struct Overlay::Impl {
         ImGui::PopFont();
         ImGui::SetCursorPosX(16.0f);
         ImGui::PushFont(small_font);
-        ImGui::TextColored(rgba(kFaintInk), "Runtime P0  /  v0.1");
+        ImGui::TextColored(rgba(kFaintInk), "Xen 本地控制台");
         ImGui::PopFont();
 
         ImGui::EndChild();
@@ -1599,12 +1603,14 @@ struct Overlay::Impl {
         if (width >= 620.0f) {
             ImGui::SameLine(0.0f, 14.0f);
             ImGui::SetCursorPosY(19.0f);
-            const char* provider = snapshot.provider.empty()
-                ? "Provider 未就绪"
-                : snapshot.provider.c_str();
+            std::string_view provider = snapshot.provider.empty()
+                ? "后端未就绪" : std::string_view(snapshot.provider);
+            constexpr std::string_view suffix = "ExecutionProvider";
+            if (provider.ends_with(suffix)) provider.remove_suffix(suffix.size());
             ImGui::TextColored(
-                rgba(kMutedInk), "%.14s  |  %.1f FPS  |  P95 %.2f ms",
-                provider, snapshot.capture_fps, snapshot.pipeline_p95_ms);
+                rgba(kMutedInk), "%.*s  |  %.1f FPS  |  P95 %.2f ms",
+                static_cast<int>(provider.size()), provider.data(),
+                snapshot.capture_fps, snapshot.pipeline_p95_ms);
         }
 
         constexpr float kButtonWidth = 64.0f;
@@ -1690,7 +1696,7 @@ struct Overlay::Impl {
             active_page != WorkspacePage::TRAINING) {
             const float button_width = 96.0f;
             ImGui::SetCursorPos(ImVec2(
-                ImGui::GetWindowWidth() - button_width - 22.0f, 12.0f));
+                ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - button_width, 12.0f));
             ImGui::BeginDisabled(!can_save);
             push_primary_button();
             if (ImGui::Button(
@@ -1745,8 +1751,8 @@ struct Overlay::Impl {
         end_surface();
     }
 
-    void render_latency_panel(const RuntimeSnapshot& snapshot, float height) {
-        begin_surface("latency_panel", ImVec2(0.0f, height));
+    void render_latency_panel(const RuntimeSnapshot& snapshot) {
+        begin_surface("latency_panel", ImVec2(0.0f, 0.0f), ImGuiChildFlags_AutoResizeY);
         ImGui::PushFont(medium_font);
         ImGui::TextUnformatted("延迟链路");
         ImGui::PopFont();
@@ -1769,6 +1775,9 @@ struct Overlay::Impl {
             {"Total", profile.total_ms},
         }};
         double maximum = 0.0;
+        float label_width = 0.0f;
+        for (const auto& stage : stages)
+            label_width = std::max(label_width, ImGui::CalcTextSize(stage.label).x);
         for (std::size_t index = 0; index + 1 < stages.size(); ++index) {
             maximum = std::max(maximum, stages[index].milliseconds);
         }
@@ -1776,7 +1785,7 @@ struct Overlay::Impl {
         if (ImGui::BeginTable(
                 "latency_rows", 3, ImGuiTableFlags_SizingStretchProp)) {
             ImGui::TableSetupColumn(
-                "阶段", ImGuiTableColumnFlags_WidthFixed, 88.0f);
+                "阶段", ImGuiTableColumnFlags_WidthFixed, label_width);
             ImGui::TableSetupColumn(
                 "条形图", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn(
@@ -1801,6 +1810,7 @@ struct Overlay::Impl {
             ImGui::EndTable();
         }
         ImGui::Dummy(ImVec2(0.0f, 5.0f));
+        ImGui::PushTextWrapPos(0.0f);
         if (snapshot.control_latency_available) {
             ImGui::TextColored(
                 rgba(kMutedInk),
@@ -1814,11 +1824,12 @@ struct Overlay::Impl {
                 rgba(kFaintInk),
                 "Capture→鼠标后端完成：尚无样本（不等于协议 ACK 或物理效果）");
         }
+        ImGui::PopTextWrapPos();
         end_surface();
     }
 
-    void render_module_panel(const RuntimeSnapshot& snapshot, float height) {
-        begin_surface("module_panel", ImVec2(0.0f, height));
+    void render_module_panel(const RuntimeSnapshot& snapshot) {
+        begin_surface("module_panel", ImVec2(0.0f, 0.0f), ImGuiChildFlags_AutoResizeY);
         ImGui::PushFont(medium_font);
         ImGui::TextUnformatted("运行检查");
         ImGui::PopFont();
@@ -1854,8 +1865,8 @@ struct Overlay::Impl {
         end_surface();
     }
 
-    void render_activity_panel(const RuntimeSnapshot& snapshot, float height) {
-        begin_surface("activity_panel", ImVec2(0.0f, height));
+    void render_activity_panel(const RuntimeSnapshot& snapshot) {
+        begin_surface("activity_panel", ImVec2(0.0f, 0.0f), ImGuiChildFlags_AutoResizeY);
         ImGui::PushFont(medium_font);
         ImGui::TextUnformatted("帧与目标");
         ImGui::PopFont();
@@ -1964,7 +1975,7 @@ struct Overlay::Impl {
     }
 
     void render_history_panel() {
-        begin_surface("metric_history_panel", ImVec2(0.0f, 148.0f));
+        begin_surface("metric_history_panel", ImVec2(0.0f, 0.0f), ImGuiChildFlags_AutoResizeY);
         ImGui::PushFont(medium_font);
         ImGui::TextUnformatted("实时历史");
         ImGui::PopFont();
@@ -2108,31 +2119,30 @@ struct Overlay::Impl {
                 "状态", ImGuiTableColumnFlags_WidthStretch, 1.0f);
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            render_latency_panel(snapshot, 379.0f);
+            render_latency_panel(snapshot);
             ImGui::TableSetColumnIndex(1);
-            render_module_panel(snapshot, 150.0f);
+            render_module_panel(snapshot);
             ImGui::Dummy(ImVec2(0.0f, 4.0f));
-            render_activity_panel(snapshot, 221.0f);
+            render_activity_panel(snapshot);
             ImGui::EndTable();
         } else {
-            render_latency_panel(snapshot, 379.0f);
+            render_latency_panel(snapshot);
             ImGui::Dummy(ImVec2(0.0f, 8.0f));
-            render_module_panel(snapshot, 150.0f);
+            render_module_panel(snapshot);
             ImGui::Dummy(ImVec2(0.0f, 8.0f));
-            render_activity_panel(snapshot, 221.0f);
+            render_activity_panel(snapshot);
         }
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         render_history_panel();
     }
 
-    void begin_config_panel(const char* id,
-                            const char* title,
-                            float height) {
+    void begin_config_panel(const char* id, const char* title) {
         ImGui::PushFont(small_font);
         ImGui::TextColored(rgba(kFaintInk), "%s", title);
         ImGui::PopFont();
         ImGui::Dummy(ImVec2(0.0f, 3.0f));
-        begin_surface(id, ImVec2(0.0f, height));
+        // 参数卡片随内容增长，滚轮只需操作外层页面；列表/历史图仍保留独立视口。
+        begin_surface(id, ImVec2(0.0f, 0.0f), ImGuiChildFlags_AutoResizeY);
     }
 
     void end_config_panel() {
@@ -2140,7 +2150,7 @@ struct Overlay::Impl {
     }
 
     void render_capture_geometry_panel(const RuntimeSnapshot& snapshot) {
-        begin_config_panel("capture_geometry_panel", "坐标契约", 136.0f);
+        begin_config_panel("capture_geometry_panel", "坐标契约");
         if (ImGui::BeginTable(
                 "capture_geometry", 2,
                 ImGuiTableFlags_SizingStretchProp)) {
@@ -2187,8 +2197,7 @@ struct Overlay::Impl {
                                display.width > 0.0f &&
                                display.height > 0.0f;
         begin_config_panel(
-            "roi_preview_panel", "实时 ROI 诊断",
-            has_image ? display.height + 126.0f : 92.0f);
+            "roi_preview_panel", "实时 ROI 诊断");
 
         const bool preview_supported =
             !snapshot.d3d11_cuda_interop &&
@@ -2521,7 +2530,7 @@ struct Overlay::Impl {
 
     void render_detector_reload_panel(const RuntimeSnapshot& snapshot,
                                       OverlayActions& actions) {
-        begin_config_panel("detector_reload_panel", "运行模型", 68.0f);
+        begin_config_panel("detector_reload_panel", "运行模型");
         if (ImGui::BeginTable(
                 "detector_reload", 2,
                 ImGuiTableFlags_SizingStretchProp)) {
@@ -2542,7 +2551,7 @@ struct Overlay::Impl {
             const char* active_model = snapshot.active_model_path.empty()
                 ? "未加载"
                 : snapshot.active_model_path.c_str();
-            ImGui::TextUnformatted(active_model);
+            ImGui::TextWrapped("%s", active_model);
             if (ImGui::IsItemHovered() &&
                 !snapshot.active_model_path.empty()) {
                 ImGui::SetTooltip("%s", snapshot.active_model_path.c_str());
@@ -2573,7 +2582,7 @@ struct Overlay::Impl {
         const bool openvino =
             app_config.detector.backend == BackendType::OPENVINO;
         begin_config_panel(
-            "detector_panel", "推理", openvino ? 300.0f : 264.0f);
+            "detector_panel", "推理");
         if (begin_form("detector_form", 126.0f)) {
             form_row(
                 "模型",
@@ -2722,7 +2731,7 @@ struct Overlay::Impl {
     }
 
     void render_detector_tuning(AppConfig& app_config) {
-        begin_config_panel("tuning_panel", "检测参数", 124.0f);
+        begin_config_panel("tuning_panel", "检测参数");
         if (begin_form("tuning_form", 144.0f)) {
             form_row(
                 "检测阈值",
@@ -2766,12 +2775,7 @@ struct Overlay::Impl {
         const bool udp_source_required = udp &&
             app_config.capture.udp_frame_layout !=
                 UdpFrameLayout::FULL_FRAME_1_TO_1;
-        float panel_height = network
-            ? (app_config.capture.center_roi ? 304.0f : 376.0f)
-            : (app_config.capture.center_roi ? 268.0f : 340.0f);
-        if (udp) panel_height += udp_source_required ? 108.0f : 36.0f;
-        if (ndi) panel_height += source_fields_visible ? 220.0f : 188.0f;
-        begin_config_panel("capture_panel", "画面", panel_height);
+        begin_config_panel("capture_panel", "画面");
         if (begin_form("capture_form", 126.0f)) {
             const char* backends[] = {
                 "本机 DXGI", "UDP MJPEG", "XUDP JPEG", "NDI"};
@@ -2954,7 +2958,7 @@ struct Overlay::Impl {
     void render_auxiliary_config(
             const RuntimeSnapshot& snapshot, AppConfig& app_config,
             bool can_edit, OverlayActions& actions) {
-        begin_config_panel("movement_panel", "身法", 420.0f);
+        begin_config_panel("movement_panel", "身法");
         auto& move = app_config.movement;
         const auto previous_movement = move;
         const char* movement_state = "已停止";
@@ -3061,7 +3065,7 @@ struct Overlay::Impl {
         end_config_panel();
         ImGui::TextWrapped("其他辅助参数停止运行后可编辑并保存；下次启动生效。");
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        begin_config_panel("auto_stop_panel", app_config.auto_stop.experimental_hud_model ? "自动急停（HUD动态制动）" : "自动急停（H40对照）", 300.0f);
+        begin_config_panel("auto_stop_panel", app_config.auto_stop.experimental_hud_model ? "自动急停（HUD动态制动）" : "自动急停（H40对照）");
         const char* status = "已关闭";
         switch (snapshot.auto_stop.status) {
             case AutoStopStatus::DISABLED: status = "已关闭"; break;
@@ -3150,7 +3154,7 @@ struct Overlay::Impl {
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
         render_trigger_config(snapshot, app_config, can_edit, key_active);
         ImGui::Dummy(ImVec2(0.0f, 8.0f));
-        begin_config_panel("recoil_panel", "自动压枪", 240.0f);
+        begin_config_panel("recoil_panel", "自动压枪");
         recoil_panel.render(snapshot, app_config, can_edit);
         end_config_panel();
     }
@@ -3158,7 +3162,7 @@ struct Overlay::Impl {
     void render_trigger_config(const RuntimeSnapshot& snapshot, AppConfig& app_config,
             bool can_edit, const std::array<bool, 256>& key_active) {
         auto& trigger = app_config.trigger;
-        begin_config_panel("trigger_panel", "自动扳机", 320.0f);
+        begin_config_panel("trigger_panel", "自动扳机");
         ImGui::TextWrapped("准星进入有效头部或人体检测框的设定范围即判断开火；100%%覆盖完整目标框，按共享GSI武器资料点射。检测框不保证弹道命中。");
         ImGui::BeginDisabled(!can_edit);
         if (begin_form("trigger_form", 150.0f)) {
@@ -3276,7 +3280,7 @@ struct Overlay::Impl {
         const auto key_active = current_virtual_key_state();
         if (can_edit) process_hotkey_capture(app_config,actions,key_active);
         if (begin_form("debug_hotkey_form",150.0f)) {
-            form_row("启用调试测试快捷键", "这是快捷键路径的物理输出许可；保存配置后生效。仍需先准备测试模板，忙碌时不排队，按住不循环，释放后才能再次按下。");
+            form_row("启用测试快捷键", "这是快捷键路径的物理输出许可；保存配置后生效。仍需先准备测试模板，忙碌时不排队，按住不循环，释放后才能再次按下。");
             toggle_switch("##debug_test_enabled",&app_config.keyboard.debug_test_enabled);
             render_hotkey_row("测试键（按下）", "##debug_test_keys",
                 "沿用现有按键绑定：按下追加、Esc清空。本机或已连接后端键均可捕获；拒绝左键、WASD及其他功能冲突。保存配置后生效。",
@@ -3284,7 +3288,7 @@ struct Overlay::Impl {
             ImGui::EndTable();
         }
         ImGui::EndDisabled();
-        ImGui::TextWrapped("先停止 Runtime 并准备测试，再由你点击启动或回游戏按测试键；每次一组。");
+        ImGui::TextWrapped("停止运行后准备测试，再点击启动或按测试键；每次执行一组。");
         ImGui::TextDisabled("准备与重复测试说明");
         show_help_tooltip("标定与采集新弹道每组都需重新准备；已有弹道验证、急停和射击节奏可按模板重复，无自动循环。离开本页保留模板；编辑实验、切换类型或设备、启动 Runtime 或急停后需重新准备。生产组合效果在辅助页配置后单独验收。");
         if (!hotkey_capture_message.empty()) ImGui::TextWrapped("%s",hotkey_capture_message.c_str());
@@ -3339,7 +3343,7 @@ struct Overlay::Impl {
     }
 
     void render_source_context_config(const RuntimeSnapshot& snapshot, AppConfig& app_config, bool can_edit) {
-        begin_config_panel("source_context_panel", "源端焦点", 300.0f);
+        begin_config_panel("source_context_panel", "源端焦点");
         ImGui::TextWrapped("源状态桥接把游戏主机的前台状态传给辅机；切到其他程序时撤销急停接管，恢复后先松开快捷键再按下。");
         ImGui::BeginDisabled(!can_edit);
         auto& context = app_config.source_context;
@@ -3414,7 +3418,7 @@ struct Overlay::Impl {
     }
 
     void render_basic_aim_form(AppConfig& app_config) {
-        begin_config_panel("basic_aim_panel", "基础瞄准", 408.0f);
+        begin_config_panel("basic_aim_panel", "基础瞄准");
         if (begin_form("basic_aim_form", 170.0f)) {
             form_row(
                 "目标置信度",
@@ -3497,7 +3501,7 @@ struct Overlay::Impl {
     }
 
     void render_prediction_form(AppConfig& app_config) {
-        begin_config_panel("prediction_panel", "预测与延迟补偿", 272.0f);
+        begin_config_panel("prediction_panel", "预测与延迟补偿");
         if (begin_form("prediction_form", 170.0f)) {
             form_row(
                 "启用延迟补偿",
@@ -3559,7 +3563,7 @@ struct Overlay::Impl {
                              AppConfig& app_config,
                              bool can_edit,
                              OverlayActions& actions) {
-        begin_config_panel("safety_panel", "安全门", 72.0f);
+        begin_config_panel("safety_panel", "安全门");
         if (ImGui::BeginTable(
                 "safety_grid", 5,
                 ImGuiTableFlags_SizingStretchSame |
@@ -3664,8 +3668,7 @@ struct Overlay::Impl {
         const bool makcu =
             app_config.mouse.backend == MouseBackend::MAKCU;
         begin_config_panel(
-            "mouse_panel", "键鼠后端",
-            kmbox ? 268.0f : (makcu ? 228.0f : 88.0f));
+            "mouse_panel", "键鼠后端");
         if (begin_form("mouse_form", 126.0f)) {
             const char* backends[] = {
                 "Win32 SendInput", "KMBOX NET", "MAKCU"};
@@ -3931,7 +3934,7 @@ struct Overlay::Impl {
         const auto key_active = current_virtual_key_state();
         process_hotkey_capture(app_config, actions, key_active);
 
-        begin_config_panel("keyboard_panel", "全局按键", 188.0f);
+        begin_config_panel("keyboard_panel", "全局按键");
         if (begin_form("keyboard_form", 126.0f)) {
             render_hotkey_row(
                 "运行管线启停", "##runtime_toggle_virtual_keys",
@@ -3964,11 +3967,7 @@ struct Overlay::Impl {
         end_config_panel();
     }
 
-    void render_settings(AppConfig& app_config, bool can_edit,
-                         OverlayActions& actions) {
-        // 日志阈值可以在运行中调整，不属于设备/控制配置的编辑锁。
-        render_log_settings(app_config, actions);
-        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    void render_settings(AppConfig& app_config, bool can_edit) {
         ImGui::BeginDisabled(!can_edit);
         const bool two_columns =
             ImGui::GetContentRegionAvail().x >= 650.0f;
@@ -3990,21 +3989,15 @@ struct Overlay::Impl {
     }
 
     void render_log_settings(AppConfig& app_config, OverlayActions& actions) {
-        constexpr std::array notes{
-            "立即生效；保存配置后保留。运行中也可切换。",
-            "最近日志 / 控制台 / 常规日志文件记录所选等级及以上（最低 INFO，需已启用对应输出）。",
-            "Release 不启用 TRACE / DEBUG；Debug 运行报告和崩溃报告独立保留。"};
-        const float text_width = std::max(1.0f, ImGui::GetContentRegionAvail().x - 24.0f);
-        float panel_height = ImGui::GetFrameHeightWithSpacing() + 24.0f;
-        for (const auto* note : notes) {
-            panel_height += ImGui::CalcTextSize(note, nullptr, false, text_width).y +
-                ImGui::GetStyle().ItemSpacing.y;
-        }
-        begin_config_panel("log_panel", "日志输出", panel_height);
+        begin_config_panel("log_panel", "日志与运行记录");
         if (begin_form("log_form", 126.0f)) {
+            form_row("详细运行记录",
+                "默认关闭。开启后保存运行报告、会话归档和自动压枪记录；启停立即生效，关闭保留旧数据。停止运行后保存配置可保留选择；显式采集、输入录制和调试任务不受此开关影响。");
+            if (ImGui::Checkbox("##diagnostics_enabled", &app_config.runtime.diagnostics_enabled))
+                actions.diagnostics_enabled_changed = true;
             form_row(
                 "输出等级",
-                "选择最低输出等级，包含更严重的日志；无会停止接收新日志，已有记录保留。切换立即生效，停止运行后点击保存配置可保留。模块单独设定的更严格等级仍然有效。");
+                "控制最近日志、控制台和已启用的常规日志文件。选择最低等级并包含更严重的日志；无会停止新日志，已有记录保留。立即生效，停止运行后保存可保留；详细运行记录由上方开关独立控制。");
             constexpr std::array levels{
                 LogLevel::OFF, LogLevel::ERROR, LogLevel::WARN, LogLevel::INFO};
             constexpr std::array labels{
@@ -4026,12 +4019,12 @@ struct Overlay::Impl {
             }
             ImGui::EndTable();
         }
-        for (const auto* note : notes) ImGui::TextWrapped("%s", note);
+        ImGui::TextWrapped("立即生效，保存配置后保留；关闭记录不会删除已有数据。");
         end_config_panel();
     }
 
     void render_runtime_settings(AppConfig& app_config) {
-        begin_config_panel("runtime_panel", "运行统计", 52.0f);
+        begin_config_panel("runtime_panel", "运行统计");
         if (begin_form("runtime_form", 126.0f)) {
             form_row(
                 "分位数窗口",
@@ -4046,7 +4039,7 @@ struct Overlay::Impl {
     }
 
     void render_ui_settings(AppConfig& app_config) {
-        begin_config_panel("ui_panel", "窗口与外观", 160.0f);
+        begin_config_panel("ui_panel", "窗口与外观");
         if (begin_form("ui_form", 126.0f)) {
             form_row(
                 "外观主题",
@@ -4308,16 +4301,21 @@ struct Overlay::Impl {
         render_notice(
             "source_context_error", snapshot.source_context_error, kWarning, kWarningSoft);
         render_notice(
+            "gsi_error", snapshot.gsi_error, kWarning, kWarningSoft);
+        render_notice(
             "detector_reload_error", snapshot.detector_reload_error,
             kDanger, kDangerSoft);
 
         if (archive_status) {
-            ImGui::BeginDisabled(!archive_status->active);
+            ImGui::BeginDisabled(!app_config.runtime.diagnostics_enabled || !archive_status->active);
             if (ImGui::Button("标记异常")) actions.anomaly_mark_requested = true;
-            show_help_tooltip("标记当前时刻，归档索引关联前后各30秒的数据；无需停止Runtime。游戏中可使用异常标记快捷键（默认F9），不改变武装或发送输入。停止较早时会注明后段不足。");
+            show_help_tooltip(app_config.runtime.diagnostics_enabled
+                ? "标记当前时刻，关联前后各30秒的数据；默认快捷键F9。需要正在记录，不改变武装或发送输入。"
+                : "详细运行记录已关闭；可在设置页开启后再标记异常。");
             ImGui::EndDisabled();
             ImGui::SameLine();
-            ImGui::TextWrapped("归档%s | 已保存 %llu 段 / %llu 帧 | 标记 %llu",
+            if (!app_config.runtime.diagnostics_enabled) ImGui::TextDisabled("详细运行记录已关闭");
+            else ImGui::TextWrapped("归档%s | 已保存 %llu 段 / %llu 帧 | 标记 %llu",
                 archive_status->active ? "进行中" : "已停止",
                 static_cast<unsigned long long>(archive_status->written_segments),
                 static_cast<unsigned long long>(archive_status->written_samples),
@@ -4359,12 +4357,15 @@ struct Overlay::Impl {
                     render_debug(snapshot, app_config, can_edit, actions, debug_snapshot);
                     break;
                 case WorkspacePage::SETTINGS:
+                    // 记录与日志可实时切换，放在设置首屏，不进入设备参数编辑锁。
+                    render_log_settings(app_config, actions);
+                    ImGui::Dummy(ImVec2(0.0f, 8.0f));
                     render_source_context_config(snapshot, app_config, can_edit);
                     recoil_panel.render_connections(app_config, can_edit);
                     render_input_config(
                         snapshot, app_config, can_edit, actions);
                     ImGui::Dummy(ImVec2(0.0f, 12.0f));
-                    render_settings(app_config, can_edit, actions);
+                    render_settings(app_config, can_edit);
                     break;
             }
         }

@@ -19,7 +19,7 @@
 
 ## 使用边界
 
-离线评价、协议ACK和模型估计不能替代真实设备与游戏效果。涉及设备的动作仅由用户前台执行，Prepare不等于Launch；保留每个入口要求的物理确认参数。
+离线评价、协议ACK和模型估计不能替代真实设备与游戏效果。设备动作按用户明确授权手动或自动执行，Prepare不等于已运行；传入入口要求的物理确认参数，回收停止与释放结果。
 
 ## 单 Run 离线复盘
 
@@ -116,7 +116,7 @@ Prepare 同时生成 `start-test.bat`、`edit-config.bat` 和 `PARAMETERS.md`；
 每组启动冻结 `execution-plan.json`；运行中改配置只影响下一组。Repeatable 延续同目录覆盖上一组
 `result` 的约定，需要保留对比证据时先另存结果或使用新 Run 目录。
 源焦点、全松和设备独占不足时拒绝，End/Ctrl+C或人工方向/鼠标按钮输入取消，不自动重试。
-真实运行必须由用户前台触发并保留 `-AllowPhysicalOutput -Confirm AUTO_STOP_COUNTERPULSE`。
+真实运行按用户明确授权手动或自动执行，并传入 `-AllowPhysicalOutput -Confirm AUTO_STOP_COUNTERPULSE`。
 
 结束后 `result/training-evaluation.json` 分别记录命令 ACK 域和 KMBOX monitor 域的换键评价、
 按住段与数据完整性，复用生产 `input_training::Session`。原始档案位于 `command-training` 和
@@ -174,7 +174,7 @@ HUD急停面板显示最近偏差、平均快慢、优秀率、波动、最快/�
 独立原地射击使用 `scripts/invoke_weapon_fire_test.ps1`：Prepare生成独立目录，
 `edit-config.bat`只编辑 `fire-settings.json` 的 `shot_hold_ms`（默认80）与 `fire_interval_ms`（默认800）。
 按住从DOWN ACK起计时，间隔为相邻DOWN提交的最小间隔，单位ms，间隔必须大于按住时长。
-`check-config.bat`离线校验，`start-test.bat`仅由用户前台启动每组15次左键按住；原地不移动，
+`check-config.bat`离线校验，`start-test.bat`按授权执行每组15次左键按住；原地不移动，
 关闭移动模型HUD，不把按住次数当子弹数或把模型零速当后座恢复。每组保留在独立runs目录，
 修改只影响下一组。80/800是观察用工程起点，不是人类反应常数或任何武器的已验证恢复值。
 当前测试阶段不添加随机范围或自动等待补偿；保持固定参数便于对照。

@@ -16,7 +16,7 @@ $taskId = if ($Profile -eq 'Soak') { 'SOAK-RC-001' } else { 'AUTO-STOP-HUD-EXPER
 $confirmation = if ($Profile -eq 'Soak') { 'XEN_SOAK_SENDS_REAL_INPUT' } else { 'HUD_STOP_EXPERIMENT' }
 if ($Mode -eq 'Launch') {
     if (-not $AllowPhysicalOutput -or $Confirm -cne $confirmation) {
-        throw "Launch必须由用户前台提供-AllowPhysicalOutput -Confirm $confirmation。"
+        throw "Launch必须提供-AllowPhysicalOutput -Confirm $confirmation。"
     }
 } elseif ($AllowPhysicalOutput -or $Confirm) { throw '仅Launch接受物理输出授权。' }
 if ($Profile -eq 'Soak') { . (Join-Path $PSScriptRoot 'soak_acceptance_support.ps1') }
@@ -25,16 +25,19 @@ function Assert-PlainPath([string]$Path, [bool]$MustExist = $true) {
     $full = [IO.Path]::GetFullPath($Path)
     if ($MustExist -and -not (Test-Path -LiteralPath $full)) { throw "路径不存在：$full" }
     $part = $full
+    $canonical = $null
     while ($part) {
-        if ((Test-Path -LiteralPath $part) -and
-            ((Get-Item -LiteralPath $part -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-            throw '任务路径不允许重解析点。'
+        if (Test-Path -LiteralPath $part) {
+            $item = Get-Item -LiteralPath $part -Force
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw '任务路径不允许重解析点。' }
+            # Get-ChildItem 返回长路径；统一8.3别名，避免回收时漏掉时间未变但内容增长的日志。
+            if ($null -eq $canonical) { $canonical = $item.FullName + $full.Substring($part.Length) }
         }
         $next = Split-Path -Parent $part
         if ($next -eq $part) { break }
         $part = $next
     }
-    return $full.TrimEnd('\', '/')
+    return $canonical.TrimEnd('\', '/')
 }
 function Get-Identity([string]$Path) {
     $path = Assert-PlainPath $Path
@@ -51,6 +54,13 @@ function Write-Text([string]$Path, [string]$Value) {
 }
 function Write-Json([string]$Path, $Value) { Write-Text $Path ($Value | ConvertTo-Json -Depth 16) }
 function Read-Json([string]$Path) { Get-Content -LiteralPath (Assert-PlainPath $Path) -Raw -Encoding UTF8 | ConvertFrom-Json }
+function Start-DiagnosticProcess([string]$Executable, [string]$WorkingDirectory) {
+    $previous = [Environment]::GetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', 'Process')
+    try {
+        [Environment]::SetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', '1', 'Process')
+        Start-Process -FilePath $Executable -WorkingDirectory $WorkingDirectory -WindowStyle Normal -PassThru
+    } finally { [Environment]::SetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', $previous, 'Process') }
+}
 function Get-IniValue([string]$Text, [string]$Section, [string]$Key) {
     $inside = $false
     $values = @()
@@ -160,8 +170,9 @@ if ($Mode -eq 'Prepare') {
 任务SOAK-RC-001；仅Prepare，尚未执行。Runtime目标$RuntimeDurationSeconds 秒；时长来源$($preparedTask.duration_basis)。默认60分钟不是用户确认，修改须重新Prepare。
 资源周期$ResourceIntervalMilliseconds 毫秒；最大窗口$($preparedTask.resource_max_duration_seconds)秒，包含启动等待$StartupWaitBudgetSeconds 秒与退出保存$CloseWaitBudgetSeconds 秒。
 config.ini是证据副本；入口使用包原目录配置，不修改控制参数。
+本次验收通过进程环境临时启用详细运行记录，不改日常INI；正常保存其他设置保留原记录偏好，主动修改记录开关除外。
 
-1. 退出其他版本。用户在目标机本地前台执行下方唯一命令。
+1. 退出其他版本。在目标机桌面会话执行下方唯一命令；已授权远程调用使用交互计划任务。
 2. 等待控制台确认Worker身份及首条资源样本就绪，再在UI启动Runtime并自行武装；需要录像则先开始录像。
 3. 连续运行计划时长；普通使用中记录异常及恢复，不重复End/AD专项。出现异常由用户自行停止。
 4. 到时仅提示，不自动停止Runtime、退出、按键或开火；用户停止Runtime保存报告并退出UI。
@@ -173,7 +184,7 @@ config.ini是证据副本；入口使用包原目录配置，不修改控制参�
 $command
 ``````
 
-仅用户前台执行。资源采集器只读，不代表Runtime验收；结束后回复观察，由代理Recover。
+按任务授权在桌面会话执行。资源采集器只读，不代表Runtime验收；结束后回复观察，由代理Recover。
 "@
         Write-Text (Join-Path $run 'OBSERVATION.md') "# 长稳人工观察`n`n尚未执行；记录实际Runtime开始/停止、场景、异常、恢复和结论。不重复已确认End/AD专项。`n"
         Write-Output $command
@@ -184,6 +195,7 @@ $command
 
 任务 $taskId（保留历史任务标识兼容）；当前仅Prepare，未执行。config.ini是证据副本；启动仍使用包原配置。
 HUD模型是输入评估模型经Xen控制适配，软件状态/ACK不证明游戏已停稳。
+本次验收临时启用详细运行记录，不改日常INI；退出后恢复日常偏好，主动修改记录开关除外。
 
 1. 源游戏前台确认焦点、GSI与源时钟有效，保持同一武器、场景、灵敏度、目标和参数。
 2. 退出其他Xen版本，再运行下方唯一命令打开当前HUD包；仅专项对照时另行安排H40比较。
@@ -200,8 +212,8 @@ HUD模型是输入评估模型经Xen控制适配，软件状态/ACK不证明游�
 $command
 ``````
 
-命令打开真实KMBOX输出入口，仅用户本轮前台执行；脚本不自动武装、按键、开火或强制结束进程。
-用户退出后代理Recover；进程启动/退出均不代表实际停稳或人工通过。
+命令打开真实KMBOX输出入口，可按任务授权在桌面会话执行；脚本不自动武装、按键、开火或强制结束进程。
+目标进程退出后Recover；进程启动/退出均不代表实际停稳或人工通过。
 "@
     Write-Text (Join-Path $run 'OBSERVATION.md') "# 人工观察`n`n尚未执行；执行人、时间、场景、各组比较、End急停和结论均未填写。`n"
     Write-Output $command
@@ -231,7 +243,7 @@ if ($Mode -in @('Validate', 'Launch')) {
     }
     if ((Get-Identity (Join-Path $run 'config.ini')).sha256 -cne $task.snapshot_sha256) { throw '配置证据副本已变化。' }
     if ($Mode -eq 'Validate') { Write-Output '绑定身份验证通过；未启动程序、未发送物理输入。'; return }
-    if ($package.StartsWith('\\') -or $run.StartsWith('\\')) { throw 'Launch必须由用户在目标机本地前台运行。' }
+    if ($package.StartsWith('\\') -or $run.StartsWith('\\')) { throw 'Launch需要目标机本地路径；远程调用请使用交互计划任务。' }
     if (Test-Path -LiteralPath (Join-Path $run 'launch.json')) { throw '禁止重复Launch，请重新Prepare。' }
     Assert-Stopped
     $beforeFiles = @(Get-ReportFiles)
@@ -259,7 +271,7 @@ if ($Mode -in @('Validate', 'Launch')) {
         try {
             [Environment]::SetEnvironmentVariable('XEN_ACCEPTANCE_LAUNCH_RECEIPT', (Join-Path $run 'launcher-identity.json'))
             # 正式Start-Xen原入口保持SourceContext注入；公开回执由Source-session消费。
-            $process = Start-Process -FilePath $entrypoint -WorkingDirectory $package -WindowStyle Normal -PassThru
+            $process = Start-DiagnosticProcess $entrypoint $package
         } finally { [Environment]::SetEnvironmentVariable('XEN_ACCEPTANCE_LAUNCH_RECEIPT', $savedReceipt) }
         try {
             $launch.entrypoint_pid = $process.Id
@@ -276,7 +288,7 @@ if ($Mode -in @('Validate', 'Launch')) {
     }
     Write-Host '即将打开HUD包UI；用户自行启动Runtime与武装，End急停，完成后退出。'
     # 复用发布包入口注入本机SourceContext；不读取或输出任何凭据内容。
-    $process = Start-Process -FilePath $entrypoint -WorkingDirectory $package -WindowStyle Normal -PassThru
+    $process = Start-DiagnosticProcess $entrypoint $package
     $launch.entrypoint_pid = $process.Id
     Write-Json (Join-Path $run 'launch.json') $launch
     $process.WaitForExit()
@@ -311,7 +323,7 @@ $collected = @()
 $hasMetadata = $null -ne $launch.PSObject.Properties['before_file_metadata']
 $beforeByPath = @{}
 if ($hasMetadata) {
-    foreach ($item in @($launch.before_file_metadata)) { $beforeByPath[$item.path] = $item }
+    foreach ($item in @($launch.before_file_metadata)) { $beforeByPath[(Assert-PlainPath $item.path $false)] = $item }
 }
 foreach ($file in @(Get-ReportFiles)) {
     $item = Get-Item -LiteralPath $file

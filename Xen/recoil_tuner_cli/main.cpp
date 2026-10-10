@@ -185,7 +185,7 @@ int main(int argc, char** argv) {
             "  compact-confirmed <旧profiles目录> <weapon-timing.json或-使用内置值> <全新迁移目录>\n"
             "  optimize <数据集.json> <基线profile.json> <新结果目录> <优化代际> <候选版本>\n"
             "  measure <之前图像> <之后图像> <人工锚点与区域.json> <新测量结果.json>\n"
-            "测量仅输出待人工确认的暗斑候选；优化结果需用户前台试验和人工验收。\n";
+            "测量仅输出待人工确认的暗斑候选；优化结果需真实试验和效果确认。\n";
         return 1;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
       catch (...) { std::cerr << "输入参数、文件或数据格式无效；未执行设备操作。\n"; return 1; }

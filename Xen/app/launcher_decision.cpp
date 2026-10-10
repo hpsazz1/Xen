@@ -25,9 +25,9 @@ int resolve_launcher_runtime(
         const ReleaseRuntimeEntry*& runtime) noexcept {
     runtime = nullptr;
     try {
-        AppConfig config;
+        BackendType backend = AppConfig{}.detector.backend;
         std::string config_error;
-        if (!load_app_config(config_path, config, config_error)) {
+        if (!load_app_backend(config_path, backend, config_error)) {
             std::error_code filesystem_error;
             const std::filesystem::path native_config_path(
                 std::u8string(config_path.begin(), config_path.end()));
@@ -52,7 +52,7 @@ int resolve_launcher_runtime(
             // 默认后端路由，由 Worker 生成配置；只有确实缺失才能进入该分支。
         }
 
-        runtime = find_runtime_for_backend(manifest, config.detector.backend);
+        runtime = find_runtime_for_backend(manifest, backend);
         if (runtime) return 0;
 
         present_error(adapter, "配置请求的推理后端未被发布清单授权");
