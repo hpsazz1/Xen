@@ -391,6 +391,17 @@ cmake --build $buildDirectory --config Release --target model_workspace_ui_previ
 `Config` 与 `Overlay` 共用 `Xen/config/hotkey_config_internal.h`，修改绑定占用规则时同时核对配置、
 Keyboard 监听器和生产界面，不在面板或捕获分支另写一套占用判断。
 
+导航和作业恢复回归使用同一目标的 `--usability-audit` 模式：
+
+```powershell
+& "$buildDirectory/Release/model_workspace_ui_preview.exe" "temp/<任务ID>/usability-ui" --usability-audit
+& "$buildDirectory/Release/model_workspace_ui_preview.exe" "temp/<任务ID>/usability-small" --usability-audit --minimum --dpi-125 --dark
+```
+
+该模式通过进程内 ImGui 事件检查日志返回、Tab/Shift+Tab/Space/Enter 导航、开关禁用约束、
+首屏作业状态、折叠与重复取消。只核对取消和打开目录意图，不执行后台作业或系统输入；
+失败返回非零并保存自身渲染目标，成功写入 `usability-audit.txt`。截图仍需人工或代理复核。
+
 技术栈：C++20、CMake、ONNX Runtime、OpenCV、spdlog、SimpleIni、Dear ImGui、nlohmann/json。
 
 ### 冻结验收的数据根

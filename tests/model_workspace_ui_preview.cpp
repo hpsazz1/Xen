@@ -34,14 +34,16 @@ void require(bool value, const char* message) {
 }
 
 struct UiInput {
+    struct KeyEvent { ImGuiKey key; bool down; };
     ImVec2 position{400.0f, 40.0f};
     bool down = false;
     float wheel = 0.0f;
     ImGuiWindow* focus_window = nullptr;
     ImGuiID focus_id = 0;
+    std::vector<KeyEvent> key_events;
 };
 
-// 仅向本进程 ImGui 队列注入指针事件，绝不移动系统光标或发送设备输入。
+// 仅向本进程 ImGui 队列注入事件，绝不移动系统光标或发送设备输入。
 void inject_input(ImGuiContext* context, ImGuiContextHook* hook) {
     auto& input = *static_cast<UiInput*>(hook->UserData);
     auto& io = context->IO;
@@ -49,6 +51,8 @@ void inject_input(ImGuiContext* context, ImGuiContextHook* hook) {
     io.AddMouseButtonEvent(0, input.down);
     if (input.wheel != 0.0f) io.AddMouseWheelEvent(0.0f, input.wheel);
     input.wheel = 0.0f;
+    for (const auto& event : input.key_events) io.AddKeyEvent(event.key, event.down);
+    input.key_events.clear();
 }
 
 struct RenderCapture {
@@ -202,7 +206,7 @@ void require_page_table(const char* table_name, ImGuiID scope = 0) {
 // 仅使用合成快照渲染生产 Overlay，并保存本进程窗口；动作不被执行。
 int wmain(int argc, wchar_t** argv) {
     try {
-        require(argc >= 2, "用法：model_workspace_ui_preview.exe <截图目录> [--minimum] [--dark] [--archive-only] [--layout-audit] [--hotkey-audit] [--dpi-125]");
+        require(argc >= 2, "用法：model_workspace_ui_preview.exe <截图目录> [--minimum] [--dark] [--archive-only] [--layout-audit] [--hotkey-audit] [--usability-audit] [--dpi-125]");
         const auto output = std::filesystem::absolute(argv[1]);
         std::filesystem::create_directories(output);
         LogConfig logs;
@@ -223,6 +227,7 @@ int wmain(int argc, wchar_t** argv) {
         bool archive_only = false;
         bool layout_audit = false;
         bool hotkey_audit = false;
+        bool usability_audit = false;
         float font_scale = 1.0f;
         for (int index = 2; index < argc; ++index) {
             const std::wstring_view argument(argv[index]);
@@ -232,6 +237,7 @@ int wmain(int argc, wchar_t** argv) {
             else if (argument == L"--archive-only") archive_only = true;
             else if (argument == L"--layout-audit") layout_audit = true;
             else if (argument == L"--hotkey-audit") hotkey_audit = true;
+            else if (argument == L"--usability-audit") usability_audit = true;
             else if (argument == L"--dpi-125") font_scale = 1.25f;
             else throw std::runtime_error("未知预览参数");
         }
@@ -302,6 +308,8 @@ int wmain(int argc, wchar_t** argv) {
         ImGui::GetIO().ConfigInputTrickleEventQueue = false;
         bool allow_config_save = false;
         bool saw_config_save = false;
+        auto expected_workspace_action = model_workspace::Action::NONE;
+        std::vector<model_workspace::Action> observed_workspace_actions;
         auto frame = [&] {
             require(overlay.pump_messages(), "窗口意外关闭");
             require(overlay.render(runtime, {}, {}, {}, config, settings, workspace,
@@ -309,11 +317,21 @@ int wmain(int argc, wchar_t** argv) {
             require(!actions.start_requested && actions.runtime_intents.empty() &&
                     !actions.stop_requested && !actions.reload_detector_requested && !actions.refresh_models_requested &&
                     (!actions.save_config_requested || allow_config_save) && !actions.log_level_changed && !actions.preview_enabled &&
-                    actions.workspace_action == model_workspace::Action::NONE &&
+                    (actions.workspace_action == model_workspace::Action::NONE ||
+                     actions.workspace_action == expected_workspace_action) &&
                     actions.debug_action == debug_session::Action::NONE && !actions.debug_allow_physical_output &&
                     !config.mouse.allow_send_input && !config.recoil.enabled &&
                     (hotkey_audit || (!config.auto_stop.enabled && !config.trigger.enabled)),
                     "验收输入误触业务动作，停止执行");
+            if (usability_audit) {
+                require(!actions.anomaly_mark_requested && !actions.diagnostics_enabled_changed &&
+                    !actions.training_start_requested && !actions.training_stop_requested &&
+                    !actions.training_load_requested && !actions.debug_plan_edited &&
+                    !actions.hotkey_capture_consumed,
+                    "可用性验收误触其他业务动作，停止执行");
+            }
+            if (actions.workspace_action != model_workspace::Action::NONE)
+                observed_workspace_actions.push_back(actions.workspace_action);
             saw_config_save |= actions.save_config_requested;
         };
         for (int index = 0; index < 3; ++index) frame();
@@ -377,6 +395,221 @@ int wmain(int argc, wchar_t** argv) {
             input.down = false; frame();
             input.position = {400,40}; frame(); frame();
         };
+        if (usability_audit) {
+            using Action = model_workspace::Action;
+            auto* context = ImGui::GetCurrentContext();
+            std::ofstream navigation_log(output / "usability-navigation.txt", std::ios::binary);
+            require(navigation_log.good(), "导航诊断日志创建失败");
+            ImGuiID expected_nav_id = 0;
+            auto trace_navigation = [&](const char* phase) {
+                navigation_log << phase << " expected=0x" << std::hex << expected_nav_id
+                    << " NavId=0x" << context->NavId << " scope=0x" << context->NavFocusScopeId
+                    << std::dec << " alive=" << context->NavIdIsAlive
+                    << " cursor=" << context->NavCursorVisible << " tab_dir=" << context->NavTabbingDir
+                    << " window=" << (context->NavWindow ? context->NavWindow->Name : "<none>") << '\n';
+                navigation_log.flush();
+            };
+            auto press_key = [&](ImGuiKey key, bool shift = false) {
+                input.position = {-1000, -1000};
+                input.down = false;
+                trace_navigation("before-key");
+                if (shift) input.key_events.push_back({ImGuiMod_Shift, true});
+                input.key_events.push_back({key, true}); frame();
+                trace_navigation("key-down");
+                input.key_events.push_back({key, false});
+                if (shift) input.key_events.push_back({ImGuiMod_Shift, false});
+                frame(); frame();
+                trace_navigation("after-key");
+            };
+            auto focus = [&](ImGuiWindow* window, ImGuiID id) {
+                input.position = {-1000, -1000}; input.down = false;
+                input.focus_window = window; input.focus_id = id; frame(); frame();
+                require(context->NavId == id && context->NavIdIsAlive,
+                    "可用性验收未找到生产控件的导航身份");
+            };
+            auto item_rect = [&](ImGuiWindow* window, ImGuiID id, bool scroll) {
+                focus(window, id);
+                auto rect = ImGui::WindowRectRelToAbs(window, window->NavRectRel[ImGuiNavLayer_Main]);
+                if (scroll) {
+                    ImGui::ScrollToRect(window, rect, ImGuiScrollFlags_AlwaysCenterY);
+                    frame(); frame();
+                    rect = ImGui::WindowRectRelToAbs(window, window->NavRectRel[ImGuiNavLayer_Main]);
+                }
+                return rect;
+            };
+            auto click_rect = [&](const ImRect& rect, Action expected = Action::NONE) {
+                const auto before = observed_workspace_actions.size();
+                expected_workspace_action = expected;
+                input.position = rect.GetCenter(); input.down = false; frame();
+                input.down = true; frame(); input.down = false; frame(); frame();
+                expected_workspace_action = Action::NONE;
+                require(observed_workspace_actions.size() == before + (expected != Action::NONE ? 1 : 0),
+                    "单次点击产生了缺失或重复的工作区动作");
+                if (expected != Action::NONE)
+                    require(observed_workspace_actions.back() == expected, "工作区动作与场景不一致");
+            };
+            auto first_screen = [&] {
+                auto* content = preview_window("content");
+                ImGui::SetScrollY(content, 0); frame(); frame(); frame();
+                return content;
+            };
+            auto first_screen_button = [&](ImGuiWindow* content, const char* label) {
+                const auto rect = item_rect(content, content->GetID(label), false);
+                require(content->Scroll.y < 1.0f && content->ClipRect.Contains(rect),
+                    "作业控制按钮必须完整位于首屏，无需滚动");
+                return rect;
+            };
+
+            // WM_KEYDOWN 只发给本次 Overlay 自有窗口；不改变系统按键或 Runtime 输入。
+            const HWND window = static_cast<HWND>(ImGui::GetMainViewport()->PlatformHandleRaw);
+            DWORD process_id = 0;
+            GetWindowThreadProcessId(window, &process_id);
+            require(window && process_id == GetCurrentProcessId(), "日志切换必须限定本进程预览窗口");
+            select_page(0);
+            SendMessageW(window, WM_KEYDOWN, VK_F9, 0);
+            SendMessageW(window, WM_KEYUP, VK_F9, 0);
+            frame(); frame();
+            preview_window("recent_log_panel");
+            save_window(capture, output / "usability-log-open.png");
+            select_page(5);
+            require(capture.text.find("最近日志") == std::string::npos &&
+                capture.text.find("训练环境") != std::string::npos,
+                "日志打开后点击侧栏必须退出日志并显示目标页");
+            require_page_table("training_environment");
+            save_window(capture, output / "usability-log-return.png");
+
+            // 初始焦点只定位起点；目标项必须由真实 Tab 导航到达，并由键盘事件激活。
+            select_page(0);
+            auto* sidebar = preview_window("sidebar");
+            const auto overview_id = ImHashStr("nav", 0, sidebar->GetID(0));
+            const auto detection_id = ImHashStr("nav", 0, sidebar->GetID(1));
+            focus(sidebar, overview_id);
+            // 鼠标点击后首次 Tab 进入键盘模式并选中首项；第二次才移向下一项。
+            expected_nav_id = overview_id;
+            press_key(ImGuiKey_Tab);
+            require(context->NavId == overview_id && context->NavIdIsAlive && context->NavCursorVisible,
+                "首次 Tab 必须进入概览导航项并显示键盘焦点");
+            expected_nav_id = detection_id;
+            press_key(ImGuiKey_Tab);
+            require(context->NavId == detection_id && context->NavIdIsAlive && context->NavCursorVisible,
+                "Tab 必须到达检测导航项并显示键盘焦点");
+            save_window(capture, output / "usability-sidebar-focus.png");
+            press_key(ImGuiKey_Space);
+            require_page_table("detector_form");
+            expected_nav_id = overview_id;
+            press_key(ImGuiKey_Tab, true);
+            require(context->NavId == overview_id, "Shift+Tab 必须能返回概览导航项");
+            press_key(ImGuiKey_Enter);
+            require_page_table("metric_grid");
+
+            select_page(1);
+            auto* detector = preview_window("detector_panel");
+            const auto form_id = detector->GetID("detector_form");
+            const auto format_id = ImHashStr("##output_format", 0, form_id);
+            const auto fp16_id = ImHashStr("##enable_fp16", 0, form_id);
+            item_rect(detector, format_id, true);
+            // 定位起点会清除导航可见态；恢复键盘起点，目标仍必须由真实 Tab 到达。
+            ImGui::SetNavCursorVisible(true);
+            expected_nav_id = fp16_id;
+            press_key(ImGuiKey_Tab);
+            require(context->NavId == fp16_id && context->NavIdIsAlive && context->NavCursorVisible,
+                "Tab 必须从输出契约到达 FP16 开关并显示焦点");
+            const auto toggle_rect = ImGui::WindowRectRelToAbs(detector, detector->NavRectRel[ImGuiNavLayer_Main]);
+            require(detector->ClipRect.Contains(toggle_rect), "键盘导航必须把开关完整滚入可视区域");
+            save_window(capture, output / "usability-toggle-focus.png");
+            const bool original_fp16 = config.detector.enable_fp16;
+            press_key(ImGuiKey_Space);
+            require(config.detector.enable_fp16 != original_fp16, "Space 必须切换 FP16 开关一次");
+            press_key(ImGuiKey_Enter);
+            require(config.detector.enable_fp16 == original_fp16, "Enter 必须切换 FP16 开关一次");
+            runtime.state = RuntimeState::STARTING;
+            frame(); frame();
+            input.focus_window = detector; input.focus_id = fp16_id; frame();
+            press_key(ImGuiKey_Space);
+            require(config.detector.enable_fp16 == original_fp16, "禁用开关不得被 Space 激活");
+            press_key(ImGuiKey_Enter);
+            require(config.detector.enable_fp16 == original_fp16, "禁用开关不得被 Enter 激活");
+            click_rect(toggle_rect);
+            require(config.detector.enable_fp16 == original_fp16, "禁用开关不得被指针激活");
+            runtime.state = RuntimeState::STOPPED;
+            frame(); frame();
+
+            workspace.job_running = true;
+            workspace.job_operation = "env_check";
+            workspace.job_state = "RUNNING";
+            workspace.job_directory = "E:/合成作业/ui-only";
+            workspace.job_message = "合成后台作业正在运行：正在检查独立训练环境；这是只读界面夹具，不执行 Python。";
+            // 控制入口必须排在长消息之前，避免窄窗口把取消入口推离首屏。
+            for (int index = 0; index < 5; ++index)
+                workspace.job_message += " 长状态用于验证换行和恢复入口；检查结果尚未完成。";
+            select_page(5);
+            auto* content = first_screen();
+            require(capture.text.find("env_check / RUNNING") != std::string::npos,
+                "训练页必须显示当前作业摘要");
+            auto cancel_rect = first_screen_button(content, "取消后台作业");
+            auto open_rect = first_screen_button(content, "打开当前作业");
+            save_window(capture, output / "usability-training-running-top.png");
+            click_rect(cancel_rect, Action::CANCEL_JOB);
+            click_rect(cancel_rect, Action::CANCEL_JOB);
+            click_rect(open_rect, Action::OPEN_JOB_DIRECTORY);
+
+            const auto training_header = content->GetID("2. 离线训练");
+            const auto header_rect = item_rect(content, training_header, true);
+            require(content->ClipRect.Contains(header_rect.GetCenter()), "离线训练折叠区必须可点击");
+            click_rect(header_rect);
+            require(content->StateStorage.GetInt(training_header, 1) == 0, "离线训练区没有折叠");
+            content = first_screen();
+            cancel_rect = first_screen_button(content, "取消后台作业");
+            click_rect(cancel_rect, Action::CANCEL_JOB);
+            require(content->StateStorage.GetInt(training_header, 1) == 0,
+                "取消后台作业不应展开离线训练区");
+            save_window(capture, output / "usability-training-collapsed-cancel.png");
+
+            workspace.job_running = false;
+            workspace.job_state = "SUCCEEDED";
+            frame(); frame();
+            click_rect(cancel_rect);
+            input.focus_window = content; input.focus_id = content->GetID("取消后台作业"); frame();
+            press_key(ImGuiKey_Space); press_key(ImGuiKey_Enter);
+            require(observed_workspace_actions.size() == 4, "完成态取消必须禁用，不能追加工作区动作");
+            save_window(capture, output / "usability-training-completed.png");
+
+            workspace.job_state = "FAILED";
+            workspace.job_message = "合成失败：训练环境检查未通过；请打开当前作业查看详细记录。";
+            select_page(4);
+            content = first_screen();
+            require(capture.text.find("env_check / FAILED") != std::string::npos &&
+                capture.text.find("合成失败") != std::string::npos,
+                "采集页必须展示同一作业的失败状态与原因");
+            open_rect = first_screen_button(content, "打开当前作业");
+            save_window(capture, output / "usability-collection-failed-top.png");
+            click_rect(open_rect, Action::OPEN_JOB_DIRECTORY);
+            workspace.job_running = true;
+            workspace.job_state = "RUNNING";
+            workspace.job_message = "合成状态：采集页也能取消同一个后台作业。";
+            frame(); frame();
+            cancel_rect = first_screen_button(content, "取消后台作业");
+            click_rect(cancel_rect, Action::CANCEL_JOB);
+            require(observed_workspace_actions == std::vector<Action>{Action::CANCEL_JOB, Action::CANCEL_JOB,
+                Action::OPEN_JOB_DIRECTORY, Action::CANCEL_JOB, Action::OPEN_JOB_DIRECTORY, Action::CANCEL_JOB},
+                "工作区动作序列不符，存在遗漏、重复或非预期动作");
+            save_window(capture, output / "usability-collection-running-top.png");
+
+            { std::ofstream report(output / "usability-audit.txt", std::ios::binary);
+              report << "PASS 日志返回、侧栏 Tab/Shift+Tab/Space/Enter、开关键盘操作及禁用约束、"
+                  "训练/采集首屏作业入口、折叠与重复取消、完成态禁用。\n"
+                  "合成工作区动作：取消4次，打开目录2次；全部只核对意图，不执行。\n"
+                  "Runtime/真实设备输入/系统键鼠注入：0。截图仅包含本进程渲染目标。\n";
+              require(report.good(), "可用性验收报告写入失败"); }
+            ImGui::RemoveContextHook(context, capture_hook_id);
+            ImGui::RemoveContextHook(context, frame_hook_id);
+            ImGui::RemoveContextHook(context, hook_id);
+            overlay.shutdown(); Log::shutdown();
+            require(std::filesystem::remove(fixture_path), "可用性UI临时曲线夹具清理失败");
+            require(std::filesystem::remove(fixture_directory), "可用性UI临时夹具目录清理失败");
+            std::cout << "PASS 可用性专项；6次合成工作区意图均未执行，真实设备输入：0。\n";
+            return 0;
+        }
         if (hotkey_audit) {
             std::ostringstream failures;
             int scenarios = 0;

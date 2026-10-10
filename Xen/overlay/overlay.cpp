@@ -467,7 +467,9 @@ void form_row(const char* label, const char* help) {
 bool toggle_switch(const char* id, bool* value) {
     constexpr ImVec2 kSize(38.0f, 22.0f);
     const ImVec2 position = ImGui::GetCursorScreenPos();
-    const bool pressed = ImGui::InvisibleButton(id, kSize);
+    const bool pressed = ImGui::InvisibleButton(id, kSize, ImGuiButtonFlags_EnableNav);
+    const bool focused = ImGui::IsItemFocused() && ImGui::GetIO().NavVisible &&
+        !(ImGui::GetItemFlags() & ImGuiItemFlags_Disabled);
     if (pressed) *value = !*value;
 
     const bool hovered = ImGui::IsItemHovered();
@@ -484,6 +486,11 @@ bool toggle_switch(const char* id, bool* value) {
     draw_list->AddCircleFilled(
         ImVec2(knob_x, position.y + 11.0f), 8.0f,
         ImGui::GetColorU32(raw_rgba(kOnAccent)));
+    // 自绘背景之后再画焦点，避免键盘导航轮廓被轨道覆盖。
+    if (focused) draw_list->AddRect(
+        ImVec2(position.x - 2.0f, position.y - 2.0f),
+        ImVec2(position.x + kSize.x + 2.0f, position.y + kSize.y + 2.0f),
+        ImGui::GetColorU32(ImGuiCol_NavCursor), kSize.y * 0.5f, 2.0f);
     return pressed;
 }
 
@@ -1505,7 +1512,8 @@ struct Overlay::Impl {
             std::max(80.0f, ImGui::GetContentRegionAvail().x - 8.0f),
             42.0f);
         ImGui::PushID(static_cast<int>(page));
-        const bool pressed = ImGui::InvisibleButton("nav", size);
+        const bool pressed = ImGui::InvisibleButton("nav", size, ImGuiButtonFlags_EnableNav);
+        const bool focused = ImGui::IsItemFocused() && ImGui::GetIO().NavVisible;
         ImGui::PopID();
         show_help_tooltip(help);
 
@@ -1529,7 +1537,13 @@ struct Overlay::Impl {
             ImGui::GetColorU32(
                 rgba(selected ? kInk : kMutedInk)),
             label);
-        if (pressed) active_page = page;
+        if (focused) ImGui::GetWindowDrawList()->AddRect(
+            position, ImVec2(position.x + size.x, position.y + size.y),
+            ImGui::GetColorU32(ImGuiCol_NavCursor), 6.0f, 2.0f);
+        if (pressed) {
+            active_page = page;
+            show_log_panel = false;
+        }
         return pressed;
     }
 
@@ -4042,13 +4056,26 @@ struct Overlay::Impl {
         ImGui::EndDisabled();
     }
 
-    void workspace_status(const model_workspace::Snapshot& workspace) {
+    void workspace_status(const model_workspace::Snapshot& workspace,
+                          OverlayActions& actions) {
+        // 两页共用同一个后台作业；恢复入口先于长消息和表单，且不随训练区折叠。
+        if (workspace.job_operation.empty() && !workspace.job_running)
+            ImGui::TextDisabled("尚未启动后台作业");
+        else
+            ImGui::TextWrapped("作业：%s / %s", workspace.job_operation.c_str(), workspace.job_state.c_str());
+        workspace_button("取消后台作业", "请求终止当前后台作业；保留已有产物和记录用于排查，不把取消结果视为成功。", model_workspace::Action::CANCEL_JOB, workspace.job_running, actions);
+        ImGui::SameLine();
+        workspace_button("打开当前作业", "打开当前作业目录，查看 process.log、status.json 和本次产物；失败或取消后仍可排查。", model_workspace::Action::OPEN_JOB_DIRECTORY, !workspace.job_directory.empty(), actions);
+        render_notice("job_message", workspace.job_message,
+            workspace.job_state == "FAILED" ? kDanger : kMutedInk,
+            workspace.job_state == "FAILED" ? kDangerSoft : kFieldSurface);
         render_notice("workspace_notice", workspace.message, kAccentStrong, kAccentSoft);
         render_notice("collection_error", workspace.collection.error, kDanger, kDangerSoft);
-        ImGui::TextWrapped("作业：%s / %s", workspace.job_operation.c_str(), workspace.job_state.c_str());
-        ImGui::TextWrapped("%s", workspace.job_message.c_str());
-        ImGui::TextWrapped("作业目录：%s", workspace.job_directory.c_str());
-        ImGui::TextWrapped("候选模型：%s", workspace.candidate_path.c_str());
+        if (!workspace.job_directory.empty())
+            ImGui::TextWrapped("作业目录：%s", workspace.job_directory.c_str());
+        if (!workspace.candidate_path.empty())
+            ImGui::TextWrapped("候选模型：%s", workspace.candidate_path.c_str());
+        ImGui::Separator();
     }
 
     void render_collection(const RuntimeSnapshot& runtime,
@@ -4061,6 +4088,7 @@ struct Overlay::Impl {
             runtime.detector_reload_state != DetectorReloadState::LOADING &&
             !runtime.d3d11_cuda_interop && !runtime.d3d11_directml_interop;
         const bool idle = !collection.active && !workspace.job_running;
+        workspace_status(workspace, actions);
         ImGui::TextWrapped("只在需要时保存原图。先在检测页配置 CPU 画面来源并启动 Runtime，再核对类别语义。未检测到人物的图片仍需审核，不能直接作为负样本。");
         ImGui::Spacing();
         workspace_button("开始采集", "开始新的素材会话。必须已运行 CPU 画面 Runtime、模型未在重载、核对类别且没有后台作业；不会启动 Runtime。采集期间保持类别与模型代一致。", Action::START_COLLECTION,
@@ -4073,7 +4101,7 @@ struct Overlay::Impl {
         workspace_button("标记下一帧", "请求保存下一张有效 CPU 帧，可绕过自动质量与生存状态筛选以诊断；仍须通过已启用的来源焦点检查，不发送键鼠输入，仍受有界缓存和队列约束。", Action::MARK_SAMPLE,
             collection.active && !collection.paused && cpu_running, actions);
         ImGui::SameLine();
-        workspace_button("打开数据目录", "打开配置的原始素材根目录，查看采集会话与图片。后台作业和导出结果请使用训练页的打开当前作业。", Action::OPEN_DATA_DIRECTORY, !settings.root_directory.empty(), actions);
+        workspace_button("打开数据目录", "打开配置的原始素材根目录，查看采集会话与图片。后台作业和导出结果请使用本页顶部的打开当前作业。", Action::OPEN_DATA_DIRECTORY, !settings.root_directory.empty(), actions);
         ImGui::TextWrapped("持续采集不设数量或累计磁盘配额；结束采集前持续保存候选，实际写盘失败会暂停并显示错误。");
         ImGui::TextWrapped("状态：%s%s", collection.active ? "采集中" : "未采集", collection.paused ? "（已暂停）" : "");
         ImGui::Text("保存 %llu   排队 %llu   丢弃 %llu   去重 %llu",
@@ -4121,7 +4149,6 @@ struct Overlay::Impl {
         }
         ImGui::EndDisabled();
         workspace_button("保存采集与训练设置", "将本页及训练页设置单独保存到模型工作区配置，不写入 Runtime 的 config.ini。", Action::SAVE_SETTINGS, idle, actions);
-        workspace_status(workspace);
     }
 
     void render_training(const RuntimeSnapshot& runtime,
@@ -4131,6 +4158,7 @@ struct Overlay::Impl {
         using Action = model_workspace::Action;
         const bool idle = !workspace.job_running && !workspace.collection.active;
         const bool stopped = runtime.state == RuntimeState::STOPPED;
+        workspace_status(workspace, actions);
         ImGui::TextWrapped("流程：检查素材 → 自动预标注 → 采集页批量审核 / CVAT → 导入标签 → 导出数据集 → 训练 → 评估候选。未审核、失败、未知样本不能作为空标签训练。");
         if (ImGui::CollapsingHeader("训练环境", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::BeginDisabled(!idle);
@@ -4211,8 +4239,6 @@ struct Overlay::Impl {
             ImGui::EndDisabled();
             workspace_button("开始训练", "使用已填写的 .pt 和数据集版本目录启动离线训练；必须停止 Runtime、结束采集且没有其他作业。不会自动替换生产模型。", Action::TRAIN,
                 idle && stopped && settings.trusted_weights && !settings.weights_path.empty() && !settings.dataset_path.empty(), actions);
-            ImGui::SameLine();
-            workspace_button("取消后台作业", "请求终止当前后台作业；保留作业状态和已有产物用于排查，不把取消结果视为成功。", Action::CANCEL_JOB, workspace.job_running, actions);
         }
         if (ImGui::CollapsingHeader("3. 评估与候选模型", ImGuiTreeNodeFlags_DefaultOpen)) {
             workspace_button("评估模型", "在固定验证数据上评估待评估模型；读取精确率、召回及误报报告，不能仅凭训练损失认定提升。", Action::EVALUATE,
@@ -4221,11 +4247,8 @@ struct Overlay::Impl {
             workspace_button("导入候选模型", "校验并登记评估后的候选模型；不自动重载 Runtime，不表示真实闭环验收通过。", Action::IMPORT_CANDIDATE,
                 idle && stopped && workspace.job_operation == "evaluate" && workspace.job_state == "SUCCEEDED", actions);
             workspace_button("打开数据目录", "打开原始素材根目录查看采集会话和图片；此目录与后台作业目录不同。", Action::OPEN_DATA_DIRECTORY, !settings.root_directory.empty(), actions);
-            ImGui::SameLine();
-            workspace_button("打开当前作业", "打开下方显示的作业目录，查看 process.log、status.json、检查报告及本次导出产物；失败时也可打开排查。", Action::OPEN_JOB_DIRECTORY, !workspace.job_directory.empty(), actions);
         }
         workspace_button("保存采集与训练设置", "将采集和训练输入保存到独立工作区配置；与页面顶部保存 Runtime INI 的按钮相互独立。", Action::SAVE_SETTINGS, idle, actions);
-        workspace_status(workspace);
     }
 
     void render_workspace(
