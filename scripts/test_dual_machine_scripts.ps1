@@ -204,18 +204,15 @@ Assert-True ($aimDeltaText -match '\$toolSpecs\s*=\s*@\(' -and
     $aimDeltaText -match 'tools/aim_report\.ps1' -and
     $aimDeltaText -match 'tools/aim_control_diagnostics\.ps1' -and
     $aimDeltaText -match 'tools/aim_fixed_scene_analysis\.ps1' -and
-    $aimDeltaText -match '\$changedTools' -and
-    $aimDeltaText -match
-        '\$manifest\.git_commit\s*=\s*\$commit\.ToLowerInvariant\(\)' -and
-    $aimDeltaText -match '\$remoteToolStageName' -and
-    $aimDeltaText -match '\$moveStatements\.Add\(' -and
-    $aimDeltaText -match 'ConvertTo-PowerShellEncodedCommand\s+\$applyScript' -and
-    $aimDeltaText -match 'escapedManifestStage') `
-    "Aim 差量入口必须暂存完整报告工具闭包，并由辅机本地 PowerShell 最后发布 manifest。"
+    $aimDeltaText -match 'publish_worker_delta\.ps1' -and
+    $aimDeltaText -match '-IncludeAimTools:\$aimToolsNeedUpdate' -and
+    $aimDeltaText -match '-AimToolsOnly:\$ConfigOnly' -and
+    $aimDeltaText -match 'Copy-AimPrepareTransaction\s+\$destinationRoot\s+\$packageRoot') `
+    'Aim legacy CLI must route the fixed tool closure through the shared transaction and paired Prepare recovery.'
 Assert-True (([regex]::Matches(
         $aimDeltaText,
-        '\$records\s*=\s*@\(@\(\$(?:manifest|finalManifest)\.files\)\s*\|\s*Where-Object')).Count -eq 2) `
-    "Aim 差量入口的单项 manifest 查询必须保持显式数组，不能在严格模式下退化为标量。"
+        '\$records\s*=\s*@\(@\(\$finalManifest\.files\)\s*\|\s*Where-Object')).Count -eq 1) `
+    'Final Aim manifest queries must remain explicit arrays under StrictMode.'
 
 $aimDeltaFixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) `
     ("xen-aim-delta-eol-{0}" -f [guid]::NewGuid().ToString("N"))
@@ -241,6 +238,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $RepositoryRoot `
             "scripts/publish_aim_worker_delta.ps1") `
         -Destination $fixtureScripts
+    Copy-Item -LiteralPath (Join-Path $RepositoryRoot "scripts/path_safety.psm1") -Destination $fixtureScripts
     foreach ($name in $fixtureToolNames) {
         Copy-Item -LiteralPath (Join-Path $RepositoryRoot "scripts\$name") `
             -Destination $fixtureScripts

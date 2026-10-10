@@ -28,6 +28,7 @@
 )
 
 $ErrorActionPreference = "Stop"
+Import-Module (Join-Path $PSScriptRoot 'path_safety.psm1') -Force
 
 if ($null -eq ("XenDetectorBenchmarkAtomicFile" -as [type])) {
     Add-Type -TypeDefinition @'
@@ -93,6 +94,68 @@ function Publish-ExistingFileAtomically {
             $moveFileReplaceExisting -bor $moveFileWriteThrough)) {
         $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
         throw "无法原子发布文件，Win32 error=$errorCode：$Destination"
+    }
+}
+
+function Publish-BenchmarkReport {
+    param([string]$PendingCsv, [string]$CsvPath,
+        [System.Collections.IDictionary]$Manifest, [string]$JsonPath)
+
+    # 两个名称的发布用独占锁串行化；第二个替换失败时恢复旧报告。
+    foreach ($path in @($PendingCsv, $CsvPath, $JsonPath, "$CsvPath.publish.lock")) {
+        Assert-XenNoReparsePathChain $path 'benchmark report publication'
+    }
+    $lock = [IO.File]::Open("$CsvPath.publish.lock", [IO.FileMode]::OpenOrCreate,
+        [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    $suffix = [guid]::NewGuid().ToString('N')
+    $pendingJson = "$JsonPath.pending-$suffix"
+    $csvBackup = "$CsvPath.backup-$suffix"
+    $jsonBackup = "$JsonPath.backup-$suffix"
+    $hadCsv = Test-Path -LiteralPath $CsvPath -PathType Leaf
+    $hadJson = Test-Path -LiteralPath $JsonPath -PathType Leaf
+    $csvPublished = $false
+    $jsonPublished = $false
+    $restored = $true
+    try {
+        $Manifest.report.csv_sha256 = (Get-FileHash -LiteralPath $PendingCsv -Algorithm SHA256).Hash.ToLowerInvariant()
+        Publish-JsonAtomically -Value $Manifest -Path $pendingJson
+        $jsonHash = (Get-FileHash -LiteralPath $pendingJson -Algorithm SHA256).Hash
+        if ($hadCsv) { Copy-Item -LiteralPath $CsvPath -Destination $csvBackup }
+        if ($hadJson) { Copy-Item -LiteralPath $JsonPath -Destination $jsonBackup }
+        Publish-ExistingFileAtomically -Source $PendingCsv -Destination $CsvPath
+        $csvPublished = $true
+        Publish-ExistingFileAtomically -Source $pendingJson -Destination $JsonPath
+        $jsonPublished = $true
+    } catch {
+        $failure = $_
+        try {
+            if ($csvPublished) {
+                if ((Get-FileHash -LiteralPath $CsvPath -Algorithm SHA256).Hash -ine $Manifest.report.csv_sha256) {
+                    throw 'CSV changed after publication; refuse to overwrite concurrent changes.'
+                }
+                if ($hadCsv) { Publish-ExistingFileAtomically $csvBackup $CsvPath }
+                else { Remove-Item -LiteralPath $CsvPath -Force }
+            }
+            if ($jsonPublished) {
+                if ((Get-FileHash -LiteralPath $JsonPath -Algorithm SHA256).Hash -cne $jsonHash) {
+                    throw 'JSON changed after publication; refuse to overwrite concurrent changes.'
+                }
+                if ($hadJson) { Publish-ExistingFileAtomically $jsonBackup $JsonPath }
+                else { Remove-Item -LiteralPath $JsonPath -Force }
+            }
+        } catch {
+            $restored = $false
+            throw "Report rollback failed; retain recovery files $csvBackup and $jsonBackup. Original error: $failure; rollback: $_"
+        }
+        throw $failure
+    } finally {
+        if (Test-Path -LiteralPath $pendingJson) { Remove-Item -LiteralPath $pendingJson -Force }
+        if ($restored) {
+            foreach ($backup in @($csvBackup, $jsonBackup)) {
+                if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Force }
+            }
+        }
+        $lock.Dispose()
     }
 }
 
@@ -1333,9 +1396,8 @@ $manifest = [ordered]@{
     deployed_runtimes = $deployedRuntimes
 }
 
-    Publish-ExistingFileAtomically -Source $pendingReportPath `
-        -Destination $finalReportPath
-    Publish-JsonAtomically -Value $manifest -Path $manifestPath
+    Publish-BenchmarkReport -PendingCsv $pendingReportPath `
+        -CsvPath $finalReportPath -Manifest $manifest -JsonPath $manifestPath
     Write-Host "Detector 视频基准完成：$finalReportPath"
     Write-Host "Detector 基准环境清单：$manifestPath"
 } finally {

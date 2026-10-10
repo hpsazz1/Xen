@@ -147,6 +147,33 @@ $identity.git_dirty = $false
 Write-Utf8NoBom (Join-Path $build "xen-build-identity.json") `
     (($identity | ConvertTo-Json -Depth 8) + "`n")
 
+foreach ($artifact in Get-ChildItem -LiteralPath $release -Filter '*.exe') {
+    $stampPath = $artifact.FullName + '.identity.json'
+    $stamp = [ordered]@{ schema = 1; source_root = $repository; git_commit = $commit; git_dirty = $false;
+        runtime = 'nvidia'; configuration = 'Release'; artifact = $artifact.Name; size = $artifact.Length;
+        sha256 = (Get-FileHash -LiteralPath $artifact.FullName).Hash.ToLowerInvariant() }
+    $validStamp = $stamp | ConvertTo-Json
+    Write-Utf8NoBom $stampPath $validStamp
+}
+foreach ($artifact in Get-ChildItem -LiteralPath $release -Filter '*.exe') {
+    $stampPath = $artifact.FullName + '.identity.json'
+    $validStamp = Get-Content -LiteralPath $stampPath -Raw
+    $stamp = $validStamp | ConvertFrom-Json
+    try {
+        $stamp.git_commit = 'b' * 40
+        Write-Utf8NoBom $stampPath ($stamp | ConvertTo-Json)
+        $staleOutput = Join-Path $resolvedTestRoot ('stale-linked-' + $artifact.Name)
+        $rejected = $false
+        try {
+            & $PublishScript -BuildDirectory $build -RepositoryRoot $repository `
+                -SourceScriptRoot $scripts -GitExecutable $GitExecutable `
+                -PackageOutputRoot $staleOutput -SkipRemotePublish
+        } catch { $rejected = $_.Exception.Message -like '*Linked artifact identity*' }
+        Assert-True ($rejected -and -not (Test-Path -LiteralPath $staleOutput)) `
+            "F04 stale linked artifact must fail before package creation: $($artifact.Name)"
+    } finally { Write-Utf8NoBom $stampPath $validStamp }
+}
+
 $junctionDestination = Join-Path $resolvedTestRoot "junction-destination"
 $junctionOutside = Join-Path $resolvedTestRoot "junction-outside"
 $junctionOutput = Join-Path $resolvedTestRoot "junction-packages"
@@ -225,7 +252,7 @@ foreach ($pathCase in @("local-ancestor", "destination-root",
 
 # 第二个payload的共享锁让实际File.Copy失败，验证已取得的incoming被清理。
 $failedCopyRoot = Join-Path $resolvedTestRoot "failed-copy-packages"
-$lockedSource = [IO.File]::Open((Join-Path $release "XenCaptureEvidence.exe"),
+$lockedSource = [IO.File]::Open((Join-Path $release "xen-runtime-deployment.json"),
     [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
 try {
     $copyFailed = $false

@@ -24,6 +24,7 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot "path_safety.psm1") -Force
+Import-Module (Join-Path $PSScriptRoot 'build_artifact_identity.psm1') -Force
 
 $msvcRuntimeNames = @(
     "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
@@ -114,6 +115,11 @@ function Assert-BuildIdentity(
     foreach ($name in $runtimeToolNames) {
         $runtimeTools[$name] = Resolve-ExistingNonEmptyFile `
             (Join-Path $releaseDirectory $name) "必需运行时工具"
+    }
+    foreach ($artifact in @($worker, $launcher) + @($runtimeTools.Values)) {
+        $stamp = Assert-XenLinkedArtifactIdentity -Path $artifact -SourceRoot $repository `
+            -Runtime $ExpectedRuntime -Commit $ExpectedCommit
+        $artifactHashes[$artifact] = [string]$stamp.sha256
     }
     $deployment = Join-Path $releaseDirectory "xen-runtime-deployment.json"
     foreach ($required in @($worker, $launcher, $deployment)) {
@@ -349,6 +355,10 @@ function Copy-VerifiedFile(
     $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Source).Hash
     $destinationHash =
         (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash
+    if ([IO.Path]::GetExtension($Source) -ieq '.exe' -and
+        (-not $artifactHashes.ContainsKey($Source) -or $sourceHash -ine $artifactHashes[$Source])) {
+        throw "Linked artifact changed during publication: $RelativePath"
+    }
     if ($sourceHash -ne $destinationHash) {
         throw "组包复制后哈希不一致：$RelativePath"
     }
@@ -413,6 +423,7 @@ $tools = @($ToolFiles | ForEach-Object {
     }
     $tool
 })
+$artifactHashes = @{}
 $builds = @(
     Assert-BuildIdentity (Resolve-ExistingPath $NvidiaBuildDirectory "NVIDIA 构建目录") "nvidia" $commit
     Assert-BuildIdentity (Resolve-ExistingPath $DirectMlBuildDirectory "DirectML 构建目录") "directml" $commit
@@ -423,6 +434,9 @@ $sourceTools = @{}
 foreach ($name in $sourceToolNames) {
     $sourceTools[$name] = Resolve-ExistingNonEmptyFile `
         (Join-Path $builds[0].ReleaseDirectory $name) "必需源工具"
+    $stamp = Assert-XenLinkedArtifactIdentity -Path $sourceTools[$name] -SourceRoot $repository `
+        -Runtime 'nvidia' -Commit $commit
+    $artifactHashes[$sourceTools[$name]] = [string]$stamp.sha256
 }
 $payloadFiles = @{}
 foreach ($entry in $repositoryPayload.GetEnumerator()) {

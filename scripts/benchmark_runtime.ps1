@@ -366,6 +366,12 @@ function Assert-RuntimeDllOrigins {
     $cudaRoot = Get-CMakeCacheValue $CMakeCachePath "XEN_CUDA_ROOT"
     $directMlRoot = Get-CMakeCacheValue $CMakeCachePath "XEN_DIRECTML_ROOT"
     $ndiRoot = Get-CMakeCacheValue $CMakeCachePath "XEN_NDI_SDK_ROOT"
+    $msvcRedistRoot = Get-CMakeCacheValue $CMakeCachePath "XEN_MSVC_REDIST_ROOT"
+    if ($msvcRedistRoot -and
+        $msvcRedistRoot.Replace('\', '/').TrimEnd('/') -notmatch
+            '(?i)/vc/redist/msvc/[^/]+/x64/microsoft\.vc14[0-9]\.crt$') {
+        throw 'MSVC runtime origin must be the configured official x64 CRT redist directory.'
+    }
 
     if ([string]::IsNullOrWhiteSpace($ortRoot) -or
         [string]::IsNullOrWhiteSpace($openCvDir)) {
@@ -391,7 +397,7 @@ function Assert-RuntimeDllOrigins {
         (Join-Path $openCvDir "..\..\.."))
     $candidateRoots = @(
         $ortRoot, $openCvRoot, $tensorRtRoot, $cudnnRoot, $cudaRoot,
-        $directMlRoot, $ndiRoot
+        $directMlRoot, $ndiRoot, $msvcRedistRoot
     )
     $resolvedRoots = @($candidateRoots |
         Where-Object {

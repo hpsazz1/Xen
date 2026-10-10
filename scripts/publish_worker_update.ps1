@@ -19,12 +19,26 @@
     [switch]$IncludeSoakAcceptanceTools,
     [switch]$IncludeModelDataReview,
     [switch]$ModelDataReviewOnly,
+    [switch]$IncludeAimTools,
+    [switch]$AimToolsOnly,
     [switch]$ChangesOnly
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$toolsOnly = $ModelDataReviewOnly -or $AimToolsOnly
+if ($AimToolsOnly) {
+    if (-not $ChangesOnly -or $ModelDataReviewOnly -or $IncludeLauncher -or
+        $IncludeRecoilTools -or $IncludeCaptureTools -or $ConfigPath -or $WorkspaceSettingsPath -or
+        $SourceContextExecutable -or $IncludeModelDataReview -or $IncludeRecoilMigrationScripts -or
+        $IncludeSourceSessionScript -or $IncludeHudAcceptanceScript -or $IncludeSoakAcceptanceTools -or
+        $PackageNotesPath -or $ManualAcceptancePath) {
+        throw 'Aim tools-only publication accepts only the fixed offline Aim tool closure.'
+    }
+    $IncludeAimTools = $true
+}
 if ($ModelDataReviewOnly) {
+    if ($IncludeAimTools) { throw 'Model review-only and Aim tool publication cannot be combined.' }
     if (-not $ChangesOnly -or $IncludeLauncher -or $IncludeRecoilTools -or $IncludeCaptureTools -or $IncludeRecoilMigrationScripts -or
         $IncludeSourceSessionScript -or $IncludeHudAcceptanceScript -or $IncludeSoakAcceptanceTools -or
         $SourceContextExecutable -or $ConfigPath -or $WorkspaceSettingsPath -or $PackageNotesPath -or $ManualAcceptancePath) {
@@ -38,6 +52,7 @@ if ($IncludeSoakAcceptanceTools) {
     $IncludeSourceSessionScript = $true
 }
 Import-Module (Join-Path $PSScriptRoot 'path_safety.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'build_artifact_identity.psm1') -Force
 
 function Read-UpdateJson([string]$Path) {
     Assert-XenNoReparsePathChain $Path 'JSON 输入' -RequireExistingLeaf
@@ -49,6 +64,11 @@ function Resolve-UpdateFile([string]$Path) {
     $item = Get-Item -LiteralPath $Path -Force
     if ($item.PSIsContainer -or $item.Length -le 0) { throw '发布输入必须是非空普通文件。' }
     return $item.FullName
+}
+
+function Assert-UpdateArtifactIdentity([string]$Path) {
+    $stamp = Assert-XenLinkedArtifactIdentity -Path $Path -SourceRoot $sourceRoot -Runtime $Runtime -Commit $commit
+    $linkedArtifactHashes[$Path] = [string]$stamp.sha256
 }
 
 function Resolve-UpdatePayload([string]$Root, [string]$Relative, [bool]$CheckPathChain = $true) {
@@ -74,8 +94,9 @@ function Resolve-UpdatePayload([string]$Root, [string]$Relative, [bool]$CheckPat
 
 $baseRoot = (Resolve-Path -LiteralPath $BasePackagePath).ProviderPath.TrimEnd('\')
 $buildRoot = ''
-if (-not $ModelDataReviewOnly) { $buildRoot = (Resolve-Path -LiteralPath $BuildDirectory).ProviderPath.TrimEnd('\') }
+if (-not $toolsOnly) { $buildRoot = (Resolve-Path -LiteralPath $BuildDirectory).ProviderPath.TrimEnd('\') }
 $sourceRoot = (Resolve-Path -LiteralPath $RepositoryRoot).ProviderPath.TrimEnd('\')
+$linkedArtifactHashes = @{}
 foreach ($root in @($baseRoot, $sourceRoot) + @($buildRoot | Where-Object { $_ })) {
     Assert-XenNoReparsePathChain $root '输入目录' -RequireExistingLeaf
     if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw '输入根必须为目录。' }
@@ -95,7 +116,7 @@ $commit = (& $GitExecutable -C $sourceRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-fA-F]{40}$') { throw '无法核对源码提交。' }
 $dirty = @(& $GitExecutable -C $sourceRoot status --porcelain)
 if ($LASTEXITCODE -ne 0 -or $dirty.Count -ne 0) { throw '发布构建源码必须干净。' }
-if (-not $ModelDataReviewOnly) {
+if (-not $toolsOnly) {
 $identityPath = Join-Path $buildRoot 'xen-build-identity.json'
 $identity = Read-UpdateJson $identityPath
 $identityHash = (Get-FileHash -LiteralPath $identityPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -106,6 +127,7 @@ if ($identity.schema -ne 1 -or $identity.git_dirty -isnot [bool] -or
     throw 'Worker 构建身份与干净源码、提交或运行时不一致。'
 }
 $workerPath = Resolve-UpdateFile (Join-Path $buildRoot 'Release\Xen.exe')
+Assert-UpdateArtifactIdentity $workerPath
 $workerHash = (Get-FileHash -LiteralPath $workerPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $workerLength = (Get-Item -LiteralPath $workerPath).Length
 }
@@ -166,7 +188,7 @@ foreach ($route in $manifest.runtimes) {
 }
 $workerRelative = "runtimes/$Runtime/Xen.exe"
 $overrides = @{}
-if (-not $ModelDataReviewOnly) { $overrides[$workerRelative] = $workerPath }
+if (-not $toolsOnly) { $overrides[$workerRelative] = $workerPath }
 $sourceScriptRelative = 'tools/source/start_source_context_session.ps1'
 $sourceScriptHash = ''
 if ($IncludeSourceSessionScript) {
@@ -228,6 +250,18 @@ if ($IncludeRecoilMigrationScripts) {
         }
     }
 }
+if ($IncludeAimTools) {
+    foreach ($tool in @('invoke_aim_manual_acceptance.ps1', 'aim_report.ps1',
+        'aim_control_diagnostics.ps1', 'aim_fixed_scene_analysis.ps1')) {
+        $relative = "tools/$tool"
+        $overrides[$relative] = Resolve-UpdateFile (Join-Path $sourceRoot "scripts/$tool")
+        if (-not $records.ContainsKey($relative)) {
+            $record = [pscustomobject][ordered]@{ path = $relative; runtime = ''; size = 0; sha256 = ''; source = '' }
+            $manifest.files = @($manifest.files) + @($record)
+            $records[$relative] = $record
+        }
+    }
+}
 if ($IncludeRecoilTools) {
     foreach ($tool in @('xen_recoil_calibration.exe', 'xen_recoil_tuner.exe')) {
         $relative = "runtimes/$Runtime/$tool"
@@ -270,6 +304,10 @@ foreach ($relative in $overrides.Keys) {
     if (-not $records.ContainsKey($relative)) { throw "替换文件不在基包清单内：$relative" }
 }
 
+foreach ($source in $overrides.Values) {
+    if ([IO.Path]::GetExtension($source) -ieq '.exe') { Assert-UpdateArtifactIdentity $source }
+}
+
 $incomingName = ".incoming-$outputName-$([guid]::NewGuid().ToString('N'))"
 $incoming = Resolve-XenDirectChildPath $outputParent $incomingName '本轮暂存目录'
 $ownedIncoming = $false
@@ -289,6 +327,10 @@ try {
         $length = (Get-Item -LiteralPath $destination).Length
         if ($overrides.ContainsKey($relative)) {
             $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ([IO.Path]::GetExtension($source) -ieq '.exe' -and
+                (-not $linkedArtifactHashes.ContainsKey($source) -or $sourceHash -cne $linkedArtifactHashes[$source])) {
+                throw "Linked artifact changed during publication: $relative"
+            }
             if ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant() -cne $sourceHash) {
                 throw "替换载荷回读不一致：$relative"
             }
@@ -324,10 +366,10 @@ try {
     if ($LASTEXITCODE -ne 0 -or $finalCommit -cne $commit) { throw '源码提交在发布期间变化。' }
     $finalDirty = @(& $GitExecutable -C $sourceRoot status --porcelain)
     if ($LASTEXITCODE -ne 0 -or $finalDirty.Count -ne 0 -or
-        (-not $ModelDataReviewOnly -and (Get-FileHash -LiteralPath $identityPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $identityHash)) {
+        (-not $toolsOnly -and (Get-FileHash -LiteralPath $identityPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $identityHash)) {
         throw '源码或构建身份在发布期间变化。'
     }
-    if (-not $ModelDataReviewOnly) {
+    if (-not $toolsOnly) {
     $baseIdentity = [ordered]@{
         path = $baseRoot; git_commit = [string]$manifest.git_commit; manifest_sha256 = $baseManifestHash
     }
@@ -404,6 +446,7 @@ try {
         # 保留包与 Worker 的原始构建身份，仅资源来源记录当前提交。
         foreach ($relative in $overrides.Keys) { $records[$relative].source = "$($overrides[$relative])@$commit" }
     }
+    if ($AimToolsOnly) { $manifest.git_commit = $commit.ToLowerInvariant() }
     $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $incoming 'manifest.json') -Encoding UTF8
     $null = Read-UpdateJson (Join-Path $incoming 'manifest.json')
     $null = Resolve-XenDirectChildPath $outputParent $incomingName '改名前暂存目录'

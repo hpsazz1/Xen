@@ -614,6 +614,18 @@ function(xen_deploy_runtime_dlls target)
     endif()
 endfunction()
 
+function(xen_record_artifact_identity runtime_target)
+    add_custom_command(TARGET ${runtime_target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND}
+            "-DXEN_ARTIFACT=$<TARGET_FILE:${runtime_target}>"
+            "-DXEN_IDENTITY=${CMAKE_BINARY_DIR}/xen-build-identity.json"
+            "-DXEN_GIT=${GIT_EXECUTABLE}"
+            "-DXEN_CONFIGURATION=$<CONFIG>"
+            -P "${PROJECT_SOURCE_DIR}/scripts/record_artifact_identity.cmake"
+        COMMENT "Record linked artifact source and SHA-256 identity"
+        VERBATIM)
+endfunction()
+
 function(xen_finalize_runtime_deployment)
     get_property(runtime_targets GLOBAL PROPERTY XEN_RUNTIME_DEPLOY_TARGETS)
     get_property(runtime_files GLOBAL PROPERTY XEN_RUNTIME_DEPLOY_FILES)
@@ -687,6 +699,7 @@ function(xen_finalize_runtime_deployment)
         VERBATIM)
     foreach(runtime_target IN LISTS runtime_targets)
         add_dependencies(${runtime_target} xen_runtime_deployment)
+        xen_record_artifact_identity(${runtime_target})
     endforeach()
 endfunction()
 
@@ -1915,6 +1928,12 @@ if(BUILD_TESTING)
     add_test(NAME evidence_publication_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
         "${PROJECT_SOURCE_DIR}/tests/evidence_publication_tests.py")
+    add_test(NAME publication_script_tests
+        COMMAND "${XEN_POWERSHELL7_EXECUTABLE}" -NoProfile -ExecutionPolicy Bypass
+        -File "${PROJECT_SOURCE_DIR}/tests/publication_script_tests.ps1")
+    add_test(NAME reference_compare_package_tests
+        COMMAND "${XEN_POWERSHELL7_EXECUTABLE}" -NoProfile -ExecutionPolicy Bypass
+        -File "${PROJECT_SOURCE_DIR}/tests/reference_compare_package_tests.ps1")
     add_test(NAME annotation_roi_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
         "${PROJECT_SOURCE_DIR}/tests/annotation_roi_tests.py")
@@ -2518,4 +2537,6 @@ endif()
 
 if(WIN32)
     xen_finalize_runtime_deployment()
+    xen_record_artifact_identity(xen_mouse_effect_probe_sequence)
+    xen_record_artifact_identity(xen_mouse_effect_probe_composite_seal)
 endif()

@@ -1,8 +1,9 @@
-param(
+﻿param(
     [Parameter(Mandatory=$true)][string]$BuildDirectory,
     [Parameter(Mandatory=$true)][string]$OutputDirectory
 )
 $ErrorActionPreference = 'Stop'
+Import-Module (Join-Path $PSScriptRoot 'build_artifact_identity.psm1') -Force
 $repo = Split-Path -Parent $PSScriptRoot
 $buildRoot = (Resolve-Path -LiteralPath $BuildDirectory).Path
 $outputRoot = [IO.Path]::GetFullPath($OutputDirectory)
@@ -13,12 +14,20 @@ $commit = (& git -C $repo rev-parse HEAD).Trim()
 $identity = Get-Content -LiteralPath (Join-Path $buildRoot 'xen-build-identity.json') -Raw | ConvertFrom-Json
 if ($identity.git_commit -ne $commit -or $identity.git_dirty) { throw '构建身份未绑定当前干净提交，请重新配置并构建。' }
 $binaryRoot = Join-Path $buildRoot 'Release'
+$linkedArtifact = Assert-XenLinkedArtifactIdentity -Path (Join-Path $binaryRoot 'XenReferenceCompare.exe') `
+    -SourceRoot $repo -Runtime ([string]$identity.runtime) -Commit $commit
 $names = @('XenReferenceCompare.exe','msvcp140.dll','vcruntime140.dll','vcruntime140_1.dll')
 foreach ($name in $names) {
     if (!(Test-Path -LiteralPath (Join-Path $binaryRoot $name) -PathType Leaf)) { throw "缺少独立工具运行文件：$name" }
 }
 New-Item -ItemType Directory -Path $outputRoot | Out-Null
-foreach ($name in $names) { Copy-Item -LiteralPath (Join-Path $binaryRoot $name) -Destination (Join-Path $outputRoot $name) }
+foreach ($name in $names) {
+    Copy-Item -LiteralPath (Join-Path $binaryRoot $name) -Destination (Join-Path $outputRoot $name)
+    if ($name -ceq 'XenReferenceCompare.exe' -and
+        (Get-FileHash -LiteralPath (Join-Path $outputRoot $name) -Algorithm SHA256).Hash -ine $linkedArtifact.sha256) {
+        throw 'Linked artifact changed during reference package creation.'
+    }
+}
 foreach ($name in @('example.json','GUIDE.md','LICENSE.cs-match-hud.txt','UPSTREAM.json')) {
     Copy-Item -LiteralPath (Join-Path $repo "assets/reference_assessment/$name") -Destination (Join-Path $outputRoot $name)
 }

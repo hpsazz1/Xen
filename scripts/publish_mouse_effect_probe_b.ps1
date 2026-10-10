@@ -15,6 +15,7 @@
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot "path_safety.psm1") -Force
+Import-Module (Join-Path $PSScriptRoot 'build_artifact_identity.psm1') -Force
 
 function Resolve-RequiredDirectory(
         [string]$Path,
@@ -136,6 +137,10 @@ function Copy-Payload(
     [IO.File]::Copy($Source, $destination, $false)
     $sourceHash = Get-FileSha256 $Source
     $destinationHash = Get-FileSha256 $destination
+    if ([IO.Path]::GetExtension($Source) -ieq '.exe' -and
+        (-not $linkedArtifactHashes.ContainsKey($Source) -or $sourceHash -cne $linkedArtifactHashes[$Source])) {
+        throw "Linked artifact changed during publication: $Name"
+    }
     $file = Get-Item -LiteralPath $destination
     if ($sourceHash -ne $destinationHash -or $file.Length -le 0) {
         throw "Physical B payload 复制后哈希或长度无效：$Name"
@@ -277,12 +282,19 @@ $buildNames = @(
     "Processing.NDI.Lib.x64.dll",
     "Processing.NDI.Lib.Licenses.txt")
 $buildFiles = @()
+$linkedArtifactHashes = @{}
 foreach ($name in $buildNames) {
-    $buildFiles += [pscustomobject]@{
+    $record = [pscustomobject]@{
         name = $name
         path = Resolve-RequiredFile (Join-Path $releaseRoot $name) `
             "Physical B Release payload"
     }
+    if ([IO.Path]::GetExtension($record.path) -ieq '.exe') {
+        $stamp = Assert-XenLinkedArtifactIdentity -Path $record.path -SourceRoot $repository `
+            -Runtime 'nvidia' -Commit $commit
+        $linkedArtifactHashes[$record.path] = [string]$stamp.sha256
+    }
+    $buildFiles += $record
 }
 $buildFiles += [pscustomobject]@{
     name = "xen-build-identity.json"

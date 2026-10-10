@@ -17,6 +17,8 @@
     [switch]$IncludeSoakAcceptanceTools,
     [switch]$IncludeModelDataReview,
     [switch]$ModelDataReviewOnly,
+    [switch]$IncludeAimTools,
+    [switch]$AimToolsOnly,
     [string]$SourceContextExecutable = '',
     [string]$SshIdentityFile = (Join-Path $env:USERPROFILE '.ssh\xen_foxos_ed25519'),
     [string]$KnownHostsFile = (Join-Path $env:USERPROFILE '.ssh\known_hosts'),
@@ -73,13 +75,15 @@ function Write-PublishPacket([string]$Stage, [string]$Target, [string[]]$Relativ
     foreach ($relative in @('config.ini', 'cache/model-workspace/settings.json')) {
         $protected += [ordered]@{ path = $relative; sha256 = Get-PublishHash (Join-Path $Target $relative) }
     }
-    [ordered]@{ schema = 1; runtime = $Runtime; model_data_review_only = [bool]$ModelDataReviewOnly; files = $files; protected_files = $protected } |
+    [ordered]@{ schema = 1; runtime = $Runtime; model_data_review_only = [bool]$ModelDataReviewOnly;
+        aim_tools_only = [bool]$AimToolsOnly; files = $files; protected_files = $protected } |
         ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $Stage 'delta.json') -Encoding UTF8
 }
-function Invoke-RemoteApply([bool]$CheckOnly) {
+function Invoke-RemoteApply([bool]$CheckOnly, [bool]$Rollback = $false) {
     $helper = Join-Path $RemotePackageRoot "$stageName\apply_worker_delta.ps1"
     $command = "& '$($helper.Replace("'", "''"))' -PackageRoot '$($RemotePackageRoot.Replace("'", "''"))' -StageName '$stageName'"
     if ($CheckOnly) { $command += ' -CheckOnly' }
+    if ($Rollback) { $command += ' -Rollback' }
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
     & ssh -i $SshIdentityFile -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes `
         -o "UserKnownHostsFile=$KnownHostsFile" "$SshUser@$SshHost" powershell.exe -NoProfile -NonInteractive -EncodedCommand $encoded
@@ -96,13 +100,19 @@ try {
         -IncludeSourceSessionScript:$IncludeSourceSessionScript `
         -IncludeHudAcceptanceScript:$IncludeHudAcceptanceScript `
         -IncludeSoakAcceptanceTools:$IncludeSoakAcceptanceTools `
-        -IncludeModelDataReview:$IncludeModelDataReview -ModelDataReviewOnly:$ModelDataReviewOnly
+        -IncludeModelDataReview:$IncludeModelDataReview -ModelDataReviewOnly:$ModelDataReviewOnly `
+        -IncludeAimTools:$IncludeAimTools -AimToolsOnly:$AimToolsOnly
     $ownedStages.Add([pscustomobject]@{ parent = (Split-Path -Parent $localRoot); name = $stageName })
     $null = Resolve-XenDirectChildPath $localRoot $stageName '移入主机包前暂存'
     [IO.Directory]::Move($generated, $localStage)
     $ownedStages.Add([pscustomobject]@{ parent = $localRoot; name = $stageName })
     $relativeFiles = @("runtimes/$Runtime/Xen.exe", 'tools/acceptance/WORKER-UPDATE.json', 'manifest.json')
     if ($ModelDataReviewOnly) { $relativeFiles = @('manifest.json') }
+    if ($AimToolsOnly) { $relativeFiles = @('manifest.json'); $IncludeAimTools = $true }
+    if ($IncludeAimTools) {
+        $relativeFiles += @('tools/invoke_aim_manual_acceptance.ps1', 'tools/aim_report.ps1',
+            'tools/aim_control_diagnostics.ps1', 'tools/aim_fixed_scene_analysis.ps1')
+    }
     if ($IncludeLauncher) { $relativeFiles += 'XenLauncher.exe' }
     if ($IncludeRecoilTools) {
         $relativeFiles += @("runtimes/$Runtime/xen_recoil_calibration.exe", "runtimes/$Runtime/xen_recoil_tuner.exe")
@@ -171,6 +181,17 @@ try {
     $completed = $true
     if ($ModelDataReviewOnly) { Write-Host '主辅机审核资源差量更新完成；仅两项资源及 manifest，未读取或传输 Worker、模型、DLL。' }
     else { Write-Host '主辅机 Worker 差量更新完成；未复制未变化 Worker、模型、DLL，未覆盖用户配置。' }
+} catch {
+    $failure = $_
+    if ($applyStarted) {
+        try {
+            Invoke-RemoteApply $false $true
+        } catch { Write-Warning "Remote delta rollback could not be verified; retain $remoteStage. $_" }
+        try {
+            & (Join-Path $localStage 'apply_worker_delta.ps1') -PackageRoot $localRoot -StageName $stageName -Rollback
+        } catch { Write-Warning "Local delta rollback could not be verified; retain $localStage. $_" }
+    }
+    throw $failure
 } finally {
     Write-Progress -Activity 'SMB 传输变化 Worker 与说明' -Completed
     foreach ($owned in $ownedStages) {

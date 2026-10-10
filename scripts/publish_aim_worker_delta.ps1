@@ -4,6 +4,7 @@
     [string]$DestinationRoot = "",
     [string]$RemotePackageRoot = "",
     [string]$SshIdentityFile = (Join-Path $env:USERPROFILE ".ssh\xen_foxos_ed25519"),
+    [string]$KnownHostsFile = (Join-Path $env:USERPROFILE ".ssh\known_hosts"),
     [string]$SshUser = "XenDeploy",
     [string]$SshHost = "192.168.3.20",
     [switch]$ConfigOnly,
@@ -41,6 +42,7 @@
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot 'path_safety.psm1') -Force
 
 # 发布目标由本轮调用方绑定，不能从已清理的历史包名或目录顺序推断。
 foreach ($requiredRoot in @("PackageRoot", "DestinationRoot", "RemotePackageRoot")) {
@@ -124,6 +126,66 @@ function Copy-Atomic([string]$Source, [string]$Target) {
         if (Test-Path -LiteralPath $pending -PathType Leaf) {
             Remove-Item -LiteralPath $pending -Force
         }
+    }
+}
+
+function Copy-AimPrepareTransaction([string]$RemoteRoot, [string]$LocalRoot) {
+    Assert-XenNoReparsePathChain (Join-Path $LocalRoot '.worker-delta.lock') 'Prepare lock'
+    $lock = [IO.File]::Open((Join-Path $LocalRoot '.worker-delta.lock'), [IO.FileMode]::OpenOrCreate,
+        [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    $stage = Join-Path $LocalRoot ('.prepare-copy-' + [guid]::NewGuid().ToString('N'))
+    $applied = [Collections.Generic.List[string]]::new()
+    $hashes = @{}
+    $oldHashes = @{}
+    $restored = $true
+    try {
+        New-Item -ItemType Directory -Path $stage | Out-Null
+        foreach ($name in @('config.ini', 'manifest.json')) {
+            $source = Join-Path $RemoteRoot $name
+            Assert-XenNoReparsePathChain $source 'Prepare remote source' -RequireExistingLeaf
+            Assert-XenNoReparsePathChain (Join-Path $LocalRoot $name) 'Prepare local target' -RequireExistingLeaf
+            $hash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+            $hashes[$name] = $hash
+            Copy-Item -LiteralPath $source -Destination (Join-Path $stage $name)
+            if ((Get-FileHash -LiteralPath (Join-Path $stage $name) -Algorithm SHA256).Hash -cne $hash -or
+                (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -cne $hash) {
+                throw 'Prepare source changed during snapshot.'
+            }
+            Copy-Item -LiteralPath (Join-Path $LocalRoot $name) -Destination (Join-Path $stage "$name.backup")
+            $oldHashes[$name] = (Get-FileHash -LiteralPath (Join-Path $stage "$name.backup") -Algorithm SHA256).Hash
+        }
+        $manifest = Read-Json (Join-Path $stage 'manifest.json') 'Prepare snapshot manifest'
+        $configRecords = @($manifest.files | Where-Object { $_.path -ceq 'config.ini' })
+        if ($configRecords.Count -ne 1 -or [string]$configRecords[0].sha256 -ine $hashes['config.ini']) {
+            throw 'Prepare snapshot config SHA does not match frozen manifest.'
+        }
+        foreach ($name in @('config.ini', 'manifest.json')) {
+            if ((Get-FileHash -LiteralPath (Join-Path $RemoteRoot $name) -Algorithm SHA256).Hash -cne $hashes[$name]) {
+                throw 'Prepare source changed before paired publication.'
+            }
+        }
+        foreach ($name in @('config.ini', 'manifest.json')) {
+            if ((Get-FileHash -LiteralPath (Join-Path $LocalRoot $name) -Algorithm SHA256).Hash -cne $oldHashes[$name]) {
+                throw 'Prepare local target changed before paired publication.'
+            }
+            Replace-FileAtomically (Join-Path $stage $name) (Join-Path $LocalRoot $name)
+            $applied.Add($name)
+        }
+    } catch {
+        $failure = $_
+        try {
+            for ($index = $applied.Count - 1; $index -ge 0; $index--) {
+                $name = $applied[$index]
+                if ((Get-FileHash -LiteralPath (Join-Path $LocalRoot $name) -Algorithm SHA256).Hash -cne $hashes[$name]) {
+                    throw 'Prepare target changed after publication; refuse to overwrite concurrent changes.'
+                }
+                Replace-FileAtomically (Join-Path $stage "$name.backup") (Join-Path $LocalRoot $name)
+            }
+        } catch { $restored = $false; throw "Prepare rollback not verified; retain $stage. Original error: $failure; rollback: $_" }
+        throw $failure
+    } finally {
+        if ($restored -and (Test-Path -LiteralPath $stage)) { Remove-Item -LiteralPath $stage -Recurse -Force }
+        $lock.Dispose()
     }
 }
 
@@ -211,280 +273,33 @@ if ($packageWorkerHashBefore -ne $expectedWorkerHash -or
     throw "主辅机 NVIDIA Worker 与发布 manifest 不一致。"
 }
 
-if (-not $ConfigOnly) {
-    $buildRoot = (Resolve-Path -LiteralPath $BuildDirectory).Path
-    $worker = Join-Path $buildRoot "Release\Xen.exe"
-    if (-not (Test-Path -LiteralPath $worker -PathType Leaf)) {
-        throw "NVIDIA Worker 不存在：$worker"
-    }
-    $identity = Read-Json (Join-Path $buildRoot "xen-build-identity.json") "构建身份"
-    if ([string]$identity.runtime -ne "nvidia" -or
-        [string]$identity.git_commit -ne $commit -or
-        [bool]$identity.git_dirty) {
-        throw "NVIDIA 构建身份与当前提交不一致。"
-    }
-    $hash = (Get-FileHash -LiteralPath $worker `
-        -Algorithm SHA256).Hash.ToLowerInvariant()
-    $length = (Get-Item -LiteralPath $worker).Length
-    $manifest.git_commit = $commit.ToLowerInvariant()
-    $record[0].size = [long]$length
-    $record[0].sha256 = $hash
-    $record[0].source = "$worker@$($commit.Substring(0, 7))"
-
-    $manifestPending = Join-Path $packageRoot `
-        ".manifest.incoming-$([guid]::NewGuid().ToString('N'))"
-    $remoteStageName = ".aim-worker.incoming-$([guid]::NewGuid().ToString('N'))"
-    $destinationPrefix =
-        [System.IO.Path]::GetFullPath($destinationRoot).TrimEnd('\') + '\'
-    $remoteStage = [System.IO.Path]::GetFullPath(
-        (Join-Path $destinationRoot $remoteStageName))
-    if (-not $remoteStage.StartsWith(
-            $destinationPrefix,
-            [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "辅机 Worker 暂存目录越出固定发布根：$remoteStage"
-    }
-    try {
-        $manifest | ConvertTo-Json -Depth 12 |
-            Set-Content -LiteralPath $manifestPending -Encoding UTF8
-        Copy-Atomic $worker $packageWorker
-        Replace-FileAtomically $manifestPending $manifestPath
-
-        New-Item -ItemType Directory -Path `
-            (Join-Path $remoteStage "runtimes\nvidia") -Force | Out-Null
-        Copy-Item -LiteralPath $worker -Destination `
-            (Join-Path $remoteStage "runtimes\nvidia\Xen.exe")
-        Copy-Item -LiteralPath $manifestPath -Destination `
-            (Join-Path $remoteStage "manifest.json")
-        $remoteHash = (Get-FileHash -LiteralPath `
-            (Join-Path $remoteStage "runtimes\nvidia\Xen.exe") `
-            -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($remoteHash -ne $hash) {
-            throw "辅机暂存 Worker SHA-256 校验失败。"
-        }
-        if (-not (Test-Path -LiteralPath $SshIdentityFile -PathType Leaf)) {
-            throw "SSH 身份文件不存在：$SshIdentityFile"
-        }
-        $remotePackagePrefix =
-            [System.IO.Path]::GetFullPath($RemotePackageRoot).TrimEnd('\') + '\'
-        $remoteWorkerStageLocal = [System.IO.Path]::GetFullPath(
-            (Join-Path $RemotePackageRoot `
-                "$remoteStageName\runtimes\nvidia\Xen.exe"))
-        $remoteWorkerTarget = [System.IO.Path]::GetFullPath(
-            (Join-Path $RemotePackageRoot "runtimes\nvidia\Xen.exe"))
-        $remoteManifestStageLocal = [System.IO.Path]::GetFullPath(
-            (Join-Path $RemotePackageRoot "$remoteStageName\manifest.json"))
-        $remoteManifestTarget = [System.IO.Path]::GetFullPath(
-            (Join-Path $RemotePackageRoot "manifest.json"))
-        foreach ($path in @(
-                $remoteWorkerStageLocal, $remoteWorkerTarget,
-                $remoteManifestStageLocal, $remoteManifestTarget)) {
-            if (-not $path.StartsWith(
-                    $remotePackagePrefix,
-                    [System.StringComparison]::OrdinalIgnoreCase)) {
-                throw "辅机原子替换路径越出固定发布根：$path"
-            }
-        }
-        $escapedWorkerStage = $remoteWorkerStageLocal.Replace("'", "''")
-        $escapedWorkerTarget = $remoteWorkerTarget.Replace("'", "''")
-        $escapedManifestStage = $remoteManifestStageLocal.Replace("'", "''")
-        $escapedManifestTarget = $remoteManifestTarget.Replace("'", "''")
-        $applyScript = '& { $ErrorActionPreference = ''Stop''; ' +
-            "Move-Item -LiteralPath '$escapedWorkerStage' " +
-            "-Destination '$escapedWorkerTarget' -Force; " +
-            "Move-Item -LiteralPath '$escapedManifestStage' " +
-            "-Destination '$escapedManifestTarget' -Force }"
-        $encodedApplyCommand = ConvertTo-PowerShellEncodedCommand $applyScript
-        & ssh -i $SshIdentityFile -o IdentitiesOnly=yes -o BatchMode=yes `
-            "$SshUser@$SshHost" powershell.exe -NoProfile -NonInteractive `
-            -EncodedCommand $encodedApplyCommand
-        if ($LASTEXITCODE -ne 0) {
-            throw "辅机本地原子替换失败，退出码：$LASTEXITCODE"
-        }
-    } finally {
-        if (Test-Path -LiteralPath $manifestPending -PathType Leaf) {
-            Remove-Item -LiteralPath $manifestPending -Force
-        }
-        if (Test-Path -LiteralPath $remoteStage) {
-            Remove-Item -LiteralPath $remoteStage -Recurse -Force
-        }
-    }
+# 兼容旧 CLI：Worker、四项 Aim 工具统一复用有锁、回滚及未知回执恢复的发布事务。
+if (-not (Test-Path -LiteralPath $SshIdentityFile -PathType Leaf)) {
+    throw "SSH 身份文件不存在：$SshIdentityFile"
 }
-
-# 人工入口、Aim 契约和控制诊断是同一个正式报告闭包。任一脚本变化时只传输变化文件，
-# 但 manifest 最后发布；中途失败会让旧清单与新文件哈希不一致并 fail-closed，不能误启任务。
-$changedTools = [System.Collections.Generic.List[object]]::new()
-$toolManifestChanged = $false
+$aimToolsNeedUpdate = $false
 foreach ($spec in $toolSpecs) {
-    if (-not (Test-Path -LiteralPath $spec.repository -PathType Leaf)) {
-        throw "仓库 Aim 报告工具不存在：$($spec.repository)"
-    }
-    $relativeWindows = ([string]$spec.relative).Replace('/', '\')
-    $packagePath = Join-Path $packageRoot $relativeWindows
-    $remotePath = Join-Path $destinationRoot $relativeWindows
-    $records = @(@($manifest.files) | Where-Object {
-        [string]$_.path -eq [string]$spec.relative
-    })
-    if ($records.Count -gt 1) {
-        throw "manifest 中 Aim 报告工具记录重复：$($spec.relative)"
-    }
-    $repositoryItem = Get-Item -LiteralPath $spec.repository
-    $repositoryHash = (Get-FileHash -LiteralPath $spec.repository `
-        -Algorithm SHA256).Hash
-    $source = "$($spec.repository)@$($commit.Substring(0, 7))"
-    $packageItem = if (Test-Path -LiteralPath $packagePath -PathType Leaf) {
-        Get-Item -LiteralPath $packagePath
-    } else { $null }
-    $remoteItem = if (Test-Path -LiteralPath $remotePath -PathType Leaf) {
-        Get-Item -LiteralPath $remotePath
-    } else { $null }
-    $packageHash = if ($null -ne $packageItem) {
-        (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash
-    } else { "" }
-    $remoteHash = if ($null -ne $remoteItem) {
-        (Get-FileHash -LiteralPath $remotePath -Algorithm SHA256).Hash
-    } else { "" }
-    $record = if ($records.Count -eq 1) { $records[0] } else { $null }
-    $publishedIdentityValid = $null -ne $record -and
-        $null -ne $packageItem -and $null -ne $remoteItem -and
-        $packageHash -eq $remoteHash -and
-        $packageHash -eq ([string]$record.sha256).ToUpperInvariant() -and
-        [long]$record.size -eq [long]$packageItem.Length -and
-        [long]$record.size -eq [long]$remoteItem.Length
-    $repositoryEquivalent = $publishedIdentityValid -and
-        (Get-NormalizedTextSha256 $spec.repository) -eq
-            (Get-NormalizedTextSha256 $packagePath)
-    if ($publishedIdentityValid -and $repositoryEquivalent) {
-        continue
-    }
-    if ($null -eq $record) {
-        $record = [pscustomobject][ordered]@{
-            path = [string]$spec.relative
-            runtime = ""
-            size = [long]0
-            sha256 = ""
-            source = ""
-        }
-        $manifest.files = @($manifest.files) + $record
-    }
-    if ([long]$record.size -ne [long]$repositoryItem.Length -or
-        ([string]$record.sha256).ToUpperInvariant() -ne $repositoryHash -or
-        [string]$record.source -ne $source) {
-        $toolManifestChanged = $true
-    }
-    $record.size = [long]$repositoryItem.Length
-    $record.sha256 = $repositoryHash.ToLowerInvariant()
-    $record.source = $source
-    if ($packageHash -ne $repositoryHash -or
-        $remoteHash -ne $repositoryHash) {
-        $changedTools.Add([pscustomobject][ordered]@{
-            relative = [string]$spec.relative
-            repository = [string]$spec.repository
-            package = $packagePath
-            remote = $remotePath
-        })
+    $localTool = Join-Path $packageRoot ([string]$spec.relative).Replace('/', '\')
+    $remoteTool = Join-Path $destinationRoot ([string]$spec.relative).Replace('/', '\')
+    $toolRecords = @($manifest.files | Where-Object { $_.path -ceq $spec.relative })
+    if (-not (Test-Path -LiteralPath $localTool -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $remoteTool -PathType Leaf) -or
+        $toolRecords.Count -ne 1 -or
+        [string]$toolRecords[0].sha256 -ine (Get-FileHash -LiteralPath $localTool -Algorithm SHA256).Hash -or
+        (Get-FileHash -LiteralPath $localTool -Algorithm SHA256).Hash -cne
+            (Get-FileHash -LiteralPath $remoteTool -Algorithm SHA256).Hash -or
+        (Get-NormalizedTextSha256 $spec.repository) -cne (Get-NormalizedTextSha256 $localTool) -or
+        (Get-NormalizedTextSha256 $spec.repository) -cne (Get-NormalizedTextSha256 $remoteTool)) {
+        $aimToolsNeedUpdate = $true
     }
 }
-if ($changedTools.Count -gt 0 -or $toolManifestChanged) {
-    $manifest.git_commit = $commit.ToLowerInvariant()
-    $manifestPending = Join-Path $packageRoot `
-        ".manifest.incoming-$([guid]::NewGuid().ToString('N'))"
-    $remoteToolStageName =
-        ".aim-tools.incoming-$([guid]::NewGuid().ToString('N'))"
-    $toolDestinationPrefix =
-        [System.IO.Path]::GetFullPath($destinationRoot).TrimEnd('\') + '\'
-    $remoteToolStage = [System.IO.Path]::GetFullPath(
-        (Join-Path $destinationRoot $remoteToolStageName))
-    if (-not $remoteToolStage.StartsWith(
-            $toolDestinationPrefix,
-            [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "辅机报告工具暂存目录越出固定发布根：$remoteToolStage"
-    }
-    try {
-        $manifest | ConvertTo-Json -Depth 12 |
-            Set-Content -LiteralPath $manifestPending -Encoding UTF8
-        foreach ($tool in $changedTools) {
-            Copy-Atomic $tool.repository $tool.package
-        }
-        Replace-FileAtomically $manifestPending $manifestPath
-
-        New-Item -ItemType Directory -Path $remoteToolStage -Force |
-            Out-Null
-        foreach ($tool in $changedTools) {
-            $stagePath = Join-Path $remoteToolStage `
-                ([string]$tool.relative).Replace('/', '\')
-            New-Item -ItemType Directory -Path (Split-Path -Parent $stagePath) `
-                -Force | Out-Null
-            Copy-Item -LiteralPath $tool.repository -Destination $stagePath
-            $stageHash = (Get-FileHash -LiteralPath $stagePath `
-                -Algorithm SHA256).Hash
-            $repositoryHash = (Get-FileHash -LiteralPath $tool.repository `
-                -Algorithm SHA256).Hash
-            if ($stageHash -ne $repositoryHash) {
-                throw "辅机报告工具暂存 SHA-256 校验失败：$($tool.relative)"
-            }
-        }
-        Copy-Item -LiteralPath $manifestPath -Destination `
-            (Join-Path $remoteToolStage "manifest.json")
-        if (-not (Test-Path -LiteralPath $SshIdentityFile -PathType Leaf)) {
-            throw "SSH 身份文件不存在：$SshIdentityFile"
-        }
-        $remotePackagePrefix =
-            [System.IO.Path]::GetFullPath($RemotePackageRoot).TrimEnd('\') + '\'
-        $remoteToolStageLocal = [System.IO.Path]::GetFullPath(
-            (Join-Path $RemotePackageRoot $remoteToolStageName))
-        $moveStatements = [System.Collections.Generic.List[string]]::new()
-        foreach ($tool in $changedTools) {
-            $relativeWindows = ([string]$tool.relative).Replace('/', '\')
-            $stageLocal = [System.IO.Path]::GetFullPath(
-                (Join-Path $remoteToolStageLocal $relativeWindows))
-            $targetLocal = [System.IO.Path]::GetFullPath(
-                (Join-Path $RemotePackageRoot $relativeWindows))
-            foreach ($path in @($stageLocal, $targetLocal)) {
-                if (-not $path.StartsWith(
-                        $remotePackagePrefix,
-                        [System.StringComparison]::OrdinalIgnoreCase)) {
-                    throw "辅机报告工具替换路径越出固定发布根：$path"
-                }
-            }
-            $escapedStage = $stageLocal.Replace("'", "''")
-            $escapedTarget = $targetLocal.Replace("'", "''")
-            $moveStatements.Add(
-                "Move-Item -LiteralPath '$escapedStage' " +
-                "-Destination '$escapedTarget' -Force")
-        }
-        $manifestStageLocal = [System.IO.Path]::GetFullPath(
-            (Join-Path $remoteToolStageLocal "manifest.json"))
-        $manifestTargetLocal = [System.IO.Path]::GetFullPath(
-            (Join-Path $RemotePackageRoot "manifest.json"))
-        foreach ($path in @($manifestStageLocal, $manifestTargetLocal)) {
-            if (-not $path.StartsWith(
-                    $remotePackagePrefix,
-                    [System.StringComparison]::OrdinalIgnoreCase)) {
-                throw "辅机报告工具清单替换路径越出固定发布根：$path"
-            }
-        }
-        $escapedManifestStage = $manifestStageLocal.Replace("'", "''")
-        $escapedManifestTarget = $manifestTargetLocal.Replace("'", "''")
-        $moveStatements.Add(
-            "Move-Item -LiteralPath '$escapedManifestStage' " +
-            "-Destination '$escapedManifestTarget' -Force")
-        $applyScript = '& { $ErrorActionPreference = ''Stop''; ' +
-            ($moveStatements -join '; ') + ' }'
-        $encodedApplyCommand = ConvertTo-PowerShellEncodedCommand $applyScript
-        & ssh -i $SshIdentityFile -o IdentitiesOnly=yes -o BatchMode=yes `
-            "$SshUser@$SshHost" powershell.exe -NoProfile -NonInteractive `
-            -EncodedCommand $encodedApplyCommand
-        if ($LASTEXITCODE -ne 0) {
-            throw "辅机报告工具闭包原子替换失败，退出码：$LASTEXITCODE"
-        }
-    } finally {
-        if (Test-Path -LiteralPath $manifestPending -PathType Leaf) {
-            Remove-Item -LiteralPath $manifestPending -Force
-        }
-        if (Test-Path -LiteralPath $remoteToolStage -PathType Container) {
-            Remove-Item -LiteralPath $remoteToolStage -Recurse -Force
-        }
-    }
+if (-not $ConfigOnly -or $aimToolsNeedUpdate) {
+& (Join-Path $PSScriptRoot 'publish_worker_delta.ps1') -PackageRoot $packageRoot `
+    -BuildDirectory $BuildDirectory -Runtime nvidia -DestinationRoot $destinationRoot `
+    -RemotePackageRoot $RemotePackageRoot -RepositoryRoot $repositoryRoot `
+    -IncludeAimTools:$aimToolsNeedUpdate -AimToolsOnly:$ConfigOnly -SshIdentityFile $SshIdentityFile `
+    -KnownHostsFile $KnownHostsFile -SshUser $SshUser -SshHost $SshHost
+$manifest = Read-Json $manifestPath 'Updated fixed-package manifest'
 }
 
 $prepareOutput = @()
@@ -536,8 +351,7 @@ if ($Prepare) {
 
     # Prepare 会把本轮 Run ID 写入 manifest 的 config 来源。辅机最终 manifest 才是任务绑定事实，
     # 必须把 config 和 manifest 一起原子回写主机固定包，避免主辅机形成两个发布基线。
-    Copy-Atomic $remoteConfig (Join-Path $packageRoot "config.ini")
-    Copy-Atomic $remoteManifest $manifestPath
+    Copy-AimPrepareTransaction $destinationRoot $packageRoot
 }
 
 $finalManifest = Read-Json $manifestPath "最终固定包 manifest"

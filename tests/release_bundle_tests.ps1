@@ -52,6 +52,12 @@ function New-FakeBuild(
     if ($IncludeCalibration) {
         Write-Utf8 (Join-Path $release "xen_recoil_calibration.exe") "calibration-$Runtime"
     }
+    foreach ($artifact in Get-ChildItem -LiteralPath $release -Filter '*.exe') {
+        [ordered]@{ schema = 1; source_root = $repository; git_commit = $Commit; git_dirty = $false;
+            runtime = $Runtime; configuration = 'Release'; artifact = $artifact.Name; size = $artifact.Length;
+            sha256 = (Get-FileHash -LiteralPath $artifact.FullName).Hash.ToLowerInvariant() } |
+            ConvertTo-Json | Set-Content -LiteralPath ($artifact.FullName + '.identity.json') -Encoding utf8
+    }
     $files = @()
     $allRuntimeFiles = @($RuntimeFiles + $fixtureCrtNames + $fixtureSourceDependencies | Sort-Object -Unique)
     foreach ($name in $allRuntimeFiles) {
@@ -77,7 +83,7 @@ function New-FakeBuild(
         Set-Content -LiteralPath (Join-Path $release "xen-runtime-deployment.json") -Encoding utf8
     [ordered]@{
         schema = 1
-        source_root = "fixture"
+        source_root = $repository
         git_commit = $Commit
         git_dirty = $false
         runtime = $Runtime
@@ -239,6 +245,52 @@ try {
         (Join-Path $nvidia "Release/onnxruntime.dll"))
 
     # 逐项删除 owned 合成构建中的必需文件；缺件不得靠其他 runtime 或旧包补齐。
+    foreach ($case in @(
+        @{ build = $nvidia; name = 'Xen.exe' },
+        @{ build = $directml; name = 'Xen.exe' },
+        @{ build = $openvino; name = 'Xen.exe' },
+        @{ build = $nvidia; name = 'XenLauncher.exe' },
+        @{ build = $directml; name = 'xen_recoil_calibration.exe' },
+        @{ build = $openvino; name = 'xen_recoil_tuner.exe' },
+        @{ build = $nvidia; name = 'xen_source_context.exe' },
+        @{ build = $nvidia; name = 'XenClockSource.exe' },
+        @{ build = $nvidia; name = 'XenSender.exe' },
+        @{ build = $nvidia; name = 'XenCaptureEvidence.exe' },
+        @{ build = $nvidia; name = 'XenAutoStopCapture.exe' })) {
+        $stampPath = Join-Path $case.build ("Release/$($case.name).identity.json")
+        $validStamp = [IO.File]::ReadAllText($stampPath)
+        try {
+            $stale = $validStamp | ConvertFrom-Json
+            $stale.git_commit = 'b' * 40
+            Write-Utf8 $stampPath ($stale | ConvertTo-Json)
+            Assert-PreflightFailure ("stale-linked-" + (Split-Path -Leaf $case.build) + '-' + $case.name) 'Linked artifact identity'
+        } finally { Write-Utf8 $stampPath $validStamp }
+    }
+    $artifactPath = Join-Path $nvidia 'Release/XenCaptureEvidence.exe'
+    $stampPath = $artifactPath + '.identity.json'
+    $validStamp = [IO.File]::ReadAllText($stampPath)
+    $artifactBytes = [IO.File]::ReadAllBytes($artifactPath)
+    try {
+        Remove-Item -LiteralPath $stampPath
+        Assert-PreflightFailure 'missing-linked-stamp' 'identity\.json'
+        Write-Utf8 $stampPath $validStamp
+        Write-Utf8 $artifactPath 'replaced-linked-payload'
+        Assert-PreflightFailure 'changed-linked-payload' 'Linked artifact identity'
+        [IO.File]::WriteAllBytes($artifactPath, $artifactBytes)
+        foreach ($mutation in @(
+            @{ field = 'source_root'; value = $root },
+            @{ field = 'runtime'; value = 'directml' },
+            @{ field = 'configuration'; value = 'Debug' },
+            @{ field = 'git_dirty'; value = $true })) {
+            $invalidStamp = $validStamp | ConvertFrom-Json
+            $invalidStamp.($mutation.field) = $mutation.value
+            Write-Utf8 $stampPath ($invalidStamp | ConvertTo-Json)
+            Assert-PreflightFailure ('linked-' + $mutation.field) 'Linked artifact identity'
+        }
+    } finally {
+        Write-Utf8 $stampPath $validStamp
+        [IO.File]::WriteAllBytes($artifactPath, $artifactBytes)
+    }
     $requiredFiles = @(
         "Xen.exe", "XenLauncher.exe",
         "xen_source_context.exe", "XenClockSource.exe", "XenSender.exe",

@@ -51,7 +51,8 @@ try {
     & $git -C $sourceRoot init --quiet
     if ($LASTEXITCODE -ne 0) { throw 'fixture git init failed' }
     Write-UpdateFixture (Join-Path $sourceRoot 'fixture.txt') 'worker source'
-    foreach ($tool in @('model_data_pipeline.py', 'model_data_review.html')) {
+    foreach ($tool in @('model_data_pipeline.py', 'model_data_review.html',
+        'invoke_aim_manual_acceptance.ps1', 'aim_report.ps1', 'aim_control_diagnostics.ps1', 'aim_fixed_scene_analysis.ps1')) {
         Write-UpdateFixture (Join-Path $sourceRoot "scripts/$tool") "updated-$tool"
     }
     Write-UpdateFixture (Join-Path $sourceRoot 'scripts/start_source_context_session.ps1') 'updated-source-session-script'
@@ -64,6 +65,7 @@ try {
     }
     & $git -C $sourceRoot add fixture.txt scripts/start_source_context_session.ps1
     & $git -C $sourceRoot add scripts/model_data_pipeline.py scripts/model_data_review.html
+    & $git -C $sourceRoot add scripts/invoke_aim_manual_acceptance.ps1 scripts/aim_report.ps1 scripts/aim_control_diagnostics.ps1 scripts/aim_fixed_scene_analysis.ps1
     & $git -C $sourceRoot add scripts/invoke_hud_stop_acceptance.ps1
     & $git -C $sourceRoot add scripts/measure_process_resources.ps1 scripts/soak_acceptance_support.ps1
     & $git -C $sourceRoot add scripts/import_recoil_profiles.py scripts/migrate_legacy_recoil_profiles.py scripts/invoke_recoil_legacy_acceptance.ps1
@@ -83,6 +85,13 @@ try {
     $identityPath = Join-Path $buildRoot 'xen-build-identity.json'
     $identity = [ordered]@{ schema = 1; source_root = $sourceRoot; git_commit = $commit; git_dirty = $false; runtime = 'nvidia' }
     Write-UpdateFixture $identityPath ($identity | ConvertTo-Json)
+    foreach ($artifact in Get-ChildItem -LiteralPath (Join-Path $buildRoot 'Release') -Filter '*.exe') {
+        $stamp = [ordered]@{ schema = 1; source_root = $sourceRoot; git_commit = $commit;
+            git_dirty = $false; runtime = 'nvidia'; configuration = 'Release';
+            artifact = $artifact.Name; size = $artifact.Length;
+            sha256 = (Get-FileHash -LiteralPath $artifact.FullName).Hash.ToLowerInvariant() }
+        Write-UpdateFixture ($artifact.FullName + '.identity.json') ($stamp | ConvertTo-Json)
+    }
     $baseRoot = Join-Path $runRoot 'base'
     $records = @()
     $routes = @()
@@ -120,6 +129,39 @@ try {
     $baseHash = (Get-FileHash -LiteralPath $baseManifestPath -Algorithm SHA256).Hash
     $parameters = @{ BasePackagePath = $baseRoot; BuildDirectory = $buildRoot; Runtime = 'nvidia'
         RepositoryRoot = $sourceRoot; GitExecutable = $git; OutputDirectory = (Join-Path $runRoot 'updated') }
+    $staleParameters = $parameters.Clone()
+    $staleParameters.OutputDirectory = Join-Path $runRoot 'stale-artifact'
+    $staleParameters.SourceContextExecutable = Join-Path $buildRoot 'Release/xen_source_context.exe'
+    $stampPath = $staleParameters.SourceContextExecutable + '.identity.json'
+    $validStamp = [IO.File]::ReadAllText($stampPath)
+    $staleStamp = $validStamp | ConvertFrom-Json
+    $staleStamp.git_commit = 'b' * 40
+    Write-UpdateFixture $stampPath ($staleStamp | ConvertTo-Json)
+    Assert-UpdateReject $staleParameters 'F04 configure identity cannot relabel stale tool executable'
+    Write-UpdateFixture $stampPath $validStamp
+    $missingStamp = $staleParameters.Clone()
+    $missingStamp.OutputDirectory = Join-Path $runRoot 'missing-artifact-stamp'
+    Remove-Item -LiteralPath $stampPath
+    Assert-UpdateReject $missingStamp 'F04 old unstamped tool cannot inherit configure identity'
+    Write-UpdateFixture $stampPath $validStamp
+    $changedArtifact = $staleParameters.Clone()
+    $changedArtifact.OutputDirectory = Join-Path $runRoot 'changed-artifact'
+    $artifactOriginal = [IO.File]::ReadAllText($staleParameters.SourceContextExecutable)
+    Write-UpdateFixture $staleParameters.SourceContextExecutable 'replaced-after-link'
+    Assert-UpdateReject $changedArtifact 'F04 artifact payload must match linked SHA'
+    Write-UpdateFixture $staleParameters.SourceContextExecutable $artifactOriginal
+    $aimOnly = $parameters.Clone()
+    $aimOnly.AimToolsOnly = $true; $aimOnly.ChangesOnly = $true
+    $aimOnly.OutputDirectory = Join-Path $runRoot 'aim-tools-only'
+    & $publisher @aimOnly
+    $aimManifest = Get-Content -LiteralPath (Join-Path $aimOnly.OutputDirectory 'manifest.json') -Raw | ConvertFrom-Json
+    Assert-UpdateTest (-not (Test-Path (Join-Path $aimOnly.OutputDirectory 'runtimes/nvidia/Xen.exe'))) 'F15 Aim tools-only does not copy Worker'
+    foreach ($tool in @('invoke_aim_manual_acceptance.ps1', 'aim_report.ps1', 'aim_control_diagnostics.ps1', 'aim_fixed_scene_analysis.ps1')) {
+        Assert-UpdateTest (Test-Path (Join-Path $aimOnly.OutputDirectory "tools/$tool")) 'F15 Aim tools-only contains fixed tool closure'
+        $aimRecord = @($aimManifest.files | Where-Object { $_.path -ceq "tools/$tool" })
+        Assert-UpdateTest ($aimRecord.Count -eq 1 -and $aimRecord[0].sha256 -ieq
+            (Get-FileHash (Join-Path $aimOnly.OutputDirectory "tools/$tool")).Hash) 'F15 Aim tool manifest matches payload'
+    }
     & $publisher @parameters
     Assert-ProductionManifest $parameters.OutputDirectory
     $published = Get-Content -LiteralPath (Join-Path $parameters.OutputDirectory 'manifest.json') -Raw | ConvertFrom-Json
@@ -144,6 +186,28 @@ try {
     $launcherParameters = $parameters.Clone()
     $launcherParameters.IncludeLauncher = $true
     $launcherParameters.OutputDirectory = Join-Path $runRoot 'launcher-update'
+    $changedLauncher = $launcherParameters.Clone()
+    $changedLauncher.OutputDirectory = Join-Path $runRoot 'launcher-copy-mutation'
+    $global:xenLauncherCopySource = Join-Path $buildRoot 'Release/XenLauncher.exe'
+    $launcherOriginal = [IO.File]::ReadAllBytes($global:xenLauncherCopySource)
+    $global:xenLauncherCopyMutated = $false
+    function Copy-Item {
+        [CmdletBinding()]
+        param([string]$LiteralPath, [string]$Destination, [switch]$Force)
+        if ($LiteralPath -ieq $global:xenLauncherCopySource -and -not $global:xenLauncherCopyMutated) {
+            [IO.File]::WriteAllText($LiteralPath, 'launcher replaced after linked identity preflight')
+            $global:xenLauncherCopyMutated = $true
+        }
+        Microsoft.PowerShell.Management\Copy-Item @PSBoundParameters
+    }
+    try {
+        Assert-UpdateReject $changedLauncher 'F04 Launcher copied payload must match preflight linked SHA'
+        Assert-UpdateTest $global:xenLauncherCopyMutated 'F04 regression reaches actual Launcher Copy-Item'
+    } finally {
+        [IO.File]::WriteAllBytes($global:xenLauncherCopySource, $launcherOriginal)
+        Remove-Item -LiteralPath Function:\Copy-Item -Force
+        Remove-Variable xenLauncherCopySource,xenLauncherCopyMutated -Scope Global
+    }
     & $publisher @launcherParameters
     Assert-ProductionManifest $launcherParameters.OutputDirectory
     Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $launcherParameters.OutputDirectory 'XenLauncher.exe') -Raw) -ceq 'new-launcher-with-current-config') '配置消费者启动器随Worker更新'
