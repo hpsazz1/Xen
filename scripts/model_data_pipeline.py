@@ -979,13 +979,19 @@ def train(ctx):
         directory = Path(trainer.save_dir) / "weights"
         last, best = directory / "last.pt", directory / "best.pt"
         write_json(output / "checkpoint.json", dict(schema_version=SCHEMA, dataset_sha256=config["dataset_sha256"], config_sha256=sha256(output / "config.json"), last_sha256=sha256(last), best_sha256=sha256(best) if best.is_file() else None, epoch=trainer.epoch, updated_at=now()))
-        if cancelled:
+        if cancelled or (ctx.cancel and ctx.cancel.exists()):
             # 此回调在 save_model 之后；抛出避免 trainer.final_eval 清除优化器状态。
             raise Cancelled("训练已在 epoch 边界保存 last.pt 后取消")
 
+    def check_epoch_boundary(_trainer):
+        # 覆盖保存回调之后收到的取消，避免进入下一轮或 final_eval。
+        ctx.check()
+
+    model.add_callback("on_train_epoch_start", check_epoch_boundary)
     model.add_callback("on_train_epoch_end", on_epoch_end)
     model.add_callback("on_train_batch_end", on_batch_end)
     model.add_callback("on_model_save", on_model_save)
+    model.add_callback("on_fit_epoch_end", check_epoch_boundary)
     ctx.check()
     resume_options = {}
     if source:
