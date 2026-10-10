@@ -1,4 +1,5 @@
 #include "recoil_tuner/recoil_tuner.h"
+#include "recoil_tuner/phase_window_internal.h"
 
 #include <algorithm>
 #include <cmath>
@@ -73,15 +74,14 @@ std::array<double, 2> sample(const std::vector<CurvePoint>& curve, double t) {
     const double weight = (t - a.time_ms) / (b.time_ms - a.time_ms);
     return {a.x_counts + (b.x_counts - a.x_counts) * weight, a.y_counts + (b.y_counts - a.y_counts) * weight};
 }
-bool phase_matches(const Dataset& data, const std::array<double, 2>& counts, double time) {
+bool phase_matches(const Dataset& data, const detail::PhaseVertexIndex& index, const std::array<double, 2>& counts, double time) {
     auto low = sample(data.base_curve, time - data.phase_tolerance_ms);
     auto high = sample(data.base_curve, time + data.phase_tolerance_ms);
     for (int axis = 0; axis < 2; ++axis) if (low[axis] > high[axis]) std::swap(low[axis], high[axis]);
-    const auto first = std::lower_bound(data.base_curve.begin(), data.base_curve.end(), time - data.phase_tolerance_ms,
-        [](const CurvePoint& p, double value) { return p.time_ms < value; });
-    for (auto it = first; it != data.base_curve.end() && it->time_ms <= time + data.phase_tolerance_ms; ++it) {
-        low[0] = std::min(low[0], it->x_counts); high[0] = std::max(high[0], it->x_counts);
-        low[1] = std::min(low[1], it->y_counts); high[1] = std::max(high[1], it->y_counts);
+    const auto vertices = index.query(time - data.phase_tolerance_ms, time + data.phase_tolerance_ms);
+    for (int axis = 0; axis < 2; ++axis) {
+        low[axis] = std::min(low[axis], vertices.low[axis]);
+        high[axis] = std::max(high[axis], vertices.high[axis]);
     }
     for (int axis = 0; axis < 2; ++axis) if (counts[axis] < low[axis] - 1.0 || counts[axis] > high[axis] + 1.0) return false;
     return true;
@@ -110,6 +110,7 @@ Report optimize(const Dataset& data, const Request& request, const CandidateVali
             !finite(data.phase_tolerance_ms) || data.phase_tolerance_ms <= 0 || data.phase_tolerance_ms > 1000 ||
             !curve_valid(data.base_curve, request) || data.trials.size() > 10000 || data.response_experiments.size() > 10000)
             return invalid("数据版本、基线曲线或优化预算无效。");
+        const detail::PhaseVertexIndex phase_index(data.base_curve);
         std::set<std::string> ids, hashes, firing_ids, trial_runs;
         std::vector<const Trial*> fit, holdout;
         for (const auto& trial : data.trials) {
@@ -135,16 +136,16 @@ Report optimize(const Dataset& data, const Request& request, const CandidateVali
                     std::trunc(receipt.x_counts) != receipt.x_counts || std::trunc(receipt.y_counts) != receipt.y_counts)
                     return invalid("回执缺失、重复、未知或时间不一致；禁止把未确认位移用于拟合。");
                 while (vertex < data.base_curve.size() && data.base_curve[vertex].time_ms < receipt.completed_ms) {
-                    if (!phase_matches(data, counts, data.base_curve[vertex++].time_ms)) return invalid("回执间存在未按基线执行的曲线阶段，不能只凭终点总量拟合。");
+                    if (!phase_matches(data, phase_index, counts, data.base_curve[vertex++].time_ms)) return invalid("回执间存在未按基线执行的曲线阶段，不能只凭终点总量拟合。");
                 }
-                if (!phase_matches(data, counts, receipt.completed_ms)) return invalid("回执之前的累计位移超出已校准相位包络，可能迟到突发。");
+                if (!phase_matches(data, phase_index, counts, receipt.completed_ms)) return invalid("回执之前的累计位移超出已校准相位包络，可能迟到突发。");
                 counts[0] += receipt.x_counts; counts[1] += receipt.y_counts; last_time = receipt.completed_ms;
                 const auto planned = sample(data.base_curve, receipt.planned_ms);
                 if (std::abs(counts[0] - planned[0]) >= 1 || std::abs(counts[1] - planned[1]) >= 1) return invalid("计划时点累计位移不匹配基线曲线。");
-                if (!phase_matches(data, counts, receipt.completed_ms)) return invalid("回执之后的累计位移超出已校准相位包络，可能提前输出。");
+                if (!phase_matches(data, phase_index, counts, receipt.completed_ms)) return invalid("回执之后的累计位移超出已校准相位包络，可能提前输出。");
             }
             while (vertex < data.base_curve.size()) {
-                if (!phase_matches(data, counts, data.base_curve[vertex++].time_ms)) return invalid("末次回执后存在遗漏曲线阶段。");
+                if (!phase_matches(data, phase_index, counts, data.base_curve[vertex++].time_ms)) return invalid("末次回执后存在遗漏曲线阶段。");
             }
             if (counts != trial.executed_counts) return invalid("Trial汇总counts与实际回执不一致。");
             if (std::abs(counts[0] - data.base_curve.back().x_counts) >= 1.0 ||

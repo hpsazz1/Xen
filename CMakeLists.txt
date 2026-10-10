@@ -1306,6 +1306,13 @@ if(BUILD_TESTING)
     target_link_libraries(recoil_tuner_tests PRIVATE recoil_tuner recoil)
     xen_deploy_runtime_dlls(recoil_tuner_tests OPENCV)
     add_test(NAME recoil_tuner_tests COMMAND recoil_tuner_tests)
+    # 合成热点计时需显式运行，不将机器速度作为 CTest 门禁。
+    add_executable(recoil_tuner_phase_benchmark tests/recoil_tuner_phase_benchmark.cpp)
+    target_link_libraries(recoil_tuner_phase_benchmark PRIVATE recoil_tuner recoil)
+    xen_deploy_runtime_dlls(recoil_tuner_phase_benchmark OPENCV)
+    add_test(NAME recoil_tuner_phase_compare_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+            "${PROJECT_SOURCE_DIR}/tests/recoil_tuner_phase_compare.py" --self-test)
     add_executable(recoil_wall_analysis_tests tests/recoil_wall_analysis_tests.cpp)
     target_link_libraries(recoil_wall_analysis_tests PRIVATE recoil_tuner)
     xen_deploy_runtime_dlls(recoil_wall_analysis_tests OPENCV)

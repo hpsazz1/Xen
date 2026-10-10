@@ -1,4 +1,6 @@
 #include "recoil_tuner/recoil_tuner.h"
+#include "recoil_tuner/phase_window_internal.h"
+#include <bit>
 #include "recoil/recoil.h"
 #include <nlohmann/json.hpp>
 #include <opencv2/imgproc.hpp>
@@ -204,7 +206,66 @@ void test_recording_and_numeric_limits() {
     expect(!optimize_profile_recorded(next, request(), base, production_validate, dir).predictions_available, "失败但已查看的留出亦不可复用");
 }
 
+
+// 冻结原扫描次序为 oracle，逐位核对相等极值及正负零。
+void test_phase_vertex_index_exact() {
+    for (const int count : {2, 3, 64, 65, 1000, 30000}) {
+        std::vector<CurvePoint> curve;
+        std::uint32_t state = 0x12345678;
+        for (int i = 0; i < count; ++i) {
+            state = state * 1664525u + 1013904223u;
+            const double value = (static_cast<int>(state % 31) - 15) / 4.0;
+            curve.push_back({static_cast<double>(i), i % 4 == 0 ? -0.0 : value,
+                i % 4 == 0 ? 0.0 : -value});
+        }
+        detail::PhaseVertexIndex index(curve);
+        const auto check = [&](double lo, double hi) {
+            detail::PhaseVertexBounds expected;
+            auto it = std::lower_bound(curve.begin(), curve.end(), lo,
+                [](const CurvePoint& p, double t) { return p.time_ms < t; });
+            for (; it != curve.end() && it->time_ms <= hi; ++it) {
+                const std::array<double, 2> values{it->x_counts, it->y_counts};
+                for (int axis = 0; axis < 2; ++axis) {
+                    expected.low[axis] = std::min(expected.low[axis], values[axis]);
+                    expected.high[axis] = std::max(expected.high[axis], values[axis]);
+                }
+            }
+            const auto actual = index.query(lo, hi);
+            for (int axis = 0; axis < 2; ++axis) {
+                expect(std::bit_cast<std::uint64_t>(actual.low[axis]) == std::bit_cast<std::uint64_t>(expected.low[axis]), "phase window exact minimum");
+                expect(std::bit_cast<std::uint64_t>(actual.high[axis]) == std::bit_cast<std::uint64_t>(expected.high[axis]), "phase window exact maximum");
+            }
+        };
+        check(-2, -1); check(count, count + 1); check(0, count - 1);
+        for (int q = 0; q < 400; ++q) {
+            state = state * 1664525u + 1013904223u;
+            const double t = state % count;
+            check(t, t); check(std::nextafter(t, -INFINITY), t);
+            check(std::nextafter(t, INFINITY), t + 3);
+            check(std::max(0.0, t - 50), std::min(double(count - 1), t + 50));
+        }
+    }
+    // 同值顶点的符号不能由树合并方向改变。
+    std::vector<CurvePoint> zeros;
+    for (int i = 0; i < 100; ++i) zeros.push_back({double(i), i % 2 ? 0.0 : -0.0, i % 2 ? -0.0 : 0.0});
+    detail::PhaseVertexIndex index(zeros);
+    for (int i = 0; i < 100; ++i) {
+        const auto bounds = index.query(i, 99);
+        expect(std::signbit(bounds.low[0]) == std::signbit(zeros[i].x_counts) &&
+            std::signbit(bounds.high[0]) == std::signbit(zeros[i].x_counts), "phase window signed zero first vertex");
+    }
+    for (int mutation = 0; mutation < 3; ++mutation) {
+        auto d = fixture();
+        if (mutation == 0) d.base_curve[1].time_ms = d.base_curve[0].time_ms;
+        if (mutation == 1) d.base_curve[1].x_counts = std::numeric_limits<double>::quiet_NaN();
+        if (mutation == 2) d.base_curve[1].time_ms = std::numeric_limits<double>::quiet_NaN();
+        const auto report = optimize(d, request(), production_validate);
+        expect(!report.candidate && !report.predictions_available, "invalid curve rejected before indexing");
+    }
+}
+
 int main() {
+    test_phase_vertex_index_exact();
     test_recording_and_numeric_limits();
     test_identification_and_candidate(); test_data_and_response_rejections(); test_image_measurement(); test_result_files();
     if (failures) return 1;
