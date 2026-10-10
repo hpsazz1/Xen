@@ -1994,6 +1994,10 @@ if(BUILD_TESTING)
     add_test(NAME model_data_pipeline_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
         "${PROJECT_SOURCE_DIR}/tests/model_data_pipeline_tests.py")
+    add_test(NAME dataset_snapshot_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+        "${PROJECT_SOURCE_DIR}/tests/dataset_snapshot_tests.py"
+        --output-root "${CMAKE_BINARY_DIR}/dataset-snapshot-fixtures")
     add_test(NAME model_data_review_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
         "${PROJECT_SOURCE_DIR}/tests/model_data_review_tests.py")

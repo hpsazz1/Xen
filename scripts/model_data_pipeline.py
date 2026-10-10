@@ -21,6 +21,7 @@ import re
 import shutil
 import sys
 import time
+from typing import NamedTuple
 import uuid
 import zipfile
 
@@ -666,14 +667,23 @@ def export_dataset(ctx):
     return dict(output=str(output), dataset=str(output), dataset_sha256=sha256(output / "dataset.json"), counts=manifest["counts"], states=manifest["states"])
 
 
-def validate_dataset(path):
+class DatasetSnapshot(NamedTuple):
+    manifest: dict
+    contents: bytes
+    sha256: str
+
+
+def validate_dataset_snapshot(path):
     path = Path(path).resolve()
-    manifest = read_json(path / "dataset.json")
+    contents = (path / "dataset.json").read_bytes()
+    manifest = json.loads(contents.decode("utf-8-sig"))
+    digest = hashlib.sha256(contents).hexdigest()
     identity = read_json(path / "dataset_identity.json")
+    yaml_contents = (path / "data.yaml").read_bytes()
     names = class_schema(manifest.get("class_names"))
-    if manifest.get("schema_version") != SCHEMA or identity.get("dataset_sha256") != sha256(path / "dataset.json") or manifest.get("data_yaml_sha256") != sha256(path / "data.yaml"):
+    if manifest.get("schema_version") != SCHEMA or identity.get("dataset_sha256") != digest or manifest.get("data_yaml_sha256") != hashlib.sha256(yaml_contents).hexdigest():
         raise PipelineError("冻结数据版本身份不匹配")
-    config = read_json(path / "data.yaml")
+    config = json.loads(yaml_contents.decode("utf-8-sig"))
     if config != dict(path=str(path), train="images/train", val="images/val", test="images/test", names=names):
         raise PipelineError("冻结 data.yaml 不得重定向或添加下载配置；移动目录后请重新导出")
     expected_images, expected_labels, entries, groups = set(), set(), [], {}
@@ -714,7 +724,11 @@ def validate_dataset(path):
             raise PipelineError(f"{split} 缺少类别真值，不能用于独立评估")
     check_leakage(entries)
     check_annotation_consistency(entries)
-    return manifest
+    return DatasetSnapshot(manifest, contents, digest)
+
+
+def validate_dataset(path):
+    return validate_dataset_snapshot(path).manifest
 
 
 def check_pt_trust(model_path, job):
@@ -836,7 +850,7 @@ def onnx_contract(path, class_count, imgsz):
     return dict(input_shape=[1, 3, imgsz, imgsz], output_shape=shape, input_type="float32", nms="external", checker="passed", detector_runtime="NOT_EXECUTED", provider_performance="NOT_EXECUTED")
 
 
-def resume_source(job, dataset, manifest):
+def resume_source(job, snapshot):
     weights = Path(job.get("weights", "")).resolve()
     if weights.name != "last.pt" or weights.parent.name != "weights" or weights.parent.parent.name != "run":
         raise PipelineError("续训必须选择本工具未完成作业的 run/weights/last.pt")
@@ -845,8 +859,7 @@ def resume_source(job, dataset, manifest):
         raise PipelineError("原作业已有完整候选；不能把新的微调伪装为续训")
     config = read_json(original / "config.json")
     checkpoint = read_json(original / "checkpoint.json")
-    identity = sha256(dataset / "dataset.json")
-    if config.get("dataset_sha256") != identity or checkpoint.get("dataset_sha256") != identity or config.get("class_names") != manifest["class_names"]:
+    if config.get("dataset_sha256") != snapshot.sha256 or checkpoint.get("dataset_sha256") != snapshot.sha256 or config.get("class_names") != snapshot.manifest["class_names"]:
         raise PipelineError("续训数据版本或类别不同；新数据必须启动新实验")
     if checkpoint.get("config_sha256") != sha256(original / "config.json") or checkpoint.get("last_sha256") != sha256(weights):
         raise PipelineError("续训检查点与原作业身份不匹配")
@@ -888,8 +901,9 @@ def detection_trainer_class():
     return DetectionTrainer
 
 
-def working_dataset(ctx, dataset, manifest, output):
+def working_dataset(ctx, dataset, snapshot, output):
     """训练器会在标签旁写缓存；仅向作业独占副本传递数据，冻结白名单保持严格。"""
+    manifest = snapshot.manifest
     working = output / "working-dataset"
     working.mkdir(exist_ok=False)
     for item in manifest["samples"]:
@@ -903,19 +917,23 @@ def working_dataset(ctx, dataset, manifest, output):
             if sha256(destination) != item[f"{key}_sha256"]:
                 raise PipelineError("工作数据副本与冻结文件 SHA-256 不一致")
     write_json(working / "data.yaml", dict(path=str(working), train="images/train", val="images/val", test="images/test", names=manifest["class_names"]))
+    # 保存解析和验证过的原始字节；后续结果不再读取可能已变化的来源路径。
+    with (output / "dataset.snapshot.json").open("xb") as stream:
+        stream.write(snapshot.contents)
     return working
 
 
 def train(ctx):
     check_pt_trust(ctx.job.get("weights", ""), ctx.job)
     dataset = Path(ctx.job["dataset"]).resolve()
-    manifest = validate_dataset(dataset)
+    snapshot = validate_dataset_snapshot(dataset)
+    manifest = snapshot.manifest
     if ctx.job.get("class_names") and ctx.job["class_names"] != manifest["class_names"]:
         raise PipelineError("作业 class_names 与冻结数据不一致")
     resume = ctx.job.get("resume", False)
     if not isinstance(resume, bool):
         raise PipelineError("resume 必须为 JSON 布尔值")
-    source = resume_source(ctx.job, dataset, manifest) if resume else None
+    source = resume_source(ctx.job, snapshot) if resume else None
     workers = training_workers(source["effective"]["workers"] if source else ctx.job.get("workers", 0))
     epochs = positive_int(source["effective"]["epochs"] if source else ctx.job.get("epochs", 20), "epochs", 10000)
     imgsz = positive_int(source["effective"]["imgsz"] if source else ctx.job.get("imgsz", 640), "imgsz", 4096)
@@ -935,8 +953,8 @@ def train(ctx):
         if checkpoint["epoch"] != source["checkpoint"]["epoch"] or model_names(model) != manifest["class_names"]:
             raise PipelineError("续训 checkpoint 的 epoch/类别与原作业不一致")
     output = ctx.output()
-    work_data = working_dataset(ctx, dataset, manifest, output)
-    config = dict(schema_version=SCHEMA, job=ctx.job, dataset_sha256=sha256(dataset / "dataset.json"), class_names=manifest["class_names"], effective_training=dict(epochs=epochs, imgsz=imgsz, batch=batch, device=device, workers=workers), weights_sha256=sha256(ctx.job["weights"]), versions=versions(), started_at=now(), resume_from=source["output"] if source else None)
+    work_data = working_dataset(ctx, dataset, snapshot, output)
+    config = dict(schema_version=SCHEMA, job=ctx.job, dataset_sha256=snapshot.sha256, class_names=manifest["class_names"], effective_training=dict(epochs=epochs, imgsz=imgsz, batch=batch, device=device, workers=workers), weights_sha256=sha256(ctx.job["weights"]), versions=versions(), started_at=now(), resume_from=source["output"] if source else None)
     write_json(output / "config.json", config)
     cancelled = False
     last_progress = 0.0
@@ -1020,7 +1038,8 @@ def evaluate(ctx):
         if ctx.job.get(key):
             check_pt_trust(ctx.job[key], ctx.job)
     dataset = Path(ctx.job["dataset"]).resolve()
-    manifest = validate_dataset(dataset)
+    snapshot = validate_dataset_snapshot(dataset)
+    manifest = snapshot.manifest
     split = ctx.job.get("split", "test")
     if split not in {"val", "test"}:
         raise PipelineError("评价只能使用 val 或 test 留出集")
@@ -1030,7 +1049,7 @@ def evaluate(ctx):
         raise PipelineError("评价 conf 必须为 0..1")
     output = ctx.output()
 
-    work_data = working_dataset(ctx, dataset, manifest, output)
+    work_data = working_dataset(ctx, dataset, snapshot, output)
     frozen_models = {}
     for key in ("model", "baseline_model"):
         if not ctx.job.get(key):
@@ -1110,7 +1129,7 @@ def evaluate(ctx):
             counts["recall"] = counts["tp"] / (counts["tp"] + counts["fn"]) if counts["tp"] + counts["fn"] else None
         return dict(model=str(frozen["source"]), model_sha256=frozen["sha256"], metrics={str(k): float(v) for k, v in result.results_dict.items()}, per_class=result.summary(), fixed_threshold_per_class=fixed, fixed_threshold_match_iou=0.5, negative_frames=negative_frames, background_fp_per_frame=false_positives/negative_frames if negative_frames else None, background_false_positive_frame_rate=false_positive_frames/negative_frames if negative_frames else None)
 
-    report = dict(schema_version=SCHEMA, created_at=now(), dataset_sha256=sha256(dataset / "dataset.json"), split=split, confidence=confidence, map_confidence_floor=0.001, nms_iou=0.7, versions=versions(), physical_acceptance="NOT_EXECUTED", **measure("model", "validation"))
+    report = dict(schema_version=SCHEMA, created_at=now(), dataset_sha256=snapshot.sha256, split=split, confidence=confidence, map_confidence_floor=0.001, nms_iou=0.7, versions=versions(), physical_acceptance="NOT_EXECUTED", **measure("model", "validation"))
     baseline = None
     comparison = dict(state="BASELINE_NOT_PROVIDED", improvement_claim=False)
     if ctx.job.get("baseline_model"):

@@ -768,23 +768,23 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(all(p.read_bytes() == data for p, data in originals.items()))
         for alteration, message in ((dict(epochs=4), "epochs=3"), (dict(imgsz=320), "imgsz=640"), (dict(workers=0), "workers=2")):
             with self.assertRaisesRegex(pipeline.PipelineError, message):
-                pipeline.resume_source(self.job("train", weights=str(last), **alteration), dataset, pipeline.read_json(dataset / "dataset.json"))
+                pipeline.resume_source(self.job("train", weights=str(last), **alteration), pipeline.validate_dataset_snapshot(dataset))
         changed = dict(pipeline.read_json(dataset / "dataset.json"), class_names=["different"])
         with self.assertRaisesRegex(pipeline.PipelineError, "类别不同"):
-            pipeline.resume_source(self.job("train", weights=str(last)), dataset, changed)
+            pipeline.resume_source(self.job("train", weights=str(last)), pipeline.validate_dataset_snapshot(dataset)._replace(manifest=changed))
         config["effective_training"].pop("workers")
         pipeline.write_json(original / "config.json", config)
         checkpoint = pipeline.read_json(original / "checkpoint.json")
         checkpoint["config_sha256"] = pipeline.sha256(original / "config.json")
         pipeline.write_json(original / "checkpoint.json", checkpoint)
-        legacy = pipeline.resume_source(self.job("train", weights=str(last), workers=0), dataset, pipeline.read_json(dataset / "dataset.json"))
+        legacy = pipeline.resume_source(self.job("train", weights=str(last), workers=0), pipeline.validate_dataset_snapshot(dataset))
         self.assertEqual(legacy["effective"]["workers"], 0)
         with self.assertRaisesRegex(pipeline.PipelineError, "workers=0"):
-            pipeline.resume_source(self.job("train", weights=str(last), workers=2), dataset, pipeline.read_json(dataset / "dataset.json"))
+            pipeline.resume_source(self.job("train", weights=str(last), workers=2), pipeline.validate_dataset_snapshot(dataset))
         config["dataset_sha256"] = "0"*64
         pipeline.write_json(original / "config.json", config)
         with self.assertRaisesRegex(pipeline.PipelineError, "数据版本"):
-            pipeline.resume_source(self.job("train", weights=str(last)), dataset, pipeline.read_json(dataset / "dataset.json"))
+            pipeline.resume_source(self.job("train", weights=str(last)), pipeline.validate_dataset_snapshot(dataset))
 
     def test_inspect_safely_parses_metadata_names(self):
         model = self.base / "model.onnx"
