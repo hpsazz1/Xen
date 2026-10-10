@@ -807,11 +807,10 @@ bool benchmark_video(Detector& detector,
             aim_report_directory / video_path.filename();
         report_base += ".aim-runtime";
         DebugReportConfig report_config;
-        // DebugReportConfig 当前接收 Windows 本地窄路径；这里必须与其
-        // filesystem::path(path) 的解释保持一致，不能把 UTF-8 再按 ACP
-        // 解码，否则中文场景名会在实际文件名中形成 mojibake。
-        report_config.csv_path = report_base.string() + ".csv";
-        report_config.json_path = report_base.string() + ".json";
+        // 视频目录使用原生路径；进入 DebugReport 时显式编码为 UTF-8。
+        const auto report_base_utf8 = path_to_utf8(report_base);
+        report_config.csv_path = report_base_utf8 + ".csv";
+        report_config.json_path = report_base_utf8 + ".json";
         report_config.session_id = "video-replay/" + result.scene;
         report_config.model_path = model_path;
         report_config.provider = provider;

@@ -195,6 +195,100 @@ void queue_contracts(const std::filesystem::path& root, bool capacity) {
         check(report["final_snapshot"]["last_sequence"]==9876,"空帧最终提交保留最新快照");
     }
 }
+void native_chinese_report_paths(const std::filesystem::path& root) {
+    const auto directory = root / std::filesystem::u8path("中文 归档目录");
+    SessionArchiveConfig config;
+    // SessionArchive 保留 native narrow 输入契约；进入 DebugReport 时才转 UTF-8。
+    config.directory = directory.string();
+    config.segment_samples = 2;
+    config.segment_interval = std::chrono::seconds(30);
+    config.report_config.session_id = "native-chinese-archive";
+    config.report_config.enable_lock_marker = true;
+    SessionArchive archive;
+    std::string error;
+    check(archive.start(config, error), "中文含空格 native 路径启动归档");
+    std::array<RuntimePipelineSample, 5> samples{};
+    for (std::size_t i = 0; i < samples.size(); ++i) {
+        samples[i].sequence = i + 1;
+        samples[i].aim_lock_active = true;
+        samples[i].detection_status = DetectionStatus::SUCCESS;
+        samples[i].aim_status = AimStatus::SUCCESS;
+        samples[i].mouse_status = MouseStatus::READY;
+    }
+    RuntimeSnapshot snapshot;
+    check(archive.submit(samples, snapshot), "中文路径提交全部样本");
+    bool marked = false;
+    for (int attempt = 0; attempt < 100 && !marked; ++attempt) {
+        marked = archive.mark("中文 路径标记");
+        if (!marked) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    check(marked, "中文路径接受归档标记");
+    archive.stop();
+    const auto state = archive.status();
+    check(!state.active && state.accepted_samples == samples.size() &&
+              state.written_samples == samples.size() && state.written_segments == 3 &&
+              state.dropped_samples == 0 && state.dropped_batches == 0 &&
+              state.trigger_events_dropped == 0 && state.last_error.empty(),
+          "中文路径多段与停止尾段必须完整且不丢样本");
+    const auto manifest = read(directory / "manifest.json");
+    check(manifest["closed"] == true && manifest["complete"] == true &&
+              manifest["accepted_samples"] == samples.size() &&
+              manifest["written_samples"] == samples.size() &&
+              manifest["written_segments"] == 3 && manifest["dropped_samples"] == 0 &&
+              manifest["dropped_batches"] == 0 && manifest["last_error"] == "",
+          "中文路径最终 manifest 必须如实完整且无丢失");
+    std::vector<std::filesystem::path> expected{
+        directory / "manifest.json", directory / "marker-1.json"};
+    std::uint64_t sequence = 0;
+    for (int segment = 1; segment <= 3; ++segment) {
+        const std::string leaf = "segment-" + std::to_string(segment);
+        const auto csv_path = directory / (leaf + ".csv");
+        const auto json_path = directory / (leaf + ".json");
+        const auto meta_path = directory / (leaf + ".meta.json");
+        expected.insert(expected.end(), {csv_path, json_path, meta_path});
+        const auto meta = read(meta_path);
+        const std::size_t expected_count = segment == 3 ? 1 : 2;
+        check(meta["published"] == true && meta["sample_count"] == expected_count &&
+                  meta["csv"] == leaf + ".csv" && meta["json"] == leaf + ".json",
+              "中文路径各段元数据必须对应实际文件与尾段样本数");
+        const auto report = read(json_path);
+        check(report["session_id"] == config.report_config.session_id &&
+                  report["samples_omitted"] == true && report["samples"].empty() &&
+                  report["samples_csv"] == leaf + ".csv",
+              "中文路径分段 JSON 必须可解析且引用对应 CSV");
+        std::ifstream csv(csv_path, std::ios::binary);
+        check(static_cast<bool>(csv), "中文路径分段 CSV 必须可打开");
+        std::string line;
+        std::size_t segment_count = 0;
+        while (std::getline(csv, line)) {
+            if (line.empty() || line.front() == '#' || line.starts_with("sequence,")) continue;
+            check(std::stoull(line.substr(0, line.find(','))) == ++sequence,
+                  "中文路径 CSV 样本跨段必须连续且不重复");
+            ++segment_count;
+        }
+        check(csv.eof() && segment_count == expected_count,
+              "中文路径 CSV 必须完整读到各段预期样本数");
+    }
+    check(sequence == samples.size(), "中文路径 CSV 必须保留全部样本");
+    const auto marker = read(directory / "marker-1.json");
+    check(marker["label"] == "中文 路径标记" && marker["closed"] == true,
+          "中文路径归档 marker 必须可读且完成封尾");
+    std::size_t file_count = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+        check(entry.is_regular_file() &&
+                  std::find(expected.begin(), expected.end(), entry.path()) != expected.end(),
+              "中文归档仅可保留正式文件，不得遗留 tmp、rollback 或锁定 marker");
+        ++file_count;
+    }
+    check(file_count == expected.size(), "中文归档正式文件集合必须完整");
+    std::size_t directory_count = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(root)) {
+        check(entry.path() == directory && entry.is_directory(),
+              "native 到 UTF-8 桥接不得创建乱码兄弟目录或旁路报告");
+        ++directory_count;
+    }
+    check(directory_count == 1, "中文归档父目录只能包含预期目录");
+}
 }
 int main(int argc, char** argv) {
     try {
@@ -269,6 +363,7 @@ int main(int argc, char** argv) {
         queue_pressure(root/"pressure");
         queue_contracts(root/"marker-contract",false);
         queue_contracts(root/"capacity-contract",true);
+        native_chinese_report_paths(root/"native-encoding-contract");
         std::cout<<"SessionArchive 测试通过\n";
         return 0;
     } catch(const std::exception& ex) { std::cerr<<ex.what()<<'\n'; return 1; }

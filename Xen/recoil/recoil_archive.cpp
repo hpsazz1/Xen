@@ -198,7 +198,10 @@ bool RecoilBatchArchive::start(const RecoilArchiveConfig& config,Reader reader,S
         if(!std::filesystem::create_directory(config.directory))throw std::runtime_error("归档需要唯一新目录");
         impl_->config=config;impl_->reader=std::move(reader);impl_->sink=sink ? std::move(sink) : disk_sink;
         impl_->stopping=false;impl_->cursor=config.after_sequence;
-        {std::lock_guard lock(impl_->mutex);impl_->state={true,true,config.acquisition_run_id,config.directory.string(),{}};}
+        // 状态进入报告 JSON 和界面文本，不能把 Windows 原生路径降为 ACP 字节。
+        const auto encoded_directory = config.directory.u8string();
+        const std::string directory(encoded_directory.begin(), encoded_directory.end());
+        {std::lock_guard lock(impl_->mutex);impl_->state={true,true,config.acquisition_run_id,directory,{}};}
         impl_->thread=std::thread([this]{impl_->run();});return true;
     }catch(const std::exception& e){impl_->fail(e.what());return false;}catch(...){return false;}
 }

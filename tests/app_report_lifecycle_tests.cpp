@@ -8,6 +8,11 @@
 #include <iostream>
 
 namespace {
+std::string utf8_path(const std::filesystem::path& path) {
+    const auto encoded = path.u8string();
+    return std::string(encoded.begin(), encoded.end());
+}
+
 using Json = nlohmann::json;
 using namespace std::chrono_literals;
 using app::detail::ReportRestartTarget;
@@ -25,8 +30,8 @@ struct Fixture {
     ~Fixture() { std::error_code error; std::filesystem::remove_all(root, error); }
     DebugReportConfig config(const std::string& name) const {
         DebugReportConfig value;
-        value.session_id = name; value.json_path = (root / (name + ".json")).string();
-        value.csv_path = (root / (name + ".csv")).string(); value.enable_lock_marker = false;
+        value.session_id = name; value.json_path = utf8_path((root / (name + ".json")));
+        value.csv_path = utf8_path((root / (name + ".csv"))); value.enable_lock_marker = false;
         value.recoil_config = RecoilConfig{}; value.trigger_config = TriggerConfig{};
         return value;
     }
@@ -61,7 +66,7 @@ void final_archive_state(bool fail_write) {
     std::promise<void> sink_entered, release_sink;
     auto entered = sink_entered.get_future(); auto release = release_sink.get_future();
     RecoilBatchArchive archive;
-    RecoilArchiveConfig config; config.directory = fixture.root / "batches"; config.acquisition_run_id = "test";
+    RecoilArchiveConfig config; config.directory = fixture.root / std::filesystem::u8path("中文 批次目录"); config.acquisition_run_id = "test";
     auto profile = std::make_shared<RecoilProfile>(); profile->id = "synthetic"; profile->weapon_id = "test";
     profile->state = RecoilProfileState::CALIBRATED; profile->phase_tolerance_ms = 20; profile->recovery_ms = 10;
     profile->source.sha256 = std::string(64, 'a'); profile->source.source_unit = "synthetic";
@@ -96,8 +101,9 @@ void final_archive_state(bool fail_write) {
         });
     });
     release_sink.set_value(); finish.get();
-    const auto json = read_json(report_config.json_path);
+    const auto json = read_json(std::filesystem::u8path(report_config.json_path));
     const auto& result = json["recoil"]["batch_archive"];
+    expect(result["directory"] == utf8_path(config.directory), "中文压枪归档目录必须以 UTF-8 写入报告元数据");
     expect(result["running"] == false && result["last_sequence"] == "1", "最终报告使用封尾后的状态");
     if (fail_write) expect(result["available"] == false && result["error"] == "批次归档失败：合成尾部写盘失败", "最终报告保留尾部写盘失败");
     else expect(result["files_written"] == 1 && result["incomplete_batches"] == 1, "最终报告包含关闭时截断的尾批");
@@ -146,7 +152,7 @@ void reopen_during_reload(DetectorReloadState result) {
     expect(archive.submit({}, snapshot), "提交新段事件"); archive.stop();
     boundary.filter_final(snapshot);
     expect(report.finalize(snapshot, error), "封尾重载后的报告");
-    const auto json = read_json(config.json_path);
+    const auto json = read_json(std::filesystem::u8path(config.json_path));
     expect(json["recoil"]["execution"]["records"].size() == 1 &&
            json["recoil"]["execution"]["records"][0]["command_id"] == 9, "重载成功或失败后均不补关闭期间压枪记录");
     const auto segment = read_json(fixture.root / "session/segment-1.json");
@@ -201,9 +207,9 @@ void failed_session_restart() {
     allow_finish.set_value(); if (job.valid()) job.get();
     if (restart.take_ready(false) == ReportRestartTarget::RUNTIME) start();
     expect(starts == 1 && restart.take_ready(false) == ReportRestartTarget::NONE, "回收封尾结果后只重启一次");
-    const bool exists = std::filesystem::exists(old_config.json_path);
+    const bool exists = std::filesystem::exists(std::filesystem::u8path(old_config.json_path));
     expect(exists, "故障重启保留旧段最终报告");
-    if (exists) expect(read_json(old_config.json_path)["sample_count"] == 1, "旧报告保留故障前样本");
+    if (exists) expect(read_json(std::filesystem::u8path(old_config.json_path))["sample_count"] == 1, "旧报告保留故障前样本");
     restart.defer_if_active(true, [] {}); restart.cancel();
     expect(restart.take_ready(false) == ReportRestartTarget::NONE, "用户停止或退出撤销排队重启");
     for (const bool busy : {true, false}) {
@@ -230,8 +236,8 @@ void final_report_failure_recovery(ReportRestartTarget target) {
     auto config = fixture.config("retry");
     const auto blocked = fixture.root / "blocked";
     { std::ofstream file(blocked); file << "模拟报告父目录被文件占用"; }
-    config.csv_path = (blocked / "retry.csv").string();
-    config.json_path = (blocked / "retry.json").string();
+    config.csv_path = utf8_path((blocked / "retry.csv"));
+    config.json_path = utf8_path((blocked / "retry.json"));
     bool active = report.start(config, error), archive_active = false;
     expect(active, "启动等待封尾的报告");
     source.append(6, 8); source.state.state = RuntimeState::FAILED;
@@ -265,7 +271,7 @@ void final_report_failure_recovery(ReportRestartTarget target) {
     expect(!active && !report.active() && !finalization.pending() && !finalization.failed(), "成功发布后才释放旧段");
     expect(restart.take_ready(false) == target && restart.take_ready(false) == ReportRestartTarget::NONE,
            "显式重试成功后只允许一次对应目标的重启");
-    const auto json = read_json(config.json_path);
+    const auto json = read_json(std::filesystem::u8path(config.json_path));
     expect(json["sample_count"] == 1, "重试保留故障前样本且不重复");
     expect(json["final_snapshot"]["last_error"] == "合成运行故障", "重试仍保留旧段故障原因");
     expect(json["recoil"]["execution"]["records"].size() == 1 &&
@@ -277,7 +283,7 @@ void final_report_failure_recovery(ReportRestartTarget target) {
     expect(report.start(new_config, error), "原段保存成功后允许创建独立新段");
     sample.sequence = 73; report.ingest(std::span(&sample, 1));
     expect(report.finalize({}, error), "新段独立封尾");
-    expect(read_json(new_config.json_path)["sample_count"] == 1 && read_json(config.json_path) == json,
+    expect(read_json(std::filesystem::u8path(new_config.json_path))["sample_count"] == 1 && read_json(std::filesystem::u8path(config.json_path)) == json,
            "新段不混入旧样本，也不覆盖已恢复的旧文件");
 }
 }

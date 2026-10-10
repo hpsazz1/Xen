@@ -129,7 +129,8 @@ std::string read_file(const std::filesystem::path& path) {
 bool cleanup_owned_benchmark_temporary_root(
         const OwnedBenchmarkTemporaryRoot& root,
         std::span<const std::filesystem::path> owned_files,
-        std::string& error) {
+        std::string& error,
+        std::span<const std::filesystem::path> owned_directories = {}) {
     if (root.temporary_base.empty() || root.path.empty() ||
         root.owner_path.empty() || root.leaf_name.empty() ||
         root.guid.empty()) {
@@ -164,12 +165,33 @@ bool cleanup_owned_benchmark_temporary_root(
         return false;
     }
 
+    std::vector<std::filesystem::path> normalized_owned_directories;
+    for (const auto& path : owned_directories) {
+        const auto directory =
+            std::filesystem::absolute(path).lexically_normal();
+        if (directory.parent_path() != normalized ||
+            directory == normalized_owner ||
+            std::find(normalized_owned_directories.begin(),
+                      normalized_owned_directories.end(), directory) !=
+                normalized_owned_directories.end() ||
+            !std::filesystem::is_directory(directory) ||
+            !non_reparse_chain(directory, error)) {
+            if (error.empty()) error = "Benchmark 临时目录不属于本轮根或重复登记";
+            return false;
+        }
+        normalized_owned_directories.push_back(directory);
+    }
+
     std::vector<std::filesystem::path> normalized_owned_files;
     normalized_owned_files.reserve(owned_files.size() + 1U);
     for (const auto& path : owned_files) {
         const auto normalized_file =
             std::filesystem::absolute(path).lexically_normal();
-        if (normalized_file.parent_path() != normalized ||
+        if ((normalized_file.parent_path() != normalized &&
+             std::find(normalized_owned_directories.begin(),
+                       normalized_owned_directories.end(),
+                       normalized_file.parent_path()) ==
+                 normalized_owned_directories.end()) ||
             normalized_file == normalized_owner ||
             std::find(normalized_owned_files.begin(),
                       normalized_owned_files.end(), normalized_file) !=
@@ -186,9 +208,22 @@ bool cleanup_owned_benchmark_temporary_root(
             std::filesystem::absolute(entry.path()).lexically_normal();
         if (std::find(normalized_owned_files.begin(),
                       normalized_owned_files.end(), entry_path) ==
-            normalized_owned_files.end()) {
+            normalized_owned_files.end() &&
+            std::find(normalized_owned_directories.begin(),
+                      normalized_owned_directories.end(), entry_path) ==
+                normalized_owned_directories.end()) {
             error = "Benchmark 临时根包含非本轮登记文件";
             return false;
+        }
+    }
+    for (const auto& directory : normalized_owned_directories) {
+        for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+            if (std::find(normalized_owned_files.begin(),
+                          normalized_owned_files.end(), entry.path()) ==
+                normalized_owned_files.end()) {
+                error = "Benchmark 临时目录包含非本轮登记文件";
+                return false;
+            }
         }
     }
     for (const auto& path : normalized_owned_files) {
@@ -215,6 +250,12 @@ bool cleanup_owned_benchmark_temporary_root(
         }
     }
     std::error_code remove_error;
+    for (const auto& directory : normalized_owned_directories) {
+        if (!std::filesystem::remove(directory, remove_error) || remove_error) {
+            error = "删除本轮 Benchmark 空目录失败: " + remove_error.message();
+            return false;
+        }
+    }
     if (!std::filesystem::remove(normalized, remove_error) || remove_error) {
         error = "删除本轮 Benchmark 临时根失败（可能存在报告残留）: " +
             remove_error.message();
@@ -957,8 +998,8 @@ void test_stop_after_formal_gate_prevents_report_finalize() {
     const auto csv_path = owned_root.path / "cancelled.csv";
     const auto json_path = owned_root.path / "cancelled.json";
     DebugReportConfig config;
-    config.csv_path = csv_path.string();
-    config.json_path = json_path.string();
+    config.csv_path = utf8_path(csv_path);
+    config.json_path = utf8_path(json_path);
     config.session_id = "cancelled-after-formal-gate";
     config.max_samples = 1;
 
@@ -1019,8 +1060,8 @@ void test_stop_at_benchmark_report_publish_boundary_keeps_staging_pair() {
     const auto csv_path = owned_root.path / "result.csv";
     const auto json_path = owned_root.path / "result.json";
     DebugReportConfig config;
-    config.csv_path = csv_staging_path.string();
-    config.json_path = json_staging_path.string();
+    config.csv_path = utf8_path(csv_staging_path);
+    config.json_path = utf8_path(json_staging_path);
     config.session_id = "cancelled-before-final-promotion";
     config.max_samples = 1;
 
@@ -1266,6 +1307,162 @@ void test_report_publish_preserves_late_unicode_collision() {
     expect(cleanup_owned_benchmark_temporary_root(root, owned, error), error);
 }
 
+bool directory_has_exact_entries(
+        const std::filesystem::path& directory,
+        std::span<const std::filesystem::path> expected) {
+    std::size_t count = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+        if (std::find(expected.begin(), expected.end(), entry.path()) ==
+            expected.end()) return false;
+        ++count;
+    }
+    return count == expected.size();
+}
+
+void test_utf8_report_save_readback_publish_and_failure_retry() {
+    benchmark::detail::prepare_benchmark_console_control();
+    for (const bool inject_collision : {false, true}) {
+        OwnedBenchmarkTemporaryRoot root;
+        std::string error;
+        if (!create_owned_benchmark_temporary_root(
+                root, kReportConsumerRootPrefix, error)) {
+            expect(false, error);
+            return;
+        }
+        const auto staging = root.path / std::filesystem::u8path("中文 暂存.pending");
+        const auto output = root.path / std::filesystem::u8path("中文 正式报告");
+        expect(std::filesystem::create_directory(staging) &&
+                   std::filesystem::create_directory(output),
+               "UTF-8 完整报告流程必须独占创建中文含空格目录");
+        const auto csv_pending = staging / std::filesystem::u8path("中文 报告.csv");
+        const auto json_pending = staging / std::filesystem::u8path("中文 报告.json");
+        const auto csv = output / std::filesystem::u8path("中文 输出.csv");
+        const auto json = output / std::filesystem::u8path("中文 输出.json");
+
+        const auto save_and_readback = [&](std::string_view session_id) {
+            DebugReportConfig config;
+            config.csv_path = utf8_path(csv_pending);
+            config.json_path = utf8_path(json_pending);
+            config.session_id = session_id;
+            config.max_samples = 1;
+            DebugReport report;
+            if (!report.start(config, error)) return false;
+            RuntimePipelineSample sample;
+            sample.sequence = 1;
+            sample.profile.total_ms = 1.0;
+            sample.detection_status = DetectionStatus::SUCCESS;
+            sample.aim_status = AimStatus::SUCCESS;
+            sample.mouse_status = MouseStatus::READY;
+            report.ingest(std::span<const RuntimePipelineSample>(&sample, 1));
+            RuntimeSnapshot snapshot;
+            DebugCoverageSummary coverage;
+            coverage.available = true;
+            coverage.formal.sample_count = 1;
+            benchmark::detail::FormalSampleSummary summary;
+            summary.formal_sample_count = 1;
+            summary.successful_samples = 1;
+            summary.retained_sample_count = 1;
+            std::uint64_t csv_omitted = 1;
+            std::uint64_t json_omitted = 1;
+            return benchmark::detail::finalize_report(
+                       report, snapshot, coverage, summary, 1, false,
+                       CaptureBackend::DESKTOP_DUPLICATION, error) &&
+                benchmark::detail::read_report_samples_dropped(
+                    config.csv_path, benchmark::detail::ReportFileFormat::CSV,
+                    csv_omitted, error) &&
+                benchmark::detail::read_report_samples_dropped(
+                    config.json_path, benchmark::detail::ReportFileFormat::JSON,
+                    json_omitted, error) &&
+                csv_omitted == 0 && json_omitted == 0;
+        };
+
+        bool prepared = save_and_readback("utf8-first-session");
+        expect(prepared,
+               "中文含空格目录和文件名必须贯通 DebugReport 保存与 Benchmark 回读: " + error);
+        if (prepared && inject_collision) {
+            BenchmarkReportPublishFaultState state;
+            benchmark::detail::BenchmarkReportPublishFileAdapter adapter;
+            adapter.context = &state;
+            adapter.move_file = [](
+                    void* context, const std::filesystem::path& source,
+                    const std::filesystem::path& target,
+                    std::uint32_t& code) noexcept {
+                auto& fault = *static_cast<BenchmarkReportPublishFaultState*>(context);
+                if (++fault.move_calls == 2) {
+                    std::ofstream(target, std::ios::binary) << "foreign-json";
+                }
+                const bool moved = MoveFileExW(
+                    source.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH) != FALSE;
+                code = moved ? ERROR_SUCCESS : GetLastError();
+                return moved;
+            };
+            adapter.remove_file = [](
+                    void*, const std::filesystem::path& path,
+                    std::error_code& code) noexcept {
+                return std::filesystem::remove(path, code);
+            };
+            expect(!benchmark::detail::publish_benchmark_reports_with_adapter(
+                       utf8_path(csv_pending), utf8_path(json_pending),
+                       utf8_path(csv), utf8_path(json), adapter, error) &&
+                       error.find("JSON 正式报告发布失败") != std::string::npos &&
+                       read_file(json) == "foreign-json" &&
+                       !std::filesystem::exists(csv),
+                   "中文 JSON 晚碰撞必须保留外部文件并回滚本轮正式 CSV: " + error);
+            const std::array expected_staging{json_pending};
+            const std::array expected_output{json};
+            expect(directory_has_exact_entries(staging, expected_staging) &&
+                       directory_has_exact_entries(output, expected_output),
+                   "发布失败仅可保留待清理 staging JSON 与外部 JSON，不得遗留 tmp/rollback/CSV");
+
+            const std::string publish_error = error;
+            benchmark::detail::remove_benchmark_outputs(
+                utf8_path(csv_pending), utf8_path(json_pending), {}, {},
+                utf8_path(staging), {}, error);
+            const std::array expected_clean_root{root.owner_path, output};
+            expect(error == publish_error &&
+                       !std::filesystem::exists(staging) &&
+                       read_file(json) == "foreign-json" &&
+                       directory_has_exact_entries(output, expected_output) &&
+                       directory_has_exact_entries(root.path, expected_clean_root),
+                   "生产失败清理必须移除中文 staging、保留外部 JSON 和原错，且无乱码残留: " + error);
+
+            // 碰撞文件由本测试创建；移除它后重新生成被 promotion 消耗的 CSV。
+            expect(std::filesystem::remove(json), "重试前必须移除本测试注入的冲突文件");
+            prepared = std::filesystem::create_directory(staging) &&
+                save_and_readback("utf8-retry-session");
+            expect(prepared, "中文路径发布失败后必须能重新保存并回读: " + error);
+        }
+        if (prepared) {
+            const bool published = benchmark::detail::publish_benchmark_reports(
+                utf8_path(csv_pending), utf8_path(json_pending),
+                utf8_path(csv), utf8_path(json), error);
+            benchmark::detail::remove_benchmark_outputs(
+                utf8_path(csv_pending), utf8_path(json_pending), {}, {},
+                utf8_path(staging), {}, error);
+            const auto session_id = inject_collision
+                ? "utf8-retry-session" : "utf8-first-session";
+            const std::array expected_output{csv, json};
+            const std::array expected_root{root.owner_path, output};
+            expect(published && error.empty() &&
+                       read_file(csv).find(session_id) != std::string::npos &&
+                       read_file(json).find(session_id) != std::string::npos &&
+                       !std::filesystem::exists(staging) &&
+                       directory_has_exact_entries(output, expected_output) &&
+                       directory_has_exact_entries(root.path, expected_root),
+                   "完整发布及生产清理必须生成同一 session 的中文报告且无 staging/tmp/rollback/乱码残留: " + error);
+        }
+
+        const std::array owned_files{csv, json};
+        const std::array owned_directories{output};
+        std::string cleanup_error;
+        const bool cleaned = cleanup_owned_benchmark_temporary_root(
+            root, owned_files, cleanup_error, owned_directories);
+        expect(cleaned && !std::filesystem::exists(root.path),
+               "中文报告流程只清理显式登记文件与空目录且不得遗留乱码目录: " +
+                   cleanup_error + "; root=" + utf8_path(root.path));
+    }
+}
+
 void test_benchmark_report_consumer_pair_publication() {
     benchmark::detail::prepare_benchmark_console_control();
     OwnedBenchmarkTemporaryRoot owned_root;
@@ -1279,8 +1476,8 @@ void test_benchmark_report_consumer_pair_publication() {
     const auto csv_path = owned_root.path / "runtime.csv";
     const auto json_path = owned_root.path / "runtime.json";
     DebugReportConfig config;
-    config.csv_path = csv_path.string();
-    config.json_path = json_path.string();
+    config.csv_path = utf8_path(csv_path);
+    config.json_path = utf8_path(json_path);
     config.max_samples = 1;
 
     RuntimePipelineSample sample;
@@ -1785,6 +1982,7 @@ int main() {
     test_benchmark_report_publish_surfaces_rollback_failure();
     test_benchmark_report_publish_accepts_already_absent_rollback();
     test_report_publish_preserves_late_unicode_collision();
+    test_utf8_report_save_readback_publish_and_failure_retry();
     test_coverage_phase_tracker();
     test_sample_phase_tracker();
     test_formal_sample_tracker_waits_for_time_gate_after_retention_limit();

@@ -13,6 +13,7 @@
 #include <vector>
 
 struct DebugReportConfig {
+    // 文件系统路径均为 UTF-8；报告、回滚副本和锁定标记共用此编码契约。
     std::string csv_path = "cache/runtime/latest.csv";
     std::string json_path = "cache/runtime/latest.json";
     std::string session_id;

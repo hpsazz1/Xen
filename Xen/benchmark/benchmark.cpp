@@ -474,119 +474,6 @@ private:
     bool owned_ = false;
 };
 
-void remove_benchmark_outputs(
-        const std::string& csv_staging_path,
-        const std::string& json_staging_path,
-        const std::string& provider_profile_path,
-        const std::string& provider_staging_path,
-        const std::string& staging_directory,
-        const std::string& provider_staging_directory,
-        std::string& error) noexcept {
-    const auto remove = [&](const std::string& path) noexcept {
-        if (path.empty()) return;
-        try {
-            std::error_code cleanup_error;
-            (void)std::filesystem::remove(
-                std::filesystem::u8path(path), cleanup_error);
-            if (cleanup_error) {
-                append_cleanup_error(
-                    error, path,
-                    "code=" + std::to_string(cleanup_error.value()) +
-                        ", message=" + cleanup_error.message());
-            }
-        } catch (const std::exception& exception) {
-            append_cleanup_error(
-                error, path, exception.what());
-        } catch (...) {
-            append_cleanup_error(
-                error, path, "unknown exception");
-        }
-    };
-    try {
-        const std::string debug_temporary_suffix = ".tmp." +
-            std::to_string(static_cast<unsigned long long>(
-                GetCurrentProcessId()));
-        const std::string retention_temporary_suffix =
-            ".retention.tmp." +
-            std::to_string(static_cast<unsigned long long>(
-                GetCurrentProcessId()));
-        for (const auto* staging_path : {
-                 &csv_staging_path, &json_staging_path}) {
-            if (staging_path->empty()) continue;
-            remove(*staging_path);
-            remove(*staging_path + debug_temporary_suffix);
-            remove(*staging_path + retention_temporary_suffix);
-        }
-        remove(provider_profile_path);
-        remove(provider_staging_path);
-        remove(provider_staging_directory);
-        // 只移除本次独占创建的空目录，不递归处理未知文件。
-        remove(staging_directory);
-    } catch (...) {
-        append_cleanup_error(
-            error, "<benchmark-outputs>",
-            "cleanup sequence exception");
-    }
-}
-
-bool read_report_samples_dropped(
-        const std::string& path,
-        benchmark::detail::ReportFileFormat format,
-        std::uint64_t& value,
-        std::string& error) noexcept {
-    try {
-        std::ifstream input(std::filesystem::u8path(path), std::ios::binary);
-        if (!input) {
-            set_error(error, "无法回读 staging 报告省略计数: " + path);
-            return false;
-        }
-        const std::string_view prefix =
-            format == benchmark::detail::ReportFileFormat::CSV
-            ? "# report_samples_dropped,"
-            : "  \"report_samples_dropped\": ";
-        std::size_t matches = 0;
-        std::uint64_t parsed_value = 0;
-        std::string line;
-        while (std::getline(input, line)) {
-            if (!line.starts_with(prefix)) continue;
-            std::string_view encoded(line);
-            encoded.remove_prefix(prefix.size());
-            if (format == benchmark::detail::ReportFileFormat::JSON) {
-                if (encoded.empty() || encoded.back() != ',') {
-                    set_error(error,
-                        "staging JSON 省略计数行格式非法");
-                    return false;
-                }
-                encoded.remove_suffix(1);
-            }
-            std::uint64_t candidate = 0;
-            const auto [end, result] = std::from_chars(
-                encoded.data(), encoded.data() + encoded.size(), candidate);
-            if (result != std::errc{} ||
-                end != encoded.data() + encoded.size()) {
-                set_error(error, "staging 报告省略计数不是 uint64");
-                return false;
-            }
-            parsed_value = candidate;
-            ++matches;
-        }
-        if (!input.eof() || matches != 1) {
-            set_error(error,
-                "staging 报告必须且只能包含一条省略计数元数据");
-            return false;
-        }
-        value = parsed_value;
-        error.clear();
-        return true;
-    } catch (const std::exception& exception) {
-        set_error(error, std::string("回读 staging 报告异常: ") +
-                          exception.what());
-        return false;
-    } catch (...) {
-        set_error(error, "回读 staging 报告时发生未知异常");
-        return false;
-    }
-}
 
 bool rewrite_report_samples_dropped(
         const std::string& path,
@@ -652,7 +539,7 @@ bool rewrite_report_samples_dropped(
         }
         temporary.clear();
         std::uint64_t verified = 0;
-        if (!read_report_samples_dropped(
+        if (!benchmark::detail::read_report_samples_dropped(
                 path, format, verified, error) ||
             verified != omitted_sample_count) {
             if (error.empty()) {
@@ -881,6 +768,121 @@ bool start_production_runtime(
 }
 
 } // namespace
+
+void benchmark::detail::remove_benchmark_outputs(
+        const std::string& csv_staging_path,
+        const std::string& json_staging_path,
+        const std::string& provider_profile_path,
+        const std::string& provider_staging_path,
+        const std::string& staging_directory,
+        const std::string& provider_staging_directory,
+        std::string& error) noexcept {
+    const auto remove = [&](const std::string& path) noexcept {
+        if (path.empty()) return;
+        try {
+            std::error_code cleanup_error;
+            (void)std::filesystem::remove(
+                std::filesystem::u8path(path), cleanup_error);
+            if (cleanup_error) {
+                append_cleanup_error(
+                    error, path,
+                    "code=" + std::to_string(cleanup_error.value()) +
+                        ", message=" + cleanup_error.message());
+            }
+        } catch (const std::exception& exception) {
+            append_cleanup_error(
+                error, path, exception.what());
+        } catch (...) {
+            append_cleanup_error(
+                error, path, "unknown exception");
+        }
+    };
+    try {
+        const std::string debug_temporary_suffix = ".tmp." +
+            std::to_string(static_cast<unsigned long long>(
+                GetCurrentProcessId()));
+        const std::string retention_temporary_suffix =
+            ".retention.tmp." +
+            std::to_string(static_cast<unsigned long long>(
+                GetCurrentProcessId()));
+        for (const auto* staging_path : {
+                 &csv_staging_path, &json_staging_path}) {
+            if (staging_path->empty()) continue;
+            remove(*staging_path);
+            remove(*staging_path + debug_temporary_suffix);
+            remove(*staging_path + retention_temporary_suffix);
+        }
+        remove(provider_profile_path);
+        remove(provider_staging_path);
+        remove(provider_staging_directory);
+        // 只移除本次独占创建的空目录，不递归处理未知文件。
+        remove(staging_directory);
+    } catch (...) {
+        append_cleanup_error(
+            error, "<benchmark-outputs>",
+            "cleanup sequence exception");
+    }
+}
+
+bool benchmark::detail::read_report_samples_dropped(
+        const std::string& path,
+        benchmark::detail::ReportFileFormat format,
+        std::uint64_t& value,
+        std::string& error) noexcept {
+    try {
+        std::ifstream input(std::filesystem::u8path(path), std::ios::binary);
+        if (!input) {
+            set_error(error, "无法回读 staging 报告省略计数: " + path);
+            return false;
+        }
+        const std::string_view prefix =
+            format == benchmark::detail::ReportFileFormat::CSV
+            ? "# report_samples_dropped,"
+            : "  \"report_samples_dropped\": ";
+        std::size_t matches = 0;
+        std::uint64_t parsed_value = 0;
+        std::string line;
+        while (std::getline(input, line)) {
+            if (!line.starts_with(prefix)) continue;
+            std::string_view encoded(line);
+            encoded.remove_prefix(prefix.size());
+            if (format == benchmark::detail::ReportFileFormat::JSON) {
+                if (encoded.empty() || encoded.back() != ',') {
+                    set_error(error,
+                        "staging JSON 省略计数行格式非法");
+                    return false;
+                }
+                encoded.remove_suffix(1);
+            }
+            std::uint64_t candidate = 0;
+            const auto [end, result] = std::from_chars(
+                encoded.data(), encoded.data() + encoded.size(), candidate);
+            if (result != std::errc{} ||
+                end != encoded.data() + encoded.size()) {
+                set_error(error, "staging 报告省略计数不是 uint64");
+                return false;
+            }
+            parsed_value = candidate;
+            ++matches;
+        }
+        if (!input.eof() || matches != 1) {
+            set_error(error,
+                "staging 报告必须且只能包含一条省略计数元数据");
+            return false;
+        }
+        value = parsed_value;
+        error.clear();
+        return true;
+    } catch (const std::exception& exception) {
+        set_error(error, std::string("回读 staging 报告异常: ") +
+                          exception.what());
+        return false;
+    } catch (...) {
+        set_error(error, "回读 staging 报告时发生未知异常");
+        return false;
+    }
+}
+
 
 bool benchmark::detail::publish_benchmark_reports(
         const std::string& csv_staging_path,
@@ -1372,7 +1374,7 @@ bool benchmark::detail::run_runtime_benchmark_with_adapter(
     bool provider_profile_owned = false;
     const auto cleanup = [&]() noexcept {
         if (!report_outputs_owned) return;
-        remove_benchmark_outputs(csv_staging_path, json_staging_path,
+        benchmark::detail::remove_benchmark_outputs(csv_staging_path, json_staging_path,
             provider_profile_owned ? provider_profile_path : std::string{},
             provider_staging_owned ? provider_staging_path : std::string{},
             staging_directory,
@@ -1840,12 +1842,12 @@ bool benchmark::detail::run_runtime_benchmark_with_adapter(
                                     std::uint64_t csv_omitted = 0;
                                     std::uint64_t json_omitted = 0;
                                     metadata_valid =
-                                        read_report_samples_dropped(
+                                        benchmark::detail::read_report_samples_dropped(
                                             csv_staging_path,
                                             benchmark::detail::
                                                 ReportFileFormat::CSV,
                                             csv_omitted, error) &&
-                                        read_report_samples_dropped(
+                                        benchmark::detail::read_report_samples_dropped(
                                             json_staging_path,
                                             benchmark::detail::
                                                 ReportFileFormat::JSON,

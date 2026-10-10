@@ -25,6 +25,25 @@ namespace {
 
 int failures = 0;
 
+std::string utf8_path(const std::filesystem::path& path) {
+    const auto value = path.u8string();
+    return std::string(value.begin(), value.end());
+}
+
+bool directory_contains_only(
+        const std::filesystem::path& directory,
+        std::span<const std::filesystem::path> expected) {
+    if (!std::filesystem::is_directory(directory)) return false;
+    std::size_t count = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+        if (std::find(expected.begin(), expected.end(), entry.path()) == expected.end()) {
+            return false;
+        }
+        ++count;
+    }
+    return count == expected.size();
+}
+
 struct Win32HandleCloser {
     void operator()(void* handle) const noexcept {
         if (handle && handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
@@ -401,8 +420,8 @@ void test_report_summary_and_atomic_files() {
 
     DebugReport report;
     DebugReportConfig config;
-    config.csv_path = (root / "nested" / "runtime.csv").string();
-    config.json_path = (root / "nested" / "runtime.json").string();
+    config.csv_path = utf8_path((root / "nested" / "runtime.csv"));
+    config.json_path = utf8_path((root / "nested" / "runtime.json"));
     config.session_id = "test-session";
     config.model_path = "models/test.onnx";
     config.provider = "CPUExecutionProvider";
@@ -753,8 +772,8 @@ void test_percentiles_preserve_interpolation_and_success_filter() {
     const std::vector<std::vector<double>> cases{{}, {7}, {30, 10, 20, 20}};
     for (const auto& values : cases) {
         DebugReportConfig config;
-        config.csv_path = (owned.path / "percentile.csv").string();
-        config.json_path = (owned.path / "percentile.json").string();
+        config.csv_path = utf8_path((owned.path / "percentile.csv"));
+        config.json_path = utf8_path((owned.path / "percentile.json"));
         config.session_id = "percentile-interpolation";
         expect(report.start(config, error), "分位数回归必须打开报告: " + error);
         if (!report.active()) continue;
@@ -786,7 +805,7 @@ void test_percentiles_preserve_interpolation_and_success_filter() {
     expect(cleanup_owned_debug_pair_test_root(owned, error), "分位数回归只清理独占目录: " + error);
 }
 
-void test_report_pair_publish_failure_preserves_previous_pair() {
+void test_report_pair_publish_failure_preserves_previous_pair(bool unicode_paths) {
     OwnedDebugPairTestRoot owned_root;
     std::string ownership_error;
     const bool root_created = create_owned_debug_pair_test_root(
@@ -795,7 +814,8 @@ void test_report_pair_publish_failure_preserves_previous_pair() {
            "必须创建带 owner sentinel 的本轮 GUID 临时测试根: " +
                ownership_error);
     if (!root_created) return;
-    const auto& root = owned_root.path;
+    const auto root = owned_root.path / std::filesystem::u8path(
+        unicode_paths ? "中文 报告目录" : "ascii reports");
     const auto cleanup_root = [&]() {
         std::string cleanup_error;
         const bool cleaned = cleanup_owned_debug_pair_test_root(
@@ -805,11 +825,13 @@ void test_report_pair_publish_failure_preserves_previous_pair() {
                    cleanup_error);
     };
 
-    const auto csv_path = root / "runtime.csv";
-    const auto json_path = root / "runtime.json";
+    const auto csv_path = root / std::filesystem::u8path(
+        unicode_paths ? "运行 报告.csv" : "runtime.csv");
+    const auto json_path = root / std::filesystem::u8path(
+        unicode_paths ? "运行 报告.json" : "runtime.json");
     DebugReportConfig config;
-    config.csv_path = csv_path.string();
-    config.json_path = json_path.string();
+    config.csv_path = utf8_path(csv_path);
+    config.json_path = utf8_path(json_path);
     config.session_id = "old-session";
     config.max_samples = 1;
     std::string error;
@@ -888,13 +910,15 @@ void test_report_pair_publish_failure_preserves_previous_pair() {
     const auto directory_has_only_pair = [&]() {
         std::size_t target_file_count = 0;
         for (const auto& entry : std::filesystem::directory_iterator(root)) {
-            if (entry.path() == owned_root.owner_path) continue;
+
             if (entry.path() != csv_path && entry.path() != json_path) {
                 return false;
             }
             ++target_file_count;
         }
-        return target_file_count == 2;
+        const std::array expected_root{owned_root.owner_path, root};
+        return target_file_count == 2 &&
+            directory_contains_only(owned_root.path, expected_root);
     };
     expect(directory_has_only_pair(),
            "report pair 发布失败后目录只能保留旧 CSV/JSON 目标");
@@ -959,6 +983,51 @@ void test_report_pair_publish_failure_preserves_previous_pair() {
     cleanup_root();
 }
 
+void test_utf8_new_report_failure_cleanup_and_retry() {
+    OwnedDebugPairTestRoot owned;
+    std::string error;
+    const bool created = create_owned_debug_pair_test_root(owned, error);
+    expect(created, "中文新报告失败回归创建独占目录: " + error);
+    if (!created) return;
+    const auto root = owned.path / std::filesystem::u8path("中文 新报告");
+    const auto csv = root / std::filesystem::u8path("运行 明细.csv");
+    const auto json = root / std::filesystem::u8path("运行 摘要.json");
+    // JSON 目标被目录占用，让 CSV 已写入后的第二步真正失败。
+    std::filesystem::create_directories(json);
+    DebugReportConfig config;
+    config.csv_path = utf8_path(csv);
+    config.json_path = utf8_path(json);
+    config.include_json_samples = false;
+    config.session_id = "utf8-new-pair";
+    DebugReport report;
+    expect(report.start(config, error), "中文新报告启动: " + error);
+    const auto sample = make_sample(1, 1.0, true);
+    report.ingest(std::span(&sample, 1));
+    expect(!report.finalize({}, error) && report.active() && !error.empty(),
+           "中文 JSON 发布失败须保留可重试的报告状态");
+    const std::array expected_root{owned.owner_path, root};
+    const std::array expected_failed{json};
+    expect(directory_contains_only(owned.path, expected_root) &&
+               directory_contains_only(root, expected_failed) &&
+               std::filesystem::is_empty(json),
+           "新报告失败必须删除本次 CSV、临时文件，不误删阻挡目录或产生乱码目录");
+    std::filesystem::remove(json);
+    expect(report.finalize({}, error) && !report.active(),
+           "解除中文路径失败后应允许原报告重试: " + error);
+    std::ifstream input(json, std::ios::binary);
+    const std::string content((std::istreambuf_iterator<char>(input)),
+                              std::istreambuf_iterator<char>());
+    input.close();
+    expect(content.find("\"samples_csv\": \"运行 明细.csv\"") != std::string::npos,
+           "精简 JSON 中的 CSV 文件名必须保持 UTF-8");
+    const std::array expected_success{csv, json};
+    expect(directory_contains_only(owned.path, expected_root) &&
+               directory_contains_only(root, expected_success),
+           "新报告重试后只保留正确中文路径下的 CSV/JSON");
+    expect(cleanup_owned_debug_pair_test_root(owned, error),
+           "中文新报告失败回归只清理独占目录: " + error);
+}
+
 void test_report_keeps_last_samples_across_batches_and_restarts() {
     OwnedDebugPairTestRoot owned;
     std::string error;
@@ -994,8 +1063,8 @@ void test_report_keeps_last_samples_across_batches_and_restarts() {
     for (std::size_t run = 0; run < cases.size(); ++run) {
         const auto [capacity, count] = cases[run];
         DebugReportConfig config;
-        config.csv_path = (owned.path / "window.csv").string();
-        config.json_path = (owned.path / "window.json").string();
+        config.csv_path = utf8_path((owned.path / "window.csv"));
+        config.json_path = utf8_path((owned.path / "window.json"));
         config.session_id = "window-" + std::to_string(run);
         config.max_samples = capacity;
         expect(report.start(config, error), "同一报告应重新开始独立尾部窗口: " + error);
@@ -1041,7 +1110,7 @@ void test_report_keeps_last_samples_across_batches_and_restarts() {
                    summary.total.mean_ms == (successes ? total / static_cast<double>(successes) : 0.0),
                "回绕及重启后汇总只能消费最后N条，成功耗时和两类丢弃不得串会话");
 
-        std::ifstream csv(config.csv_path), json(config.json_path);
+        std::ifstream csv(std::filesystem::u8path(config.csv_path)), json(std::filesystem::u8path(config.json_path));
         const std::string json_text(
             (std::istreambuf_iterator<char>(json)), std::istreambuf_iterator<char>());
         std::vector<std::string> header;
@@ -1095,18 +1164,23 @@ void test_report_rejects_invalid_capacity() {
            "零容量 Debug 报告必须拒绝启动");
 }
 
-void test_aim_lock_active_marker_lifecycle() {
-    const auto root = std::filesystem::temp_directory_path() /
-                      "xen_debug_aim_lock_marker_test";
-    std::error_code ignored;
-    std::filesystem::remove_all(root, ignored);
+void test_aim_lock_active_marker_lifecycle(bool unicode_paths) {
+    OwnedDebugPairTestRoot owned;
+    std::string ownership_error;
+    const bool created = create_owned_debug_pair_test_root(owned, ownership_error);
+    expect(created, "marker 回归创建独占目录: " + ownership_error);
+    if (!created) return;
+    const auto root = owned.path / std::filesystem::u8path(
+        unicode_paths ? "中文 标记目录" : "ascii markers");
 
     DebugReportConfig config;
-    config.csv_path = (root / "runtime.csv").string();
-    config.json_path = (root / "runtime.json").string();
+    config.csv_path = utf8_path(root / std::filesystem::u8path(
+        unicode_paths ? "运行 报告.csv" : "runtime.csv"));
+    config.json_path = utf8_path(root / std::filesystem::u8path(
+        unicode_paths ? "运行 报告.json" : "runtime.json"));
     config.session_id = "aim-lock-session";
     config.max_samples = 4;
-    const auto marker = std::filesystem::path(
+    const auto marker = std::filesystem::u8path(
         config.json_path + ".aim-lock-active");
     std::string error;
 
@@ -1207,10 +1281,10 @@ void test_aim_lock_active_marker_lifecycle() {
     }
     DebugReportConfig blocked_config = config;
     blocked_config.csv_path =
-        (blocked_parent / "runtime.csv").string();
+        utf8_path(blocked_parent / "runtime.csv");
     blocked_config.json_path =
-        (blocked_parent / "runtime.json").string();
-    const auto blocked_marker = std::filesystem::path(
+        utf8_path(blocked_parent / "runtime.json");
+    const auto blocked_marker = std::filesystem::u8path(
         blocked_config.json_path + ".aim-lock-active");
     {
         DebugReport report;
@@ -1225,7 +1299,14 @@ void test_aim_lock_active_marker_lifecycle() {
                "marker I/O 失败必须保持缺席且不得终止 DebugReport");
     }
 
-    std::filesystem::remove_all(root, ignored);
+    const std::array expected_root{owned.owner_path, root};
+    const std::array expected_files{std::filesystem::u8path(config.csv_path),
+        std::filesystem::u8path(config.json_path), blocked_parent};
+    expect(directory_contains_only(owned.path, expected_root) &&
+               directory_contains_only(root, expected_files),
+           "marker 停止和析构清理不得留下临时文件或乱码目录");
+    expect(cleanup_owned_debug_pair_test_root(owned, ownership_error),
+           "marker 回归只清理独占目录: " + ownership_error);
 }
 
 void test_disabled_probes_are_not_reported_as_zero_cost_samples() {
@@ -1236,8 +1317,8 @@ void test_disabled_probes_are_not_reported_as_zero_cost_samples() {
 
     DebugReport report;
     DebugReportConfig config;
-    config.csv_path = (root / "runtime.csv").string();
-    config.json_path = (root / "runtime.json").string();
+    config.csv_path = utf8_path((root / "runtime.csv"));
+    config.json_path = utf8_path((root / "runtime.json"));
     config.session_id = "probe-off";
     config.max_samples = 1;
     config.performance_probes_enabled = false;
@@ -1283,8 +1364,8 @@ void test_report_preserves_same_frame_source_timing_fields() {
     if (!root_created) return;
 
     DebugReportConfig config;
-    config.csv_path = (owned_root.path / "runtime.csv").string();
-    config.json_path = (owned_root.path / "runtime.json").string();
+    config.csv_path = utf8_path((owned_root.path / "runtime.csv"));
+    config.json_path = utf8_path((owned_root.path / "runtime.json"));
     config.session_id = "same-frame-source-timing";
     config.max_samples = 3;
     std::array<RuntimePipelineSample, 3> samples{
@@ -1410,8 +1491,8 @@ void test_report_preserves_same_frame_source_timing_fields() {
         }
     }
 
-    std::ifstream csv(config.csv_path, std::ios::binary);
-    std::ifstream json(config.json_path, std::ios::binary);
+    std::ifstream csv(std::filesystem::u8path(config.csv_path), std::ios::binary);
+    std::ifstream json(std::filesystem::u8path(config.json_path), std::ios::binary);
     const std::string csv_text(
         (std::istreambuf_iterator<char>(csv)),
         std::istreambuf_iterator<char>());
@@ -1573,8 +1654,8 @@ void test_report_captures_optional_aim_startup_config() {
     if (owned.path.empty() || !std::filesystem::exists(owned.owner_path)) return;
     DebugReport report;
     DebugReportConfig config;
-    config.csv_path = (owned.path / "aim.csv").string();
-    config.json_path = (owned.path / "aim.json").string();
+    config.csv_path = utf8_path((owned.path / "aim.csv"));
+    config.json_path = utf8_path((owned.path / "aim.json"));
     for (int mode = 0; mode < 5; ++mode) {
         config.aim_config.reset();
         config.auto_stop_config.reset();
@@ -1625,8 +1706,8 @@ void test_report_captures_optional_aim_startup_config() {
             snapshot.auto_stop.max_arbiter_wait_ns = mode == 2 ? 56000 : 0;
         }
         expect(report.finalize(snapshot, error), "Aim启动快照须随报告成功落盘");
-        std::ifstream json_file(config.json_path, std::ios::binary);
-        std::ifstream csv_file(config.csv_path, std::ios::binary);
+        std::ifstream json_file(std::filesystem::u8path(config.json_path), std::ios::binary);
+        std::ifstream csv_file(std::filesystem::u8path(config.csv_path), std::ios::binary);
         const std::string json((std::istreambuf_iterator<char>(json_file)), {});
         const std::string csv((std::istreambuf_iterator<char>(csv_file)), {});
         expect(json.find("\"schema\": 20") != std::string::npos,
@@ -1705,8 +1786,8 @@ void test_trigger_startup_and_final_metadata() {
     expect(create_owned_debug_pair_test_root(owned, error), "Trigger报告创建独立临时根");
     if (owned.path.empty() || !std::filesystem::exists(owned.owner_path)) return;
     DebugReportConfig config;
-    config.csv_path = (owned.path / "trigger.csv").string();
-    config.json_path = (owned.path / "trigger.json").string();
+    config.csv_path = utf8_path((owned.path / "trigger.csv"));
+    config.json_path = utf8_path((owned.path / "trigger.json"));
     for (int mode = 0; mode < 5; ++mode) {
         config.trigger_config.reset();
         if (mode != 0) {
@@ -1746,8 +1827,8 @@ void test_trigger_startup_and_final_metadata() {
             snapshot.source_context.age_ms = mode == 3 ? 20 : 201;
         }
         expect(report.finalize(snapshot, error), "Trigger报告封口");
-        std::ifstream json_file(config.json_path, std::ios::binary);
-        std::ifstream csv_file(config.csv_path, std::ios::binary);
+        std::ifstream json_file(std::filesystem::u8path(config.json_path), std::ios::binary);
+        std::ifstream csv_file(std::filesystem::u8path(config.csv_path), std::ios::binary);
         const std::string json((std::istreambuf_iterator<char>(json_file)), {});
         const std::string csv((std::istreambuf_iterator<char>(csv_file)), {});
         expect(json.find("\"schema\": 20") != std::string::npos, "Trigger不改变frame schema20");
@@ -1802,7 +1883,7 @@ void test_trigger_startup_and_final_metadata() {
 
 
 std::string report_text(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
+    std::ifstream file(std::filesystem::u8path(path), std::ios::binary);
     return std::string((std::istreambuf_iterator<char>(file)), {});
 }
 
@@ -1812,8 +1893,8 @@ void test_session_aggregate_survives_tail_eviction() {
     expect(create_owned_debug_pair_test_root(owned, error), "全程统计测试创建独占目录");
     if (owned.path.empty()) return;
     DebugReportConfig config;
-    config.csv_path = (owned.path / "aggregate.csv").string();
-    config.json_path = (owned.path / "aggregate.json").string();
+    config.csv_path = utf8_path((owned.path / "aggregate.csv"));
+    config.json_path = utf8_path((owned.path / "aggregate.json"));
     config.max_samples = 2;
     std::vector<RuntimePipelineSample> samples;
     for (std::uint64_t i = 1; i <= 10005; ++i) {
@@ -1873,8 +1954,8 @@ void test_session_aggregate_boundaries_and_batching() {
     expect(create_owned_debug_pair_test_root(owned, error), "统计边界创建独占目录");
     if (owned.path.empty()) return;
     DebugReportConfig config;
-    config.csv_path = (owned.path / "edges.csv").string();
-    config.json_path = (owned.path / "edges.json").string();
+    config.csv_path = utf8_path((owned.path / "edges.csv"));
+    config.json_path = utf8_path((owned.path / "edges.json"));
     config.max_samples = 1;
     std::vector<RuntimePipelineSample> samples;
     for (std::uint64_t i = 1; i <= 100; ++i) {
@@ -1988,8 +2069,8 @@ void test_session_aggregate_minute_capacity() {
     expect(create_owned_debug_pair_test_root(owned, error), "分钟容量创建独占目录");
     if (owned.path.empty()) return;
     DebugReportConfig config;
-    config.csv_path = (owned.path / "minutes.csv").string();
-    config.json_path = (owned.path / "minutes.json").string();
+    config.csv_path = utf8_path((owned.path / "minutes.csv"));
+    config.json_path = utf8_path((owned.path / "minutes.json"));
     config.max_samples = 1;
     DebugReport report;
     expect(report.start(config, error), "分钟容量启动");
@@ -2026,10 +2107,13 @@ int main() {
     test_session_aggregate_minute_capacity();
     test_report_summary_and_atomic_files();
     test_percentiles_preserve_interpolation_and_success_filter();
-    test_report_pair_publish_failure_preserves_previous_pair();
+    test_report_pair_publish_failure_preserves_previous_pair(false);
+    test_report_pair_publish_failure_preserves_previous_pair(true);
+    test_utf8_new_report_failure_cleanup_and_retry();
     test_report_keeps_last_samples_across_batches_and_restarts();
     test_report_rejects_invalid_capacity();
-    test_aim_lock_active_marker_lifecycle();
+    test_aim_lock_active_marker_lifecycle(false);
+    test_aim_lock_active_marker_lifecycle(true);
     test_disabled_probes_are_not_reported_as_zero_cost_samples();
     test_report_preserves_same_frame_source_timing_fields();
     test_shared_success_semantics();

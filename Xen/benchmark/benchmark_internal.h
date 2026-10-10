@@ -43,6 +43,16 @@ bool run_runtime_benchmark_with_adapter(
     const BenchmarkRunAdapter& adapter,
     std::string& error) noexcept;
 
+// 主循环收尾与回归共用：调用者只传入本次拥有的文件/目录；不删除正式 CSV/JSON。
+void remove_benchmark_outputs(
+    const std::string& csv_staging_path,
+    const std::string& json_staging_path,
+    const std::string& provider_profile_path,
+    const std::string& provider_staging_path,
+    const std::string& staging_directory,
+    const std::string& provider_staging_directory,
+    std::string& error) noexcept;
+
 // XenBenchmark 控制台入口委托到这里；handler 只置无锁原子 stop 标志，
 // 文件清理与 Runtime 收口仍由普通执行流完成。
 void prepare_benchmark_console_control() noexcept;
@@ -421,6 +431,14 @@ enum class ReportFileFormat {
     CSV,
     JSON,
 };
+
+// 主循环和报告回归共用实际磁盘回读，UTF-8 路径在文件系统边界转换。
+bool read_report_samples_dropped(
+    const std::string& path,
+    ReportFileFormat format,
+    std::uint64_t& value,
+    std::string& error) noexcept;
+
 
 // DebugReport 在 staging 中只接收最终尾窗，因此其内部 dropped 为 0。
 // 正式报告发布前只允许精确改写这一条元数据，逐样本正文保持不变。

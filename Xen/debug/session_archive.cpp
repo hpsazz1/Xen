@@ -98,8 +98,11 @@ struct SessionArchive::Impl {
         const auto number = ++segment_number;
         const auto base = std::filesystem::path(config.directory) / ("segment-" + std::to_string(number));
         auto report_config = config.report_config;
-        report_config.csv_path = base.string() + ".csv";
-        report_config.json_path = base.string() + ".json";
+        // 归档目录保留原生窄路径契约；报告边界统一传入 UTF-8。
+        const auto encoded_base = base.u8string();
+        const std::string report_base(encoded_base.begin(), encoded_base.end());
+        report_config.csv_path = report_base + ".csv";
+        report_config.json_path = report_base + ".json";
         report_config.max_samples = std::max<std::size_t>(1, pending.size());
         report_config.include_json_samples = false;
         report_config.enable_lock_marker = false;

@@ -17,6 +17,11 @@
 #include <vector>
 
 namespace {
+std::string utf8_path(const std::filesystem::path& path) {
+    const auto encoded = path.u8string();
+    return std::string(encoded.begin(), encoded.end());
+}
+
 using Json = nlohmann::json;
 using namespace std::chrono_literals;
 using app::detail::ReportJobKind;
@@ -129,8 +134,8 @@ struct Session {
         const auto directory = fixture.root / "reports";
         if (blocked) { std::ofstream file(directory); file << "模拟报告目录被普通文件占用"; }
         config.session_id = "interleave";
-        config.json_path = (directory / "report.json").string();
-        config.csv_path = (directory / "report.csv").string();
+        config.json_path = utf8_path((directory / "report.json"));
+        config.csv_path = utf8_path((directory / "report.csv"));
         config.enable_lock_marker = false;
         config.recoil_config = RecoilConfig{}; config.trigger_config = TriggerConfig{};
         std::string error;
@@ -191,7 +196,7 @@ struct Session {
         throw std::runtime_error("生产调度器回收任务超时");
     }
     void expect_old_report() {
-        const auto json = read_json(config.json_path);
+        const auto json = read_json(std::filesystem::u8path(config.json_path));
         expect(json["sample_count"] == 1, "只发布一次原始样本");
         expect(json["final_snapshot"]["last_error"] == "原始故障", "保存原冻结故障原因");
         expect(json["trigger"]["execution"]["events"].size() == 1 &&

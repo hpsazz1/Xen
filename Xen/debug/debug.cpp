@@ -906,6 +906,11 @@ void append_json_snapshot(std::ostringstream& output,
         << bool_name(snapshot.emergency_stopped) << "\n  },\n";
 }
 
+std::string path_to_utf8(const std::filesystem::path& path) {
+    const auto encoded = path.u8string();
+    return std::string(encoded.begin(), encoded.end());
+}
+
 bool write_atomically(const std::string& path,
                       const std::string& content,
                       std::string& error) noexcept {
@@ -914,7 +919,8 @@ bool write_atomically(const std::string& path,
             set_error(error, "Debug 报告路径不能为空");
             return false;
         }
-        const std::filesystem::path target(path);
+        // 配置与 Benchmark 传入 UTF-8；所有临时文件和 W API 路径从同一原生路径派生。
+        const auto target = std::filesystem::u8path(path);
         const auto parent = target.parent_path();
         if (!parent.empty()) std::filesystem::create_directories(parent);
 
@@ -927,7 +933,7 @@ bool write_atomically(const std::string& path,
                                  std::ios::binary | std::ios::trunc);
             if (!stream) {
                 set_error(error, "无法创建 Debug 报告临时文件: " +
-                                  temporary.string());
+                                  path_to_utf8(temporary));
                 return false;
             }
             stream.write(content.data(),
@@ -937,7 +943,7 @@ bool write_atomically(const std::string& path,
                 std::error_code ignored;
                 std::filesystem::remove(temporary, ignored);
                 set_error(error, "Debug 报告临时文件写入失败: " +
-                                  temporary.string());
+                                  path_to_utf8(temporary));
                 return false;
             }
         }
@@ -1013,7 +1019,7 @@ bool publish_report_pair(const std::string& csv_path,
                          std::string& error) noexcept {
     ReportCsvRollback rollback;
     try {
-        const std::filesystem::path csv_target(csv_path);
+        const auto csv_target = std::filesystem::u8path(csv_path);
         rollback.path = csv_target;
         rollback.path += ".rollback." +
             std::to_string(static_cast<unsigned long long>(
@@ -1057,7 +1063,7 @@ bool publish_report_pair(const std::string& csv_path,
                     : "Debug CSV 回滚复制与清理均失败，CopyError=" +
                           std::to_string(copy_error) + ", CleanupError=" +
                           std::to_string(cleanup_error) + ", path=" +
-                          rollback.path.string());
+                          path_to_utf8(rollback.path));
                 return false;
             }
             rollback.owned = true;
@@ -1072,7 +1078,7 @@ bool publish_report_pair(const std::string& csv_path,
                 : publish_error +
                       "; Debug CSV 回滚文件清理失败，Win32Error=" +
                       std::to_string(cleanup_error) + ", path=" +
-                      rollback.path.string());
+                      path_to_utf8(rollback.path));
             return false;
         }
         rollback.csv_published = true;
@@ -1083,7 +1089,7 @@ bool publish_report_pair(const std::string& csv_path,
                 set_error(error, publish_error +
                     "; Debug CSV 回滚失败，Win32Error=" +
                     std::to_string(rollback_error) + ", path=" +
-                    rollback.path.string());
+                    path_to_utf8(rollback.path));
                 return false;
             }
             set_error(error, publish_error);
@@ -1099,7 +1105,7 @@ bool publish_report_pair(const std::string& csv_path,
             set_error(error,
                       "Debug report pair 已提交，但回滚文件清理失败，Win32Error=" +
                           std::to_string(cleanup_error) + ", path=" +
-                          rollback.path.string());
+                          path_to_utf8(rollback.path));
             return false;
         }
         return true;
@@ -1111,11 +1117,11 @@ bool publish_report_pair(const std::string& csv_path,
         set_error(error, rollback_error != ERROR_SUCCESS
             ? "Debug report pair 发布异常且 CSV 回滚失败，Win32Error=" +
                   std::to_string(rollback_error) + ", path=" +
-                  rollback.path.string()
+                  path_to_utf8(rollback.path)
             : cleanup_error != ERROR_SUCCESS
                 ? "Debug report pair 发布异常且回滚文件清理失败，Win32Error=" +
                       std::to_string(cleanup_error) + ", path=" +
-                      rollback.path.string()
+                      path_to_utf8(rollback.path)
                 : "Debug report pair 发布时发生未知异常");
         return false;
     }
@@ -1149,7 +1155,7 @@ bool DebugReport::remove_aim_lock_marker() noexcept {
         }
         std::error_code error;
         std::filesystem::remove(
-            std::filesystem::path(config_.json_path + kAimLockMarkerSuffix),
+            std::filesystem::u8path(config_.json_path + kAimLockMarkerSuffix),
             error);
         if (error) {
             // 删除失败时保留 published 状态，后续 inactive 样本会有界重试；
@@ -2040,7 +2046,8 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
         json << "  },\n";
         if (!config_.include_json_samples) {
             json << "  \"samples_omitted\": true,\n  \"samples_csv\": \""
-                 << json_escape(std::filesystem::path(config_.csv_path).filename().string()) << "\",\n";
+                 << json_escape(path_to_utf8(
+                        std::filesystem::u8path(config_.csv_path).filename())) << "\",\n";
         }
         json << "  \"samples\": [\n";
         for (std::size_t index = 0; config_.include_json_samples && index < samples_.size(); ++index) {
