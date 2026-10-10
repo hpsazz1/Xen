@@ -709,10 +709,32 @@ void test_priority_queue_preserves_warn_burst() {
            "阻塞优先队列不得覆盖或丢失 WARN 洪峰记录");
 }
 
+void test_unicode_file_paths() {
+    Log::shutdown();TempDirectory directory;
+    const auto root=directory.path()/std::filesystem::path(L"\u65e5\u5fd7_\U0001f9ea");
+    LogConfig config;config.enable_console=false;config.enable_file=true;
+    config.enable_debug_file=true;config.enable_ringbuf=true;
+    const auto encoded=root.u8string();config.log_dir.assign(encoded.begin(),encoded.end());
+    Log::init(config);expect(Log::initialized(),"unicode log directory must initialize");
+    Log::register_module("unicode",LogLevel::INFO);
+    LOG_INFO("unicode","unicode-file-marker");
+    const auto dump=root/std::filesystem::path(L"\u8f6c\u50a8_\U0001f9ea.log");
+    const auto dump_encoded=dump.u8string();
+    Log::dump_ring_buffer(std::string(dump_encoded.begin(),dump_encoded.end()));
+    Log::shutdown();
+    expect(read_file(root/"xen.log").find("unicode-file-marker")!=std::string::npos,
+           "rotating sink preserves unicode path");
+    expect(read_file(root/"debug.log").find("unicode-file-marker")!=std::string::npos,
+           "debug sink preserves unicode path");
+    expect(read_file(dump).find("unicode-file-marker")!=std::string::npos,
+           "ring dump preserves unicode path");
+}
+
 } // namespace
 
 int main() {
     try {
+        test_unicode_file_paths();
         test_invalid_config_can_retry();
         test_unregistered_is_dropped_and_ring_is_immediate();
         test_macro_extends_temporary_module_lifetime();

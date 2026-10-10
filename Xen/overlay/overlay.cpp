@@ -603,6 +603,31 @@ struct Overlay::Impl {
             : E_POINTER;
     }
 
+    static void destroy_target(void* context) noexcept {
+        static_cast<Impl*>(context)->destroy_render_target();
+    }
+    static HRESULT resize_target(void* context, unsigned int width,
+                                 unsigned int height) noexcept {
+        auto* self = static_cast<Impl*>(context);
+        return self->swap_chain->ResizeBuffers(
+            0, width, height, DXGI_FORMAT_UNKNOWN, 0);
+    }
+    static bool create_target(void* context) noexcept {
+        return static_cast<Impl*>(context)->create_render_target();
+    }
+    static void draw_target(void* context) noexcept {
+        auto* self = static_cast<Impl*>(context);
+        const ImVec4 clear_color = rgba(kCanvas);
+        const float colors[4] = {clear_color.x, clear_color.y,
+                                clear_color.z, clear_color.w};
+        self->context->OMSetRenderTargets(
+            1, self->render_target.GetAddressOf(), nullptr);
+        self->context->ClearRenderTargetView(self->render_target.Get(), colors);
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    }
+    overlay::detail::RenderTargetAdapter render_target_adapter() noexcept {
+        return {this, destroy_target, resize_target, create_target, draw_target};
+    }
     Impl() noexcept
         : present_boundary({this, present_swap_chain}) {}
 
@@ -717,12 +742,10 @@ struct Overlay::Impl {
             }
             case WM_SIZE:
                 if (self && self->device && wparam != SIZE_MINIMIZED) {
-                    self->destroy_render_target();
-                    self->swap_chain->ResizeBuffers(
-                        0, static_cast<UINT>(LOWORD(lparam)),
-                        static_cast<UINT>(HIWORD(lparam)),
-                        DXGI_FORMAT_UNKNOWN, 0);
-                    self->create_render_target();
+                    self->present_boundary.resize_render_target(
+                        self->render_target_adapter(),
+                        static_cast<UINT>(LOWORD(lparam)),
+                        static_cast<UINT>(HIWORD(lparam)));
                 }
                 return 0;
             case WM_GETMINMAXINFO: {
@@ -837,6 +860,8 @@ struct Overlay::Impl {
     }
 
     void destroy_render_target() noexcept {
+        // ResizeBuffers 要求同时释放 context 持有的 backbuffer view 引用。
+        if (context) context->OMSetRenderTargets(0, nullptr, nullptr);
         render_target.Reset();
     }
 
@@ -4539,16 +4564,8 @@ bool Overlay::render(
         ImGui::End();
 
         ImGui::Render();
-        const ImVec4 clear_color = rgba(kCanvas);
-        const float kClearColor[4] = {
-            clear_color.x, clear_color.y,
-            clear_color.z, clear_color.w};
-        impl_->context->OMSetRenderTargets(
-            1, impl_->render_target.GetAddressOf(), nullptr);
-        impl_->context->ClearRenderTargetView(
-            impl_->render_target.Get(), kClearColor);
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-        return impl_->present_boundary.present(
+        return impl_->present_boundary.render(
+            impl_->render_target_adapter(), impl_->render_target.Get() != nullptr,
             config.ui.enable_vsync ? 1U : 0U, 0U);
     } catch (...) {
         return false;

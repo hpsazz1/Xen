@@ -1,4 +1,5 @@
 #include <iostream>
+#include <functional>
 #include <source_location>
 #include "auto_stop_probe/probe_internal.h"
 #include "auto_stop_probe/session_internal.h"
@@ -29,7 +30,7 @@ public:
         return result;
     }
     KeyboardReceipt cleanup_wasd_keyboard() noexcept override {
-        ++cleanup_count; KeyboardReceipt result; result.disposition = KeyboardDisposition::ACKNOWLEDGED; return result;
+        ++cleanup_count; if(on_cleanup)on_cleanup(cleanup_count); KeyboardReceipt result; result.disposition = KeyboardDisposition::ACKNOWLEDGED; return result;
     }
     void close() noexcept override { ++close_count; }
     MouseStatus status() const noexcept override { return MouseStatus::READY; }
@@ -40,6 +41,7 @@ public:
     std::size_t cancel_after = 999;
     bool cancel = false, poll_failure = false;
     int polls = 0;
+    std::function<void(int)> on_cleanup;
     int cleanup_count = 0, close_count = 0, forbidden = 0;
 };
 void require(bool condition, const std::source_location location = std::source_location::current()) {
@@ -165,6 +167,17 @@ int main() {
         std::filesystem::remove(session_dir / "session.status.json");
         std::filesystem::remove(session_dir);
         // 第三次轮询才产生 W；1 ms 休眠不保证在 1 ms 后获调度，不能用 30 ms 卡调度精度。
+        const auto final_write_dir=std::filesystem::current_path()/("probe-final-write-"+std::to_string(ns(Clock::now())));
+        std::filesystem::create_directory(final_write_dir);
+        Fake final_write;final_write.cancel=true;
+        final_write.on_cleanup=[&](int count) {
+            if(count==2) {std::error_code error;
+                std::filesystem::create_directory(final_write_dir/"session.status.json.writing",error);}
+        };
+        const auto final_write_result=execute_session(final_write,final_write_dir,1,0);
+        require(final_write_result["state"]=="error"&&final_write_result["reason"]=="SESSION_EXCEPTION"&&
+                final_write_result["success"]==false&&final_write.cleanup_count==2&&final_write.close_count==1);
+        std::filesystem::remove_all(final_write_dir);
         const MaskCheckTiming quick{1000, 0, 1, 0, 1000};
         MaskFake masked;
         masked.start_held = true;

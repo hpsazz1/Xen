@@ -87,9 +87,10 @@ inline Json execute_session(IMouseController& mouse, const std::filesystem::path
         write_session_json(status_path, status, true);
         return status;
     } catch (...) {
+        status["success"] = false;
         status["state"] = "error";
         status["reason"] = "SESSION_EXCEPTION";
-        status["cleanup"] = receipt_json(guard.finish());
+        if (!status.contains("cleanup")) status["cleanup"] = receipt_json(guard.finish());
         status["finished_steady_ns"] = ns(Clock::now());
         try { write_session_json(status_path, status, true); } catch (...) {}
         return status;

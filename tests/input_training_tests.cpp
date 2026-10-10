@@ -2,6 +2,7 @@
 #include "input_training/input_training_internal.h"
 
 #include <chrono>
+#include <atomic>
 #include <condition_variable>
 #include <cmath>
 #include <fstream>
@@ -143,6 +144,42 @@ void gap_tests(Fixture& fixture) {
     session.stop(); result = session.snapshot();
     check(result->holds[0]->end == HoldEnd::GAP && result->dropped_events >= 7 && result->dropped_events % 7 == 0,
         "空批gap损坏当前hold并保存来源丢弃计数");
+}
+void live_gap_publication_test(Fixture& fixture) {
+    for (const bool trailing : {false, true}) {
+        auto phase = std::make_shared<std::atomic<int>>(0);
+        Session session;
+        check(session.start(fixture.directory(), {}, [phase, trailing] {
+            ReadBatch batch;
+            int expected = 0;
+            if (phase->compare_exchange_strong(expected, 1)) {
+                batch.events = {event(1, 0), event(2, 1, 0, true)};
+            } else {
+                expected = 2;
+                if (phase->compare_exchange_strong(expected, 3)) {
+                    batch.gap = !trailing;
+                    batch.trailing_gap = trailing;
+                    batch.dropped_events = trailing ? 0 : 7;
+                }
+            }
+            return batch;
+        }), "启动实时空gap发布回归");
+        const auto wait = [&](const auto& predicate) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            while (!predicate() && std::chrono::steady_clock::now() < deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            return predicate();
+        };
+        check(wait([&] { return session.snapshot()->active_hold != nullptr; }), "故障前先发布真实活动hold");
+        phase->store(2);
+        const bool published = wait([&] {
+            const auto snapshot = session.snapshot();
+            return snapshot->received_events == 2 && snapshot->dropped_events == (trailing ? 0 : 7) &&
+                !snapshot->active_hold && snapshot->holds.size() == 1 && snapshot->holds[0]->end == HoldEnd::GAP;
+        });
+        session.stop();
+        check(published, "没有后续事件时空gap仍须实时发布hold结束和丢失计数");
+    }
 }
 void archive_tests(Fixture& fixture) {
     std::vector<Event> events{event(1,0),event(2,1,0,true),event(3,2,0,true,1,1),event(4,3,0,true,1,1),event(5,4,0,true,1,1),event(6,5)};
@@ -312,6 +349,7 @@ int main() {
     try {
         Fixture fixture;
         timing_tests(fixture); hold_tests(fixture); gap_tests(fixture); archive_tests(fixture); timeout_test(fixture);
+        live_gap_publication_test(fixture);
         archive_visitor_tests(fixture);
         replay_validation_parity_tests(fixture);
         replay_cancellation_test(fixture);

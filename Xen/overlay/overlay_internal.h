@@ -32,6 +32,14 @@ inline bool should_post_quit_on_main_window_destroy(
     return !programmatic_shutdown;
 }
 
+struct RenderTargetAdapter {
+    void* context = nullptr;
+    void (*destroy)(void*) noexcept = nullptr;
+    HRESULT (*resize)(void*, unsigned int, unsigned int) noexcept = nullptr;
+    bool (*create)(void*) noexcept = nullptr;
+    void (*draw)(void*) noexcept = nullptr;
+};
+
 struct PresentAdapter {
     void* context = nullptr;
     HRESULT (*present)(
@@ -82,10 +90,47 @@ public:
         return false;
     }
 
+    bool resize_render_target(const RenderTargetAdapter& adapter,
+                              unsigned int width, unsigned int height) noexcept {
+        if (failed_) return false;
+        if (!adapter.destroy || !adapter.resize || !adapter.create) {
+            return fail_render_target("RenderTarget adapter", E_POINTER);
+        }
+        adapter.destroy(adapter.context);
+        const HRESULT resized = adapter.resize(adapter.context, width, height);
+        if (FAILED(resized)) {
+            return fail_render_target("IDXGISwapChain::ResizeBuffers", resized);
+        }
+        if (!adapter.create(adapter.context)) {
+            return fail_render_target("CreateRenderTargetView/GetBuffer", E_FAIL);
+        }
+        return true;
+    }
+
+    bool render(const RenderTargetAdapter& adapter, bool target_available,
+                unsigned int sync_interval, unsigned int flags) noexcept {
+        if (failed_) return false;
+        if (!target_available || !adapter.draw) {
+            return fail_render_target("RenderTargetView unavailable", E_POINTER);
+        }
+        adapter.draw(adapter.context);
+        return present(sync_interval, flags);
+    }
+
     bool failed() const noexcept { return failed_; }
     const std::string& last_error() const noexcept { return last_error_; }
 
 private:
+    bool fail_render_target(const char* operation, HRESULT result) noexcept {
+        failed_ = true;
+        std::array<char, 160> message{};
+        std::snprintf(message.data(), message.size(),
+                      "%s 失败，HRESULT=0x%08X",
+                      operation, static_cast<unsigned int>(result));
+        try { last_error_ = message.data(); } catch (...) {}
+        return false;
+    }
+
     PresentAdapter adapter_;
     bool failed_ = false;
     std::string last_error_;

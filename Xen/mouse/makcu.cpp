@@ -414,6 +414,7 @@ public:
             mouse_buttons_ = 0;
             mouse_input_received_ = false;
             keyboard_input_received_ = false;
+            keyboard_report_failed_ = false;
             input_sequence_ = 0;
             status_.store(config_.allow_send_input
                               ? MouseStatus::READY : MouseStatus::DISABLED,
@@ -525,6 +526,10 @@ public:
             }
             handle_stream_frame(frame);
         }
+        if (keyboard_report_failed_) {
+            snapshot.status = InputMonitorStatus::FAILURE;
+            return true;
+        }
         if (!mouse_input_received_ || !keyboard_input_received_) {
             snapshot.status = InputMonitorStatus::WAITING;
             return true;
@@ -627,6 +632,14 @@ private:
             mouse_input_received_at_ = std::chrono::steady_clock::now();
         } else if (frame.size == kKeyboardStreamFrameBytes &&
                    frame.bytes[1] == 0xa5U) {
+            // HID 1..3 是错误状态，不能发布为松键或刷新键盘健康时钟。
+            if (std::any_of(frame.bytes.begin() + 5U,
+                            frame.bytes.begin() + 19U,
+                    [](std::uint8_t usage) { return usage >= 1U && usage <= 3U; })) {
+                keyboard_report_failed_ = true;
+                return;
+            }
+            keyboard_report_failed_ = false;
             mouse::detail::apply_hid_keyboard_report(
                 frame.bytes[4], frame.bytes.data() + 5U, 14U,
                 keyboard_keys_);
@@ -755,6 +768,7 @@ private:
     std::uint8_t mouse_buttons_ = 0;
     bool mouse_input_received_ = false;
     bool keyboard_input_received_ = false;
+    bool keyboard_report_failed_ = false;
     std::uint64_t input_sequence_ = 0;
     std::chrono::steady_clock::time_point mouse_input_received_at_{};
     std::chrono::steady_clock::time_point keyboard_input_received_at_{};

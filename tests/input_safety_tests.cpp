@@ -382,6 +382,61 @@ void test_makcu_stream_loss_disarms_without_releasing(bool keyboard_continues) {
            "新 MAKCU 物理释放报告才可清除 Runtime 保留的 hold");
 }
 
+void test_makcu_hid_error_disarms_without_false_key_edges() {
+    auto stream = std::make_shared<MakcuInputStream>();
+    MouseConfig config;
+    config.backend = MouseBackend::MAKCU;
+    config.allow_send_input = false;
+    config.makcu_port = "COM7";
+    std::shared_ptr<IMouseController> device =
+        mouse::detail::create_makcu_controller_for_test(
+            config, std::make_unique<MakcuInputTransport>(stream));
+    expect(device && device->open(), "HID safety fixture opens fake serial device");
+    KeyboardConfig keys;
+    keys.aim_hold_virtual_keys = {0x41};
+    KeyboardListener keyboard(keys, device);
+    Runtime runtime;
+    expect(keyboard.open(), "HID safety fixture opens real keyboard listener");
+    stream->mouse_report(false);
+    stream->keyboard_report();
+    auto poll = keyboard.poll();
+    route_poll(runtime, poll);
+    stream->keyboard_report();
+    stream->frames.back()[5] = 0x04U; // A: hold
+    stream->frames.back()[6] = 0x41U; // F8: toggle
+    poll = keyboard.poll();
+    route_poll(runtime, poll);
+    expect(poll.input_healthy &&
+               contains_event(poll, KeyboardEventType::AIM_HOLD_CHANGED, true) &&
+               contains_event(poll, KeyboardEventType::RUNTIME_TOGGLE, true) &&
+               runtime.post_intent({RuntimeIntentType::ARM_OUTPUT, true}),
+           "Known held A and F8 establish initial real edges");
+    for (const std::uint8_t usage : {1U, 2U, 3U}) {
+        stream->keyboard_report();
+        stream->frames.back()[5] = usage;
+        poll = keyboard.poll();
+        route_poll(runtime, poll);
+        expect(poll.monitor_status == InputMonitorStatus::FAILURE &&
+                   !poll.input_healthy && !poll.new_input_fact && poll.events.empty() &&
+                   runtime.snapshot().aim_hold_active && !runtime.snapshot().output_armed,
+               "HID error disarms Runtime without inventing key release");
+        stream->keyboard_report();
+        stream->frames.back()[5] = 0x04U;
+        stream->frames.back()[6] = 0x41U;
+        poll = keyboard.poll();
+        route_poll(runtime, poll);
+        expect(poll.input_healthy && poll.new_input_fact && poll.events.empty() &&
+                   runtime.snapshot().aim_hold_active && !runtime.snapshot().output_armed,
+               "Recovery with still-held F8 never repeats toggle or automatically arms");
+    }
+    stream->keyboard_report();
+    poll = keyboard.poll();
+    route_poll(runtime, poll);
+    expect(poll.input_healthy &&
+               contains_event(poll, KeyboardEventType::AIM_HOLD_CHANGED, false) &&
+               !runtime.snapshot().aim_hold_active,
+           "Valid empty report publishes the actual release after HID recovery");
+}
 void test_global_debug_emergency_uses_both_frontend_sources() {
     using app::detail::debug_emergency_requested;
     const std::vector<RuntimeIntent> ordinary{
@@ -452,6 +507,7 @@ int main() {
     test_failure_cache_and_new_release();
     test_poll_failure_visible_in_same_result();
     test_listener_generation_resets_sequence_owner();
+    test_makcu_hid_error_disarms_without_false_key_edges();
     test_makcu_stream_loss_disarms_without_releasing(true);
     test_makcu_stream_loss_disarms_without_releasing(false);
     test_global_debug_emergency_uses_both_frontend_sources();

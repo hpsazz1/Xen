@@ -21,6 +21,12 @@ bool valid_shape(const std::vector<int64_t>& shape) noexcept {
            shape[1] > 0 && shape[2] > 0;
 }
 
+// 浮点先限幅，再转换；INT_MAX 的 float 表示可能已舍入到 2^31。
+int bounded_pixel_index(double rounded, int low, int high) noexcept {
+    return static_cast<int>(std::clamp(
+        rounded, static_cast<double>(low), static_cast<double>(high)));
+}
+
 bool finite_box(float x1, float y1, float x2, float y2) noexcept {
     return std::isfinite(x1) && std::isfinite(y1) &&
            std::isfinite(x2) && std::isfinite(y2);
@@ -149,7 +155,8 @@ bool decode_end_to_end(const float* data,
         const float class_value = row[5];
         if (!std::isfinite(confidence) || confidence < conf_threshold ||
             !std::isfinite(class_value) || class_value < 0.0f ||
-            class_value > static_cast<float>(std::numeric_limits<int>::max()) ||
+            static_cast<double>(class_value) >
+                static_cast<double>(std::numeric_limits<int>::max()) ||
             !finite_box(row[0], row[1], row[2], row[3]) ||
             row[2] <= row[0] || row[3] <= row[1]) {
             continue;
@@ -1011,17 +1018,17 @@ bool finalize_segmentations(
         output.masks.reserve(output.detections.size());
         size_t total_mask_bytes = 0;
         for (const Detection& detection : output.detections) {
-            const int left = std::clamp(
-                static_cast<int>(std::floor(detection.x1)),
+            const int left = bounded_pixel_index(
+                std::floor(static_cast<double>(detection.x1)),
                 0, info.orig_w);
-            const int top = std::clamp(
-                static_cast<int>(std::floor(detection.y1)),
+            const int top = bounded_pixel_index(
+                std::floor(static_cast<double>(detection.y1)),
                 0, info.orig_h);
-            const int right = std::clamp(
-                static_cast<int>(std::ceil(detection.x2)),
+            const int right = bounded_pixel_index(
+                std::ceil(static_cast<double>(detection.x2)),
                 0, info.orig_w);
-            const int bottom = std::clamp(
-                static_cast<int>(std::ceil(detection.y2)),
+            const int bottom = bounded_pixel_index(
+                std::ceil(static_cast<double>(detection.y2)),
                 0, info.orig_h);
             if (right <= left || bottom <= top) return false;
 
@@ -1059,17 +1066,17 @@ bool finalize_segmentations(
         const float prototype_scale_y =
             static_cast<float>(prototype_height) /
             static_cast<float>(info.target_h);
-        const int resized_width = std::clamp(
-            static_cast<int>(std::round(info.orig_w * info.scale)),
+        const int resized_width = bounded_pixel_index(
+            std::round(info.orig_w * info.scale),
             1, info.target_w);
-        const int resized_height = std::clamp(
-            static_cast<int>(std::round(info.orig_h * info.scale)),
+        const int resized_height = bounded_pixel_index(
+            std::round(info.orig_h * info.scale),
             1, info.target_h);
-        const int input_left = std::clamp(
-            static_cast<int>(std::round(info.pad_x)),
+        const int input_left = bounded_pixel_index(
+            std::round(static_cast<double>(info.pad_x)),
             0, info.target_w - resized_width);
-        const int input_top = std::clamp(
-            static_cast<int>(std::round(info.pad_y)),
+        const int input_top = bounded_pixel_index(
+            std::round(static_cast<double>(info.pad_y)),
             0, info.target_h - resized_height);
 
         for (size_t instance = 0; instance < selected.size(); ++instance) {
@@ -1103,21 +1110,17 @@ bool finalize_segmentations(
 
             // Ultralytics process_mask() 先在原型分辨率按模型框裁剪，再双线性
             // 上采样并按 logit>0 二值化；该阈值与 sigmoid(logit)>0.5 等价。
-            const int crop_left = std::clamp(
-                static_cast<int>(std::round(
-                    candidate.detection.x1 * prototype_scale_x)),
+            const int crop_left = bounded_pixel_index(
+                std::round(candidate.detection.x1 * prototype_scale_x),
                 0, prototype_width);
-            const int crop_top = std::clamp(
-                static_cast<int>(std::round(
-                    candidate.detection.y1 * prototype_scale_y)),
+            const int crop_top = bounded_pixel_index(
+                std::round(candidate.detection.y1 * prototype_scale_y),
                 0, prototype_height);
-            const int crop_right = std::clamp(
-                static_cast<int>(std::round(
-                    candidate.detection.x2 * prototype_scale_x)),
+            const int crop_right = bounded_pixel_index(
+                std::round(candidate.detection.x2 * prototype_scale_x),
                 0, prototype_width);
-            const int crop_bottom = std::clamp(
-                static_cast<int>(std::round(
-                    candidate.detection.y2 * prototype_scale_y)),
+            const int crop_bottom = bounded_pixel_index(
+                std::round(candidate.detection.y2 * prototype_scale_y),
                 0, prototype_height);
             for (int y = 0; y < prototype_height; ++y) {
                 float* row = mask_logits.data() +

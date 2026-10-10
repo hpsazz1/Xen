@@ -143,6 +143,46 @@ void test_end_to_end_decode() {
            "END_TO_END 应过滤补零行并保留 class");
 }
 
+void test_end_to_end_class_integer_boundary() {
+    const std::vector<float> tensor = {
+        0.0f, 0.0f, 4.0f, 4.0f, 0.9f, 2147483648.0f,
+        0.0f, 0.0f, 4.0f, 4.0f, 0.9f, 2147483520.0f,
+    };
+    std::vector<Detection> detections;
+    expect(detector::detail::decode_output(tensor.data(), {1, 2, 6},
+               OutputFormat::END_TO_END, 0.25f, detections),
+           "Boundary class tensor decodes");
+    expect(detections.size() == 1 && detections[0].class_id == 2147483520,
+           "2^31 class is rejected before integer conversion; nearest valid float remains");
+}
+
+void test_segmentation_extreme_coordinate_clipping() {
+    detector::detail::SegmentationContract contract;
+    expect(detector::detail::resolve_segmentation_contract(
+               {1, 6, 1}, {1, 1, 2, 2}, OutputFormat::CHANNEL_FIRST, contract),
+           "Extreme coordinate fixture resolves");
+    const std::vector<float> prediction{0.0f, 0.0f, 6.0e30f, 6.0e30f, 0.9f, 1.0f};
+    const std::vector<float> prototypes{1.0f, 1.0f, 1.0f, 1.0f};
+    std::vector<detector::detail::SegmentationCandidate> candidates;
+    expect(detector::detail::decode_segmentation_output(prediction.data(),
+               {1, 6, 1}, contract, 0.25f, candidates), "Extreme finite box decodes");
+    detector::detail::LetterBoxInfo info;
+    info.scale = 1.0f;
+    info.orig_w = info.orig_h = info.target_w = info.target_h = 4;
+    SegmentationResult output;
+    std::vector<detector::detail::SegmentationCandidate> selected;
+    std::vector<unsigned char> suppressed;
+    std::vector<float> logits;
+    std::vector<std::uint8_t> input;
+    expect(detector::detail::finalize_segmentations(candidates, 0.5f, 10, info,
+               prediction.data(), {1, 6, 1}, prototypes.data(), {1, 1, 2, 2},
+               contract, true, output, selected, suppressed, logits, input),
+           "Extreme finite coordinates clip to full image before integer conversion");
+    expect(output.masks.size() == 1 && output.masks[0].width == 4 &&
+               output.masks[0].height == 4 && output.mask_pixels &&
+               *output.mask_pixels == std::vector<std::uint8_t>(16, 1U),
+           "Huge encompassing box retains the full foreground mask");
+}
 void test_segmentation_decode_and_mask() {
     detector::detail::SegmentationContract contract;
     expect(detector::detail::resolve_segmentation_contract(
@@ -785,6 +825,8 @@ int main() {
     test_channel_first_decode();
     test_anchor_first_objectness_decode();
     test_end_to_end_decode();
+    test_end_to_end_class_integer_boundary();
+    test_segmentation_extreme_coordinate_clipping();
     test_segmentation_decode_and_mask();
     test_pose_decode_and_keypoints();
     test_obb_decode_and_probabilistic_nms();

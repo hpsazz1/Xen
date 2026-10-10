@@ -1531,7 +1531,8 @@ bool load_app_config(const std::string& path,
             if (used(candidate.keyboard.aim_hold_virtual_keys) || used(candidate.keyboard.emergency_virtual_keys) ||
                 used(candidate.keyboard.runtime_toggle_virtual_keys) || used(candidate.keyboard.debug_test_virtual_keys) ||
                 used(candidate.auto_stop.release_virtual_keys) || candidate.auto_stop.activation_virtual_key == 0x78 ||
-                candidate.trigger.hold_virtual_key == 0x78) candidate.keyboard.anomaly_mark_virtual_keys.clear();
+                candidate.trigger.hold_virtual_key == 0x78 || candidate.movement.spin_virtual_key == 0x78 ||
+                candidate.movement.large_virtual_key == 0x78) candidate.keyboard.anomaly_mark_virtual_keys.clear();
         }
         candidate.runtime.profile_window = static_cast<int>(ini.GetLongValue(
             "runtime", "profile_window", candidate.runtime.profile_window));

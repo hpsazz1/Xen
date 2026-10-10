@@ -338,7 +338,7 @@ struct Log::Impl {
                 kBytesPerMiB;
             auto file_sink =
                 std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-                    log_path.string(), max_size,
+                    log_path.native(), max_size,
                     static_cast<std::size_t>(requested_config.file_max_count),
                     false);
             file_sink->set_pattern(
@@ -354,7 +354,7 @@ struct Log::Impl {
             const auto debug_path = log_directory / "debug.log";
             auto debug_sink =
                 std::make_shared<spdlog::sinks::basic_file_sink_mt>(
-                    debug_path.string(), false);
+                    debug_path.native(), false);
             debug_sink->set_pattern(
                 "[%Y-%m-%d %H:%M:%S.%e] [%l] [%n] %v");
             debug_sink->set_level(spdlog::level::trace);
@@ -702,7 +702,11 @@ void Log::dump_ring_buffer(const std::string& path) {
             }
         }
 
-        std::FILE* file = std::fopen(dump_path.string().c_str(), "wb");
+#ifdef _WIN32
+        std::FILE* file = ::_wfopen(dump_path.c_str(), L"wb");
+#else
+        std::FILE* file = std::fopen(dump_path.c_str(), "wb");
+#endif
         if (!file) {
             report_error("环形缓冲区文件打开失败");
             return;

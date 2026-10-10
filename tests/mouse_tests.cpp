@@ -1073,6 +1073,45 @@ void test_makcu_response_failures() {
            "MAKCU 错误命令码 ACK 必须返回 INVALID_RESPONSE");
 }
 
+void test_makcu_hid_error_reports_are_unverified() {
+    for (const std::uint8_t usage : {1U, 2U, 3U}) {
+        auto state = std::make_shared<FakeMakcuState>();
+        state->responses = {makcu_baud_response(4000000U),
+            makcu_stream_response(0x0cU), makcu_stream_response(0xa5U)};
+        auto config = make_makcu_config();
+        config.allow_send_input = false;
+        auto mouse = make_fake_makcu(config, state);
+        expect(mouse && mouse->open(), "HID error fixture opens fake monitor");
+        state->responses.push_back(makcu_mouse_stream(0U));
+        state->responses.push_back(makcu_keyboard_stream({usage}));
+        InputSnapshot snapshot;
+        expect(mouse && mouse->poll_input(snapshot) && !snapshot.state_valid &&
+                   snapshot.status == InputMonitorStatus::FAILURE,
+               "HID error usage must not establish healthy keyboard input");
+        state->responses.push_back(makcu_keyboard_stream({0x41U}));
+        expect(mouse && mouse->poll_input(snapshot) && snapshot.state_valid &&
+                   snapshot.virtual_keys[0x77],
+               "Valid keyboard report restores verified held key");
+        const auto valid_sequence = snapshot.sequence;
+        state->responses.push_back(makcu_keyboard_stream({usage, 0x41U}));
+        expect(mouse && mouse->poll_input(snapshot) && !snapshot.state_valid &&
+                   snapshot.status == InputMonitorStatus::FAILURE,
+               "Mixed HID error report must invalidate previously healthy input");
+        state->responses.push_back(makcu_mouse_stream(0U));
+        expect(mouse && mouse->poll_input(snapshot) && !snapshot.state_valid &&
+                   snapshot.status == InputMonitorStatus::FAILURE,
+               "Mouse report cannot renew failed keyboard health");
+        state->responses.push_back(makcu_keyboard_stream({0x41U}));
+        expect(mouse && mouse->poll_input(snapshot) && snapshot.state_valid &&
+                   snapshot.virtual_keys[0x77] &&
+                   snapshot.sequence == valid_sequence + 2U,
+               "Error report never publishes a release or advances input sequence");
+        state->responses.push_back(makcu_keyboard_stream({}));
+        expect(mouse && mouse->poll_input(snapshot) && snapshot.state_valid &&
+                   !snapshot.virtual_keys[0x77],
+               "Valid empty report remains an explicit key release");
+    }
+}
 void test_makcu_interleaved_input_streams() {
     auto state = std::make_shared<FakeMakcuState>();
     state->responses = {
@@ -1255,6 +1294,7 @@ int main() {
     test_makcu_binary_protocol_and_boundaries();
     test_makcu_invalid_config_and_commands();
     test_makcu_response_failures();
+    test_makcu_hid_error_reports_are_unverified();
     test_makcu_interleaved_input_streams();
     test_makcu_single_stream_first_report_is_incomplete(true);
     test_makcu_single_stream_first_report_is_incomplete(false);

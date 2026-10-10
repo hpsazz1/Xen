@@ -57,6 +57,62 @@ overlay::detail::PresentAdapter adapter_for(
     return {&capture, present_from_capture};
 }
 
+struct RenderTargetCapture {
+    HRESULT resize_result = S_OK;
+    bool create_result = true;
+    std::size_t destroy_count = 0;
+    std::size_t resize_count = 0;
+    std::size_t create_count = 0;
+    std::size_t draw_count = 0;
+};
+
+overlay::detail::RenderTargetAdapter adapter_for(RenderTargetCapture& capture) {
+    return {&capture,
+        [](void* value) noexcept { ++static_cast<RenderTargetCapture*>(value)->destroy_count; },
+        [](void* value, unsigned int, unsigned int) noexcept {
+            auto& state = *static_cast<RenderTargetCapture*>(value);
+            ++state.resize_count;
+            return state.resize_result;
+        },
+        [](void* value) noexcept {
+            auto& state = *static_cast<RenderTargetCapture*>(value);
+            ++state.create_count;
+            return state.create_result;
+        },
+        [](void* value) noexcept { ++static_cast<RenderTargetCapture*>(value)->draw_count; }};
+}
+
+void test_render_target_resize_failure_blocks_draw_and_present() {
+    for (const bool resize_fails : {true, false}) {
+        PresentCapture present;
+        present.results[0] = S_OK;
+        present.result_count = 1;
+        RenderTargetCapture target;
+        target.resize_result = resize_fails ? DXGI_ERROR_DEVICE_REMOVED : S_OK;
+        target.create_result = resize_fails;
+        overlay::detail::PresentBoundary boundary(adapter_for(present));
+        expect(!boundary.resize_render_target(adapter_for(target), 640, 480) &&
+                   boundary.failed() && !boundary.last_error().empty(),
+               "Resize or RTV creation failure is owned by render boundary");
+        expect(!boundary.render(adapter_for(target), false, 1, 0) &&
+                   target.draw_count == 0 && present.call_count == 0 &&
+                   target.destroy_count == 1 && target.resize_count == 1 &&
+                   target.create_count == (resize_fails ? 0U : 1U),
+               "Failed resize never calls null RTV draw or Present");
+        expect(!boundary.resize_render_target(adapter_for(target), 640, 480) &&
+                   target.resize_count == 1,
+               "Resize failure remains latched until Overlay recreation");
+    }
+    PresentCapture present;
+    present.results[0] = S_OK;
+    present.result_count = 1;
+    RenderTargetCapture target;
+    overlay::detail::PresentBoundary boundary(adapter_for(present));
+    expect(boundary.resize_render_target(adapter_for(target), 640, 480) &&
+               boundary.render(adapter_for(target), true, 1, 0) &&
+               target.draw_count == 1 && present.call_count == 1,
+           "Successful target recreation preserves draw and Present");
+}
 void test_trigger_session_status_is_stable_without_masking_safety() {
     TriggerController controller;
     TriggerConfig config;
@@ -616,6 +672,7 @@ void test_delay_compensation_tooltip_states_new_app_default() {
 
 int main() {
     test_trigger_session_status_is_stable_without_masking_safety();
+    test_render_target_resize_failure_blocks_draw_and_present();
     test_present_success_statuses_preserve_submission();
     test_present_device_removed_failure_is_owned_and_latched();
     test_present_device_reset_and_generic_failures_are_rejected();

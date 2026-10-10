@@ -698,6 +698,9 @@ FetchContent_Declare(spdlog
 set(SPDLOG_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
 set(SPDLOG_BUILD_TESTS   OFF CACHE BOOL "" FORCE)
 set(SPDLOG_BUILD_SHARED  OFF CACHE BOOL "" FORCE)
+if(WIN32)
+    set(SPDLOG_WCHAR_FILENAMES ON CACHE BOOL "Use native Windows log file paths" FORCE)
+endif()
 FetchContent_MakeAvailable(spdlog)
 
 # SimpleIni 当前可验证的最新稳定 tag 为 4.19。仅使用其单头文件实现，禁止

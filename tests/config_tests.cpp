@@ -2029,6 +2029,20 @@ void test_runtime_diagnostics_preference() {
     std::filesystem::remove(path, ignored);
 }
 
+void test_legacy_movement_f9_anomaly_migration() {
+    const auto directory=make_temp_test_directory("legacy_movement_f9");
+    const auto path=directory/"config.ini";AppConfig loaded;std::string error;
+    for(const auto* mode : {"spin","large"}) {
+        const std::string ini=std::string("[detector]\nmodel_path=model.onnx\n[movement]\nenabled=true\n")+
+            "mode="+(std::string(mode)=="large"?"large_jump":"spin")+"\n"+
+            mode+"_trigger=key\n"+mode+"_virtual_key=120\n";
+        expect(write_file_bytes(path,ini),"write legacy F9 movement fixture");
+        expect(load_app_config(path.string(),loaded,error),"legacy movement F9 must load: "+error);
+        expect(loaded.keyboard.anomaly_mark_virtual_keys.empty(),"legacy movement F9 binding must preserve ownership");
+    }
+    std::error_code ignored;std::filesystem::remove_all(directory,ignored);
+}
+
 int main(int argc, char** argv) {
     // 发布工具复用生产序列化，导出代码默认值；不创建任何设备或运行时。
     if (argc == 3 && std::string(argv[1]) == "--write-default-config") {
@@ -2039,6 +2053,7 @@ int main(int argc, char** argv) {
     }
     test_utf8_config_path();
     test_runtime_diagnostics_preference();
+    test_legacy_movement_f9_anomaly_migration();
     test_movement_config();
     test_disabled_features_preserve_parameters_until_enabled();
     test_disabled_feature_hotkeys_preserve_reuse_until_enabled();

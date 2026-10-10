@@ -411,17 +411,24 @@ public:
         bool replay = false;
         std::function<void(const Event&, const std::atomic_bool&)> before_replay_event;
         Clock::time_point last_snapshot{};
-        std::uint64_t last_published_events = 0;
+        std::uint64_t last_published_events = 0, last_published_dropped = 0;
+        bool stream_state_changed = false;
 
         void publish(bool force = false) {
             const auto now = Clock::now();
-            if (force || (evaluator.result.received_events != last_published_events && now - last_snapshot >= std::chrono::milliseconds(100))) {
+            const auto dropped_events = dropped.load();
+            // 空gap会结束活动轨迹；没有新事件也必须按既有节流公开状态。
+            const bool changed = evaluator.result.received_events != last_published_events ||
+                dropped_events != last_published_dropped || stream_state_changed;
+            if (force || (changed && now - last_snapshot >= std::chrono::milliseconds(100))) {
                 auto value = std::make_shared<Snapshot>(*evaluator.snapshot(timed_out ? Status::STOP_TIMEOUT : status,
-                    directory.string(), error, dropped.load(), bytes, chunks));
+                    directory.string(), error, dropped_events, bytes, chunks));
                 value->replay_source = replay;
                 published.store(value);
                 last_snapshot = now;
                 last_published_events = evaluator.result.received_events;
+                last_published_dropped = dropped_events;
+                stream_state_changed = false;
             }
         }
         void flush_chunk() {
@@ -447,6 +454,7 @@ public:
         bool consume_batch(ReadBatch batch) {
             if (batch.events.size() > limits.queue_events) throw std::runtime_error("输入 Reader 返回批次超出有界契约");
             dropped += batch.dropped_events;
+            stream_state_changed |= batch.gap || batch.trailing_gap;
             if (batch.gap) {
                 if (!batch.events.empty()) batch.events.front().gap = true;
                 else {
