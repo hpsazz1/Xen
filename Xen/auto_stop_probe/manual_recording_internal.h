@@ -98,7 +98,7 @@ inline ManualRecordingResult record_manual_monitor(const MouseConfig& original,
     freeze.value.reset();
     const auto stopped_at_ns = ns(Clock::now());
     session.stop();
-    if (session.snapshot()->status == input_training::Status::STOP_TIMEOUT)
+    if (input_training::stop_is_unconfirmed(session.snapshot()->status))
         throw std::runtime_error("人工归档停止超时，不能将前缀当成完成记录");
     // Session的最终Reader调用排空冻结水位；只有之后才能关闭monitor。
     source.reset();

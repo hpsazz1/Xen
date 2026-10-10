@@ -265,7 +265,8 @@ Event decode(const std::string& line) {
     }
     return event;
 }
-void publish_file(const std::filesystem::path& path, const std::string& text) {
+bool publish_file(const std::filesystem::path& path, const std::string& text,
+    const std::function<bool()>& admit = {}) {
     // 不覆盖旧文件；临时文件明确表示未完成，发布时仍核对目标。
     auto temporary = path; temporary += ".pending";
     if (std::filesystem::exists(path) || std::filesystem::exists(temporary)) throw std::runtime_error("归档文件已存在");
@@ -273,8 +274,10 @@ void publish_file(const std::filesystem::path& path, const std::string& text) {
     stream.write(text.data(), static_cast<std::streamsize>(text.size())); stream.flush();
     if (!stream.good()) throw std::runtime_error("归档写入失败");
     stream.close(); if (stream.fail()) throw std::runtime_error("归档关闭失败");
+    if (admit && !admit()) return false; // 保留.pending，不能伪装成完整manifest。
     if (std::filesystem::exists(path)) throw std::runtime_error("归档发布目标已存在");
     std::filesystem::rename(temporary, path);
+    return true;
 }
 bool valid_limits(const Limits& limits) noexcept {
     return limits.queue_events > 0 && limits.queue_events <= 65536 && limits.chunk_events > 0 && limits.chunk_events <= 4096 &&
@@ -399,9 +402,14 @@ public:
         std::size_t head = 0, size = 0;
         std::mutex mutex, completion_mutex;
         std::condition_variable wake, completion;
-        std::atomic_bool accepting{ true }, stopping{ false }, finished{ false }, timed_out{ false }, pending_gap{ false };
+        std::atomic_bool accepting{ true }, stopping{ false }, finished{ false }, pending_gap{ false };
+        enum class CommitState { PENDING, TIMED_OUT, COMMITTING };
+        std::atomic<CommitState> commit_state{CommitState::PENDING};
+        bool timed_out() const noexcept { return commit_state.load() == CommitState::TIMED_OUT; }
         std::atomic<std::uint64_t> dropped{ 0 };
         std::atomic<std::shared_ptr<const Snapshot>> published;
+        // 仅在commit_state发布COMMITTING前赋值，此后不可变。
+        std::shared_ptr<const Snapshot> committing_snapshot;
         Evaluator evaluator;
         std::uint64_t bytes = 0, chunks = 0;
         bool trailing_gap = false;
@@ -410,6 +418,8 @@ public:
         Status status = Status::RECORDING;
         bool replay = false;
         std::function<void(const Event&, const std::atomic_bool&)> before_replay_event;
+        std::function<void()> before_manifest_commit;
+        std::function<void()> after_manifest_commit_admitted;
         Clock::time_point last_snapshot{};
         std::uint64_t last_published_events = 0, last_published_dropped = 0;
         bool stream_state_changed = false;
@@ -421,7 +431,7 @@ public:
             const bool changed = evaluator.result.received_events != last_published_events ||
                 dropped_events != last_published_dropped || stream_state_changed;
             if (force || (changed && now - last_snapshot >= std::chrono::milliseconds(100))) {
-                auto value = std::make_shared<Snapshot>(*evaluator.snapshot(timed_out ? Status::STOP_TIMEOUT : status,
+                auto value = std::make_shared<Snapshot>(*evaluator.snapshot(timed_out() ? Status::STOP_TIMEOUT : status,
                     directory.string(), error, dropped_events, bytes, chunks));
                 value->replay_source = replay;
                 published.store(value);
@@ -504,18 +514,27 @@ public:
             evaluator.finish(status == Status::LIMIT ? HoldEnd::LIMIT : HoldEnd::MISSING_END);
             flush_chunk();
             if (status == Status::RECORDING) status = Status::STOPPED;
-            if (timed_out) { status = Status::STOP_TIMEOUT; return; }
+            if (timed_out()) { status = Status::STOP_TIMEOUT; return; }
             std::ostringstream summary;
             summary << "from,to,delta_ns,grade,atomic_ambiguous,uncertainty_crosses_boundary\n";
             for (const auto& timing : evaluator.result.timings) summary << timing.from << ',' << timing.to << ',' << timing.delta_ns << ','
                 << static_cast<int>(timing.grade) << ',' << timing.atomic_ambiguous << ',' << timing.uncertainty_crosses_boundary << '\n';
             publish_file(directory / "summary.csv", summary.str());
-            if (timed_out) { status = Status::STOP_TIMEOUT; return; }
+            if (timed_out()) { status = Status::STOP_TIMEOUT; return; }
             std::ostringstream manifest;
             manifest << "XEN_INPUT_TRAINING_V1\n" << chunks << ' ' << evaluator.result.received_events << ' '
                 << dropped.load() << ' ' << bytes << ' ' << static_cast<int>(status) << ' ' << trailing_gap << ' '
                 << limits.max_hold_events << '\n';
-            publish_file(directory / "manifest.txt", manifest.str());
+            committing_snapshot = evaluator.snapshot(Status::FINALIZING, directory.string(),
+                "归档提交尚未结束；请等待后台结果，当前不能认定成功或开始新会话",
+                dropped.load(), bytes, chunks);
+            if (!publish_file(directory / "manifest.txt", manifest.str(), [&] {
+                    if (before_manifest_commit) before_manifest_commit();
+                    auto expected = CommitState::PENDING;
+                    if (!commit_state.compare_exchange_strong(expected, CommitState::COMMITTING)) return false;
+                    if (after_manifest_commit_admitted) after_manifest_commit_admitted();
+                    return true;
+                })) status = Status::STOP_TIMEOUT;
         }
         void run_replay() {
             const auto check_canceled = [&] { if (stopping.load()) throw ReplayCanceled{}; };
@@ -563,6 +582,8 @@ public:
     std::thread worker;
     std::function<void(const Event&, const std::atomic_bool&)> before_replay_event;
     std::function<void()> before_worker_start;
+    std::function<void()> before_manifest_commit;
+    std::function<void()> after_manifest_commit_admitted;
     std::shared_ptr<const Snapshot> idle = std::make_shared<Snapshot>();
 
     bool start(const std::filesystem::path& directory, Limits limits, Reader reader, bool replay) noexcept {
@@ -579,6 +600,8 @@ public:
             next = std::make_shared<State>(limits);
             next->directory = directory; next->reader = std::move(reader); next->replay = replay;
             next->before_replay_event = before_replay_event;
+            next->before_manifest_commit = before_manifest_commit;
+            next->after_manifest_commit_admitted = after_manifest_commit_admitted;
             next->status = replay ? Status::REPLAYING : Status::RECORDING;
             next->accepting = !replay; next->publish(true);
             // 在线程构造前备好失败快照；构造分配失败的收尾不再分配内存。
@@ -609,7 +632,10 @@ public:
             current->accepting = false; current->stopping = true; current->wake.notify_all();
             std::unique_lock lock(current->completion_mutex);
             const bool completed = current->completion.wait_for(lock, std::chrono::milliseconds(current->limits.stop_timeout_ms), [&] { return current->finished.load(); });
-            if (!completed) current->timed_out = true;
+            if (!completed) {
+                auto expected = State::CommitState::PENDING;
+                current->commit_state.compare_exchange_strong(expected, State::CommitState::TIMED_OUT);
+            }
             lock.unlock();
             if (worker.joinable()) { if (completed) worker.join(); else worker.detach(); }
         } catch (...) {}
@@ -624,6 +650,16 @@ void detail::SessionTestAccess::before_replay_event(Session& session,
 Session::~Session() { stop(); }
 void detail::SessionTestAccess::before_worker_start(Session& session, std::function<void()> operation) {
     session.impl_->before_worker_start = std::move(operation);
+}
+void detail::SessionTestAccess::before_manifest_commit(Session& session, std::function<void()> operation) {
+    session.impl_->before_manifest_commit = std::move(operation);
+}
+void detail::SessionTestAccess::after_manifest_commit_admitted(Session& session, std::function<void()> operation) {
+    session.impl_->after_manifest_commit_admitted = std::move(operation);
+}
+bool detail::SessionTestAccess::finished(const Session& session) {
+    const auto state = session.impl_->state.load();
+    return state && state->finished.load();
 }
 bool Session::start(const std::filesystem::path& directory, Limits limits, Reader reader) noexcept { return impl_->start(directory, limits, std::move(reader), false); }
 bool Session::load(const std::filesystem::path& directory, Limits limits) noexcept { return impl_->start(directory, limits, {}, true); }
@@ -646,13 +682,22 @@ std::shared_ptr<const Snapshot> Session::snapshot() const noexcept {
         const auto state = impl_->state.load();
         if (!state) return impl_->idle;
         const auto result = state->published.load();
-        if (state->timed_out && result && result->status != Status::STOP_TIMEOUT) {
+        if (state->timed_out() && result && result->status != Status::STOP_TIMEOUT) {
             auto timeout = std::make_shared<Snapshot>(*result); timeout->status = Status::STOP_TIMEOUT;
             timeout->error = "后台收尾超时；保留未完成记录，不能视为成功归档";
             return timeout;
         }
+        if (result && !state->finished && state->commit_state.load() == Impl::State::CommitState::COMMITTING) {
+            return state->committing_snapshot;
+        }
         return result;
     } catch (...) { return impl_->idle; }
+}
+bool is_busy(Status value) noexcept {
+    return value == Status::RECORDING || value == Status::REPLAYING || value == Status::FINALIZING;
+}
+bool stop_is_unconfirmed(Status value) noexcept {
+    return value == Status::STOP_TIMEOUT || value == Status::FINALIZING;
 }
 const char* grade_name(Grade value) noexcept {
     switch (value) { case Grade::PERFECT: return "完美"; case Grade::EXCELLENT: return "优秀";
@@ -666,6 +711,7 @@ const char* hold_end_name(HoldEnd value) noexcept {
 const char* status_name(Status value) noexcept {
     switch (value) { case Status::IDLE: return "未记录"; case Status::RECORDING: return "记录中";
     case Status::REPLAYING: return "回放中"; case Status::STOPPED: return "已结束";
+    case Status::FINALIZING: return "归档提交中";
     case Status::LIMIT: return "达到预算"; case Status::FAILED: return "记录失败"; default: return "收尾超时"; }
 }
 }

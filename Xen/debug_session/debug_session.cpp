@@ -655,9 +655,9 @@ bool Session::record_inputs(Runtime& runtime, const std::string& root, const Con
             runtime.stop_input_training();
             auto training = runtime.snapshot().training;
             impl_->update([&](Snapshot& s) {
-                if (training && training->status == input_training::Status::STOP_TIMEOUT) {
+                if (training && input_training::stop_is_unconfirmed(training->status)) {
                     s.state = State::CLEANUP_UNKNOWN; s.cleanup_unknown = true;
-                    s.message = "记录停止超时，不能开始新设备任务";
+                    s.message = "记录收尾尚未确认，不能开始新设备任务";
                 } else if (training && training->status == input_training::Status::STOPPED) {
                     s.state = State::COMPLETED;
                     s.message = "输入记录结束；完整性以归档报告为准";
@@ -684,7 +684,7 @@ bool Session::load_inputs(Runtime& runtime, const std::string& directory) noexce
             const auto training = runtime.snapshot().training;
             impl_->update([&](Snapshot& s) {
                 s.report_directory = directory;
-                if (training && training->status == input_training::Status::STOP_TIMEOUT) {
+                if (training && input_training::stop_is_unconfirmed(training->status)) {
                     s.state = State::CLEANUP_UNKNOWN; s.cleanup_unknown = true;
                     s.message = "离线读取停止超时，后台资源尚未确认退出";
                 } else if (training && training->status == input_training::Status::STOPPED) {

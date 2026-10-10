@@ -192,7 +192,7 @@ struct InputTrainingPanel::Impl {
         help("评估输入接收时序和完整按住记录；与模型训练无关。按需记录，UI 不读取设备或磁盘。");
         IdScope id_scope("input_training_panel");
         ImGui::TextWrapped("来源：已有 KMBOX monitor 或离线 Run。记录不会武装输出。接收时间不是物理按下、游戏开枪或停稳时间；设备源丢包目前不可验证。");
-        const bool busy = snapshot && (snapshot->status == input_training::Status::RECORDING || snapshot->status == input_training::Status::REPLAYING);
+        const bool busy = snapshot && input_training::is_busy(snapshot->status);
         {
         DisabledScope disabled(busy);
         ImGui::TextUnformatted("录制根目录");

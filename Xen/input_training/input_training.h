@@ -50,7 +50,10 @@ struct Hold {
     bool physical_motion_verified = false, motion_available = false, boundary_ambiguous = false;
     std::vector<Point> points;
 };
-enum class Status { IDLE, RECORDING, REPLAYING, STOPPED, LIMIT, FAILED, STOP_TIMEOUT };
+enum class Status { IDLE, RECORDING, REPLAYING, STOPPED, LIMIT, FAILED, STOP_TIMEOUT, FINALIZING };
+// FINALIZING只表示提交已准入、结果尚未确认，不是成功归档或新会话许可。
+bool is_busy(Status value) noexcept;
+bool stop_is_unconfirmed(Status value) noexcept;
 struct Snapshot {
     Status status = Status::IDLE;
     bool replay_source = false;

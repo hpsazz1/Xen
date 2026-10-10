@@ -1850,8 +1850,7 @@ bool Runtime::start_input_training(const std::filesystem::path& directory,
         std::lock_guard lock(impl_->lifecycle_mutex);
         if (auto prior = impl_->training.load()) {
             const auto view = prior->snapshot();
-            if (view && (view->status == input_training::Status::RECORDING ||
-                         view->status == input_training::Status::REPLAYING ||
+            if (view && (input_training::is_busy(view->status) ||
                          view->status == input_training::Status::STOP_TIMEOUT)) return false;
         }
         impl_->stop_training();
@@ -1890,8 +1889,7 @@ bool Runtime::load_input_training(const std::filesystem::path& directory) noexce
         std::lock_guard lock(impl_->lifecycle_mutex);
         if (auto prior = impl_->training.load()) {
             const auto view = prior->snapshot();
-            if (view && (view->status == input_training::Status::RECORDING ||
-                         view->status == input_training::Status::REPLAYING ||
+            if (view && (input_training::is_busy(view->status) ||
                          view->status == input_training::Status::STOP_TIMEOUT)) return false;
         }
         impl_->stop_training();

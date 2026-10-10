@@ -49,6 +49,11 @@ int main() {
         auto snapshot = std::make_shared<input_training::Snapshot>();
         snapshot->status = input_training::Status::STOPPED;
         draw(panel, snapshot);
+        snapshot->status = input_training::Status::FINALIZING;
+        expect(input_training::is_busy(snapshot->status) && input_training::stop_is_unconfirmed(snapshot->status),
+               "提交中必须保持忙碌和收尾未确认边界");
+        draw(panel, snapshot);
+        snapshot->status = input_training::Status::STOPPED;
         snapshot->invalid_events = 2; snapshot->dropped_events = 1;
         for (int i = 0; i < 5; ++i) {
             input_training::Timing timing;

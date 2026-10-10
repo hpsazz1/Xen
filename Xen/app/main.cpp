@@ -529,8 +529,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             context.runtime_idle = !report_lifecycle.stopping() &&
                 (snapshot.state == RuntimeState::STOPPED || snapshot.state == RuntimeState::FAILED);
             context.input_recording_idle = !snapshot.training ||
-                (snapshot.training->status != input_training::Status::RECORDING &&
-                 snapshot.training->status != input_training::Status::REPLAYING &&
+                (!input_training::is_busy(snapshot.training->status) &&
                  snapshot.training->status != input_training::Status::STOP_TIMEOUT);
             context.cleanup_known = !snapshot.auto_stop.cleanup_unknown && !snapshot.trigger.button_may_be_down &&
                 !snapshot.trigger.faulted && !snapshot.output_armed && !debug_workspace.snapshot()->cleanup_unknown;

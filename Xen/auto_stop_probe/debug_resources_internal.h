@@ -61,7 +61,7 @@ private:
 
 // wait_for超时不证明Reader已退出；禁止把尚存后台的冻结水位交给下一组重置。
 inline void finish_monitor_training(MonitorTraining& training) {
-    if (training.stop() == input_training::Status::STOP_TIMEOUT)
+    if (input_training::stop_is_unconfirmed(training.stop()))
         throw DebugRunFailure("输入报告归档停止超时：MONITOR_TRAINING_STOP_TIMEOUT", false);
 }
 }
