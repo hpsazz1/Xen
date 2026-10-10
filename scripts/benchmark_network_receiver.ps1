@@ -92,16 +92,6 @@ function Get-FileEvidence {
     }
 }
 
-function Remove-OwnedOutputs {
-    param([string[]]$Paths)
-    foreach ($path in $Paths) {
-        if (-not [string]::IsNullOrWhiteSpace($path)) {
-            Remove-Item -LiteralPath $path -Force `
-                -ErrorAction SilentlyContinue
-        }
-    }
-}
-
 if ($ListenUrl.IndexOfAny([char[]]"`r`n") -ge 0 -or
     $NdiSourceName.IndexOfAny([char[]]"`r`n") -ge 0 -or
     $NdiClockSyncUrl.IndexOfAny([char[]]"`r`n") -ge 0) {
@@ -148,16 +138,8 @@ if (Test-Path -LiteralPath $ReadyFilePath) {
 $receiverConfig = "$ReportPrefix.receiver.ini"
 $networkMarker = "$ReportPrefix.network.json"
 $pendingNetworkMarker = "$networkMarker.pending-$([guid]::NewGuid().ToString('N'))"
+$pendingNetworkMarkerOwned = $false
 $profilePath = "$ReportPrefix.provider-profile.json"
-$ownedOutputs = @(
-    "$ReportPrefix.csv",
-    "$ReportPrefix.json",
-    "$ReportPrefix.environment.json",
-    $profilePath,
-    $networkMarker,
-    $pendingNetworkMarker,
-    $ReadyFilePath
-)
 $finalOutputs = @(
     "$ReportPrefix.csv",
     "$ReportPrefix.json",
@@ -165,7 +147,6 @@ $finalOutputs = @(
     $profilePath,
     $networkMarker
 )
-$runtimeReportPublished = $false
 foreach ($path in $finalOutputs) {
     if (Test-Path -LiteralPath $path) {
         throw "网络基准目标已存在，拒绝覆盖：$path"
@@ -342,7 +323,6 @@ try {
         throw "网络基准环境清单缺少完整且通过的 Aim schema 17/18/19/20 门禁。"
     }
     $snapshot = $report.final_snapshot
-    $runtimeReportPublished = $true
     if ([uint64]$snapshot.source_dropped_frames -gt
             $MaximumSourceDroppedFrames -or
         [uint64]$snapshot.transport_dropped_frames -gt
@@ -453,21 +433,23 @@ try {
         }
     }
     $markerText = $marker | ConvertTo-Json -Depth 10
-    [System.IO.File]::WriteAllText(
-        $pendingNetworkMarker, $markerText,
-        [System.Text.UTF8Encoding]::new($false))
+    $markerStream = [System.IO.File]::Open($pendingNetworkMarker,
+        [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None)
+    $pendingNetworkMarkerOwned = $true
+    try {
+        $markerBytes = [System.Text.UTF8Encoding]::new($false).GetBytes($markerText)
+        $markerStream.Write($markerBytes, 0, $markerBytes.Length)
+        $markerStream.Flush()
+    } finally { $markerStream.Dispose() }
     [System.IO.File]::Move($pendingNetworkMarker, $networkMarker)
+    $pendingNetworkMarkerOwned = $false
     Write-Host "网络接收正式基准通过：$networkMarker"
-} catch {
-    # Runtime 报告已按自身契约原子发布后，即使网络门禁拒绝，也必须保留
-    # 完整采样证据供定位具体丢弃来源；缺少 network.json 明确表示未正式通过。
-    if (-not $runtimeReportPublished) {
-        Remove-OwnedOutputs $ownedOutputs
-    }
-    throw
 } finally {
-    Remove-Item -LiteralPath $pendingNetworkMarker -Force `
-        -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $ReadyFilePath -Force `
-        -ErrorAction SilentlyContinue
+    # Runtime只回滚自己实际发布的报告，ready由创建它的XenBenchmark负责。
+    # 外层预检不授予清理权；失败时保留可能由另一个任务发布的同名产物。
+    if ($pendingNetworkMarkerOwned) {
+        Remove-Item -LiteralPath $pendingNetworkMarker -Force `
+            -ErrorAction SilentlyContinue
+    }
 }

@@ -2236,6 +2236,8 @@ if(BUILD_TESTING)
     xen_add_windows_powershell_test(benchmark_xudp_snapshot_tests
         "${PROJECT_SOURCE_DIR}/tests/benchmark_xudp_snapshot_tests.ps1"
         -GitExecutable "${GIT_EXECUTABLE}")
+    xen_add_windows_powershell_test(benchmark_output_ownership_tests
+        "${PROJECT_SOURCE_DIR}/tests/benchmark_output_ownership_tests.ps1")
     xen_add_windows_powershell_test(benchmark_mouse_script_tests
         "${PROJECT_SOURCE_DIR}/tests/benchmark_mouse_script_tests.ps1"
         -BuildDirectory "${CMAKE_BINARY_DIR}"

@@ -50,9 +50,10 @@ foreach ($field in @(
         [regex]::Escape("$field={")) `
         "网络门禁错误必须打印实际值和阈值：$field。"
 }
-Assert-True ($networkReceiverText -match
-    'if \(-not \$runtimeReportPublished\)') `
-    "网络门禁拒绝后必须保留已原子发布的 Runtime 报告。"
+Assert-True ($networkReceiverText -notmatch
+    'Remove-OwnedOutputs' -and $networkReceiverText -notmatch
+    'Remove-Item -LiteralPath \$ReadyFilePath') `
+    "网络外层不能仅凭共享目标路径删除 Runtime 报告或 ready-file。"
 Assert-True ($networkReceiverText -match
     '(?s)throw \(\("网络门禁未通过.*"网络完成标记不发布。"\) -f') `
     "网络门禁文本必须先拼接完整模板，再应用格式参数。"

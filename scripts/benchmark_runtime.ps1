@@ -710,9 +710,7 @@ $pendingProviderProfile = if ($requiresProviderProfile) {
 }
 $pendingArtifacts = @($pendingCsv, $pendingJson, $pendingEnvironment)
 if ($requiresProviderProfile) { $pendingArtifacts += $pendingProviderProfile }
-if (-not [string]::IsNullOrWhiteSpace($ReadyFilePath)) {
-    $pendingArtifacts += $ReadyFilePath
-}
+# ready由实际创建它的XenBenchmark清理；本脚本不能根据预检或调用参数推定所有权。
 
 try {
 $packageBefore = if ($portablePackage) {

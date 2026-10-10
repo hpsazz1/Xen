@@ -1,0 +1,25 @@
+# D02 基准报告所有权子范围
+
+基线02d0733f05682be1aac8b203d2f3d8d528a77b0a；隔离分支fix/benchmark-output-ownership-20261011。
+原D02的传输临时目录和秒级runId不在本提交内，不能据此关闭整个D02。
+
+benchmark_output_ownership_tests.ps1执行未经替换的benchmark_network_receiver.ps1及其
+benchmark_runtime.ps1子脚本。带Action的行断点只提供确定性交错：B经过预检后，另一写入者A
+用File.Move发布已知字节；B随后在真实目标检查或无第三方DLL检查失败。从未运行有效的
+XenBenchmark、模型、Capture、网络发送或设备。A文件是所有权哨兵，不冒充完整Runtime报告。
+
+三个反例：外层已过预检再发生目标碰撞；外层调用内层后出现外来产物且内层失败；直接内层失败
+但ready属于另一写入者。旧脚本三例均删除A。只有B自己的pending文件的控制组本来就能清理。
+修复后四例均通过，逐字节验证A保留，实际创建的三个B pending全部清理；断点各命中一次，
+且错误必须来自预定生产门禁。首次测试的PS5模块路径继承错误不计有效红灯；red2为有效基线。
+
+修复：外层不再回滚不属于自己的Runtime报告，也不删除共享ready；内层仅清理自己的pending。
+Runtime既有成功Move后登记published的回滚保持；C++ ReadyFileGuard仍负责自己创建的ready。
+无法证明所有权的异常残留会保持并导致下一次预检拒绝，脚本不会猜测或删除。网络marker自己的
+临时文件通过CreateNew获得创建权；只有成功创建且未成功发布时，finally才清理它。
+
+相关两项CTest通过2.69秒：benchmark_output_ownership_tests、publication_script_tests。
+scripts/test_dual_machine_scripts.ps1在Windows PowerShell5通过；公开文档19文件195链接0错误。
+提交后正式Release身份、远端SHA和CI检查见本地
+docs/evidence/XEN-BENCHMARK-OWNERSHIP-20261011-001/RESULT.md。
+没有新UI、完整Runtime成功运行、多Provider或真实物理闭环结论。无新增常驻规则。
