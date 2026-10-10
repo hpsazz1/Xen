@@ -22,6 +22,8 @@ public:
     ndi_test::CaptureSystem input;
     std::atomic<bool> interrupt{false};
     std::atomic<int> created{0};
+    std::atomic<bool> invalid_video{false};
+    std::atomic<int> invalid_received{0};
     CaptureStatus open(const clock_sync::ClientConfig& c, std::string& e) noexcept override { return input.open(c,e); }
     void close() noexcept override { input.close(); }
     NDIlib_find_instance_t find_create(const NDIlib_find_create_t* s) noexcept override { return input.find_create(s); }
@@ -38,6 +40,12 @@ public:
     NDIlib_frame_type_e recv_capture(NDIlib_recv_instance_t r, NDIlib_video_frame_v2_t* v,
             NDIlib_metadata_frame_t* m, std::uint32_t t) noexcept override {
         if (interrupt.exchange(false)) return NDIlib_frame_type_error;
+        if (invalid_video.load()) {
+            *v = {};
+            ++invalid_received;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            return NDIlib_frame_type_video;
+        }
         return input.recv_capture(r,v,m,t);
     }
     void recv_free_video(NDIlib_recv_instance_t r, NDIlib_video_frame_v2_t* v) noexcept override { input.recv_free_video(r,v); }
@@ -47,6 +55,61 @@ public:
     clock_sync::MappingResult map_source_timestamp(std::int64_t t,
             std::chrono::steady_clock::time_point n) const noexcept override { return input.map_source_timestamp(t,n); }
 };
+
+void test_invalid_video_cannot_extend_valid_frame_deadline(bool received_before) {
+    auto system = std::make_unique<ReconnectingSystem>();
+    auto* input = system.get();
+    auto config = ndi_test::config();
+    config.ndi_discovery_timeout_ms = 120;
+    config.ndi_disconnect_timeout_ms = 120;
+    config.ndi_receive_timeout_ms = 5;
+    auto capture = capture::detail::create_ndi_capture(config, std::move(system));
+    input->invalid_video = !received_before;
+    if (!capture || !capture->open()) { expect(false, "无效视频超时fixture必须打开"); return; }
+    CapturedFrame frame;
+    if (received_before) {
+        input->input.send_video({});
+        expect(ndi_test::receive(*capture, frame), "断流场景必须先收到合法视频");
+        ndi_test::release(frame);
+        input->invalid_video = true;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(600);
+    while (capture->status() != CaptureStatus::ACCESS_LOST &&
+           std::chrono::steady_clock::now() < deadline) {
+        capture->grab(frame);
+    }
+    expect(input->invalid_received.load() > 0 && capture->status() == CaptureStatus::ACCESS_LOST,
+           received_before ? "持续坏video必须按最后有效视频期限判定断流" :
+                             "首帧前持续坏video不能绕过发现期限");
+    capture->close();
+}
+
+void test_invalid_video_recovers_before_deadline() {
+    auto system = std::make_unique<ReconnectingSystem>();
+    auto* input = system.get();
+    auto config = ndi_test::config();
+    config.ndi_discovery_timeout_ms = 1000;
+    config.ndi_disconnect_timeout_ms = 1000;
+    config.ndi_receive_timeout_ms = 5;
+    auto capture = capture::detail::create_ndi_capture(config, std::move(system));
+    input->invalid_video = true;
+    if (!capture || !capture->open()) { expect(false, "无效视频恢复fixture必须打开"); return; }
+    CapturedFrame frame;
+    for (int round = 0; round < 2; ++round) {
+        const int before = input->invalid_received.load();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        while (input->invalid_received.load() < before + 5 &&
+               std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        input->input.send_video({});
+        input->invalid_video = false;
+        expect(ndi_test::receive(*capture, frame) && frame.timing.sequence == round + 1,
+               "首次等待与有效帧后坏video在期限内恢复时均须继续发布新帧");
+        ndi_test::release(frame);
+        input->invalid_video = true;
+    }
+    capture->close();
+}
 
 void test_receiver_generation_survives_internal_reconnect() {
     expect(FrameTiming{}.receiver_generation == 0, "非 NDI 默认帧不声明接收器代次");
@@ -382,6 +445,9 @@ void test_required_missing_metadata_is_rejected() {
 } // namespace
 
 int main() {
+    test_invalid_video_cannot_extend_valid_frame_deadline(false);
+    test_invalid_video_cannot_extend_valid_frame_deadline(true);
+    test_invalid_video_recovers_before_deadline();
     test_receiver_generation_survives_internal_reconnect();
     test_reused_frame_does_not_inherit_source_timing();
     test_reused_frame_keeps_current_invalid_mapping(

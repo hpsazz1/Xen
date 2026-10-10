@@ -439,6 +439,10 @@ struct BenchmarkRunAdapterState {
     bool fail_setup = false;
     bool block_setup = false;
     std::string cleanup_path_to_lock;
+    bool lock_setup_output = false;
+    std::string observed_setup_path;
+    std::vector<std::filesystem::path> foreign_outputs;
+    bool cancel_after_setup = false;
     bool return_runtime = false;
     bool request_ctrl_break_before_runtime_start = false;
     bool ctrl_break_handled = false;
@@ -461,6 +465,11 @@ bool fake_provider_setup(
         std::string& error) {
     auto& state = *static_cast<BenchmarkRunAdapterState*>(context);
     ++state.setup_calls;
+    state.observed_setup_path = output_path;
+    for (const auto& path : state.foreign_outputs) {
+        std::ofstream foreign(path, std::ios::binary);
+        foreign << "foreign-report";
+    }
     try {
         std::ofstream output(
             std::filesystem::u8path(output_path),
@@ -475,6 +484,7 @@ bool fake_provider_setup(
         error = "注入 setup 写入 Provider profile 异常";
         return false;
     }
+    if (state.lock_setup_output) state.cleanup_path_to_lock = output_path;
     if (!state.cleanup_path_to_lock.empty()) {
         const auto cleanup_path =
             std::filesystem::u8path(state.cleanup_path_to_lock);
@@ -509,6 +519,9 @@ bool fake_provider_setup(
     if (state.fail_setup) {
         error = "注入 setup 失败";
         return false;
+    }
+    if (state.cancel_after_setup) {
+        benchmark::detail::handle_benchmark_console_control(CTRL_C_EVENT);
     }
     error.clear();
     return true;
@@ -807,15 +820,15 @@ void test_failed_setup_surfaces_cleanup_error_and_continues() {
     BenchmarkRunAdapterState state;
     state.fail_setup = true;
     const auto options = run.options();
-    const std::string locked_csv_path = options.report_prefix + ".csv";
-    state.cleanup_path_to_lock = locked_csv_path;
+    state.lock_setup_output = true;
     std::string error;
     const bool succeeded =
         benchmark::detail::run_runtime_benchmark_with_adapter(
             options, adapter_for(state), error);
+    const std::string locked_profile_path = state.cleanup_path_to_lock;
     const std::string expected_error_prefix =
         "注入 setup 失败; CleanupError(path=" +
-        locked_csv_path + ", code=32,";
+        locked_profile_path + ", code=32,";
     bool pending_outputs_absent = true;
     std::error_code scan_error;
     const auto report_directory =
@@ -826,7 +839,10 @@ void test_failed_setup_surfaces_cleanup_error_and_continues() {
         const std::string name = entry->path().filename().string();
         if (name.find(".pending.") != std::string::npos ||
             name.find(".tmp.") != std::string::npos) {
-            pending_outputs_absent = false;
+            pending_outputs_absent = entry->path() ==
+                std::filesystem::u8path(locked_profile_path).parent_path() &&
+                std::distance(std::filesystem::directory_iterator(entry->path()),
+                              std::filesystem::directory_iterator{}) == 1;
         }
     }
     expect(!succeeded && state.setup_calls == 1 &&
@@ -835,7 +851,7 @@ void test_failed_setup_surfaces_cleanup_error_and_continues() {
                state.locked_cleanup_path.get() != INVALID_HANDLE_VALUE &&
                error.starts_with(expected_error_prefix) &&
                std::filesystem::is_regular_file(
-                   std::filesystem::u8path(locked_csv_path)) &&
+                   std::filesystem::u8path(locked_profile_path)) &&
                !std::filesystem::exists(options.provider_profile_path) &&
                !std::filesystem::exists(options.report_prefix + ".json") &&
                !std::filesystem::exists(options.ready_file_path) &&
@@ -844,12 +860,89 @@ void test_failed_setup_surfaces_cleanup_error_and_continues() {
                error);
 
     state.locked_cleanup_path.reset();
-    const std::array remaining_outputs{
-        std::filesystem::u8path(locked_csv_path)};
+    const auto residual = std::filesystem::u8path(locked_profile_path);
+    expect(std::filesystem::remove(residual) &&
+               std::filesystem::remove(residual.parent_path()),
+           "释放锁后仅清理本次残留 profile 和空 staging 目录");
+    const std::array<std::filesystem::path, 0> remaining_outputs{};
     std::string cleanup_error;
     expect(run.cleanup_with_outputs(remaining_outputs, cleanup_error),
-           "释放共享锁后 fixture 必须精确清理残留 CSV 与根: " +
+           "释放共享锁后 fixture 必须精确清理根: " +
                cleanup_error);
+}
+
+std::string utf8_path(const std::filesystem::path& path) {
+    const auto value = path.u8string();
+    return {reinterpret_cast<const char*>(value.data()), value.size()};
+}
+
+void test_utf8_paths_and_foreign_reports_are_preserved() {
+    for (int scenario = 0; scenario < 6; ++scenario) {
+        TemporaryBenchmarkRun run;
+        expect(run.valid(), "UTF-8 报告夹具必须可用");
+        if (!run.valid()) return;
+        auto options = run.options();
+        const auto root = std::filesystem::u8path(options.model_path).parent_path();
+        const auto chinese_model = root / std::filesystem::u8path("中文 模型.onnx");
+        options.report_prefix = utf8_path(root / std::filesystem::u8path("中文 报告"));
+        options.provider_profile_path = options.report_prefix + ".provider.json";
+        const std::array outputs{
+            std::filesystem::u8path(options.report_prefix + ".csv"),
+            std::filesystem::u8path(options.report_prefix + ".json"),
+            std::filesystem::u8path(options.provider_profile_path)};
+        BenchmarkRunAdapterState state;
+        state.fail_setup = scenario != 5;
+        state.cancel_after_setup = scenario == 5;
+        if (scenario == 0) {
+            std::filesystem::copy_file(std::filesystem::u8path(options.model_path), chinese_model);
+            options.model_path = utf8_path(chinese_model);
+        } else if (scenario <= 3) {
+            std::ofstream existing(outputs[scenario - 1], std::ios::binary);
+            existing << "existing-report";
+        } else {
+            state.foreign_outputs.assign(outputs.begin(), outputs.end());
+        }
+        std::string error;
+        expect(!benchmark::detail::run_runtime_benchmark_with_adapter(
+                   options, adapter_for(state), error), "失败/取消场景不得报告成功");
+        if (scenario == 0) {
+            expect(state.setup_calls == 1 && error.find("注入 setup 失败") != std::string::npos,
+                   "中文空格模型路径必须通过 UTF-8 预检: " + error);
+        } else if (scenario <= 3) {
+            expect(state.setup_calls == 0 &&
+                       read_file(outputs[scenario - 1]) == "existing-report",
+                   "中文 CSV/JSON/profile 旧文件必须在 setup 前被发现且保持原字节");
+        } else {
+            for (const auto& path : outputs) {
+                expect(read_file(path) == "foreign-report",
+                       "预检后外部生成的正式文件不能被 setup/失败/取消清理覆盖或删除");
+            }
+        }
+        const std::array owned{outputs[0], outputs[1], outputs[2], chinese_model};
+        std::string cleanup_error;
+        expect(run.cleanup_with_outputs(owned, cleanup_error), cleanup_error);
+    }
+}
+
+void test_provider_staging_stays_beside_its_final_target() {
+    for (const bool same_prefix : {false, true}) {
+    TemporaryBenchmarkRun reports;
+    TemporaryBenchmarkRun provider;
+    expect(reports.valid() && provider.valid(), "独立报告/profile 根目录必须可用");
+    if (!reports.valid() || !provider.valid()) return;
+    auto options = reports.options();
+    options.provider_profile_path = same_prefix ? options.report_prefix : provider.options().provider_profile_path;
+    BenchmarkRunAdapterState state;
+    std::string error;
+    expect(!benchmark::detail::run_runtime_benchmark_with_adapter(options, adapter_for(state), error) &&
+               state.setup_calls == 1 && state.runtime_factory_calls == 1 &&
+               std::filesystem::u8path(state.observed_setup_path).parent_path().parent_path() ==
+                   std::filesystem::u8path(options.provider_profile_path).parent_path() &&
+               reports.outputs_clean() && provider.outputs_clean(),
+           "profile staging 必须邻近其最终目录，不能随报告迁到另一卷: " + error);
+    expect(!std::filesystem::exists(std::filesystem::u8path(options.provider_profile_path)),
+           "无扩展 profile 与报告前缀共名也必须完成发布与失败清理");
+    }
 }
 
 void test_stop_after_formal_gate_prevents_report_finalize() {
@@ -1133,6 +1226,44 @@ void test_benchmark_report_publish_accepts_already_absent_rollback() {
                owned_root, owned_files, cleanup_error),
            "already-absent rollback 测试不得遗留 staging/final: " +
                cleanup_error);
+}
+
+void test_report_publish_preserves_late_unicode_collision() {
+    benchmark::detail::prepare_benchmark_console_control();
+    OwnedBenchmarkTemporaryRoot root;
+    std::string error;
+    if (!create_owned_benchmark_temporary_root(root, kReportConsumerRootPrefix, error)) {
+        expect(false, error);
+        return;
+    }
+    const auto csv = root.path / std::filesystem::u8path("中文 输出.csv");
+    const auto json = root.path / std::filesystem::u8path("中文 输出.json");
+    const auto csv_pending = root.path / "report.csv.pending";
+    const auto json_pending = root.path / "report.json.pending";
+    { std::ofstream(csv_pending) << "new-csv"; std::ofstream(json_pending) << "new-json"; }
+    BenchmarkReportPublishFaultState state;
+    benchmark::detail::BenchmarkReportPublishFileAdapter adapter;
+    adapter.context = &state;
+    adapter.move_file = [](void* context, const std::filesystem::path& source,
+                           const std::filesystem::path& target, std::uint32_t& code) noexcept {
+        auto& fault = *static_cast<BenchmarkReportPublishFaultState*>(context);
+        if (++fault.move_calls == 2) {
+            std::ofstream(target) << "foreign-json";
+        }
+        const bool moved = MoveFileExW(source.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH) != FALSE;
+        code = moved ? ERROR_SUCCESS : GetLastError();
+        return moved;
+    };
+    adapter.remove_file = [](void*, const std::filesystem::path& path, std::error_code& code) noexcept {
+        return std::filesystem::remove(path, code);
+    };
+    expect(!benchmark::detail::publish_benchmark_reports_with_adapter(
+               utf8_path(csv_pending), utf8_path(json_pending), utf8_path(csv), utf8_path(json), adapter, error) &&
+               state.move_calls == 2 && read_file(json) == "foreign-json" &&
+               !std::filesystem::exists(csv) && std::filesystem::exists(json_pending),
+           "第二个正式目标出现碰撞时只回滚本轮 CSV，保留外部中文 JSON: " + error);
+    const std::array owned{csv, json, csv_pending, json_pending};
+    expect(cleanup_owned_benchmark_temporary_root(root, owned, error), error);
 }
 
 void test_benchmark_report_consumer_pair_publication() {
@@ -1639,6 +1770,8 @@ int main() {
     test_normal_setup_reaches_runtime_factory_and_cleans_outputs();
     test_failed_setup_skips_runtime_and_cleans_outputs();
     test_failed_setup_surfaces_cleanup_error_and_continues();
+    test_utf8_paths_and_foreign_reports_are_preserved();
+    test_provider_staging_stays_beside_its_final_target();
     test_stop_during_blocking_setup_skips_runtime_and_allows_next_run();
     test_stop_after_runtime_factory_is_observed_before_start();
     test_console_handler_only_claims_interrupt_events();
@@ -1651,6 +1784,7 @@ int main() {
     test_stop_at_benchmark_report_publish_boundary_keeps_staging_pair();
     test_benchmark_report_publish_surfaces_rollback_failure();
     test_benchmark_report_publish_accepts_already_absent_rollback();
+    test_report_publish_preserves_late_unicode_collision();
     test_coverage_phase_tracker();
     test_sample_phase_tracker();
     test_formal_sample_tracker_waits_for_time_gate_after_retention_limit();

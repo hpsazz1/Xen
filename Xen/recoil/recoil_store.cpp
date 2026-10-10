@@ -1,4 +1,5 @@
 #include "recoil/recoil_store.h"
+#include "recoil/recoil_store_internal.h"
 #include "weapon/weapon_catalog.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -32,15 +33,13 @@ bool reparse(const std::filesystem::path& path) {
 #endif
 }
 std::string read(const std::filesystem::path& path,std::uintmax_t maximum) {
-    if(reparse(path)||!std::filesystem::is_regular_file(path)||std::filesystem::file_size(path)>maximum)
+    if(reparse(path)||!std::filesystem::is_regular_file(path))
         throw std::runtime_error("文件类型或大小不符合曲线库限制");
+    const auto checked_size = std::filesystem::file_size(path);
+    if(checked_size>maximum)throw std::runtime_error("文件类型或大小不符合曲线库限制");
     std::ifstream stream(path,std::ios::binary);
     if(!stream)throw std::runtime_error("无法读取曲线文件");
-    std::string text(static_cast<std::size_t>(maximum)+1,'\0');
-    stream.read(text.data(),static_cast<std::streamsize>(text.size()));
-    text.resize(static_cast<std::size_t>(stream.gcount()));
-    if(text.size()>maximum||stream.bad())throw std::runtime_error("读取曲线文件失败或越界");
-    return text;
+    return recoil::detail::read_bounded_stream(stream,checked_size,maximum);
 }
 Json index(const std::filesystem::path& directory) {
     const auto path=directory/"active.json";

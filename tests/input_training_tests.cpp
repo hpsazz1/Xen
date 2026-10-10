@@ -1,4 +1,5 @@
 #include "input_training/input_training.h"
+#include "input_training/input_training_internal.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -255,12 +256,65 @@ void archive_visitor_tests(Fixture& fixture) {
         "尾缺口和丢弃计数必须交给校准调用方而非静默消失");
     check(!visit_archive(directory, {}, summary, error), "空访客拒绝");
 }
+void replay_validation_parity_tests(Fixture& fixture) {
+    const auto rejected_by_both = [](const std::filesystem::path& path) {
+        ArchiveSummary summary; std::string error;
+        check(!visit_archive(path, [](const Event&) {}, summary, error), "严格归档遍历拒绝畸形输入");
+        check(replay(path)->status == Status::FAILED, "后台回放必须复用严格归档校验结论");
+    };
+    auto directory = fixture.directory(); record(directory, {event(1,0), event(2,1)});
+    { std::ofstream extra(directory / "manifest.txt", std::ios::app); extra << "extra\n"; }
+    rejected_by_both(directory);
+
+    directory = fixture.directory(); const auto recorded = record(directory, {event(1,0), event(2,1)});
+    const auto chunk = directory / "events-0.csv";
+    std::filesystem::resize_file(chunk, std::filesystem::file_size(chunk) - 1);
+    // 同时调整字节水位，确保失败来自未关闭尾行，而非已有总量检查。
+    { std::ofstream manifest(directory / "manifest.txt", std::ios::binary);
+        manifest << "XEN_INPUT_TRAINING_V1\n1 2 0 " << recorded->archive_bytes - 1 << " 3 0 262144\n"; }
+    rejected_by_both(directory);
+
+    directory = fixture.directory(); record(directory, {event(1,0)});
+    rejected_by_both(directory / ".." / directory.filename());
+}
+void replay_cancellation_test(Fixture& fixture) {
+    const auto directory = fixture.directory();
+    record(directory, {event(1,0), event(2,1,0,true), event(3,2,0,true,1,1), event(4,3)});
+    std::mutex mutex; std::condition_variable condition; bool entered = false;
+    Session session;
+    detail::SessionTestAccess::before_replay_event(session, [&](const Event& value, const std::atomic_bool& stopping) {
+        if (value.sequence != 3) return;
+        { std::lock_guard lock(mutex); entered = true; } condition.notify_all();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!stopping.load() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        check(stopping.load(), "回放取消门必须在有界时间收到停止");
+    });
+    check(session.load(directory), "取消测试从生产回放入口启动");
+    { std::unique_lock lock(mutex);
+        check(condition.wait_for(lock, std::chrono::seconds(1), [&] { return entered; }), "回放进入第三条事件交付边界"); }
+    session.stop();
+    auto result = session.snapshot();
+    check(result->status == Status::STOPPED && result->replay_source && result->received_events == 2 &&
+        result->holds.size() == 1 && result->holds[0]->end == HoldEnd::CANCELED &&
+        !result->holds[0]->complete_received_stream, "取消保留已读前缀并将未结束 hold 标为 CANCELED");
+    detail::SessionTestAccess::before_replay_event(session, {});
+    check(session.load(directory), "取消完成后同一 Session 可以重新回放");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (session.snapshot()->status == Status::REPLAYING && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+    result = session.snapshot(); session.stop();
+    check(result->status == Status::STOPPED && result->received_events == 4 &&
+        result->holds.size() == 1 && result->holds[0]->complete_received_stream,
+        "取消后重载恢复完整档案，不继承前次取消水位");
+}
 }
 int main() {
     try {
         Fixture fixture;
         timing_tests(fixture); hold_tests(fixture); gap_tests(fixture); archive_tests(fixture); timeout_test(fixture);
         archive_visitor_tests(fixture);
+        replay_validation_parity_tests(fixture);
+        replay_cancellation_test(fixture);
         std::cout << "输入评估生产接口专项通过；未使用设备或真实鼠标输出\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

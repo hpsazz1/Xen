@@ -186,19 +186,25 @@ json read_json(const std::filesystem::path& path) {
     return value;
 }
 
-void write_json(const std::filesystem::path& path, const json& value) {
+void write_json(const std::filesystem::path& path, const json& value,
+                const detail::CloseFileOperation& close_file) {
     std::ofstream stream(path, std::ios::binary | std::ios::trunc);
     stream << value.dump(2) << '\n';
     if (!stream) throw std::runtime_error("写入 JSON 失败: " + path.string());
+    close_file(stream, path);
+    if (!stream) throw std::runtime_error("关闭 JSON 失败: " + path.string());
 }
 
 void write_json_lines(const std::filesystem::path& path,
-                      const std::vector<json>& rows) {
+                      const std::vector<json>& rows,
+                      const detail::CloseFileOperation& close_file) {
     std::ofstream stream(path, std::ios::binary | std::ios::trunc);
     for (const auto& row : rows) stream << row.dump() << '\n';
     if (!stream) {
         throw std::runtime_error("写入 JSONL 失败: " + path.string());
     }
+    close_file(stream, path);
+    if (!stream) throw std::runtime_error("关闭 JSONL 失败: " + path.string());
 }
 
 double finite_number(const json& object,
@@ -827,6 +833,15 @@ bool produce_output_off_bundle(
     const ProduceOptions& options,
     ProduceResult& result,
     std::string& error) noexcept {
+    return detail::produce_output_off_bundle(options, result, error,
+        [](std::ofstream& stream, const std::filesystem::path&) { stream.close(); });
+}
+
+bool detail::produce_output_off_bundle(
+    const ProduceOptions& options,
+    ProduceResult& result,
+    std::string& error,
+    const CloseFileOperation& close_file) noexcept {
     result = {};
     error.clear();
     std::filesystem::path incoming;
@@ -957,7 +972,7 @@ bool produce_output_off_bundle(
                 const auto relative_path = std::filesystem::path("traces") /
                     (trace_id + ".jsonl");
                 const auto trace_path = incoming / relative_path;
-                write_json_lines(trace_path, rows);
+                write_json_lines(trace_path, rows, close_file);
                 std::string trace_sha256;
                 if (!compute_file_sha256(trace_path, trace_sha256, error)) {
                     throw std::runtime_error(error);
@@ -986,7 +1001,7 @@ bool produce_output_off_bundle(
             }
         }
 
-        write_json(incoming / "manifest.json", manifest);
+        write_json(incoming / "manifest.json", manifest, close_file);
         std::string rename_error;
         if (!detail::rename_directory_with_retry(
                 incoming, output, 5, std::chrono::milliseconds(50),

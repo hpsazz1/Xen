@@ -358,15 +358,12 @@ private:
                                   std::memory_order_release);
                     continue;
                 }
-                if (received <= 0) continue;
-
                 XudpCompletedFrame completed;
-                const XudpConsumeResult result = assembler_.consume_packet(
-                    std::span<const std::uint8_t>(
-                        packet_.data(), static_cast<std::size_t>(received)),
-                    received_at, completed);
                 bool valid_frame = false;
-                if (result == XudpConsumeResult::FRAME) {
+                // 空数据报不进入组帧器，但必须进入下面的无有效帧期限判断。
+                if (received > 0 && assembler_.consume_packet(
+                        std::span<const std::uint8_t>(packet_.data(), static_cast<std::size_t>(received)),
+                        received_at, completed) == XudpConsumeResult::FRAME) {
                     valid_frame = decode_and_publish(completed);
                     if (terminal_status(
                             status_.load(std::memory_order_acquire))) {

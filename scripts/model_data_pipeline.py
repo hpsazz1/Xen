@@ -776,12 +776,30 @@ def versions():
     return result
 
 
-def onnx_contract(path, class_count, imgsz):
+def load_embedded_onnx(path):
     try:
         import onnx
     except ImportError as exc:
         raise PipelineError("DEPENDENCY_MISSING：缺少 onnx，无法核验导出合同") from exc
-    graph = onnx.load(str(path))
+    # 单文件候选不能从快照目录之外补读权重；先只读取 protobuf，再检查所有嵌套张量。
+    graph = onnx.load(str(path), load_external_data=False)
+    def require_embedded_tensors(message):
+        if message.DESCRIPTOR.full_name == "onnx.TensorProto" and (message.data_location == onnx.TensorProto.EXTERNAL or message.external_data):
+            raise PipelineError("ONNX 外部权重不属于单文件冻结身份，请先导出内嵌权重模型")
+        for field, value in message.ListFields():
+            if field.type == field.TYPE_MESSAGE:
+                repeated = getattr(field, "is_repeated", None)
+                if repeated is None:
+                    repeated = field.label == field.LABEL_REPEATED
+                for child in value if repeated else (value,):
+                    require_embedded_tensors(child)
+    require_embedded_tensors(graph)
+    return graph
+
+
+def onnx_contract(path, class_count, imgsz):
+    graph = load_embedded_onnx(path)
+    import onnx
     onnx.checker.check_model(graph)
     dimensions = lambda value: [dim.dim_value for dim in value.type.tensor_type.shape.dim]
     if len(graph.graph.input) != 1 or dimensions(graph.graph.input[0]) != [1, 3, imgsz, imgsz] or graph.graph.input[0].type.tensor_type.elem_type != onnx.TensorProto.FLOAT:
@@ -989,15 +1007,45 @@ def evaluate(ctx):
     output = ctx.output()
 
     work_data = working_dataset(ctx, dataset, manifest, output)
+    frozen_models = {}
+    for key in ("model", "baseline_model"):
+        if not ctx.job.get(key):
+            continue
+        ctx.check()
+        source = Path(ctx.job[key]).resolve()
+        if not source.is_file() or source.suffix.lower() not in {".pt", ".onnx"}:
+            raise PipelineError("评价需要本地 .pt/.onnx 模型")
+        digest = sha256(source)
+        frozen = output / key / source.name
+        frozen.parent.mkdir()
+        shutil.copyfile(source, frozen)
+        if sha256(frozen) != digest or sha256(source) != digest:
+            raise PipelineError("冻结期间模型身份已变化，请重新评价")
+        model_job = dict(ctx.job)
+        if source.suffix.lower() == ".pt":
+            # 授权仍来自原始用户文件；独占副本只能继承已核验的同一字节身份。
+            if digest != ctx.job["expected_weights_sha256"].lower():
+                raise PipelineError("可信 PT 模型身份已变化，请重新确认")
+            model_job["trusted_weights_path"] = str(frozen)
+            check_pt_trust(frozen, model_job)
+        contract = None
+        if source.suffix.lower() == ".onnx":
+            if key == "model":
+                contract = onnx_contract(frozen, len(manifest["class_names"]), imgsz)
+            else:
+                # 基线不申请部署资格，仅确认读取不依赖快照之外的权重文件。
+                load_embedded_onnx(frozen)
+        frozen_models[key] = dict(source=source, path=frozen, sha256=digest, job=model_job, contract=contract)
 
     def overlap(left, right):
         intersection = max(0, min(left[2], right[2])-max(left[0], right[0])) * max(0, min(left[3], right[3])-max(left[1], right[1]))
         union = (left[2]-left[0])*(left[3]-left[1]) + (right[2]-right[0])*(right[3]-right[1]) - intersection
         return intersection / union if union > 0 else 0
 
-    def measure(model_path, name):
+    def measure(key, name):
         ctx.check()
-        model = load_yolo(model_path, job=ctx.job)
+        frozen = frozen_models[key]
+        model = load_yolo(frozen["path"], job=frozen["job"])
         if model_names(model) != manifest["class_names"]:
             raise PipelineError("评价模型 class_names 与真值不一致")
         def check_batch(_validator):
@@ -1036,19 +1084,22 @@ def evaluate(ctx):
         for counts in fixed:
             counts["precision"] = counts["tp"] / (counts["tp"] + counts["fp"]) if counts["tp"] + counts["fp"] else None
             counts["recall"] = counts["tp"] / (counts["tp"] + counts["fn"]) if counts["tp"] + counts["fn"] else None
-        return dict(model=str(Path(model_path).resolve()), model_sha256=sha256(model_path), metrics={str(k): float(v) for k, v in result.results_dict.items()}, per_class=result.summary(), fixed_threshold_per_class=fixed, fixed_threshold_match_iou=0.5, negative_frames=negative_frames, background_fp_per_frame=false_positives/negative_frames if negative_frames else None, background_false_positive_frame_rate=false_positive_frames/negative_frames if negative_frames else None)
+        return dict(model=str(frozen["source"]), model_sha256=frozen["sha256"], metrics={str(k): float(v) for k, v in result.results_dict.items()}, per_class=result.summary(), fixed_threshold_per_class=fixed, fixed_threshold_match_iou=0.5, negative_frames=negative_frames, background_fp_per_frame=false_positives/negative_frames if negative_frames else None, background_false_positive_frame_rate=false_positive_frames/negative_frames if negative_frames else None)
 
-    report = dict(schema_version=SCHEMA, created_at=now(), dataset_sha256=sha256(dataset / "dataset.json"), split=split, confidence=confidence, map_confidence_floor=0.001, nms_iou=0.7, versions=versions(), physical_acceptance="NOT_EXECUTED", **measure(ctx.job["model"], "validation"))
+    report = dict(schema_version=SCHEMA, created_at=now(), dataset_sha256=sha256(dataset / "dataset.json"), split=split, confidence=confidence, map_confidence_floor=0.001, nms_iou=0.7, versions=versions(), physical_acceptance="NOT_EXECUTED", **measure("model", "validation"))
     baseline = None
     comparison = dict(state="BASELINE_NOT_PROVIDED", improvement_claim=False)
     if ctx.job.get("baseline_model"):
         ctx.report("RUNNING", "正在同一留出集评价基线模型")
-        baseline = measure(ctx.job["baseline_model"], "baseline")
+        baseline = measure("baseline_model", "baseline")
         deltas = {key: value-baseline["metrics"][key] for key, value in report["metrics"].items() if key in baseline["metrics"]}
         fp_delta = report["background_fp_per_frame"]-baseline["background_fp_per_frame"] if report["negative_frames"] else None
         comparison = dict(state="MEASURED_REVIEW_REQUIRED", metric_deltas=deltas, background_fp_per_frame_delta=fp_delta, improvement_claim=False, note="需按预先冻结的类别召回与误报准入标准人工复核；整体指标增量不自动代表提升")
-    model_path = Path(ctx.job["model"]).resolve()
-    contract = onnx_contract(model_path, len(manifest["class_names"]), imgsz) if model_path.suffix.lower() == ".onnx" else None
+    for frozen in frozen_models.values():
+        if sha256(frozen["source"]) != frozen["sha256"] or sha256(frozen["path"]) != frozen["sha256"]:
+            raise PipelineError("评价期间模型身份已变化，未发布评价或候选导入资格")
+    model_path = frozen_models["model"]["source"]
+    contract = frozen_models["model"]["contract"]
     report.update(model=str(model_path), dataset=str(dataset), class_names=manifest["class_names"], task="detect", input_size=imgsz, passed_compatibility=contract is not None, contract=contract, baseline=baseline, comparison=comparison)
     report = evaluation_json_value(report)
     write_json(output / "evaluation.json", report)

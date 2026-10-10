@@ -11,6 +11,7 @@
 #include "debug/session_statistics_internal.h"
 #include "debug/recoil_report.h"
 #include "debug/auxiliary_report.h"
+#include "runtime/statistics_internal.h"
 
 #include "log/log.h"
 
@@ -91,44 +92,35 @@ void set_error(std::string& output, const std::string& value) noexcept {
     }
 }
 
-double percentile(std::vector<double> values, double quantile) {
-    if (values.empty()) return 0.0;
-    std::sort(values.begin(), values.end());
-    const double position = quantile *
-        static_cast<double>(values.size() - 1);
-    const std::size_t lower = static_cast<std::size_t>(std::floor(position));
-    const std::size_t upper = static_cast<std::size_t>(std::ceil(position));
-    if (lower == upper) return values[lower];
-    const double fraction = position - static_cast<double>(lower);
-    return values[lower] * (1.0 - fraction) + values[upper] * fraction;
-}
-
-DebugTimingSummary summarize(const std::vector<double>& values) {
+DebugTimingSummary summarize(std::vector<double>& values) {
     DebugTimingSummary result;
     result.sample_count = values.size();
     if (values.empty()) return result;
     result.mean_ms = std::accumulate(values.begin(), values.end(), 0.0) /
                     static_cast<double>(values.size());
-    result.p50_ms = percentile(values, 0.50);
-    result.p95_ms = percentile(values, 0.95);
-    result.p99_ms = percentile(values, 0.99);
     result.max_ms = *std::max_element(values.begin(), values.end());
+    // 先按原始顺序求均值，再原地排序一次供三个分位数使用。
+    std::sort(values.begin(), values.end());
+    result.p50_ms = runtime::detail::sorted_percentile(values, 0.50);
+    result.p95_ms = runtime::detail::sorted_percentile(values, 0.95);
+    result.p99_ms = runtime::detail::sorted_percentile(values, 0.99);
     return result;
 }
 
 DebugQueueDepthSummary summarize_queue_depth(
-        const std::vector<double>& values) {
+        std::vector<double>& values) {
     DebugQueueDepthSummary result;
     result.sample_count = values.size();
     if (values.empty()) return result;
     result.mean_frames =
         std::accumulate(values.begin(), values.end(), 0.0) /
         static_cast<double>(values.size());
-    result.p50_frames = percentile(values, 0.50);
-    result.p95_frames = percentile(values, 0.95);
-    result.p99_frames = percentile(values, 0.99);
     result.max_frames = static_cast<int>(
         *std::max_element(values.begin(), values.end()));
+    std::sort(values.begin(), values.end());
+    result.p50_frames = runtime::detail::sorted_percentile(values, 0.50);
+    result.p95_frames = runtime::detail::sorted_percentile(values, 0.95);
+    result.p99_frames = runtime::detail::sorted_percentile(values, 0.99);
     return result;
 }
 
@@ -1133,11 +1125,8 @@ bool publish_report_pair(const std::string& csv_path,
 
 bool debug_sample_succeeded(
         const RuntimePipelineSample& sample) noexcept {
-    if (sample.detection_status != DetectionStatus::SUCCESS ||
-        sample.aim_status != AimStatus::SUCCESS) {
-        return false;
-    }
-    return !sample.mouse_sent || sample.mouse_status == MouseStatus::READY;
+    return runtime::detail::pipeline_sample_succeeded(sample.detection_status,
+        sample.aim_status, sample.mouse_status, sample.mouse_sent);
 }
 
 DebugReport::DebugReport() {

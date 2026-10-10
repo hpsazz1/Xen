@@ -2,6 +2,8 @@
 
 #include "log/log.h"
 #include "runtime/runtime_internal.h"
+#include "runtime/statistics_internal.h"
+#include "runtime/startup_internal.h"
 #include "runtime/weapon_context_internal.h"
 #include "runtime/aim_frame_internal.h"
 #include "runtime/collection_frame_internal.h"
@@ -21,7 +23,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
-#include <deque>
 #include <filesystem>
 #include <limits>
 #include <memory>
@@ -31,21 +32,6 @@
 #include <thread>
 #include <utility>
 #include <vector>
-
-namespace {
-
-double percentile(std::vector<double> values, double quantile) {
-    if (values.empty()) return 0.0;
-    std::sort(values.begin(), values.end());
-    const double position = quantile * static_cast<double>(values.size() - 1);
-    const std::size_t lower = static_cast<std::size_t>(std::floor(position));
-    const std::size_t upper = static_cast<std::size_t>(std::ceil(position));
-    if (lower == upper) return values[lower];
-    const double fraction = position - static_cast<double>(lower);
-    return values[lower] * (1.0 - fraction) + values[upper] * fraction;
-}
-
-} // namespace
 
 struct Runtime::Impl {
     static constexpr std::size_t kDebugSampleCapacity = 4096;
@@ -66,6 +52,7 @@ struct Runtime::Impl {
     // Detector 不支持 detect() 与资源切换并发；候选加载始终在锁外完成。
     mutable std::mutex detector_mutex;
     AppConfig config;
+    runtime::detail::StartupAdapter startup_adapter;
     RuntimeSnapshot current_snapshot;
     std::shared_ptr<AutoStopOutputArbiter> output_arbiter;
     // 公有控制入口可与停止并发；原子共享引用保证清理期间对象仍存活。
@@ -101,8 +88,7 @@ struct Runtime::Impl {
     std::atomic<bool> stop_requested{false};
     std::atomic<bool> aim_reset_requested{false};
     std::atomic<bool> detector_reload_running{false};
-    std::deque<double> pipeline_samples;
-    std::deque<double> control_latency_samples;
+    runtime::detail::PipelineLatencyWindow latency_window;
     DebugSampleRing debug_samples;
     bool diagnostics_enabled = false; // snapshot_mutex 保护
     std::chrono::steady_clock::time_point fps_started{};
@@ -237,7 +223,8 @@ struct Runtime::Impl {
         CaptureConfig capture_config = config.capture;
         capture_config.enable_performance_probes =
             config.runtime.enable_performance_probes;
-        capture = create_capture(capture_config);
+        capture = startup_adapter.create_capture
+            ? startup_adapter.create_capture(capture_config) : create_capture(capture_config);
         if (!capture || !capture->open()) {
             set_error(capture ? capture->last_error() : "创建 Capture 失败");
             return false;
@@ -317,9 +304,8 @@ struct Runtime::Impl {
             current_snapshot.d3d11_directml_interop =
                 config.capture.enable_d3d11_directml_interop;
         }
-        pipeline_samples.clear();
+        latency_window.reset(static_cast<std::size_t>(config.runtime.profile_window));
         if (config.movement.enabled) configure_movement(config.movement);
-        control_latency_samples.clear();
         debug_samples.reset();
         fps_started = std::chrono::steady_clock::now();
         fps_frame_count = 0;
@@ -793,35 +779,16 @@ struct Runtime::Impl {
         const auto profile_window_started = probes_enabled
             ? std::chrono::steady_clock::now()
             : std::chrono::steady_clock::time_point{};
-        pipeline_samples.push_back(profile.total_ms);
-        while (pipeline_samples.size() >
-               static_cast<std::size_t>(config.runtime.profile_window)) {
-            pipeline_samples.pop_front();
-        }
-        const std::vector<double> samples(
-            pipeline_samples.begin(), pipeline_samples.end());
-        current_snapshot.pipeline_p50_ms = percentile(samples, 0.50);
-        current_snapshot.pipeline_p95_ms = percentile(samples, 0.95);
-        if (profile.mouse_backend_completion_timing_valid) {
-            control_latency_samples.push_back(
-                profile.capture_to_mouse_backend_completion_ms);
-            while (control_latency_samples.size() >
-                   static_cast<std::size_t>(config.runtime.profile_window)) {
-                control_latency_samples.pop_front();
-            }
-            const std::vector<double> control_samples(
-                control_latency_samples.begin(),
-                control_latency_samples.end());
-            current_snapshot.control_latency_available = true;
-            current_snapshot.control_latency_sample_count =
-                control_samples.size();
-            current_snapshot.control_latency_last_ms =
-                profile.capture_to_mouse_backend_completion_ms;
-            current_snapshot.control_latency_p50_ms =
-                percentile(control_samples, 0.50);
-            current_snapshot.control_latency_p95_ms =
-                percentile(control_samples, 0.95);
-        }
+        latency_window.observe(profile, aim_result.status, mouse_status, mouse_sent);
+        const auto& pipeline_latency = latency_window.pipeline();
+        const auto& control_latency = latency_window.control();
+        current_snapshot.pipeline_p50_ms = pipeline_latency.p50;
+        current_snapshot.pipeline_p95_ms = pipeline_latency.p95;
+        current_snapshot.control_latency_available = control_latency.count != 0;
+        current_snapshot.control_latency_sample_count = control_latency.count;
+        current_snapshot.control_latency_last_ms = control_latency.last;
+        current_snapshot.control_latency_p50_ms = control_latency.p50;
+        current_snapshot.control_latency_p95_ms = control_latency.p95;
         if (probes_enabled) {
             result.profile_window_ms =
                 std::chrono::duration<double, std::milli>(
@@ -1370,6 +1337,13 @@ Runtime::Runtime() : impl_(std::make_unique<Impl>()) {
     Log::register_module("runtime", LogLevel::INFO);
 }
 
+std::unique_ptr<Runtime> runtime::detail::make_runtime_with_startup_adapter(
+        StartupAdapter adapter) {
+    auto runtime = std::make_unique<Runtime>();
+    runtime->impl_->startup_adapter = std::move(adapter);
+    return runtime;
+}
+
 Runtime::~Runtime() {
     stop();
 }
@@ -1424,7 +1398,25 @@ bool Runtime::start(const AppConfig& config,
         impl_->pipeline_thread = std::thread([this] {
             impl_->pipeline_loop();
         });
-        impl_->set_state(RuntimeState::RUNNING);
+        if (impl_->startup_adapter.before_running) impl_->startup_adapter.before_running(*this);
+        bool running_published = false;
+        {
+            // 成功与 fail_runtime 的失败发布共用一把锁，失败先发生时不得覆盖。
+            std::lock_guard lock(impl_->snapshot_mutex);
+            if (impl_->current_snapshot.state == RuntimeState::STARTING &&
+                !impl_->stop_requested.load(std::memory_order_acquire)) {
+                impl_->current_snapshot.state = RuntimeState::RUNNING;
+                running_published = true;
+            }
+        }
+        if (!running_published) {
+            // fail_runtime 先请求停止、后发布错误；在锁外等线程退出，保证返回时失败信息完整。
+            if (impl_->capture_thread.joinable()) impl_->capture_thread.join();
+            if (impl_->pipeline_thread.joinable()) impl_->pipeline_thread.join();
+            // 线程已不再 joinable，下次 start 的线程回收分支不会再替本轮清理模块。
+            impl_->release_modules();
+            return false;
+        }
         LOG_INFO("runtime", "Runtime 已启动: provider={}",
                  impl_->detector->backend_name());
         return true;

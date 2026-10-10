@@ -21,6 +21,11 @@
 #include "movement/movement.h"
 
 namespace data_collection { class Collector; }
+class Runtime;
+namespace runtime::detail {
+struct StartupAdapter;
+std::unique_ptr<Runtime> make_runtime_with_startup_adapter(StartupAdapter adapter);
+}
 
 enum class RuntimeState {
     STOPPED,
@@ -405,6 +410,8 @@ public:
     bool set_recoil_archive(std::optional<RecoilArchiveConfig> archive) noexcept;
 
 private:
+    friend std::unique_ptr<Runtime> runtime::detail::make_runtime_with_startup_adapter(
+        runtime::detail::StartupAdapter adapter);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -712,6 +713,101 @@ void test_kmbox_monitor_packet_identity_observer_captures_raw_datagram() {
     if (mouse) mouse->close();
 }
 
+void test_kmbox_close_keeps_monitor_socket_until_receiver_exits() {
+    class BlockingObserver final : public mouse::detail::IKmboxMonitorPacketObserver {
+    public:
+        void observe_kmbox_monitor_packet(
+                const mouse::detail::KmboxMonitorPacketObservation& observation,
+                std::span<const std::uint8_t>) noexcept override {
+            std::unique_lock lock(mutex);
+            port = observation.monitor_local_port;
+            entered = true;
+            changed.notify_all();
+            changed.wait(lock, [&] { return released; });
+        }
+        std::mutex mutex;
+        std::condition_variable changed;
+        std::uint16_t port = 0;
+        bool entered = false, released = false;
+    };
+    FakeKmboxDevice device(std::vector<AckMode>(6, AckMode::VALID));
+    auto observer = std::make_shared<BlockingObserver>();
+    expect(mouse::detail::install_kmbox_monitor_packet_observer(observer),
+           "关闭交错测试取得 monitor observer");
+    auto mouse = create_test_mouse(make_config(device.port()));
+    if (!mouse || !mouse->open()) { expect(false, "关闭交错测试连接成功"); return; }
+    expect(device.send_monitor(0x02U), "关闭前实际接收一份按下报告");
+    std::uint16_t port = 0;
+    {
+        std::unique_lock lock(observer->mutex);
+        expect(observer->changed.wait_for(lock, std::chrono::seconds(1),
+                   [&] { return observer->entered; }), "接收线程到达关闭屏障");
+        port = observer->port;
+    }
+    std::atomic<bool> closed{false};
+    std::thread closing([&] { mouse->close(); closed.store(true); });
+    InputSnapshot snapshot;
+    const auto stop_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    do {
+        mouse->poll_input(snapshot);
+        if (snapshot.status == InputMonitorStatus::CLOSED) break;
+        std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < stop_deadline);
+    expect(snapshot.status == InputMonitorStatus::CLOSED,
+           "停止已发布，输入不再提供旧许可");
+    bool port_reused = false;
+    const auto probe_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+    do {
+        const SOCKET probe = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (probe == INVALID_SOCKET) { expect(false, "端口所有权探针创建成功"); break; }
+        BOOL exclusive = TRUE;
+        const bool exclusive_set = setsockopt(probe, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+                   reinterpret_cast<const char*>(&exclusive), sizeof(exclusive)) != SOCKET_ERROR;
+        expect(exclusive_set, "端点复用探针设置独占绑定成功");
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        // 必须探测同一个 wildcard 端点；Windows 允许独立 socket 在已绑定
+        // INADDR_ANY 的端口上绑定特定本机地址，不能据此判断原端口已释放。
+        address.sin_addr.S_un.S_addr = htonl(INADDR_ANY);
+        address.sin_port = htons(port);
+        port_reused = port != 0 && bind(probe, reinterpret_cast<const sockaddr*>(&address),
+                                      sizeof(address)) != SOCKET_ERROR;
+        const int bind_error = port_reused ? 0 : WSAGetLastError();
+        closesocket(probe);
+        if (!port_reused && bind_error != WSAEADDRINUSE && bind_error != WSAEACCES) {
+            expect(false, "复用探针只接受端点仍被占用的失败原因");
+            break;
+        }
+        if (port_reused) break;
+        std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < probe_deadline);
+    expect(!closed.load() && !port_reused,
+           "接收线程尚未退出时不得关闭 socket 或允许端口复用");
+    {
+        std::lock_guard lock(observer->mutex);
+        observer->released = true;
+    }
+    observer->changed.notify_all();
+    closing.join();
+    expect(closed.load(), "释放接收屏障后关闭完成");
+    observer.reset();
+    expect(mouse->open(), "同一 controller 在完整关闭后可以重开");
+    expect(device.send_monitor(0U), "重开后接收明确释放报告");
+    const auto reopen_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    do {
+        mouse->poll_input(snapshot);
+        if (snapshot.status == InputMonitorStatus::READY) break;
+        std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < reopen_deadline);
+    expect(snapshot.status == InputMonitorStatus::READY && snapshot.state_valid &&
+               !snapshot.virtual_keys[0x02] && snapshot.sequence == 1,
+           "重开只发布新代际输入，不继承旧按下");
+    const auto idle_close_started = std::chrono::steady_clock::now();
+    mouse->close();
+    expect(std::chrono::steady_clock::now() - idle_close_started < std::chrono::seconds(1),
+           "没有新包时关闭仍有界完成");
+}
+
 void test_invalid_commands_are_not_sent() {
     FakeKmboxDevice device({AckMode::VALID, AckMode::VALID});
     expect(device.valid(), "非法命令测试假设备必须创建成功");
@@ -1139,6 +1235,7 @@ int main() {
     test_packet_layout_and_sequence();
     test_kmbox_monitor_retains_state_until_explicit_release();
     test_kmbox_monitor_packet_identity_observer_captures_raw_datagram();
+    test_kmbox_close_keeps_monitor_socket_until_receiver_exits();
     test_invalid_commands_are_not_sent();
     test_invalid_config();
     test_open_response_failure(

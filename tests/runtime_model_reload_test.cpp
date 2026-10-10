@@ -10,6 +10,7 @@
 #include "config/config.h"
 #include "log/log.h"
 #include "runtime/runtime.h"
+#include "runtime/startup_internal.h"
 #include "debug/session_archive.h"
 
 #include <algorithm>
@@ -175,6 +176,63 @@ double percentile(std::vector<double> values, double quantile) {
     return values[lower] * (1.0 - fraction) + values[upper] * fraction;
 }
 
+class StartupCapture final : public ICapture {
+public:
+    explicit StartupCapture(bool fail) : fail_(fail) {}
+    bool open() noexcept override { status_.store(CaptureStatus::READY); return true; }
+    CaptureStatus grab(CapturedFrame&) noexcept override {
+        std::this_thread::sleep_for(1ms);
+        const auto next = fail_ ? CaptureStatus::FAILURE : CaptureStatus::NO_FRAME;
+        status_.store(next);
+        return next;
+    }
+    void close() noexcept override { status_.store(CaptureStatus::CLOSED); }
+    CaptureStatus status() const noexcept override { return status_.load(); }
+    std::string last_error() const override { return fail_ ? "启动异步采集故障" : ""; }
+private:
+    bool fail_;
+    std::atomic<CaptureStatus> status_{CaptureStatus::CLOSED};
+};
+
+void check_startup_failure_and_restart(const AppConfig& config) {
+    bool fail_capture = true;
+    unsigned failed_barriers = 0;
+    runtime::detail::StartupAdapter adapter;
+    adapter.create_capture = [&](const CaptureConfig&) {
+        return std::make_unique<StartupCapture>(fail_capture);
+    };
+    adapter.before_running = [&](Runtime& runtime) {
+        if (!fail_capture) return;
+        const bool failed = wait_until([&] {
+            return runtime.snapshot().state == RuntimeState::FAILED;
+        }, 5s);
+        expect(failed, "启动发布屏障必须等到采集线程已经发布 FAILED");
+        if (failed) ++failed_barriers;
+    };
+    auto runtime = runtime::detail::make_runtime_with_startup_adapter(std::move(adapter));
+    auto mouse = std::make_shared<NoOutputMouse>();
+    for (const bool explicit_stop : {true, false}) {
+        fail_capture = true;
+        const bool started = runtime->start(config, mouse);
+        const auto failed = runtime->snapshot();
+        expect(!started && failed.state == RuntimeState::FAILED &&
+                   failed.last_error == "启动异步采集故障" && failed.emergency_stopped,
+               "工作线程启动期故障必须返回失败，保留 FAILED、错误和急停状态");
+        if (explicit_stop) {
+            runtime->stop();
+            expect(runtime->snapshot().state == RuntimeState::STOPPED,
+                   "启动失败后的 stop 必须回收两个线程并进入 STOPPED");
+        }
+        fail_capture = false;
+        expect(runtime->start(config, mouse) && runtime->snapshot().state == RuntimeState::RUNNING &&
+                   runtime->snapshot().last_error.empty(),
+               "显式停止或直接重启都必须回收失败会话并成功启动新会话");
+        runtime->stop();
+    }
+    expect(failed_barriers == 2 && mouse->moves.load() == 0,
+           "两种重启路径都必须确定性覆盖失败先于 RUNNING 发布，且不产生输出");
+}
+
 void check_inflight_reload_generation(AppConfig config, bool probes_enabled) {
     config.runtime.enable_performance_probes = probes_enabled;
     config.runtime.diagnostics_enabled = false;
@@ -302,6 +360,8 @@ int main(int argc, char** argv) {
     config.mouse.backend = MouseBackend::WIN32_SEND_INPUT;
     config.mouse.allow_send_input = false;
     config.runtime.enable_performance_probes = true;
+
+    check_startup_failure_and_restart(config);
 
     Runtime runtime;
     SessionArchive diagnostic_archive;

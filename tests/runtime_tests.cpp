@@ -1,4 +1,5 @@
 #include "runtime/runtime_internal.h"
+#include "runtime/statistics_internal.h"
 
 #include <atomic>
 #include <cstdint>
@@ -62,6 +63,44 @@ void expect(bool condition, const std::string& message) {
     if (condition) return;
     ++failures;
     std::cerr << "[失败] " << message << '\n';
+}
+
+void test_successful_latency_window_survives_failures() {
+    runtime::detail::PipelineLatencyWindow window;
+    window.reset(3);
+    PipelineProfile profile;
+    profile.detector.status = DetectionStatus::SUCCESS;
+    profile.mouse_backend_completion_timing_valid = true;
+    const auto observe = [&](double value, AimStatus aim = AimStatus::SUCCESS,
+                             MouseStatus mouse = MouseStatus::READY, bool sent = true) {
+        profile.total_ms = value;
+        profile.capture_to_mouse_backend_completion_ms = value + 1.0;
+        window.observe(profile, aim, mouse, sent);
+    };
+    observe(30); observe(10); observe(20);
+    expect(window.pipeline().count == 3 && window.pipeline().p50 == 20 &&
+               std::abs(window.pipeline().p95 - 29.0) < 1e-9,
+           "成功滑窗保持既有排序与线性插值定义");
+    profile.detector.status = DetectionStatus::INFERENCE_FAILED;
+    for (int i = 0; i < 8; ++i) observe(0);
+    profile.detector.status = DetectionStatus::SUCCESS;
+    observe(1000, AimStatus::NOT_RUN);
+    observe(1000, AimStatus::SUCCESS, MouseStatus::SEND_FAILED);
+    expect(window.pipeline().count == 3 && window.pipeline().p50 == 20 &&
+               std::abs(window.pipeline().p95 - 29.0) < 1e-9 &&
+               window.control().last == 21 && window.control().p50 == 21,
+           "检测、Aim失败或已发送但设备异常都不进入成功窗口，连续失败不能挤走成功样本");
+    // 合法空检测仍是 SUCCESS；没有物理发送时 Mouse CLOSED 不构成失败。
+    profile.mouse_backend_completion_timing_valid = false;
+    observe(40, AimStatus::SUCCESS, MouseStatus::CLOSED, false);
+    expect(window.pipeline().count == 3 && window.pipeline().p50 == 20 &&
+               std::abs(window.pipeline().p95 - 38.0) < 1e-9 &&
+               window.control().count == 3 && window.control().last == 21,
+           "合法空检测成功占一个窗口位置，未发送帧不伪造控制完成样本");
+    window.reset(3);
+    expect(window.pipeline().count == 0 && window.pipeline().p95 == 0 &&
+               window.control().count == 0,
+           "新Runtime会话不继承旧会话成功窗口");
 }
 
 void publish(runtime::detail::LatestFrameQueue& queue,
@@ -956,6 +995,7 @@ int main() {
         expect(deadline() == std::chrono::steady_clock::time_point{} && reason == AutoStopBlockReason::SOURCE_TIMING_INVALID,
             "缺少可信源时间不可维持人工保持");
     }
+    test_successful_latency_window_survives_failures();
     test_processed_frame_timing_evidence_preserves_raw_identity();
     test_latest_frame_queue();
     test_malformed_capture_frame_is_not_counted_as_published();

@@ -1,8 +1,30 @@
 #include "recoil/recoil_store.h"
+#include "recoil/recoil_store_internal.h"
+#include <atomic>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <new>
+#include <sstream>
 #include <string_view>
+
+namespace allocation_probe {
+std::atomic<bool> enabled{false};
+std::atomic<std::size_t> largest{0};
+}
+// 观测公开 load 的实际资源需求，不替换文件读取或曲线解析。
+void* operator new(std::size_t size) {
+    if (allocation_probe::enabled.load(std::memory_order_relaxed)) {
+        auto previous = allocation_probe::largest.load(std::memory_order_relaxed);
+        while (size > previous && !allocation_probe::largest.compare_exchange_weak(
+                   previous, size, std::memory_order_relaxed)) {}
+    }
+    if (auto* pointer = std::malloc(size ? size : 1)) return pointer;
+    throw std::bad_alloc();
+}
+void operator delete(void* pointer) noexcept { std::free(pointer); }
+void operator delete(void* pointer, std::size_t) noexcept { std::free(pointer); }
 namespace {
 int failures=0;
 void expect(bool value,const char* message){if(!value){++failures;std::cerr<<message<<'\n';}}
@@ -10,6 +32,25 @@ RecoilProfile profile(){RecoilProfile p;p.id="synthetic";p.weapon_id="test_weapo
     p.state=RecoilProfileState::CALIBRATED;p.phase_tolerance_ms=20;p.recovery_ms=100;
     p.calibration={"test_build","kmbox_net","test_conditions","synthetic:test_only",1.0};
     p.source.sha256=std::string(64,'a');p.points={{0,0,0},{10,1,2}};return p;}
+void test_bounded_read_rejects_file_changes() {
+    const auto rejects = [](const std::string& bytes, std::uintmax_t checked_size, std::uintmax_t maximum) {
+        std::istringstream stream(bytes);
+        try { (void)recoil::detail::read_bounded_stream(stream, checked_size, maximum); return false; }
+        catch (const std::exception&) { return true; }
+    };
+    std::istringstream exact("abcdef");
+    expect(recoil::detail::read_bounded_stream(exact, 6, 6) == "abcdef", "正好到上限的字节完整保留");
+    expect(rejects("abcdefg", 6, 6), "扫描后超出硬上限的增长不得被截断接受");
+    expect(rejects("abcdefg", 6, 16), "扫描后限额内增长也不得默默返回旧长度前缀");
+    expect(rejects("abc", 6, 16), "扫描后缩短明确失败");
+    expect(rejects("abcdefg", 7, 6), "已知超限在读取前拒绝");
+    std::istringstream failed("abcdef");
+    failed.setstate(std::ios::badbit);
+    bool rejected = false;
+    try { (void)recoil::detail::read_bounded_stream(failed, 6, 16); }
+    catch (const std::exception&) { rejected = true; }
+    expect(rejected, "底层读取异常不得当作合法EOF");
+}
 }
 int main(int argc, char** argv){
     // 实际本地导入产物的只读验收；不设置活动版本、不启动设备。
@@ -31,12 +72,19 @@ int main(int argc, char** argv){
         return 0;
     }
     if (argc != 1) return 2;
+    test_bounded_read_rejects_file_changes();
     auto directory=std::filesystem::temp_directory_path()/("xen-recoil-store-test-"+std::to_string(RecoilClock::now().time_since_epoch().count()));
     std::filesystem::create_directories(directory);
     RecoilStore store(directory);std::string error,file1,file2,file3;
     auto p=profile();
     expect(store.save_new(p,file1,error),"默认候选保存");
     RecoilProfile loaded;expect(store.load(file1,loaded,error)&&loaded.state==RecoilProfileState::SCHEMA_VALID,"默认保存降级候选");
+    allocation_probe::largest.store(0);
+    allocation_probe::enabled.store(true);
+    const bool small_loaded = store.load(file1, loaded, error);
+    allocation_probe::enabled.store(false);
+    expect(small_loaded && allocation_probe::largest.load() < 1024 * 1024,
+        "小曲线经生产入口加载不得按16MiB上限分配工作区");
     expect(!store.set_active(p.weapon_id,file1,error),"未校准候选不能活动发布");
     expect(store.save_new(p,file2,error,true)&&file1!=file2,"显式校准保存新revision不覆盖");
     RecoilConfig cfg;cfg.game_build="test_build";cfg.input_path="kmbox_net";cfg.conditions="test_conditions";cfg.sensitivity=1;
@@ -103,6 +151,10 @@ int main(int argc, char** argv){
         "活动索引解析离散版本");
     expect(store.rollback("ak47",error)&&store.resolve(cfg,"ak47",error)->schema_version==1,
         "离散迁移可回退原累计版本");
+    {std::ofstream large(directory/"oversized.json",std::ios::binary);
+        large.seekp(16*1024*1024);large.put('\0');}
+    expect(!store.load("oversized.json",loaded,error)&&error.find("大小")!=std::string::npos,
+        "生产入口仍在解析前拒绝超过16MiB的文件");
     {std::ofstream broken(directory/"broken.json");broken<<"{}";}
     expect(!store.list(profiles,error),"损坏候选显式失败不假成功");
     std::filesystem::remove_all(directory);

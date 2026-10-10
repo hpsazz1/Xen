@@ -225,6 +225,17 @@ public:
                 close_locked();
                 return false;
             }
+            // 接收有界，停止后先等待线程归还 socket，再关闭；不能跨线程
+            // closesocket 打断 recvfrom，否则句柄可能在接收线程退出前被复用。
+            const DWORD monitor_receive_timeout_ms = 20;
+            if (setsockopt(monitor_socket_, SOL_SOCKET, SO_RCVTIMEO,
+                           reinterpret_cast<const char*>(&monitor_receive_timeout_ms),
+                           sizeof(monitor_receive_timeout_ms)) == SOCKET_ERROR) {
+                set_winsock_error("KMBOX NET monitor 接收超时配置失败", WSAGetLastError());
+                status_.store(MouseStatus::CONNECTION_FAILED, std::memory_order_release);
+                close_locked();
+                return false;
+            }
             sockaddr_in monitor_address{};
             monitor_address.sin_family = AF_INET;
             monitor_address.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -462,8 +473,7 @@ public:
     bool poll_input(InputSnapshot& snapshot) noexcept override {
         snapshot = {};
         std::lock_guard<std::mutex> lock(monitor_mutex_);
-        if (monitor_socket_ == INVALID_SOCKET ||
-            monitor_stop_.load(std::memory_order_acquire)) {
+        if (monitor_stop_.load(std::memory_order_acquire)) {
             snapshot.status = InputMonitorStatus::CLOSED;
             return true;
         }
@@ -865,11 +875,11 @@ private:
         }
         monitor_configured_ = false;
         monitor_stop_.store(true, std::memory_order_release);
+        if (monitor_thread_.joinable()) monitor_thread_.join();
         if (monitor_socket_ != INVALID_SOCKET) {
             closesocket(monitor_socket_);
             monitor_socket_ = INVALID_SOCKET;
         }
-        if (monitor_thread_.joinable()) monitor_thread_.join();
         if (socket_ != INVALID_SOCKET) {
             closesocket(socket_);
             socket_ = INVALID_SOCKET;
@@ -890,6 +900,9 @@ private:
                 static_cast<int>(packet.size()), 0,
                 reinterpret_cast<sockaddr*>(&source), &source_size);
             if (received == SOCKET_ERROR) {
+                // change-only monitor 没有心跳；等待超时只用于复核停止，
+                // 不能把静止长按变成输入失败或伪造释放。
+                if (WSAGetLastError() == WSAETIMEDOUT) continue;
                 if (!monitor_stop_.load(std::memory_order_acquire)) {
                     std::lock_guard<std::mutex> lock(monitor_mutex_);
                     monitor_failed_ = true;

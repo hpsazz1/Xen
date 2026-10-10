@@ -1,4 +1,5 @@
 #include <data_collection/data_collection.h>
+#include <log/log.h>
 #include <nlohmann/json.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <chrono>
@@ -35,6 +36,24 @@ void automatic(data_collection::Collector& collector, CapturedFrame& frame,
             after.duplicates != before.duplicates) return;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     } while (std::chrono::steady_clock::now() < deadline);
+}
+void configured_log_level_test(const data_collection::Config& config) {
+    for (const auto level : {LogLevel::OFF, LogLevel::INFO}) {
+        LogConfig logging;
+        logging.enable_console = logging.enable_file = false;
+        logging.module_levels.emplace("data", level);
+        Log::init(logging);
+        {
+            data_collection::Collector collector;
+            std::string error;
+            expect(collector.start(config, error), "日志等级回归使用生产采集入口");
+            collector.stop();
+            const auto lines = Log::get_ring_buffer();
+            expect(level == LogLevel::OFF ? lines.empty() : !lines.empty(),
+                   "data 模块 OFF 必须过滤实际采集日志，INFO 正常输出");
+        }
+        Log::shutdown();
+    }
 }
 }
 int make_fixture(const std::filesystem::path& root) {
@@ -83,6 +102,7 @@ int wmain(int argc, wchar_t** argv) {
         config.class_names = {"person"};
         config.interval_ms = 0;
         config.exploration_interval_ms = 60000;
+        configured_log_level_test(config);
         data_collection::Collector collector;
         std::string error;
         {

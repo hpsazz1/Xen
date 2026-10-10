@@ -194,7 +194,7 @@ struct Collector::Impl {
         }
     }
 };
-Collector::Collector() : impl_(std::make_unique<Impl>()) { Log::register_module("Data"); }
+Collector::Collector() : impl_(std::make_unique<Impl>()) { Log::register_module("data"); }
 Collector::~Collector() { stop(); }
 bool Collector::start(const Config& config, std::string& error) noexcept {
     stop();
@@ -244,7 +244,7 @@ bool Collector::start(const Config& config, std::string& error) noexcept {
         std::filesystem::rename(p.state.session_directory / "session.pending", p.state.session_directory / "session.json");
         p.worker = std::thread([&p] { p.run(); });
         p.state.active = true;
-        LOG_INFO("Data", "连续采集会话已启动：{}", p.session_id);
+        LOG_INFO("data", "连续采集会话已启动：{}", p.session_id);
         p.enabled.store(true, std::memory_order_release);
         error.clear();
         return true;

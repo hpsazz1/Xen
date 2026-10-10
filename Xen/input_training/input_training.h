@@ -10,6 +10,7 @@
 #include <vector>
 
 namespace input_training {
+namespace detail { class SessionTestAccess; }
 // 位图只表示来源报告的原始键态，不抹去同轴双键重叠。
 inline constexpr std::uint8_t kW = 1, kA = 2, kS = 4, kD = 8;
 struct Event {
@@ -103,6 +104,7 @@ public:
     bool load(const std::filesystem::path& directory, Limits limits = {}) noexcept;
     std::shared_ptr<const Snapshot> snapshot() const noexcept;
 private:
+    friend class detail::SessionTestAccess;
     class Impl;
     std::unique_ptr<Impl> impl_;
 };

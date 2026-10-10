@@ -744,6 +744,48 @@ void test_report_summary_and_atomic_files() {
     std::filesystem::remove_all(root, ignored);
 }
 
+void test_percentiles_preserve_interpolation_and_success_filter() {
+    OwnedDebugPairTestRoot owned;
+    std::string error;
+    expect(create_owned_debug_pair_test_root(owned, error), "分位数回归应创建独占临时根: " + error);
+    if (owned.path.empty() || !std::filesystem::exists(owned.owner_path)) return;
+    DebugReport report;
+    const std::vector<std::vector<double>> cases{{}, {7}, {30, 10, 20, 20}};
+    for (const auto& values : cases) {
+        DebugReportConfig config;
+        config.csv_path = (owned.path / "percentile.csv").string();
+        config.json_path = (owned.path / "percentile.json").string();
+        config.session_id = "percentile-interpolation";
+        expect(report.start(config, error), "分位数回归必须打开报告: " + error);
+        if (!report.active()) continue;
+        std::vector<RuntimePipelineSample> samples;
+        for (const auto value : values) {
+            auto sample = make_sample(samples.size() + 1, value, true);
+            sample.capture_stages.ndi_valid = true;
+            sample.capture_stages.queue_depth_sampled = true;
+            sample.capture_stages.queued_video_frames = static_cast<int>(value);
+            samples.push_back(sample);
+        }
+        samples.push_back(make_sample(samples.size() + 1, 1000, false));
+        report.ingest(samples);
+        expect(report.finalize({}, error), "分位数回归必须封口: " + error);
+        const auto& summary = report.summary();
+        const double p50 = values.empty() ? 0.0 : values.size() == 1 ? 7.0 : 20.0;
+        const double p95 = values.empty() ? 0.0 : values.size() == 1 ? 7.0 : 28.5;
+        const double p99 = values.empty() ? 0.0 : values.size() == 1 ? 7.0 : 29.7;
+        expect(summary.successful_samples == values.size() && summary.failed_samples == 1 &&
+                   summary.total.sample_count == values.size() && summary.total.p50_ms == p50 &&
+                   std::abs(summary.total.p95_ms - p95) < 1e-9 &&
+                   std::abs(summary.total.p99_ms - p99) < 1e-9 &&
+                   summary.ndi_video_queue_depth.sample_count == values.size() &&
+                   summary.ndi_video_queue_depth.p50_frames == p50 &&
+                   std::abs(summary.ndi_video_queue_depth.p95_frames - p95) < 1e-9 &&
+                   std::abs(summary.ndi_video_queue_depth.p99_frames - p99) < 1e-9,
+               "耗时与队深单次排序均须保留空集、单元素、乱序重复值的线性插值并排除失败");
+    }
+    expect(cleanup_owned_debug_pair_test_root(owned, error), "分位数回归只清理独占目录: " + error);
+}
+
 void test_report_pair_publish_failure_preserves_previous_pair() {
     OwnedDebugPairTestRoot owned_root;
     std::string ownership_error;
@@ -1983,6 +2025,7 @@ int main() {
     test_session_aggregate_boundaries_and_batching();
     test_session_aggregate_minute_capacity();
     test_report_summary_and_atomic_files();
+    test_percentiles_preserve_interpolation_and_success_filter();
     test_report_pair_publish_failure_preserves_previous_pair();
     test_report_keeps_last_samples_across_batches_and_restarts();
     test_report_rejects_invalid_capacity();

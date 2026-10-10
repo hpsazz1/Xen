@@ -1,4 +1,4 @@
-#include "input_training/input_training.h"
+#include "input_training/input_training_internal.h"
 
 #include <algorithm>
 #include <atomic>
@@ -315,6 +315,62 @@ bool archive_line(std::istream& stream, std::string& line, std::size_t limit) {
     if (!line.empty()) throw std::runtime_error("归档尾行未完整关闭");
     return false;
 }
+ArchiveSummary read_archive(const std::filesystem::path& directory, const std::function<void(const Event&)>& visitor,
+    Limits limits, const std::function<void(const ArchiveSummary&)>& on_manifest = {},
+    const std::function<void(const ArchiveSummary&)>& on_chunk = {}) {
+    if (directory.empty() || !visitor || !valid_limits(limits)) throw std::runtime_error("归档遍历参数无效");
+    // Windows absolute 可能先规范化掉 ..；必须在转换前检查调用方原始路径。
+    for (const auto& component : directory)
+        if (component == "..") throw std::runtime_error("归档路径不能包含父目录跳转");
+    const auto root = std::filesystem::absolute(directory);
+    require_archive_path(root, true);
+    const auto manifest_path = root / "manifest.txt";
+    require_archive_path(manifest_path, false);
+    if (std::filesystem::file_size(manifest_path) > 1024) throw std::runtime_error("归档清单超出预算");
+    std::ifstream manifest(manifest_path, std::ios::binary);
+    std::string line;
+    if (!archive_line(manifest, line, 128) || line != "XEN_INPUT_TRAINING_V1")
+        throw std::runtime_error("无有效归档 manifest");
+    if (!archive_line(manifest, line, 512)) throw std::runtime_error("归档清单缺少水位");
+    std::istringstream fields(line);
+    std::array<std::uint64_t, 7> values{};
+    std::string token;
+    for (auto& value : values) {
+        if (!(fields >> token)) throw std::runtime_error("归档清单字段不足");
+        const auto [end, code] = std::from_chars(token.data(), token.data() + token.size(), value);
+        if (code != std::errc{} || end != token.data() + token.size()) throw std::runtime_error("归档清单数值无效");
+    }
+    if (fields >> token || archive_line(manifest, line, 512)) throw std::runtime_error("归档清单存在多余字段");
+    if (values[0] > limits.max_chunks || values[1] > limits.max_run_events || values[3] > limits.max_run_bytes ||
+        values[5] > 1 || values[6] < 2 || values[6] > limits.max_hold_events ||
+        (values[4] != static_cast<std::uint64_t>(Status::STOPPED) && values[4] != static_cast<std::uint64_t>(Status::LIMIT)))
+        throw std::runtime_error("归档清单超限或终止水位无效");
+    ArchiveSummary result;
+    result.status = static_cast<Status>(values[4]); result.dropped = values[2];
+    result.trailing_gap = values[5] != 0; result.max_hold_events = static_cast<std::size_t>(values[6]);
+    if (on_manifest) on_manifest(result);
+    for (std::uint64_t index = 0; index < values[0]; ++index) {
+        const auto path = root / ("events-" + std::to_string(index) + ".csv");
+        require_archive_path(path, false);
+        const auto file_bytes = std::filesystem::file_size(path);
+        if (file_bytes > limits.max_run_bytes - result.bytes || file_bytes > 4096ull * 512 + 1024)
+            throw std::runtime_error("原始 chunk 超出字节预算");
+        std::ifstream stream(path, std::ios::binary);
+        if (!archive_line(stream, line, 512) || line != kColumns) throw std::runtime_error("原始 chunk 表头不匹配");
+        std::size_t count = 0;
+        while (archive_line(stream, line, 512)) {
+            if (++count > 4096 || result.events >= values[1]) throw std::runtime_error("原始事件超出清单或块预算");
+            visitor(decode(line));
+            ++result.events;
+        }
+        if (!count || std::filesystem::file_size(path) != file_bytes) throw std::runtime_error("原始 chunk 为空或读取期间变化");
+        result.bytes += file_bytes; ++result.chunks;
+        if (on_chunk) on_chunk(result);
+    }
+    if (result.events != values[1] || result.bytes != values[3]) throw std::runtime_error("原始 chunk 与清单数量不一致");
+    return result;
+}
+struct ReplayCanceled {};
 }
 
 bool visit_archive(const std::filesystem::path& directory, const std::function<void(const Event&)>& visitor,
@@ -322,55 +378,7 @@ bool visit_archive(const std::filesystem::path& directory, const std::function<v
     summary = {};
     error.clear();
     try {
-        if (directory.empty() || !visitor || !valid_limits(limits)) throw std::runtime_error("归档遍历参数无效");
-        // Windows absolute 可能先规范化掉 ..；必须在转换前检查调用方原始路径。
-        for (const auto& component : directory)
-            if (component == "..") throw std::runtime_error("归档路径不能包含父目录跳转");
-        const auto root = std::filesystem::absolute(directory);
-        require_archive_path(root, true);
-        const auto manifest_path = root / "manifest.txt";
-        require_archive_path(manifest_path, false);
-        if (std::filesystem::file_size(manifest_path) > 1024) throw std::runtime_error("归档清单超出预算");
-        std::ifstream manifest(manifest_path, std::ios::binary);
-        std::string line;
-        if (!archive_line(manifest, line, 128) || line != "XEN_INPUT_TRAINING_V1")
-            throw std::runtime_error("无有效归档 manifest");
-        if (!archive_line(manifest, line, 512)) throw std::runtime_error("归档清单缺少水位");
-        std::istringstream fields(line);
-        std::array<std::uint64_t, 7> values{};
-        std::string token;
-        for (auto& value : values) {
-            if (!(fields >> token)) throw std::runtime_error("归档清单字段不足");
-            const auto [end, code] = std::from_chars(token.data(), token.data() + token.size(), value);
-            if (code != std::errc{} || end != token.data() + token.size()) throw std::runtime_error("归档清单数值无效");
-        }
-        if (fields >> token || archive_line(manifest, line, 512)) throw std::runtime_error("归档清单存在多余字段");
-        if (values[0] > limits.max_chunks || values[1] > limits.max_run_events || values[3] > limits.max_run_bytes ||
-            values[5] > 1 || values[6] < 2 || values[6] > limits.max_hold_events ||
-            (values[4] != static_cast<std::uint64_t>(Status::STOPPED) && values[4] != static_cast<std::uint64_t>(Status::LIMIT)))
-            throw std::runtime_error("归档清单超限或终止水位无效");
-        ArchiveSummary result;
-        result.status = static_cast<Status>(values[4]); result.dropped = values[2];
-        result.trailing_gap = values[5] != 0; result.max_hold_events = static_cast<std::size_t>(values[6]);
-        for (std::uint64_t index = 0; index < values[0]; ++index) {
-            const auto path = root / ("events-" + std::to_string(index) + ".csv");
-            require_archive_path(path, false);
-            const auto file_bytes = std::filesystem::file_size(path);
-            if (file_bytes > limits.max_run_bytes - result.bytes || file_bytes > 4096ull * 512 + 1024)
-                throw std::runtime_error("原始 chunk 超出字节预算");
-            std::ifstream stream(path, std::ios::binary);
-            if (!archive_line(stream, line, 512) || line != kColumns) throw std::runtime_error("原始 chunk 表头不匹配");
-            std::size_t count = 0;
-            while (archive_line(stream, line, 512)) {
-                if (++count > 4096 || result.events >= values[1]) throw std::runtime_error("原始事件超出清单或块预算");
-                visitor(decode(line));
-                ++result.events;
-            }
-            if (!count || std::filesystem::file_size(path) != file_bytes) throw std::runtime_error("原始 chunk 为空或读取期间变化");
-            result.bytes += file_bytes; ++result.chunks;
-        }
-        if (result.events != values[1] || result.bytes != values[3]) throw std::runtime_error("原始 chunk 与清单数量不一致");
-        summary = result;
+        summary = read_archive(directory, visitor, limits);
         return true;
     } catch (const std::exception& exception) {
         try { error = exception.what(); } catch (...) {}
@@ -401,6 +409,7 @@ public:
         std::size_t chunk_count = 0;
         Status status = Status::RECORDING;
         bool replay = false;
+        std::function<void(const Event&, const std::atomic_bool&)> before_replay_event;
         Clock::time_point last_snapshot{};
         std::uint64_t last_published_events = 0;
 
@@ -501,42 +510,28 @@ public:
             publish_file(directory / "manifest.txt", manifest.str());
         }
         void run_replay() {
-            std::ifstream manifest(directory / "manifest.txt", std::ios::binary);
-            std::string version;
-            if (!std::getline(manifest, version) || version != "XEN_INPUT_TRAINING_V1") throw std::runtime_error("无有效归档 manifest，不能称完整回放");
-            std::uint64_t expected_chunks = 0, expected_events = 0, archive_drops = 0, archive_bytes = 0;
-            int ending = 0;
-            unsigned archive_trailing_gap = 0;
-            std::size_t archive_max_hold = 0;
-            if (!(manifest >> expected_chunks >> expected_events >> archive_drops >> archive_bytes >> ending >> archive_trailing_gap >> archive_max_hold) ||
-                expected_chunks > limits.max_chunks || expected_events > limits.max_run_events || archive_bytes > limits.max_run_bytes ||
-                archive_trailing_gap > 1 || archive_max_hold < 2 || archive_max_hold > limits.max_hold_events ||
-                (ending != static_cast<int>(Status::STOPPED) && ending != static_cast<int>(Status::LIMIT)))
-                throw std::runtime_error("归档清单超限或无效");
-            dropped = archive_drops;
-            auto replay_limits = limits; replay_limits.max_hold_events = archive_max_hold;
-            evaluator = Evaluator(replay_limits);
-            for (std::uint64_t index = 0; index < expected_chunks; ++index) {
-                if (stopping) { status = Status::STOPPED; evaluator.finish(HoldEnd::CANCELED); return; }
-                const auto path = directory / ("events-" + std::to_string(index) + ".csv");
-                const auto file_bytes = std::filesystem::file_size(path);
-                if (file_bytes > limits.max_run_bytes - bytes || file_bytes > 4096ull * 512 + 1024) throw std::runtime_error("原始 chunk 超出字节预算");
-                bytes += file_bytes;
-                std::ifstream stream(path, std::ios::binary);
-                std::string line;
-                if (!std::getline(stream, line) || line != kColumns) throw std::runtime_error("原始 chunk 表头不匹配");
-                while (std::getline(stream, line)) {
-                    if (line.size() > 512) throw std::runtime_error("原始事件行超限");
-                    if (evaluator.result.received_events >= expected_events) throw std::runtime_error("原始事件多于清单，不能静默截断");
-                    if (!consume(decode(line)) && status != Status::LIMIT) throw std::runtime_error("原始 chunk 消费失败");
-                }
-                if (stream.bad()) throw std::runtime_error("原始 chunk 读取失败");
-                ++chunks; publish();
+            const auto check_canceled = [&] { if (stopping.load()) throw ReplayCanceled{}; };
+            try {
+                check_canceled();
+                const auto archive = read_archive(directory, [&](const Event& event) {
+                    if (before_replay_event) before_replay_event(event, stopping);
+                    check_canceled();
+                    if (!consume(event) && status != Status::LIMIT) throw std::runtime_error("原始 chunk 消费失败");
+                }, limits, [&](const ArchiveSummary& manifest) {
+                    check_canceled();
+                    dropped = manifest.dropped;
+                    auto replay_limits = limits; replay_limits.max_hold_events = manifest.max_hold_events;
+                    evaluator = Evaluator(replay_limits);
+                }, [&](const ArchiveSummary& progress) {
+                    bytes = progress.bytes; chunks = progress.chunks; publish();
+                    check_canceled();
+                });
+                if (archive.trailing_gap) evaluator.break_stream();
+                status = archive.status;
+                evaluator.finish(status == Status::LIMIT ? HoldEnd::LIMIT : HoldEnd::MISSING_END);
+            } catch (const ReplayCanceled&) {
+                status = Status::STOPPED; evaluator.finish(HoldEnd::CANCELED);
             }
-            if (evaluator.result.received_events != expected_events || bytes != archive_bytes) throw std::runtime_error("原始 chunk 与清单数量不一致");
-            if (archive_trailing_gap) evaluator.break_stream();
-            status = static_cast<Status>(ending);
-            evaluator.finish(status == Status::LIMIT ? HoldEnd::LIMIT : HoldEnd::MISSING_END);
         }
         void run() noexcept {
             try {
@@ -558,6 +553,7 @@ public:
     };
     std::atomic<std::shared_ptr<State>> state;
     std::thread worker;
+    std::function<void(const Event&, const std::atomic_bool&)> before_replay_event;
     std::shared_ptr<const Snapshot> idle = std::make_shared<Snapshot>();
 
     bool start(const std::filesystem::path& directory, Limits limits, Reader reader, bool replay) noexcept {
@@ -571,6 +567,7 @@ public:
             }
             auto next = std::make_shared<State>(limits);
             next->directory = directory; next->reader = std::move(reader); next->replay = replay;
+            next->before_replay_event = before_replay_event;
             next->status = replay ? Status::REPLAYING : Status::RECORDING;
             next->accepting = !replay; next->publish(true);
             state.store(next);
@@ -597,6 +594,10 @@ public:
 };
 
 Session::Session() : impl_(std::make_unique<Impl>()) {}
+void detail::SessionTestAccess::before_replay_event(Session& session,
+    std::function<void(const Event&, const std::atomic_bool&)> operation) {
+    session.impl_->before_replay_event = std::move(operation);
+}
 Session::~Session() { stop(); }
 bool Session::start(const std::filesystem::path& directory, Limits limits, Reader reader) noexcept { return impl_->start(directory, limits, std::move(reader), false); }
 bool Session::load(const std::filesystem::path& directory, Limits limits) noexcept { return impl_->start(directory, limits, {}, true); }

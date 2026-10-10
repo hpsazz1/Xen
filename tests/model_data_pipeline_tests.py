@@ -21,7 +21,7 @@ spec.loader.exec_module(pipeline)
 class PipelineTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.base = Path(self.temp.name)
+        self.base = Path(self.temp.name).resolve()
         self.root = self.base / "raw"
         self.names = ["person"]
         for index, color in enumerate(((200, 10, 10), (10, 200, 10), (10, 10, 200))):
@@ -342,7 +342,7 @@ class PipelineTests(unittest.TestCase):
 
         status = self.base / "status.json"
         output = self.base / "training"
-        with patch.object(pipeline, "load_yolo", side_effect=lambda path, training=False, **kwargs: FakeModel(path)), patch.object(pipeline, "onnx_contract", return_value=dict(input_shape=[1, 3, 640, 640], output_shape=[1, 5, 8400], detector_runtime="NOT_EXECUTED")):
+        with patch.object(pipeline, "load_yolo", side_effect=lambda path, training=False, **kwargs: FakeModel(path)), patch.object(pipeline, "onnx_contract", return_value=dict(input_shape=[1, 3, 640, 640], output_shape=[1, 5, 8400], detector_runtime="NOT_EXECUTED")), patch.object(pipeline, "load_embedded_onnx"):
             self.assertEqual(pipeline.execute(self.job("train", dataset=str(dataset), weights=str(weight), output=str(output), workers=8, **self.trust(weight)), status), 0)
             result = pipeline.read_json(status)["result"]
             self.assertTrue(Path(result["candidate"]).is_file())
@@ -378,6 +378,51 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(Path(captured["train"]["data"]).is_relative_to(output))
         self.assertTrue(all(Path(v["data"]).is_relative_to(evaluation) for v in captured["evaluations"]))
 
+    def test_evaluation_rejects_model_replacement_during_each_measurement(self):
+        dataset = self.freeze()
+        for role in ("candidate", "baseline"):
+            for phase in ("val", "predict"):
+                with self.subTest(role=role, phase=phase):
+                    candidate, baseline = self.base / "candidate.onnx", self.base / "baseline.onnx"
+                    candidate.write_bytes(b"candidate-original")
+                    baseline.write_bytes(b"baseline-original")
+                    target = candidate if role == "candidate" else baseline
+                    original = target.read_bytes()
+                    observed = []
+                    contracts = []
+                    def contract(path, *_):
+                        path = Path(path)
+                        self.assertNotIn(path, (candidate, baseline))
+                        contracts.append(path.read_bytes())
+                        return {"fixture": True}
+                    class Model:
+                        names = ["person"]
+                        def __init__(self, path):
+                            self.path = Path(path)
+                            self.selected = self.path.read_bytes() == original
+                        def add_callback(self, *_): pass
+                        def alter(self, stage):
+                            if self.selected and stage == phase:
+                                target.write_bytes(b"replacement-not-evaluated")
+                                observed.append(self.path.read_bytes())
+                        def val(self, **kwargs):
+                            self.alter("val")
+                            return types.SimpleNamespace(results_dict={"mAP": 0.75}, summary=lambda: [])
+                        def predict(self, **kwargs):
+                            self.alter("predict")
+                            return [types.SimpleNamespace(boxes=types.SimpleNamespace(data=types.SimpleNamespace(cpu=lambda: types.SimpleNamespace(tolist=lambda: []))))]
+                    status = self.base / f"{role}-{phase}-status.json"
+                    output = self.base / f"{role}-{phase}-evaluation"
+                    with patch.object(pipeline, "load_yolo", side_effect=lambda path, **kwargs: Model(path)), patch.object(pipeline, "onnx_contract", side_effect=contract), patch.object(pipeline, "load_embedded_onnx", side_effect=contract):
+                        code = pipeline.execute(self.job("evaluate", model=str(candidate), baseline_model=str(baseline), dataset=str(dataset), output=str(output)), status)
+                    self.assertEqual(code, 1, "评价期间替换源模型必须失败，不能授予新文件导入资格")
+                    self.assertEqual(pipeline.read_json(status)["state"], "FAILED")
+                    self.assertNotIn("passed_compatibility", pipeline.read_json(status)["result"])
+                    self.assertFalse((output / "evaluation.json").exists())
+                    self.assertTrue(observed)
+                    self.assertEqual(contracts, [b"candidate-original", b"baseline-original"])
+                    self.assertTrue(all(value == original for value in observed), "运行中的评价始终读取本次冻结字节")
+
     def test_evaluation_cache_stays_outside_frozen_dataset_even_on_failure(self):
         dataset = self.freeze()
         frozen_files = {p: p.read_bytes() for p in dataset.rglob("*") if p.is_file()}
@@ -391,11 +436,70 @@ class PipelineTests(unittest.TestCase):
                 data_root = Path(pipeline.read_json(kwargs["data"])["path"])
                 (data_root / "labels" / "test.cache").write_bytes(b"cache-before-failure")
                 raise RuntimeError("validator fixture stopped")
-        with patch.object(pipeline, "load_yolo", return_value=Validator()):
+        with patch.object(pipeline, "load_yolo", return_value=Validator()), patch.object(pipeline, "onnx_contract", return_value={"fixture": True}):
             with self.assertRaisesRegex(RuntimeError, "fixture stopped"):
                 pipeline.evaluate(self.context("evaluate", model=str(model_path), dataset=str(dataset), output=str(output)))
         self.assertEqual({p: p.read_bytes() for p in dataset.rglob("*") if p.is_file()}, frozen_files)
         pipeline.validate_dataset(dataset)
+
+    def test_evaluation_pt_snapshot_retains_original_trust(self):
+        dataset = self.freeze()
+        weights = self.base / "trusted.pt"
+        weights.write_bytes(b"explicitly-trusted-weight")
+        paths = []
+        class Model:
+            names = ["person"]
+            def add_callback(self, *_): pass
+            def val(self, **kwargs):
+                return types.SimpleNamespace(results_dict={"mAP": 0.5}, summary=lambda: [])
+            def predict(self, **kwargs):
+                return [types.SimpleNamespace(boxes=types.SimpleNamespace(data=types.SimpleNamespace(cpu=lambda: types.SimpleNamespace(tolist=lambda: []))))]
+        def load(path, **kwargs):
+            pipeline.check_pt_trust(path, kwargs["job"])
+            self.assertFalse(kwargs.get("internal_training_output", False))
+            self.assertEqual(Path(path).read_bytes(), b"explicitly-trusted-weight")
+            self.assertNotEqual(Path(path), weights)
+            paths.append(Path(path))
+            return Model()
+        output = self.base / "pt-evaluation"
+        with patch.object(pipeline, "load_yolo", side_effect=load):
+            result = pipeline.evaluate(self.context("evaluate", model=str(weights), dataset=str(dataset), output=str(output), **self.trust(weights)))
+        self.assertEqual(len(paths), 1)
+        self.assertTrue(paths[0].is_relative_to(output))
+        self.assertEqual(result["model"], str(weights))
+        self.assertEqual(result["model_sha256"], pipeline.sha256(weights))
+        self.assertFalse(result["passed_compatibility"], "可信 PT 评价不能冒充可导入 ONNX")
+
+    def test_onnx_contract_rejects_nested_external_weights_before_loading_data(self):
+        dataset = self.freeze()
+        model = self.base / "external.onnx"
+        model.write_bytes(b"protobuf-fixture")
+        trusted = self.base / "candidate.pt"
+        trusted.write_bytes(b"trusted-candidate")
+        tensor = types.SimpleNamespace(DESCRIPTOR=types.SimpleNamespace(full_name="onnx.TensorProto"), data_location=1, external_data=[])
+        # ONNX 1.19 允许 protobuf 4.25；该版 FieldDescriptor 通过 label 表示 repeated。
+        repeated = types.SimpleNamespace(type=11, TYPE_MESSAGE=11, label=3, LABEL_REPEATED=3)
+        child = types.SimpleNamespace(DESCRIPTOR=types.SimpleNamespace(full_name="onnx.GraphProto"), ListFields=lambda: [(repeated, [tensor])])
+        single = types.SimpleNamespace(type=11, TYPE_MESSAGE=11, label=1, LABEL_REPEATED=3)
+        graph = types.SimpleNamespace(DESCRIPTOR=types.SimpleNamespace(full_name="onnx.ModelProto"), ListFields=lambda: [(single, child)])
+        observed = []
+        def load(path, **kwargs):
+            observed.append(kwargs)
+            return graph
+        def unexpected_checker(_graph):
+            self.fail("未冻结外部权重必须在 checker 或框架有机会读取前拒绝")
+        onnx = types.SimpleNamespace(load=load, TensorProto=types.SimpleNamespace(EXTERNAL=1), checker=types.SimpleNamespace(check_model=unexpected_checker))
+        for descriptors in ("legacy", "current"):
+            if descriptors == "current":
+                repeated.is_repeated, single.is_repeated = True, False
+            for role in ("candidate", "baseline"):
+                with self.subTest(descriptors=descriptors, role=role):
+                    inputs = dict(model=str(model)) if role == "candidate" else dict(model=str(trusted), baseline_model=str(model), **self.trust(trusted))
+                    with patch.dict(sys.modules, {"onnx": onnx}), patch.object(pipeline, "load_yolo") as load_model:
+                        with self.assertRaisesRegex(pipeline.PipelineError, "外部权重"):
+                            pipeline.evaluate(self.context("evaluate", dataset=str(dataset), output=str(self.base / f"external-{descriptors}-{role}"), **inputs))
+                        load_model.assert_not_called()
+        self.assertEqual(observed, [{"load_external_data": False}] * 4)
 
     def test_evaluation_metrics_reject_nonfinite_and_unknown_objects(self):
         for value in (float("nan"), float("inf"), np.float32("nan"), np.float64("-inf"),

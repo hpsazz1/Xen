@@ -1465,6 +1465,71 @@ bool wait_for_capture_frame(ICapture& capture,
     return false;
 }
 
+void test_empty_datagrams_cannot_extend_valid_frame_deadline(CaptureBackend backend,
+                                                           bool restore_valid_frame) {
+    WinsockSession winsock;
+    const auto port = reserve_loopback_port();
+    expect(winsock.ready() && port != 0, "空数据报回归必须取得回环端口");
+    if (!winsock.ready() || port == 0) return;
+    CaptureConfig config;
+    config.backend = backend;
+    config.udp_url = "udp://127.0.0.1:" + std::to_string(port);
+    config.udp_read_timeout_ms = 100;
+    config.udp_disconnect_timeout_ms = 500;
+    config.roi_width = 320; config.roi_height = 320;
+    config.acquire_timeout_ms = 10;
+    auto capture = create_capture(config);
+    if (!capture || !capture->open()) { expect(false, "空数据报回归必须打开生产Capture"); return; }
+    const SOCKET sender = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sender == INVALID_SOCKET) { expect(false, "空数据报发送器必须打开"); return; }
+    sockaddr_in destination{};
+    destination.sin_family = AF_INET;
+    destination.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    destination.sin_port = htons(port);
+    std::atomic<bool> sending{true};
+    std::atomic<int> empty_sent{0};
+    std::thread empty_sender([&] {
+        while (sending.load()) {
+            if (sendto(sender, "", 0, 0, reinterpret_cast<const sockaddr*>(&destination),
+                       sizeof(destination)) == 0) ++empty_sent;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    });
+    CapturedFrame frame;
+    if (restore_valid_frame) {
+        std::vector<std::uint8_t> jpeg;
+        cv::imencode(".jpg", cv::Mat(320, 320, CV_8UC3, cv::Scalar(30, 70, 120)), jpeg);
+        for (std::uint64_t sequence = 1; sequence <= 2; ++sequence) {
+            const int before = empty_sent.load();
+            const auto started = std::chrono::steady_clock::now();
+            while (empty_sent.load() < before + 5 &&
+                   std::chrono::steady_clock::now() - started < std::chrono::milliseconds(250))
+                std::this_thread::yield();
+            bool sent = false;
+            if (backend == CaptureBackend::UDP_MJPEG) {
+                sent = send_fragmented_jpeg(sender, destination, jpeg);
+            } else {
+                const auto packets = make_xudp_packets(make_xudp_descriptor(sequence, jpeg.size()), jpeg);
+                const std::array<std::size_t, 3> order{{0, 1, 2}};
+                sent = send_xudp_datagrams(sender, destination, packets, order);
+            }
+            expect(sent && wait_for_capture_frame(*capture, sequence - 1, frame),
+                   "首次等待与有效帧后空数据报在期限内恢复时均须继续发布新JPEG帧");
+            frame.bgr.release(); frame.bgr_storage.reset();
+        }
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1200);
+    while (capture->status() != CaptureStatus::ACCESS_LOST && std::chrono::steady_clock::now() < deadline)
+        capture->grab(frame);
+    expect(empty_sent.load() > 0 && capture->status() == CaptureStatus::ACCESS_LOST,
+           std::string(CaptureBackendName(backend)) + (restore_valid_frame
+               ? "恢复有效帧后持续空数据报必须按有效帧期限断流" : "首帧前持续空数据报必须超时"));
+    sending = false;
+    empty_sender.join();
+    closesocket(sender);
+    capture->close();
+}
+
 void test_udp_mjpeg_loopback() {
     WinsockSession winsock;
     expect(winsock.ready(), "Winsock 必须可用于 UDP 回环测试");
@@ -1694,12 +1759,22 @@ void test_xudp_jpeg_loopback() {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     LogConfig log_config;
     log_config.enable_console = false;
     log_config.enable_file = false;
     log_config.enable_ringbuf = false;
     Log::init(log_config);
+    // 定向回归仅使用回环UDP，不调用NDI发现或任何真实输入设备。
+    const bool timeout_only = argc == 2 && std::string(argv[1]) == "--network-timeout-only";
+    for (const auto backend : {CaptureBackend::UDP_MJPEG, CaptureBackend::XUDP_JPEG}) {
+        test_empty_datagrams_cannot_extend_valid_frame_deadline(backend, false);
+        test_empty_datagrams_cannot_extend_valid_frame_deadline(backend, true);
+    }
+    if (timeout_only) {
+        Log::shutdown();
+        return failures == 0 ? 0 : 1;
+    }
     test_mouse_disabled_by_default();
     test_ndi_silence_watchdog_tracks_first_frame_and_reopen();
     test_ndi_session_state_owns_discovery_and_connection_reasons();

@@ -512,6 +512,38 @@ void test_producer_cleans_only_owned_incoming_after_failure() {
            "新建 incoming 后输入失败只可清理本次目录，必须保留同级既有文件");
 }
 
+void test_producer_rejects_final_close_failure(bool fail_manifest) {
+    const OwnedTestDirectory directory;
+    const auto& root = directory.path();
+    const auto plan = root / "plan.json";
+    const auto config = root / "config.ini";
+    const auto reference = root / "reference.csv";
+    const auto binary = root / "producer.exe";
+    const auto output = root / "bundle";
+    const auto sibling = root / "unrelated.txt";
+    write_text(plan, make_plan().dump());
+    std::string error;
+    expect(save_app_config(config.string(), AppConfig{}, error), "关闭失败测试配置可写");
+    write_text(reference, "test-only reference");
+    write_text(binary, "test-only producer identity");
+    write_text(sibling, "existing unrelated bytes");
+    bool injected = false;
+    aim_production_red::ProduceResult result;
+    const bool produced = aim_production_red::detail::produce_output_off_bundle(
+        {plan, config, reference, binary, output}, result, error,
+        [&](std::ofstream& stream, const std::filesystem::path& path) {
+            stream.close();
+            const bool selected = fail_manifest ? path.filename() == "manifest.json" : path.extension() == ".jsonl";
+            if (selected) { injected = true; stream.setstate(std::ios::failbit); }
+        });
+    expect(injected && !produced && !error.empty() && result.manifest_path.empty() &&
+               result.trace_count == 0 && result.sample_count == 0 &&
+               !std::filesystem::exists(output) && !std::filesystem::exists(root / "bundle.incoming") &&
+               read_text(sibling) == "existing unrelated bytes",
+           fail_manifest ? "manifest 最终关闭失败不得发布 bundle，且只清理本次 incoming" :
+                           "trace 最终关闭失败不得哈希发布，且只清理本次 incoming");
+}
+
 void test_atomic_publish_retries_transient_access_denied() {
     int attempts = 0;
     std::string error;
@@ -543,6 +575,8 @@ int main() {
     test_producer_preserves_file_at_incoming_path();
     test_producer_preserves_parent_when_incoming_creation_fails();
     test_producer_cleans_only_owned_incoming_after_failure();
+    test_producer_rejects_final_close_failure(false);
+    test_producer_rejects_final_close_failure(true);
     test_atomic_publish_retries_transient_access_denied();
     if (failures != 0) {
         std::cerr << failures << " 个 Aim production red producer 测试失败\n";

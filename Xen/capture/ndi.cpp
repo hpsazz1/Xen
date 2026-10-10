@@ -1011,8 +1011,9 @@ private:
                                     : "<none>");
                         }
                     }
+                    continue;
                 }
-                continue;
+                // video 类型本身不代表有效帧；被拒绝的视频与普通无进展事件共用期限。
             }
             const NdiReceiveLoopDecision loop_decision =
                 advance_ndi_receive_loop(

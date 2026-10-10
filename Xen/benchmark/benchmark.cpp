@@ -475,11 +475,12 @@ private:
 };
 
 void remove_benchmark_outputs(
-        const std::string& csv_path,
-        const std::string& json_path,
         const std::string& csv_staging_path,
         const std::string& json_staging_path,
         const std::string& provider_profile_path,
+        const std::string& provider_staging_path,
+        const std::string& staging_directory,
+        const std::string& provider_staging_directory,
         std::string& error) noexcept {
     const auto remove = [&](const std::string& path) noexcept {
         if (path.empty()) return;
@@ -502,8 +503,6 @@ void remove_benchmark_outputs(
         }
     };
     try {
-        remove(csv_path);
-        remove(json_path);
         const std::string debug_temporary_suffix = ".tmp." +
             std::to_string(static_cast<unsigned long long>(
                 GetCurrentProcessId()));
@@ -519,6 +518,10 @@ void remove_benchmark_outputs(
             remove(*staging_path + retention_temporary_suffix);
         }
         remove(provider_profile_path);
+        remove(provider_staging_path);
+        remove(provider_staging_directory);
+        // 只移除本次独占创建的空目录，不递归处理未知文件。
+        remove(staging_directory);
     } catch (...) {
         append_cleanup_error(
             error, "<benchmark-outputs>",
@@ -1361,7 +1364,20 @@ bool benchmark::detail::run_runtime_benchmark_with_adapter(
     std::string csv_staging_path;
     std::string json_staging_path;
     std::string provider_profile_path;
+    std::string provider_staging_path;
+    std::string staging_directory;
+    std::string provider_staging_directory;
     bool report_outputs_owned = false;
+    bool provider_staging_owned = false;
+    bool provider_profile_owned = false;
+    const auto cleanup = [&]() noexcept {
+        if (!report_outputs_owned) return;
+        remove_benchmark_outputs(csv_staging_path, json_staging_path,
+            provider_profile_owned ? provider_profile_path : std::string{},
+            provider_staging_owned ? provider_staging_path : std::string{},
+            staging_directory,
+            provider_staging_owned ? provider_staging_directory : std::string{}, error);
+    };
     ReadyFileGuard ready_file(options.ready_file_path);
     try {
         if (!adapter.setup_provider_profile || !adapter.create_runtime ||
@@ -1370,7 +1386,7 @@ bool benchmark::detail::run_runtime_benchmark_with_adapter(
             return false;
         }
         if (!validate_benchmark_options(options, error)) return false;
-        const std::filesystem::path model_path(options.model_path);
+        const auto model_path = std::filesystem::u8path(options.model_path);
         if (!std::filesystem::is_regular_file(model_path)) {
             set_error(error, "模型文件不存在: " + options.model_path);
             return false;
@@ -1399,10 +1415,10 @@ bool benchmark::detail::run_runtime_benchmark_with_adapter(
                 return false;
             }
         }
-        if (std::filesystem::exists(csv_path) ||
-            std::filesystem::exists(json_path) ||
+        if (std::filesystem::exists(std::filesystem::u8path(csv_path)) ||
+            std::filesystem::exists(std::filesystem::u8path(json_path)) ||
             (!provider_profile_path.empty() &&
-             std::filesystem::exists(provider_profile_path))) {
+             std::filesystem::exists(std::filesystem::u8path(provider_profile_path)))) {
             set_error(error, "报告目标已存在，拒绝覆盖: " +
                               options.report_prefix);
             return false;
@@ -1412,26 +1428,14 @@ bool benchmark::detail::run_runtime_benchmark_with_adapter(
                 GetCurrentProcessId())) + '-' +
             std::to_string(static_cast<unsigned long long>(
                 GetTickCount64()));
-        csv_staging_path = csv_path + staging_suffix;
-        json_staging_path = json_path + staging_suffix;
-        const std::string debug_temporary_suffix = ".tmp." +
-            std::to_string(static_cast<unsigned long long>(
-                GetCurrentProcessId()));
-        const std::string retention_temporary_suffix =
-            ".retention.tmp." +
-            std::to_string(static_cast<unsigned long long>(
-                GetCurrentProcessId()));
-        const auto staging_path_exists = [&](const std::string& path) {
-            return std::filesystem::exists(path) ||
-                std::filesystem::exists(path + debug_temporary_suffix) ||
-                std::filesystem::exists(path + retention_temporary_suffix);
-        };
-        if (staging_path_exists(csv_staging_path) ||
-            staging_path_exists(json_staging_path)) {
-            set_error(error, "本轮 staging 报告目标已存在，拒绝覆盖");
-            return false;
+        staging_directory = options.report_prefix + staging_suffix + "-reports";
+        csv_staging_path = staging_directory + "/report.csv";
+        json_staging_path = staging_directory + "/report.json";
+        if (!provider_profile_path.empty()) {
+            // profile 可与报告位于不同卷，临时文件必须邻近自己的最终目标。
+            provider_staging_directory = provider_profile_path + staging_suffix + "-provider";
+            provider_staging_path = provider_staging_directory + "/provider-profile.json";
         }
-        report_outputs_owned = true;
 
         AppConfig config;
         config.detector.model_path = options.model_path;
@@ -1470,6 +1474,28 @@ bool benchmark::detail::run_runtime_benchmark_with_adapter(
             return false;
         }
         Log::register_module("benchmark", LogLevel::INFO);
+        const auto staging_native = std::filesystem::u8path(staging_directory);
+        if (!staging_native.parent_path().empty())
+            std::filesystem::create_directories(staging_native.parent_path());
+        // create_directory 的成功返回才授予本轮所有权，预检不存在不作清理授权。
+        if (!std::filesystem::create_directory(staging_native)) {
+            set_error(error, "本轮 staging 目录已存在，拒绝复用");
+            Log::shutdown();
+            return false;
+        }
+        report_outputs_owned = true;
+        if (!provider_staging_directory.empty()) {
+            const auto provider_native = std::filesystem::u8path(provider_staging_directory);
+            if (!provider_native.parent_path().empty())
+                std::filesystem::create_directories(provider_native.parent_path());
+            if (!std::filesystem::create_directory(provider_native)) {
+                set_error(error, "本轮 Provider staging 目录已存在，拒绝复用");
+                cleanup();
+                Log::shutdown();
+                return false;
+            }
+            provider_staging_owned = true;
+        }
         bool success = false;
         {
             CrashHandler crash_handler;
@@ -1478,10 +1504,20 @@ bool benchmark::detail::run_runtime_benchmark_with_adapter(
             if (!crash_handler.install(crash_log_dir)) {
                 set_error(error, "崩溃诊断安装失败");
             } else {
-                const bool profile_ready = provider_profile_path.empty() ||
+                bool profile_ready = provider_profile_path.empty() ||
                     adapter.setup_provider_profile(
-                        adapter.context, config.detector, provider_profile_path,
+                        adapter.context, config.detector, provider_staging_path,
                         expected_provider_name(options.backend), error);
+                if (profile_ready && !provider_profile_path.empty()) {
+                    profile_ready = MoveFileExW(
+                        std::filesystem::u8path(provider_staging_path).c_str(),
+                        std::filesystem::u8path(provider_profile_path).c_str(),
+                        MOVEFILE_WRITE_THROUGH) != FALSE;
+                    provider_profile_owned = profile_ready;
+                    if (!profile_ready) set_error(error,
+                        "Provider profile 正式目标发布失败，Win32Error=" +
+                        std::to_string(GetLastError()));
+                }
                 if (profile_ready) {
                 if (benchmark_stop_requested.load(
                         std::memory_order_acquire)) {
@@ -1854,37 +1890,23 @@ bool benchmark::detail::run_runtime_benchmark_with_adapter(
                 crash_handler.uninstall();
             }
         }
-        if (!success && report_outputs_owned) {
-            // 正式和 staging 目标在入口均确认不存在，因此这里只清理本轮
-            // 创建的精确 CSV、JSON、临时文件和 Provider profile。补写或成对
-            // 发布失败时不能留下可被误认为有效结果的单个文件。
-            remove_benchmark_outputs(
-                csv_path, json_path,
-                csv_staging_path, json_staging_path,
-                provider_profile_path, error);
-        }
+        // CSV/JSON 的发布函数只回滚实际发布的文件；外层不删除正式目标。
+        // 成功时保留已发布 profile，清理本次中间文件和空目录。
+        if (success) provider_profile_owned = false;
+        cleanup();
+        if (success && !error.empty()) success = false;
         Log::shutdown();
         if (success) error.clear();
         return success;
     } catch (const std::exception& exception) {
         set_error(error, std::string("执行 Runtime 基准异常: ") +
                           exception.what());
-        if (report_outputs_owned) {
-            remove_benchmark_outputs(
-                csv_path, json_path,
-                csv_staging_path, json_staging_path,
-                provider_profile_path, error);
-        }
+        cleanup();
         Log::shutdown();
         return false;
     } catch (...) {
         set_error(error, "执行 Runtime 基准时发生未知异常");
-        if (report_outputs_owned) {
-            remove_benchmark_outputs(
-                csv_path, json_path,
-                csv_staging_path, json_staging_path,
-                provider_profile_path, error);
-        }
+        cleanup();
         Log::shutdown();
         return false;
     }

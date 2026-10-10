@@ -487,9 +487,8 @@ private:
                                   std::memory_order_release);
                     continue;
                 }
-                if (received <= 0) continue;
-
-                const bool valid_frame = consume_packet(
+                // 零长数据报是一次成功接收，但没有有效帧进展，仍须检查断流期限。
+                const bool valid_frame = received > 0 && consume_packet(
                         packet_.data(), static_cast<std::size_t>(received),
                         received_at);
                 if (valid_frame) {
