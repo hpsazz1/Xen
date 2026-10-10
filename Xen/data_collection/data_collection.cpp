@@ -10,6 +10,7 @@
 #undef ERROR
 #endif
 #include <data_collection/data_collection.h>
+#include <data_collection/lifecycle_internal.h>
 #include <log/log.h>
 #include <nlohmann/json.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -93,6 +94,7 @@ std::int64_t nanoseconds(Clock::time_point value) {
 }
 }
 struct Collector::Impl {
+    detail::LifecycleAdapter lifecycle_adapter;
     struct Slot {
         std::vector<unsigned char> pixels;
         std::vector<Detection> detections;
@@ -106,6 +108,7 @@ struct Collector::Impl {
         bool occupied = false;
     };
     mutable std::mutex mutex;
+    std::mutex lifecycle_mutex;
     std::condition_variable ready;
     std::thread worker;
     Config config;
@@ -118,6 +121,7 @@ struct Collector::Impl {
     std::uint64_t accepted{}, bound_generation{};
     bool generation_bound = false;
     bool stopping = false;
+    bool worker_running = false;
     bool writer_failed = false;
     std::string session_id;
     Clock::time_point last_check{}, next_exploration{};
@@ -128,6 +132,7 @@ struct Collector::Impl {
     bool have_previous = false;
     void fail(const char* message) noexcept { state.paused = true; state.manual_pending = false; try { state.error = message; } catch (...) {} }
     void save(Slot& slot) {
+        if (lifecycle_adapter.before_write) lifecycle_adapter.before_write();
         const auto sample_id = std::to_string(slot.id);
         const auto image_relative = std::filesystem::path("images") / (sample_id + ".png");
         const auto image_path = state.session_directory / image_relative;
@@ -177,7 +182,7 @@ struct Collector::Impl {
             {
                 std::unique_lock lock(mutex);
                 ready.wait(lock, [&] { return stopping || queue_size != 0; });
-                if (!queue_size) return;
+                if (!queue_size) { worker_running = false; return; }
                 index = queue[queue_head];
                 queue_head = (queue_head + 1) % queue.size();
                 --queue_size;
@@ -193,11 +198,40 @@ struct Collector::Impl {
             --state.queued;
         }
     }
+    void request_stop() noexcept {
+        {
+            std::lock_guard lock(mutex);
+            enabled.store(false, std::memory_order_release);
+            state.active = false;
+            state.manual_pending = false;
+            stopping = true;
+            // 排空状态持续到 join 完成；队列为空也可能还有正在写盘的槽。
+            state.draining = state.draining || worker_running;
+        }
+        ready.notify_all();
+        if (lifecycle_adapter.stop_requested) lifecycle_adapter.stop_requested();
+    }
+    // 调用方必须持有 lifecycle_mutex，所有句柄访问都遵守同一所有权。
+    void join() noexcept {
+        if (worker.joinable()) {
+            if (lifecycle_adapter.before_join) lifecycle_adapter.before_join();
+            worker.join();
+        }
+        std::lock_guard lock(mutex);
+        state.draining = false;
+    }
 };
 Collector::Collector() : impl_(std::make_unique<Impl>()) { Log::register_module("data"); }
+std::unique_ptr<Collector> detail::make_collector_with_lifecycle_adapter(LifecycleAdapter adapter) {
+    auto collector = std::make_unique<Collector>();
+    collector->impl_->lifecycle_adapter = std::move(adapter);
+    return collector;
+}
 Collector::~Collector() { stop(); }
 bool Collector::start(const Config& config, std::string& error) noexcept {
-    stop();
+    std::lock_guard lifecycle_lock(impl_->lifecycle_mutex);
+    impl_->request_stop();
+    impl_->join();
     try {
         if (config.root_directory.empty() || config.model_path.empty() || config.class_names.empty() ||
             !config.queue_capacity || config.queue_capacity > 64 ||
@@ -243,6 +277,7 @@ bool Collector::start(const Config& config, std::string& error) noexcept {
         write_file(p.state.session_directory / "session.pending", text.data(), text.size());
         std::filesystem::rename(p.state.session_directory / "session.pending", p.state.session_directory / "session.json");
         p.worker = std::thread([&p] { p.run(); });
+        p.worker_running = true;
         p.state.active = true;
         LOG_INFO("data", "连续采集会话已启动：{}", p.session_id);
         p.enabled.store(true, std::memory_order_release);
@@ -254,10 +289,19 @@ bool Collector::start(const Config& config, std::string& error) noexcept {
     return false;
 }
 void Collector::stop() noexcept {
-    impl_->enabled.store(false, std::memory_order_release);
-    { std::lock_guard lock(impl_->mutex); impl_->state.active = false; impl_->state.manual_pending = false; impl_->stopping = true; }
-    impl_->ready.notify_all();
-    if (impl_->worker.joinable()) impl_->worker.join();
+    std::lock_guard lifecycle_lock(impl_->lifecycle_mutex);
+    impl_->request_stop();
+    impl_->join();
+}
+void Collector::request_stop() noexcept { impl_->request_stop(); }
+void Collector::poll_stop() noexcept {
+    std::unique_lock lifecycle_lock(impl_->lifecycle_mutex, std::try_to_lock);
+    if (!lifecycle_lock.owns_lock()) return;
+    {
+        std::lock_guard lock(impl_->mutex);
+        if (!impl_->state.draining || impl_->worker_running) return;
+    }
+    impl_->join();
 }
 void Collector::set_paused(bool paused) noexcept {
     std::lock_guard lock(impl_->mutex);

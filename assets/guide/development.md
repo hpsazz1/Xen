@@ -399,7 +399,7 @@ Keyboard 监听器和生产界面，不在面板或捕获分支另写一套占�
 ```
 
 该模式通过进程内 ImGui 事件检查日志返回、Tab/Shift+Tab/Space/Enter 导航、开关禁用约束、
-首屏作业状态、折叠与重复取消。只核对取消和打开目录意图，不执行后台作业或系统输入；
+首屏作业状态、折叠与重复取消、采集排空禁用及写盘失败提示。只核对界面意图，不执行后台作业或系统输入；
 失败返回非零并保存自身渲染目标，成功写入 `usability-audit.txt`。截图仍需人工或代理复核。
 
 技术栈：C++20、CMake、ONNX Runtime、OpenCV、spdlog、SimpleIni、Dear ImGui、nlohmann/json。
@@ -419,6 +419,14 @@ Keyboard 监听器和生产界面，不在面板或捕获分支另写一套占�
 归档在首帧前或完整分段后的空 FAILED 快照也保存终态，零样本终态段不代表额外帧。输入训练遇到空 gap 时仍按原节流发布活动轨迹结束和丢失数。日志在 Windows 使用宽文件名与原生路径，支持中文和 emoji 目录。错误 HID usage 1–3 不能续为健康输入，也不能制造松键/重新按键边沿；异常模型类别和掩码坐标在整数转换前检查范围。旧配置中身法占用 F9 时不自动抢占该键作为异常标记。
 
 Overlay 在 ResizeBuffers 或 RTV 重建失败后锁存 HRESULT，阻止后续绘制与 Present，重建 Overlay 后才恢复。报告 verifier 同时检查签名和事件字段类型/数量；签名有效不能代替 schema 有效。
+
+采集停止分为封口、后台排空与最终回收；`request_stop()` 用于 UI，`poll_stop()` 只尝试回收已完成的
+线程，同步 `stop()` 则等待全部完成。线程句柄只在生命周期锁下访问，不能在快照锁内等待写盘。
+排空仍属于忙碌状态，数据作业和模型切换门禁不能仅检查 `active`。
+配置 `XEN_TEST_MODEL` 后，`collection_lifecycle_*` 使用真实 App 动作/输入路由、Workspace、Collector、
+ReportLifecycle 与 Runtime，在合成采集和写盘屏障上验证交错；`runtime_start_failure_tests` 在每实例
+线程工厂注入首/次顶层线程构造失败，检查返回前模块回收、订阅解除和换配置直接重启。
+这两组只使用 CPU 推理与禁输出设备夹具，不验证真实硬件释放或游戏闭环。
 
 ### 离线调参窗口查询
 

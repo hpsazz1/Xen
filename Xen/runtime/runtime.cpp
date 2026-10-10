@@ -1395,12 +1395,18 @@ bool Runtime::start(const AppConfig& config,
             impl_->set_state(RuntimeState::FAILED);
             return false;
         }
-        impl_->capture_thread = std::thread([this] {
+        const auto capture_task = [this] {
             impl_->capture_loop();
-        });
-        impl_->pipeline_thread = std::thread([this] {
+        };
+        impl_->capture_thread = impl_->startup_adapter.create_thread
+            ? impl_->startup_adapter.create_thread(capture_task)
+            : std::thread(capture_task);
+        const auto pipeline_task = [this] {
             impl_->pipeline_loop();
-        });
+        };
+        impl_->pipeline_thread = impl_->startup_adapter.create_thread
+            ? impl_->startup_adapter.create_thread(pipeline_task)
+            : std::thread(pipeline_task);
         if (impl_->startup_adapter.before_running) impl_->startup_adapter.before_running(*this);
         bool running_published = false;
         {
@@ -1425,6 +1431,11 @@ bool Runtime::start(const AppConfig& config,
         return true;
     } catch (...) {
         impl_->fail_runtime("启动 Runtime 时发生未知异常");
+        // fail_runtime 已停止并唤醒流水线；构造后续线程失败时先回收已启动线程。
+        if (impl_->capture_thread.joinable()) impl_->capture_thread.join();
+        if (impl_->pipeline_thread.joinable()) impl_->pipeline_thread.join();
+        // 首个线程也可能尚未构造：子 worker 与订阅仍须同步释放，保留 FAILED 诊断。
+        impl_->release_modules();
         return false;
     }
 }
@@ -1488,7 +1499,9 @@ bool Runtime::reload_detector(const DetectorConfig& config) noexcept {
     try {
         std::lock_guard<std::mutex> lifecycle_lock(impl_->lifecycle_mutex);
 
-        if (impl_->data_collector && impl_->data_collector->snapshot().active) {
+        const auto collection = impl_->data_collector
+            ? impl_->data_collector->snapshot() : data_collection::Snapshot{};
+        if (collection.active || collection.draining) {
             std::lock_guard<std::mutex> lock(impl_->snapshot_mutex);
             impl_->current_snapshot.detector_reload_state = DetectorReloadState::FAILED;
             impl_->current_snapshot.detector_reload_error =

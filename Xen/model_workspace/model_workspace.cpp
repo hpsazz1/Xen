@@ -522,13 +522,17 @@ Snapshot Workspace::poll(Settings* settings) noexcept {
                 impl_->view.weights_message.clear();
             }
         }
-        if (impl_->collector) impl_->view.collection = impl_->collector->snapshot();
+        if (impl_->collector) {
+            impl_->collector->poll_stop();
+            impl_->view.collection = impl_->collector->snapshot();
+        }
         return impl_->view;
     } catch (...) {
         // 状态文件不可读不等于作业结束，保留进程所有权门禁。
         Snapshot fallback;
         fallback.job_running = impl_->process.valid();
         fallback.collection.active = impl_->view.collection.active;
+        fallback.collection.draining = impl_->view.collection.draining;
         return fallback;
     }
 }
@@ -539,7 +543,8 @@ bool Workspace::execute(Action action, Settings& settings,
     try {
         check(!impl_->workspace_root.empty(), "模型工作区未初始化");
         impl_->refresh_job();
-        const bool collecting = impl_->collector && impl_->collector->snapshot().active;
+        const auto collection = impl_->collector ? impl_->collector->snapshot() : data_collection::Snapshot{};
+        const bool collecting = collection.active || collection.draining;
         if (action == Action::NONE) return true;
         if (action == Action::CANCEL_JOB) { impl_->cancel(); return true; }
         if (action == Action::OPEN_REVIEW || action == Action::PICK_REVIEW_MANIFEST) {
@@ -583,11 +588,16 @@ bool Workspace::execute(Action action, Settings& settings,
                 nullptr, nullptr, SW_SHOWNORMAL)) > 32, "无法打开数据目录");
             return true;
         }
+        if (action == Action::STOP_COLLECTION) {
+            check(impl_->collector && !collection.session_directory.empty(), "当前没有采集会话");
+            impl_->collector->request_stop();
+            impl_->view.message = "已停止接收新素材；已排队样本在后台完成写入，结果以采集状态和计数为准。";
+            return true;
+        }
         if (action == Action::PAUSE_COLLECTION || action == Action::RESUME_COLLECTION ||
-            action == Action::STOP_COLLECTION || action == Action::MARK_SAMPLE) {
-            check(collecting, "当前没有采集会话");
-            if (action == Action::STOP_COLLECTION) impl_->collector->stop();
-            else if (action == Action::MARK_SAMPLE) impl_->collector->request_sample();
+            action == Action::MARK_SAMPLE) {
+            check(collection.active, "当前没有活动的采集会话");
+            if (action == Action::MARK_SAMPLE) impl_->collector->request_sample();
             else impl_->collector->set_paused(action == Action::PAUSE_COLLECTION);
             impl_->view.message = action == Action::MARK_SAMPLE
                 ? "已标记下一张有效帧，保存结果以采集计数为准。" : "采集状态已更新。";

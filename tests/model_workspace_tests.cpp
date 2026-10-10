@@ -23,7 +23,7 @@ std::string utf8(const fs::path& path) {
 model_workspace::Snapshot wait(model_workspace::Workspace& workspace) {
     for (int i = 0; i < 150; ++i) {
         const auto view = workspace.poll();
-        if (!view.job_running) return view;
+        if (!view.job_running && !view.collection.draining) return view;
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     return workspace.poll();
@@ -172,7 +172,9 @@ int main(int argc, char** argv) try {
     settings.class_schema_confirmed = true;
     expect(workspace.execute(Action::START_COLLECTION, settings, true, false, utf8(model)),
            "已确认相同模型身份可创建采集会话，不启动Runtime");
-    workspace.execute(Action::STOP_COLLECTION, settings, false, false, "");
+    expect(workspace.execute(Action::STOP_COLLECTION, settings, false, false, "") &&
+           !collector->snapshot().active, "结束采集立即封口");
+    expect(!wait(workspace).collection.draining, "主循环轮询完成采集回收后才可重开");
     expect(workspace.execute(Action::SAVE_SETTINGS, settings, false, false, ""), "保存已核实模型身份");
     {
         const auto settings_path = root / "cache/model-workspace/settings.json";
@@ -186,7 +188,9 @@ int main(int argc, char** argv) try {
         expect(reopened.initialize(root, restored, error), "兼容读取旧配额字段");
         expect(reopened.execute(Action::START_COLLECTION, restored, true, false, utf8(model)),
                "旧数量和磁盘配额不再阻止采集");
-        reopened.execute(Action::STOP_COLLECTION, restored, false, false, "");
+        expect(reopened.execute(Action::STOP_COLLECTION, restored, false, false, "") &&
+               !collector->snapshot().active, "重开后的结束同样立即封口");
+        expect(!wait(reopened).collection.draining, "重开会话通过生产轮询收尾");
         expect(reopened.execute(Action::SAVE_SETTINGS, restored, false, false, ""), "新设置保存成功");
         nlohmann::json saved;
         { std::ifstream stream(settings_path); stream >> saved; }

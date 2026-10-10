@@ -595,9 +595,45 @@ int wmain(int argc, wchar_t** argv) {
                 "工作区动作序列不符，存在遗漏、重复或非预期动作");
             save_window(capture, output / "usability-collection-running-top.png");
 
+            workspace = {};
+            runtime.state = RuntimeState::RUNNING;
+            settings.class_schema_confirmed = true;
+            select_page(4);
+            content = first_screen();
+            const auto start_rect = first_screen_button(content, "开始采集");
+            workspace.collection.active = true;
+            frame(); frame();
+            const auto stop_rect = first_screen_button(content, "结束采集");
+            workspace.collection.active = false;
+            workspace.collection.draining = true;
+            workspace.collection.queued = 3;
+            frame(); frame();
+            require(capture.text.find("正在完成写入") != std::string::npos,
+                "后台排空必须与未采集状态明确区分");
+            click_rect(start_rect);
+            click_rect(stop_rect);
+            require(observed_workspace_actions.size() == 6,
+                "排空期开始与结束按钮必须禁用，不能产生重复生命周期动作");
+            save_window(capture, output / "usability-collection-draining.png");
+            select_page(5);
+            first_screen();
+            require(capture.text.find("素材正在完成写入") != std::string::npos,
+                "训练页必须说明排空期间不可操作的原因");
+            save_window(capture, output / "usability-training-draining.png");
+            select_page(4);
+            first_screen();
+            workspace.collection.draining = false;
+            workspace.collection.queued = 0;
+            workspace.collection.error = "合成写盘失败：样本未提交，请检查数据目录。";
+            frame(); frame();
+            require(capture.text.find("合成写盘失败") != std::string::npos &&
+                capture.text.find("正在完成写入") == std::string::npos,
+                "失败终态必须保留错误且结束排空提示");
+            save_window(capture, output / "usability-collection-write-failed.png");
+
             { std::ofstream report(output / "usability-audit.txt", std::ios::binary);
               report << "PASS 日志返回、侧栏 Tab/Shift+Tab/Space/Enter、开关键盘操作及禁用约束、"
-                  "训练/采集首屏作业入口、折叠与重复取消、完成态禁用。\n"
+                  "训练/采集首屏作业入口、折叠与重复取消、完成态禁用、采集排空和写盘失败状态。\n"
                   "合成工作区动作：取消4次，打开目录2次；全部只核对意图，不执行。\n"
                   "Runtime/真实设备输入/系统键鼠注入：0。截图仅包含本进程渲染目标。\n";
               require(report.good(), "可用性验收报告写入失败"); }

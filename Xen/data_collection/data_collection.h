@@ -10,6 +10,11 @@
 #include <vector>
 
 namespace data_collection {
+class Collector;
+namespace detail {
+struct LifecycleAdapter;
+std::unique_ptr<Collector> make_collector_with_lifecycle_adapter(LifecycleAdapter adapter);
+}
 struct Config {
     std::filesystem::path root_directory;
     std::vector<std::string> class_names;
@@ -27,6 +32,7 @@ struct Snapshot {
     bool active = false;
     bool paused = false;
     bool manual_pending = false;
+    bool draining = false;
     std::uint64_t saved = 0;
     std::uint64_t dropped = 0;
     std::uint64_t duplicates = 0;
@@ -36,7 +42,7 @@ struct Snapshot {
     std::filesystem::path session_directory;
     std::string error;
 };
-// start/stop 由单一生命周期调用方串行调用；offer 只有一个生产者。
+// start/stop 串行拥有线程句柄；多个 stop 调用等待同一次回收。offer 只有一个生产者。
 // 原图只复制到本模块预分配槽，后台不保留 Capture 的引用。
 class Collector {
 public:
@@ -45,6 +51,10 @@ public:
     Collector(const Collector&) = delete;
     Collector& operator=(const Collector&) = delete;
     bool start(const Config& config, std::string& error) noexcept;
+    // UI 只封口；poll_stop 仅在写入线程已完成时尝试回收，不等待写盘。
+    void request_stop() noexcept;
+    void poll_stop() noexcept;
+    // 同步停止供 Runtime/析构使用，返回时已完成排空与回收。
     void stop() noexcept;
     void set_paused(bool paused) noexcept;
     void request_sample() noexcept;
@@ -54,6 +64,7 @@ public:
                bool automatic_allowed = true) noexcept;
     Snapshot snapshot() const;
 private:
+    friend std::unique_ptr<Collector> detail::make_collector_with_lifecycle_adapter(detail::LifecycleAdapter);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

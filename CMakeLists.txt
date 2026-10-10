@@ -2525,6 +2525,21 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME runtime_model_reload_test
             COMMAND runtime_model_reload_test "${XEN_TEST_MODEL}")
+
+        add_executable(collection_lifecycle_tests tests/collection_lifecycle_tests.cpp)
+        target_link_libraries(collection_lifecycle_tests PRIVATE app_input model_workspace xen_debug)
+        xen_deploy_runtime_dlls(collection_lifecycle_tests OPENCV ORT NDI)
+        foreach(case ui-response stop-interleave writer-failure concurrent-stop)
+            add_test(NAME collection_lifecycle_${case}
+                COMMAND collection_lifecycle_tests "${XEN_TEST_MODEL}" "--${case}")
+            set_tests_properties(collection_lifecycle_${case} PROPERTIES TIMEOUT 45)
+        endforeach()
+        add_executable(runtime_start_failure_tests tests/runtime_start_failure_tests.cpp)
+        target_link_libraries(runtime_start_failure_tests PRIVATE runtime)
+        xen_deploy_runtime_dlls(runtime_start_failure_tests OPENCV ORT NDI)
+        add_test(NAME runtime_start_failure_tests
+            COMMAND runtime_start_failure_tests "${XEN_TEST_MODEL}")
+        set_tests_properties(runtime_start_failure_tests PROPERTIES TIMEOUT 60)
     endif()
 endif()
 

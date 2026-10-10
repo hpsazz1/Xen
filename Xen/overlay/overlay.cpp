@@ -4087,7 +4087,7 @@ struct Overlay::Impl {
         const bool cpu_running = runtime.state == RuntimeState::RUNNING &&
             runtime.detector_reload_state != DetectorReloadState::LOADING &&
             !runtime.d3d11_cuda_interop && !runtime.d3d11_directml_interop;
-        const bool idle = !collection.active && !workspace.job_running;
+        const bool idle = !collection.active && !collection.draining && !workspace.job_running;
         workspace_status(workspace, actions);
         ImGui::TextWrapped("只在需要时保存原图。先在检测页配置 CPU 画面来源并启动 Runtime，再核对类别语义。未检测到人物的图片仍需审核，不能直接作为负样本。");
         ImGui::Spacing();
@@ -4097,13 +4097,14 @@ struct Overlay::Impl {
         workspace_button(collection.paused ? "继续采集" : "暂停采集", "暂停时不接收新素材；继续使用当前会话。", collection.paused ? Action::RESUME_COLLECTION : Action::PAUSE_COLLECTION,
             collection.active && !workspace.job_running && (collection.paused ? cpu_running : true), actions);
         ImGui::SameLine();
-        workspace_button("结束采集", "结束当前素材会话并完成已排队写入；不停止 Runtime。", Action::STOP_COLLECTION, collection.active, actions);
+        workspace_button("结束采集", "立即停止接收新素材，后台完成已排队写入；收尾期间仍可操作界面，不停止 Runtime。", Action::STOP_COLLECTION, collection.active, actions);
         workspace_button("标记下一帧", "请求保存下一张有效 CPU 帧，可绕过自动质量与生存状态筛选以诊断；仍须通过已启用的来源焦点检查，不发送键鼠输入，仍受有界缓存和队列约束。", Action::MARK_SAMPLE,
             collection.active && !collection.paused && cpu_running, actions);
         ImGui::SameLine();
         workspace_button("打开数据目录", "打开配置的原始素材根目录，查看采集会话与图片。后台作业和导出结果请使用本页顶部的打开当前作业。", Action::OPEN_DATA_DIRECTORY, !settings.root_directory.empty(), actions);
         ImGui::TextWrapped("持续采集不设数量或累计磁盘配额；结束采集前持续保存候选，实际写盘失败会暂停并显示错误。");
-        ImGui::TextWrapped("状态：%s%s", collection.active ? "采集中" : "未采集", collection.paused ? "（已暂停）" : "");
+        ImGui::TextWrapped("状态：%s%s", collection.draining ? "正在完成写入" : collection.active ? "采集中" : "未采集",
+            collection.active && collection.paused ? "（已暂停）" : "");
         ImGui::Text("保存 %llu   排队 %llu   丢弃 %llu   去重 %llu",
             static_cast<unsigned long long>(collection.saved), static_cast<unsigned long long>(collection.queued),
             static_cast<unsigned long long>(collection.dropped), static_cast<unsigned long long>(collection.duplicates));
@@ -4156,9 +4157,11 @@ struct Overlay::Impl {
                          const model_workspace::Snapshot& workspace,
                          OverlayActions& actions) {
         using Action = model_workspace::Action;
-        const bool idle = !workspace.job_running && !workspace.collection.active;
+        const bool idle = !workspace.job_running && !workspace.collection.active && !workspace.collection.draining;
         const bool stopped = runtime.state == RuntimeState::STOPPED;
         workspace_status(workspace, actions);
+        if (workspace.collection.draining)
+            ImGui::TextWrapped("素材正在完成写入，请等待采集收尾后再运行数据或训练作业。");
         ImGui::TextWrapped("流程：检查素材 → 自动预标注 → 采集页批量审核 / CVAT → 导入标签 → 导出数据集 → 训练 → 评估候选。未审核、失败、未知样本不能作为空标签训练。");
         if (ImGui::CollapsingHeader("训练环境", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::BeginDisabled(!idle);

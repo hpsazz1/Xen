@@ -6,6 +6,7 @@
 #include "app/release_contract_internal.h"
 #include "app/startup_internal.h"
 #include "app/report_lifecycle_internal.h"
+#include "app/workspace_actions_internal.h"
 #include "config/config.h"
 #include "crash/crash.h"
 #include "debug/debug.h"
@@ -572,24 +573,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             }
         }
 
-        if (actions.workspace_action != model_workspace::Action::NONE) {
-            if (actions.workspace_action == model_workspace::Action::START_COLLECTION &&
-                snapshot.detector_reload_state == DetectorReloadState::LOADING) {
-                app_message = "模型正在切换，请完成后再开始采集。";
-            } else {
-                std::string active_model_path = snapshot.active_model_path;
-                if (active_model_path.empty()) {
-                    DetectorConfig selection = config.detector;
-                    if (resolve_detector_config(selection)) active_model_path = selection.model_path;
-                }
-                const bool busy_runtime = snapshot.state != RuntimeState::STOPPED &&
-                                          snapshot.state != RuntimeState::FAILED;
-                model_workspace.execute(actions.workspace_action, workspace_settings,
-                    busy_runtime,
-                    snapshot.d3d11_cuda_interop || snapshot.d3d11_directml_interop,
-                    active_model_path);
-            }
-        }
+        app::detail::route_workspace_action(model_workspace, actions.workspace_action,
+            workspace_settings, snapshot, config.detector, resolve_detector_config, app_message);
 
         if (actions.refresh_models_requested) {
             if (refresh_models()) {
