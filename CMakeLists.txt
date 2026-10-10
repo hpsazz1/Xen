@@ -2427,6 +2427,9 @@ if(BUILD_TESTING)
     xen_add_windows_powershell_test(benchmark_evidence_snapshot_tests
         "${PROJECT_SOURCE_DIR}/tests/benchmark_evidence_snapshot_tests.ps1"
         -FixtureExecutable "$<TARGET_FILE:benchmark_report_fixture>")
+    xen_add_windows_powershell_test(network_evidence_binding_tests
+        "${PROJECT_SOURCE_DIR}/tests/benchmark_evidence_snapshot_tests.ps1"
+        -FixtureExecutable "$<TARGET_FILE:benchmark_report_fixture>" -NetworkOnly)
     add_executable(session_archive_tests tests/session_archive_tests.cpp)
     target_link_libraries(session_archive_tests PRIVATE xen_debug log)
     add_test(NAME session_archive_tests COMMAND session_archive_tests)

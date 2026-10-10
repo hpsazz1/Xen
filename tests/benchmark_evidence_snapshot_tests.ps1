@@ -1,4 +1,4 @@
-﻿param([Parameter(Mandatory = $true)][string]$FixtureExecutable)
+﻿param([Parameter(Mandatory = $true)][string]$FixtureExecutable, [switch]$NetworkOnly)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $repository = Split-Path -Parent $PSScriptRoot
@@ -25,15 +25,21 @@ using System;
 using System.IO;
 public static class BenchmarkEvidenceFixture {
     public static int Main(string[] args) {
-        string prefix = null, profile = null;
+        string prefix = null, profile = null, backend = null;
         for (int i = 0; i + 1 < args.Length; ++i) {
             if (args[i] == "--report-prefix") prefix = args[i + 1];
             if (args[i] == "--provider-profile") profile = args[i + 1];
+            if (args[i] == "--backend") backend = args[i + 1];
         }
-        if (prefix == null || profile == null) return 2;
-        File.Copy("$escapedTemplate.csv", prefix + ".csv");
-        File.Copy("$escapedTemplate.json", prefix + ".json");
-        File.Copy("$escapedTemplate.profile.json", profile);
+        if (prefix == null) return 2;
+        if (backend == "cpu") {
+            File.WriteAllText(prefix + ".csv", File.ReadAllText("$escapedTemplate.csv").Replace("CUDAExecutionProvider", "CPUExecutionProvider"));
+            File.WriteAllText(prefix + ".json", File.ReadAllText("$escapedTemplate.json").Replace("CUDAExecutionProvider", "CPUExecutionProvider"));
+        } else {
+            File.Copy("$escapedTemplate.csv", prefix + ".csv");
+            File.Copy("$escapedTemplate.json", prefix + ".json");
+        }
+        if (profile != null) File.Copy("$escapedTemplate.profile.json", profile);
         return 0;
     }
 }
@@ -53,6 +59,87 @@ function Bytes-Hash([byte[]]$Bytes) {
     finally { $sha.Dispose() }
 }
 $failed = 0
+if ($NetworkOnly) {
+    $entry = [IO.Path]::GetFullPath((Join-Path $repository 'scripts/benchmark_network_receiver.ps1'))
+    try {
+        foreach ($case in @('control', 'cpu-control', 'json-before-read', 'csv-before-read', 'profile-before-read', 'config-before-read', 'json-after-read', 'csv-after-read', 'profile-after-read', 'config-after-read', 'environment-after-read', 'json-after-rename')) {
+            $prefix = Join-Path $root "$case/result"
+            $isControl = $case -in @('control', 'cpu-control')
+            $backend = if ($case -eq 'cpu-control') { 'cpu' } else { 'cuda' }
+            $global:XenNetworkEvidenceFixture = @{ Case = $case; Prefix = $prefix; Hits = 0; Blocked = $false }
+            $breakpoint = $null
+            if (-not $isControl) {
+                $boundary = if ($case -like '*-before-read') { '$reportPath = "$ReportPrefix.json"' }
+                else { '$snapshot = $report.final_snapshot' }
+                $breakpoint = Set-PSBreakpoint -Script $entry -Line (Find-Line $boundary) -Action {
+                    $state = $global:XenNetworkEvidenceFixture
+                    ++$state.Hits
+                    $kind = $state.Case.Split('-')[0]
+                    $suffix = switch ($kind) {
+                        'json' { '.json' }; 'csv' { '.csv' }; 'profile' { '.provider-profile.json' }
+                        'config' { '.receiver.ini' }; 'environment' { '.environment.json' }
+                    }
+                    $path = $state.Prefix + $suffix
+                    if ($kind -eq 'json') {
+                        $reportB = [IO.File]::ReadAllText($path) | ConvertFrom-Json
+                        $reportB.samples[0].mouse_sent = $true
+                        $bytes = [Text.Encoding]::UTF8.GetBytes(($reportB | ConvertTo-Json -Depth 30))
+                    } else { $bytes = [Text.Encoding]::UTF8.GetBytes('被替换的未验证B字节') }
+                    try {
+                        if ($state.Case -eq 'json-after-rename') { [IO.File]::Move($path, $path + '.other-writer') }
+                        [IO.File]::WriteAllBytes($path, $bytes)
+                    }
+                    catch {
+                        $inner = $_.Exception.InnerException
+                        if ($null -ne $inner -and ($inner.HResult -band 0xffff) -in @(32, 33)) { $state.Blocked = $true }
+                        else { throw }
+                    }
+                }
+            }
+            $rejection = ''
+            try {
+                & $entry -ModelPath $model -ReportPrefix $prefix -BuildDirectory (Join-Path $root 'build') -Backend $backend -WarmupSamples 0 -MinimumSamples 1 -MinimumSeconds 0 -MaximumSeconds 1 -EnableFp16 off -EnableCudaGraph off -EnableGpuPreprocess off
+            } catch { $rejection = $_.Exception.Message }
+            finally { if ($null -ne $breakpoint) { Remove-PSBreakpoint -Breakpoint $breakpoint } }
+            try {
+                $state = $global:XenNetworkEvidenceFixture
+                if (-not $isControl -and $state.Hits -ne 1) { throw '没有命中外层实际消费屏障' }
+                if ($case -like '*-before-read') {
+                    if ($rejection -notmatch '路径或摘要' -or [IO.File]::Exists("$prefix.network.json")) { throw '环境A与产物B混配未因绑定失败拒绝' }
+                    foreach ($suffix in @('.json', '.csv', '.provider-profile.json', '.environment.json')) {
+                        if (-not [IO.File]::Exists($prefix + $suffix)) { throw '外层错误删除了Runtime产物' }
+                    }
+                } else {
+                    if ($rejection) { throw $rejection }
+                    if (-not $isControl -and -not $state.Blocked) { throw '已验证文件在标记发布前仍可被替换' }
+                    $marker = [IO.File]::ReadAllText("$prefix.network.json") | ConvertFrom-Json
+                    foreach ($artifact in @('receiver_config', 'runtime_report', 'runtime_environment', 'provider_profile')) {
+                        $evidence = $marker.artifacts.$artifact
+                        if ($artifact -eq 'provider_profile' -and $backend -eq 'cpu') {
+                            if ($null -ne $evidence) { throw 'CPU控制不得捏造profile' }
+                            continue
+                        }
+                        if ($evidence.sha256 -ne (Bytes-Hash ([IO.File]::ReadAllBytes($evidence.path)))) { throw "$artifact 标记摘要与固定字节不符" }
+                    }
+                    $environment = [IO.File]::ReadAllText("$prefix.environment.json") | ConvertFrom-Json
+                    if ($environment.report.csv_sha256 -ne (Bytes-Hash ([IO.File]::ReadAllBytes("$prefix.csv")))) { throw 'CSV没有绑定环境中的摘要' }
+                }
+                foreach ($suffix in @('.receiver.ini', '.json', '.csv', '.environment.json', '.provider-profile.json')) {
+                    if ([IO.File]::Exists($prefix + $suffix)) {
+                        $released = [IO.File]::Open($prefix + $suffix, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+                        $released.Dispose()
+                    }
+                }
+                Write-Host "network-${case}: PASS"
+            } catch { ++$failed; Write-Host "network-${case}: FAIL $($_.Exception.Message)" }
+        }
+        if ($failed) { throw "$failed 个正式network证据绑定案例失败" }
+    } finally {
+        Remove-Variable -Name XenNetworkEvidenceFixture -Scope Global -ErrorAction SilentlyContinue
+        Write-Host "合成network夹具保留：$root"
+    }
+    exit 0
+}
 try {
     foreach ($case in @('control', 'profile-parse-hash', 'profile-hash-move', 'json-parse-hash', 'json-hash-move', 'csv-parse-hash', 'csv-hash-move')) {
         $prefix = Join-Path $root $case

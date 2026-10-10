@@ -81,14 +81,40 @@ if ([string]::IsNullOrWhiteSpace($BuildDirectory)) {
     }
 }
 
-function Get-FileEvidence {
-    param([Parameter(Mandatory = $true)][string]$Path)
-    $file = Get-Item -LiteralPath $Path -ErrorAction Stop
-    return [ordered]@{
-        path = $file.FullName
-        length = [long]$file.Length
-        sha256 = (Get-FileHash -LiteralPath $file.FullName `
-            -Algorithm SHA256).Hash
+function Open-NetworkEvidence {
+    param([string]$Path, [System.Collections.IList]$Opened)
+    $snapshot = [pscustomobject]@{
+        stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        evidence = $null
+    }
+    $Opened.Add($snapshot) | Out-Null
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $snapshot.evidence = [ordered]@{
+            path = [System.IO.Path]::GetFullPath($Path)
+            length = $snapshot.stream.Length
+            sha256 = [BitConverter]::ToString($sha.ComputeHash($snapshot.stream)).Replace('-', '')
+        }
+    } finally { $sha.Dispose() }
+    return $snapshot
+}
+
+function Read-NetworkEvidenceText {
+    param([object]$Snapshot)
+    $Snapshot.stream.Position = 0
+    $reader = [System.IO.StreamReader]::new($Snapshot.stream,
+        [System.Text.UTF8Encoding]::new($false, $true), $true, 4096, $true)
+    try { return $reader.ReadToEnd() }
+    finally { $reader.Dispose() }
+}
+
+function Assert-NetworkEvidenceBinding {
+    param([object]$Snapshot, [string]$Path, [string]$Sha256, [string]$Description)
+    if (-not [StringComparer]::OrdinalIgnoreCase.Equals(
+            $Snapshot.evidence.path, $Path) -or
+        $Snapshot.evidence.sha256 -ne $Sha256) {
+        throw "网络基准 $Description 路径或摘要与Runtime环境清单不一致。"
     }
 }
 
@@ -258,6 +284,7 @@ $resolvedGpuPreprocess = if ($EnableGpuPreprocess -eq "auto") {
     if ($Backend -eq "tensorrt") { "on" } else { "off" }
 } else { $EnableGpuPreprocess }
 
+$openedEvidence = New-Object System.Collections.Generic.List[object]
 $benchmarkScript = Join-Path $PSScriptRoot "benchmark_runtime.ps1"
 try {
     & $benchmarkScript `
@@ -297,10 +324,16 @@ try {
 
     $reportPath = "$ReportPrefix.json"
     $environmentPath = "$ReportPrefix.environment.json"
-    $report = Get-Content -LiteralPath $reportPath -Raw -Encoding UTF8 |
-        ConvertFrom-Json
-    $environment = Get-Content -LiteralPath $environmentPath -Raw `
-        -Encoding UTF8 | ConvertFrom-Json
+    # 已发布文件在整个外层校验和marker提交期间保持只读句柄，禁止重写/删除。
+    $environmentEvidence = Open-NetworkEvidence $environmentPath $openedEvidence
+    $reportEvidence = Open-NetworkEvidence $reportPath $openedEvidence
+    $csvEvidence = Open-NetworkEvidence "$ReportPrefix.csv" $openedEvidence
+    $configEvidence = Open-NetworkEvidence $receiverConfig $openedEvidence
+    $profileEvidence = if ($Backend -in @('cuda', 'tensorrt')) {
+        Open-NetworkEvidence $profilePath $openedEvidence
+    } else { $null }
+    $report = Read-NetworkEvidenceText $reportEvidence | ConvertFrom-Json
+    $environment = Read-NetworkEvidenceText $environmentEvidence | ConvertFrom-Json
     $expectedPerformanceProbes = $EnablePerformanceProbes -eq "on"
     $reportFields = @($report.PSObject.Properties.Name)
     if ([int]$report.schema -notin @(17, 18, 19, 20)) {
@@ -321,6 +354,18 @@ try {
         $null -eq $environment.report.aim -or
         -not [bool]$environment.report.aim.contract_valid) {
         throw "网络基准环境清单缺少完整且通过的 Aim schema 17/18/19/20 门禁。"
+    }
+    # 继承逐帧通过结论前，必须确认当前消费的就是Runtime验证并封存的那组字节。
+    Assert-NetworkEvidenceBinding $reportEvidence $reportPath `
+        $environment.report.json_sha256 'JSON报告'
+    Assert-NetworkEvidenceBinding $csvEvidence "$ReportPrefix.csv" `
+        $environment.report.csv_sha256 'CSV报告'
+    Assert-NetworkEvidenceBinding $configEvidence $environment.inputs.config.path `
+        $environment.inputs.config.sha256 '接收配置'
+    if ($null -ne $profileEvidence) {
+        $binding = $environment.benchmark.provider_execution.profile.file
+        Assert-NetworkEvidenceBinding $profileEvidence $binding.path `
+            $binding.sha256 'Provider profile'
     }
     $snapshot = $report.final_snapshot
     if ([uint64]$snapshot.source_dropped_frames -gt
@@ -424,11 +469,11 @@ try {
             }
         }
         artifacts = [ordered]@{
-            receiver_config = Get-FileEvidence $receiverConfig
-            runtime_report = Get-FileEvidence $reportPath
-            runtime_environment = Get-FileEvidence $environmentPath
-            provider_profile = if (Test-Path -LiteralPath $profilePath) {
-                Get-FileEvidence $profilePath
+            receiver_config = $configEvidence.evidence
+            runtime_report = $reportEvidence.evidence
+            runtime_environment = $environmentEvidence.evidence
+            provider_profile = if ($null -ne $profileEvidence) {
+                $profileEvidence.evidence
             } else { $null }
         }
     }
@@ -446,6 +491,7 @@ try {
     $pendingNetworkMarkerOwned = $false
     Write-Host "网络接收正式基准通过：$networkMarker"
 } finally {
+    foreach ($snapshot in $openedEvidence) { $snapshot.stream.Dispose() }
     # Runtime只回滚自己实际发布的报告，ready由创建它的XenBenchmark负责。
     # 外层预检不授予清理权；失败时保留可能由另一个任务发布的同名产物。
     if ($pendingNetworkMarkerOwned) {

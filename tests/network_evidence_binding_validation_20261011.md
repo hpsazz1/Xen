@@ -1,0 +1,13 @@
+# D07 network环境/产物绑定验证
+
+基线3774f7d770f3570f472d496900e1cf954e95b477，分支fix/network-evidence-binding-20261011。承接Runtime副本冻结，本批使用相同合成fixture执行真实benchmark_network_receiver→benchmark_runtime两层PS，验证器不替换。
+
+原实现正常控制通过，九个实际反例失败：首次读取前替换JSON/CSV/profile/config四例仍发布完成标记；读取后JSON/CSV/profile/config/environment五例仍能改写。JSON B仅把一个样本的mouse_sent改为true，能通过旧外层浅校验但违反Runtime逐帧禁输出合同；它只存在于合成文件，绝不执行设备操作。
+
+修复后全部通过：已发布五类文件以FileShare.Read持有到marker完成，解析和摘要走同句柄。JSON/CSV与environment中的实际sha256字段比较，config/profile另核对环境已存路径；失败保留Runtime产物。首版假设environment含report.json/report.csv路径被正常控制反证，已改为本次ReportPrefix确定路径，不改既有schema。
+
+最终12例包含上述九例、原正常控制、无profile的合成CPU控制、JSON改名后替换控制。所有成功/失败返回后均重新以独占读写打开原文件，确认句柄释放。marker发布后文件仍可被正常维护，未来改动由其摘要识别，不承诺永久不可变或对恶意同目录进程提供认证。
+
+五项相关CTest通过9.88秒（network_evidence_binding_tests、benchmark_evidence_snapshot_tests、benchmark_output_ownership_tests、publication_script_tests、receiver_run_id_tests）；补正CPU合成CSV标签并增加改名控制后重跑受影响两项通过6.76秒。双机PS脚本通过；公开文档19文件195链接0错误。正式Release、干净产物身份和远端核对另记录本地docs/evidence/XEN-NETWORK-EVIDENCE-BINDING-20261011-001/RESULT.md。
+
+输入由生产DebugReport写入器从合成Runtime数据生成；文件复制进程没有Capture、模型加载、真实Provider调用、网络传输或设备输出，所有Provider值仅合成标签。未启动UI或修改系统权限/凭据。D07原列入口在本批验证收尾后闭环，其余D08/D09/D17等独立问题继续开放。

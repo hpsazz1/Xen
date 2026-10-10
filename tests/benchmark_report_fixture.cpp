@@ -35,6 +35,7 @@ int main(int argc, char** argv) {
     report.ingest(std::span<const RuntimePipelineSample>(&sample, 1));
     RuntimeSnapshot snapshot;
     snapshot.provider = config.provider;
+    snapshot.source_received_frames = 2;
     snapshot.source_width = 2560;
     snapshot.source_height = 1440;
     snapshot.encoded_width = snapshot.encoded_height = 320;
