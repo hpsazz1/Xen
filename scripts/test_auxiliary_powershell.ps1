@@ -77,18 +77,37 @@ try {
 param([string]$Scenario)
 $global:fixtureScenario = $Scenario
 $global:fixtureWaits = [Collections.Generic.List[int]]::new()
+# 必须用真实 .NET getter 抛错；固定值或只在调用方主动 throw 覆盖不到属性读取边界。
+Add-Type -TypeDefinition @"
+public sealed class XenAuxiliaryProcessFixture {
+    public bool FailHandle;
+    public int HandleReads;
+    public int Id { get { return 24680; } }
+    public System.DateTime StartTime { get { return new System.DateTime(2026, 10, 10, 1, 2, 3, System.DateTimeKind.Utc); } }
+    public System.IntPtr Handle {
+        get {
+            ++HandleReads;
+            if (FailHandle) { throw new System.InvalidOperationException("模拟句柄查询失败"); }
+            return new System.IntPtr(1);
+        }
+    }
+    public int ExitCode { get { return 0; } }
+}
+"@
 function Start-Process {
     param($FilePath, $ArgumentList, $WindowStyle, [switch]$PassThru, $RedirectStandardOutput, $RedirectStandardError)
-    $child = [pscustomobject]@{ Id=24680; StartTime=[datetime]'2026-10-10T01:02:03Z'; Handle=[intptr]1; ExitCode=0 }
+    $child = [XenAuxiliaryProcessFixture]::new()
+    $child.FailHandle = $global:fixtureScenario -like 'handle_*'
     $child | Add-Member ScriptMethod WaitForExit {
         param([int]$Milliseconds)
         $global:fixtureWaits.Add($Milliseconds)
         if ($global:fixtureScenario -eq 'wait_failure') { throw [InvalidOperationException]::new('模拟等待失败') }
         if ($Milliseconds -eq 100 -and $global:fixtureWaits.Count -ge 3) { throw [InvalidOperationException]::new('监督没有进入有界清理等待') }
-        return $Milliseconds -gt 100 -and $global:fixtureScenario -in @('binding_exits', 'timeout_exits', 'stop_exits')
+        return $Milliseconds -gt 100 -and $global:fixtureScenario -in @('binding_exits', 'timeout_exits', 'stop_exits', 'handle_exits')
     }
     $child | Add-Member ScriptMethod Dispose {
-        [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'fixture-waits.json'), (ConvertTo-Json -InputObject @($global:fixtureWaits) -Compress))
+        $observed = @{ waits=@($global:fixtureWaits); handle_reads=$this.HandleReads }
+        [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'fixture-process.json'), ($observed | ConvertTo-Json -Compress))
     }
     if ($global:fixtureScenario -like 'stop_*') { [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'STOP'), 'STOP_REQUESTED') }
     return $child
@@ -100,10 +119,10 @@ exit $LASTEXITCODE
     $bindingPath = Join-Path $run '.auxiliary/task.json'
     $bindingText = [IO.File]::ReadAllText($bindingPath)
     $failures = [Collections.Generic.List[string]]::new()
-    foreach ($scenario in @('binding_pending', 'timeout_error', 'binding_exits', 'timeout_exits', 'stop_exits', 'wait_failure', 'timeout_pending')) {
+    foreach ($scenario in @('binding_pending', 'timeout_error', 'binding_exits', 'timeout_exits', 'stop_exits', 'wait_failure', 'timeout_pending', 'handle_pending', 'handle_exits')) {
         try {
             Remove-Item -LiteralPath (Join-Path $run '.auxiliary/STOP') -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath (Join-Path $run '.auxiliary/fixture-waits.json') -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath (Join-Path $run '.auxiliary/fixture-process.json') -Force -ErrorAction SilentlyContinue
             if ($scenario -like 'binding_*') { [IO.File]::WriteAllText($bindingPath, '{invalid json') }
             else {
                 $binding = $bindingText | ConvertFrom-Json
@@ -113,11 +132,18 @@ exit $LASTEXITCODE
             [IO.File]::WriteAllText((Join-Path $run 'task.json'), $(if ($scenario -eq 'timeout_error') { '{invalid json' } else { '{}' }))
             & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $fixturePath -Scenario $scenario
             $result = Get-Content -LiteralPath (Join-Path $run '.auxiliary/result.json') -Raw | ConvertFrom-Json
-            $expectedExit = $scenario -in @('binding_exits', 'timeout_exits', 'stop_exits')
+            $expectedExit = $scenario -in @('binding_exits', 'timeout_exits', 'stop_exits', 'handle_exits')
             Assert-True (([bool]$result.ended_utc) -eq $expectedExit) "$scenario 仅确认子进程退出后才写任务结束时间"
-            Assert-True ($result.PSObject.Properties['child_process_id'] -and $result.child_process_id -eq 24680 -and $result.child_started_utc) "$scenario 必须持久化已启动子进程身份"
-            $waits = @(Get-Content -LiteralPath (Join-Path $run '.auxiliary/fixture-waits.json') -Raw | ConvertFrom-Json)
+            Assert-True ($result.child_launch_attempted -and $result.PSObject.Properties['child_process_id'] -and $result.child_process_id -eq 24680 -and
+                ([datetime]$result.child_started_utc).ToUniversalTime() -eq ([datetime]'2026-10-10T01:02:03Z').ToUniversalTime()) "$scenario 必须持久化启动尝试、PID 与准确开始时间"
+            $observed = Get-Content -LiteralPath (Join-Path $run '.auxiliary/fixture-process.json') -Raw | ConvertFrom-Json
+            $waits = @($observed.waits)
             Assert-True ($waits.Count -le 3 -and @($waits | Where-Object { $_ -gt 100 -and $_ -le 10000 }).Count -eq 1) "$scenario 必须仅作一次有界清理等待"
+            Assert-True ($observed.handle_reads -eq 1) "$scenario 必须实际读取 Process 句柄"
+            if ($scenario -like 'handle_*') {
+                Assert-True ($waits.Count -eq 1 -and $waits[0] -eq 5000) "$scenario getter 异常后必须立即进入有界清理，不能先继续常规监督"
+                Assert-True ($result.PSObject.Properties['error_type'] -and $result.error_type) "$scenario 必须保留句柄查询失败证据"
+            }
             Assert-True ($result.child_exit_confirmed -eq $expectedExit) "$scenario 不得猜测子进程退出"
             Assert-True ([bool]$result.supervision_ended_utc) "$scenario 必须区分监督器结束与子任务结束"
             Assert-True (Test-Path -LiteralPath (Join-Path $run '.auxiliary/STOP')) "$scenario 必须请求本 Run 取消"
@@ -129,13 +155,16 @@ exit $LASTEXITCODE
             $script:registered = [pscustomobject]@{ TaskName=$first.task_name;
                 Actions=[pscustomobject]@{ Execute=(Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'); Arguments=('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $runner + '"') }; State='Ready' }
             $beforeRemovals = $script:removals
-            if (-not $expectedExit) {
-                $script:registered.State = 'Running'
+            foreach ($schedulerState in @('Running', 'Queued')) {
+                $script:registered.State = $schedulerState
                 $request.mode = 'Status'
                 $pending = Invoke-XenAuxiliaryTask $request | ConvertFrom-Json
-                Assert-True ($pending.status -like '*cleanup_unconfirmed') "$scenario 调度器仍运行时也不得覆盖清理未知状态"
-                $script:registered.State = 'Ready'
+                Assert-True ($pending.status -eq $result.status) "$scenario 调度器 $schedulerState 不得覆盖子进程退出证据"
+                $request.mode = 'Recover'
+                $null = Invoke-XenAuxiliaryTask $request
+                Assert-True ($script:removals -eq $beforeRemovals) "$scenario 调度器 $schedulerState 时不得注销任务"
             }
+            $script:registered.State = 'Ready'
             $request.mode = 'Recover'
             $recovery = Invoke-XenAuxiliaryTask $request
             Assert-True ($script:removals -eq ($beforeRemovals + [int]$expectedExit)) "$scenario 清理未确认时不得注销计划任务"

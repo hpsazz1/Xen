@@ -230,16 +230,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     SessionArchive session_archive;
     bool session_archive_active = false;
     app::detail::ReportBoundary report_boundary;
+    app::detail::ReportFinalization report_finalization;
     app::detail::ReportRestart report_restart;
+    app::detail::ReportResume report_resume;
     auto archive_trigger_poll = std::chrono::steady_clock::time_point{};
     bool archive_drain_failed = false;
     bool debug_session_active = false;
-    bool detector_reload_pending = false;
     bool release_restart_requested = false;
     bool pending_runtime_stop = false;
-    std::future<void> runtime_stop_job;
-    std::future<void> report_finish_job;
-    bool diagnostics_start_pending = false;
+    std::future<bool> runtime_stop_job;
+    std::future<bool> report_finish_job;
     std::optional<DetectorConfig> pending_detector_config;
     std::string debug_run_id;
     std::optional<AimConfig> debug_aim_config;
@@ -299,21 +299,21 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         return snapshot;
     };
     const auto finish_debug_report = [&](std::optional<RuntimeSnapshot> frozen = {}) noexcept {
-        if (!debug_session_active && !session_archive_active) return;
-        auto final_snapshot = frozen ? std::move(*frozen) : report_snapshot();
-        drain_debug_samples(true, &final_snapshot);
-        session_archive.stop();
-        session_archive_active = false;
-        if (!debug_session_active) return;
-        std::string report_error;
-        report_boundary.filter_final(final_snapshot);
-        if (!debug_report.finalize(final_snapshot, report_error)) {
-            LOG_WARN("app", "Debug 报告生成失败: {}", report_error);
+        const bool finished = report_finalization.finish(debug_session_active, session_archive_active,
+            report_boundary, debug_report, session_archive,
+            [&] { return frozen ? std::move(*frozen) : report_snapshot(); },
+            [&](const auto& snapshot) { drain_debug_samples(true, &snapshot); });
+        if (report_finalization.failed()) {
+            LOG_WARN("app", "Debug 报告生成失败: {}", report_finalization.error());
         }
-        debug_session_active = false;
+        return finished;
     };
     const auto start_debug_report = [&](const RuntimeSnapshot& snapshot) {
         if (!config.runtime.diagnostics_enabled || snapshot.state != RuntimeState::RUNNING) return false;
+        if (report_finalization.pending()) {
+            app_message = "旧报告保存失败；请修复磁盘问题后点击停止或启动重试，退出会丢失未保存数据。";
+            return false;
+        }
         report_boundary.begin_segment(runtime);
         DebugReportConfig report_config;
         const std::string segment_id =
@@ -360,29 +360,32 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         runtime.set_diagnostics_enabled(false);
         auto frozen = report_snapshot();
         report_finish_job = std::async(std::launch::async, [&, frozen = std::move(frozen)]() mutable {
-            app::detail::finish_reports_after_archive(runtime, std::move(frozen), finish_debug_report);
+            return app::detail::finish_reports_after_archive(runtime, std::move(frozen), finish_debug_report);
         });
     };
 
-    const auto stop_runtime_session = [&]() {
+    const auto stop_runtime_session = [&](bool retry_report = true) {
         if (runtime_stop_job.valid()) return;
-        diagnostics_start_pending = false;
+        report_resume.cancel();
         pending_detector_config.reset();
         if (report_finish_job.valid()) {
             runtime.post_intent({RuntimeIntentType::DISARM_OUTPUT, true});
             pending_runtime_stop = true;
             return;
         }
-        detector_reload_pending = false;
         const auto state = runtime.snapshot().state;
-        if (state == RuntimeState::STOPPED && !debug_session_active && !session_archive_active) {
+        if (state == RuntimeState::STOPPED &&
+            ((!debug_session_active && !session_archive_active) || (!retry_report && report_finalization.failed()))) {
+            if (report_finalization.failed()) return;
             app_message = "Runtime 已停止。";
             return;
         }
         runtime.post_intent({RuntimeIntentType::DISARM_OUTPUT, true});
-        runtime_stop_job = std::async(std::launch::async, [&] {
+        runtime_stop_job = std::async(std::launch::async, [&, retry_report] {
             runtime.stop();
-            finish_debug_report();
+            // 自动收尾仍停止设备，但不在磁盘持续失败时按 UI 帧率重试。
+            if (!retry_report && report_finalization.failed()) return false;
+            return finish_debug_report();
         });
         app_message = "正在后台停止Runtime并保存报告。";
     };
@@ -422,8 +425,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         debug_trigger_config->head_class_ids = runtime_config.aim.head_class_ids;
         debug_segment = 0;
         archive_drain_failed = false;
-        detector_reload_pending = false;
-        diagnostics_start_pending = false;
+        report_resume.cancel();
         debug_session_active = start_debug_report(runtime.snapshot());
         app_message = debug_session_active
             ? "运行已启动，详细记录已开启。"
@@ -431,26 +433,35 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         if (temporary_diagnostics) append_message(app_message, "详细记录仅本次调试开启，日常偏好未改");
     };
 
+    const auto collect_report_result = [&](bool succeeded, const char* success_message) {
+        report_restart.finish_completed(succeeded);
+        if (succeeded) app_message = success_message;
+        else {
+            report_resume.cancel();
+            pending_detector_config.reset();
+            app_message = "旧报告保存失败，已取消自动重启/切段并保留当前进程内的数据。"
+                          "请修复磁盘问题后点击停止或启动重试；退出会丢失未保存数据。原因：" + report_finalization.error();
+        }
+    };
+
     while (overlay.pump_messages(true)) {
         debug_workspace.set_theme(config.ui.theme);
         debug_workspace.poll();
         if (report_finish_job.valid() && report_finish_job.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
-            report_finish_job.get();
-            app_message = "详细记录已结束；已有资料保留。";
+            collect_report_result(report_finish_job.get(), "详细记录已结束；已有资料保留。");
         }
         if (runtime_stop_job.valid() && runtime_stop_job.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
-            runtime_stop_job.get();
-            app_message = "Runtime已停止，后台报告处理结束。";
+            collect_report_result(runtime_stop_job.get(), "Runtime已停止，后台报告处理结束。");
         }
         if (pending_runtime_stop && !debug_workspace.busy() && !report_finish_job.valid()) {
             pending_runtime_stop = false;
-            stop_runtime_session();
+            stop_runtime_session(false);
         }
         if (overlay.close_requested()) report_restart.cancel();
         if (overlay.close_requested()) {
             debug_workspace.request_shutdown();
             overlay.cancel_background();
-            if (!debug_workspace.busy() && !overlay.background_busy()) stop_runtime_session();
+            if (!debug_workspace.busy() && !overlay.background_busy()) stop_runtime_session(false);
             if (!debug_workspace.busy() && !overlay.background_busy() && !runtime_stop_job.valid() && !report_finish_job.valid()) break;
             app_message = "正在结束调试任务并回收资源；设备清理未知时仍会明确报告。";
         }
@@ -458,41 +469,30 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         // health 不属于可被热键绑定 UI 吞掉的语义事件；先投递后再生成
         // Snapshot 和渲染，保证武装控件与实际 SafetyGate 同帧一致。
         app::detail::route_input_health(runtime, keyboard_poll);
-        if (!runtime_stop_job.valid() && !report_finish_job.valid()) drain_debug_samples();
+        if (!runtime_stop_job.valid() && !report_finish_job.valid() && !report_finalization.pending()) drain_debug_samples();
         RuntimeSnapshot snapshot = runtime.snapshot();
         if (pending_detector_config && !report_finish_job.valid() && !runtime_stop_job.valid()) {
             const auto requested = std::move(*pending_detector_config);
             pending_detector_config.reset();
-            detector_reload_pending = runtime.reload_detector(requested);
+            const bool accepted = runtime.reload_detector(requested);
+            report_resume.reload_requested(accepted);
             snapshot = runtime.snapshot();
-            if (!detector_reload_pending) {
-                diagnostics_start_pending = config.runtime.diagnostics_enabled;
+            if (!accepted) {
+                report_resume.diagnostics_changed(config.runtime.diagnostics_enabled);
                 app_message = "模型重载请求未接受，当前模型继续运行。";
             }
         }
-        if (diagnostics_start_pending && !report_finish_job.valid() && !runtime_stop_job.valid() &&
-            !detector_reload_pending && !pending_runtime_stop) {
-            diagnostics_start_pending = false;
-            start_debug_report(snapshot);
-        }
-        if (!runtime_stop_job.valid() && !report_finish_job.valid() && detector_reload_pending &&
-            snapshot.state != RuntimeState::RUNNING) {
-            detector_reload_pending = false;
-        } else if (!runtime_stop_job.valid() && !report_finish_job.valid() && detector_reload_pending &&
-                   snapshot.detector_reload_state !=
-                       DetectorReloadState::LOADING) {
-            // Runtime 在发布诊断样本时核对模型代际；开段统一重置事件水位。
-            drain_debug_samples();
-            detector_reload_pending = false;
-            const bool report_started = start_debug_report(snapshot);
-            diagnostics_start_pending = false;
+        const auto resumed = report_resume.poll(snapshot,
+            report_finish_job.valid() || runtime_stop_job.valid() || pending_runtime_stop,
+            [&](const auto& current) { return start_debug_report(current); });
+        if (resumed.reload_finished) {
             if (snapshot.detector_reload_state ==
                     DetectorReloadState::SUCCEEDED) {
-                app_message = report_started
+                app_message = resumed.report_started
                     ? "Detector 已热重载，Debug 报告已切换分段。"
                     : "Detector 已热重载，Debug 报告未启用。";
             } else {
-                app_message = report_started
+                app_message = resumed.report_started
                     ? "Detector 重载失败，旧模型继续运行，Debug 报告已恢复。"
                     : "Detector 重载失败，旧模型继续运行。";
             }
@@ -522,7 +522,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         if (actions.diagnostics_enabled_changed) {
             temporary_diagnostics = false;
             diagnostics_preference = config.runtime.diagnostics_enabled;
-            diagnostics_start_pending = config.runtime.diagnostics_enabled;
+            report_resume.diagnostics_changed(config.runtime.diagnostics_enabled);
             if (!config.runtime.diagnostics_enabled && !runtime_stop_job.valid()) finish_reports_async();
             app_message = config.runtime.diagnostics_enabled
                 ? "详细记录已开启；保存配置后保留设置。"
@@ -703,9 +703,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                     app::detail::runtime_for_backend(config.detector.backend) !=
                         release_environment.runtime_id;
                 if (cross_runtime_restart) {
-                    stop_runtime_session();
-                    release_restart_requested = true;
-                    break;
+                    if (emergency_pressed || actions.stop_requested || toggle_requests_stop) {
+                        report_restart.cancel();
+                        app_message = "配置已保存；本轮停止或急停已取消跨运行时重启。";
+                    } else {
+                        report_restart.request_application(stop_runtime_session);
+                        app_message = "配置已保存，正在结束旧报告；保存成功后重启到所选运行时。";
+                    }
+                    continue;
                 }
                 const bool input_backend_changed =
                     !same_mouse_config(active_input_config, config.mouse);
@@ -769,11 +774,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             }
         }
         // 本轮键盘与界面停止/急停优先，不能先自动重启再清除刚收到的急停。
-        if (report_restart.take_ready(runtime_stop_job.valid() || report_finish_job.valid() ||
+        const auto restart_target = report_restart.take_ready(runtime_stop_job.valid() || report_finish_job.valid() ||
                 pending_runtime_stop || debug_workspace.busy() || overlay.background_busy() ||
                 model_workspace.poll().job_running,
-                emergency_pressed || actions.stop_requested || toggle_requests_stop || overlay.close_requested()))
+                emergency_pressed || actions.stop_requested || toggle_requests_stop || overlay.close_requested());
+        if (restart_target == app::detail::ReportRestartTarget::RUNTIME)
             start_runtime_session();
+        else if (restart_target == app::detail::ReportRestartTarget::APPLICATION) {
+            release_restart_requested = true;
+            break;
+        }
     }
 
     // 渲染失败和系统退出同样经过屏障；不可先关闭后台仍使用的设备或日志。
@@ -783,17 +793,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         debug_workspace.poll();
         overlay.poll_background();
         if (runtime_stop_job.valid() && runtime_stop_job.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready)
-            runtime_stop_job.get();
+            collect_report_result(runtime_stop_job.get(), "Runtime已停止，后台报告处理结束。");
         if (report_finish_job.valid() && report_finish_job.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready)
-            report_finish_job.get();
-        if (!debug_workspace.busy() && !overlay.background_busy()) stop_runtime_session();
+            collect_report_result(report_finish_job.get(), "详细记录已结束；已有资料保留。");
+        if (!debug_workspace.busy() && !overlay.background_busy()) stop_runtime_session(false);
         if (!debug_workspace.busy() && !overlay.background_busy() && !runtime_stop_job.valid() && !report_finish_job.valid()) break;
         overlay.pump_messages(true);
         MsgWaitForMultipleObjectsEx(0, nullptr, 16, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
     }
     runtime.stop();
     model_workspace.shutdown();
-    finish_debug_report();
+    if (!report_finalization.failed()) finish_debug_report();
+    if (report_finalization.failed()) LOG_WARN("app", "退出时仍有未保存报告，内存数据无法保留到下次启动: {}", report_finalization.error());
     keyboard.close();
     if (input_device) input_device->close();
     overlay.shutdown();

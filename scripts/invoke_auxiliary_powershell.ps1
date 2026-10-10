@@ -90,7 +90,8 @@ try {
     $result.child_process_id = $child.Id
     Save-Result
     $result.child_started_utc = $child.StartTime.ToUniversalTime().ToString('o')
-    $null = $child.Handle
+    # PowerShell 属性语法会吞掉 getter 异常；显式调用访问器才能进入下方清理路径。
+    $null = $child.get_Handle()
     Save-Result
     $binding = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'task.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     $clock = [Diagnostics.Stopwatch]::StartNew()

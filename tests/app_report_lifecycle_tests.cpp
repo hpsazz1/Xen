@@ -10,6 +10,7 @@
 namespace {
 using Json = nlohmann::json;
 using namespace std::chrono_literals;
+using app::detail::ReportRestartTarget;
 int failures = 0;
 void expect(bool value, const char* message) {
     if (!value) { ++failures; std::cerr << "[失败] " << message << '\n'; }
@@ -104,27 +105,80 @@ void final_archive_state(bool fail_write) {
 
 void reopen_during_reload(DetectorReloadState result) {
     Fixture fixture; Source source; source.append(5, 7);
-    source.state.state = RuntimeState::RUNNING; source.state.detector_reload_state = result;
+    source.state.state = RuntimeState::RUNNING;
+    source.state.detector_reload_state = DetectorReloadState::LOADING;
+    source.state.active_model_path = "old.onnx"; source.state.detector_generation = 1;
     app::detail::ReportBoundary boundary;
-    // 加载期间打开记录，直接从重载完成入口进入共用的分段起点。
-    boundary.begin_segment(source);
+    app::detail::ReportResume resume;
     DebugReport report; SessionArchive archive; std::string error;
-    const auto config = fixture.config("reopen");
-    expect(report.start(config, error), "重载后启动报告");
-    SessionArchiveConfig archive_config; archive_config.directory = (fixture.root / "session").string();
-    archive_config.report_config = config; archive_config.trigger_sequence_baseline = boundary.archive_after_event;
-    expect(archive.start(archive_config, error), "重载后启动全程归档");
-    source.append(6, 8);
+    auto config = fixture.config("reopen");
+    int starts = 0;
+    const auto open = [&](const RuntimeSnapshot& snapshot) {
+        ++starts;
+        boundary.begin_segment(source);
+        config.model_path = snapshot.active_model_path;
+        expect(report.start(config, error), "重载后启动报告");
+        SessionArchiveConfig archive_config; archive_config.directory = (fixture.root / "session").string();
+        archive_config.report_config = config; archive_config.trigger_sequence_baseline = boundary.archive_after_event;
+        expect(archive.start(archive_config, error), "重载后启动全程归档");
+        return report.active();
+    };
+    resume.reload_requested(true);
+    resume.diagnostics_changed(true); // 用户在 LOADING 窗口开启，而不是直接调用开段 helper。
+    resume.poll(source.snapshot(), true, open);
+    resume.poll(source.snapshot(), false, open);
+    expect(starts == 0, "封尾忙碌或模型仍 LOADING 时不能提前打开报告");
+    source.append(6, 8); // 加载窗口内继续产生的事件也必须被恢复水位排除。
+    source.state.detector_reload_state = result;
+    if (result == DetectorReloadState::SUCCEEDED) {
+        source.state.active_model_path = "new.onnx"; source.state.detector_generation = 2;
+    }
+    resume.poll(source.snapshot(), true, open);
+    expect(starts == 0, "重载完成但后台封尾未回收时仍不能开段");
+    const auto reopened = resume.poll(source.snapshot(), false, open);
+    expect(reopened.reload_finished && reopened.report_started && starts == 1, "真实恢复路由只打开一个报告");
+    resume.poll(source.snapshot(), false, open);
+    expect(starts == 1, "恢复已消费的开段意图不能下一帧重复执行");
+    expect(config.model_path == (result == DetectorReloadState::SUCCEEDED ? "new.onnx" : "old.onnx"),
+           "重载成功使用新模型，失败仍使用旧模型身份");
+    source.append(7, 9);
     auto snapshot = source.snapshot(); snapshot.trigger_execution_log = source.trigger_execution_log(boundary.archive_after_event);
     expect(archive.submit({}, snapshot), "提交新段事件"); archive.stop();
     boundary.filter_final(snapshot);
     expect(report.finalize(snapshot, error), "封尾重载后的报告");
     const auto json = read_json(config.json_path);
     expect(json["recoil"]["execution"]["records"].size() == 1 &&
-           json["recoil"]["execution"]["records"][0]["command_id"] == 8, "重载成功或失败后均不补关闭期间压枪记录");
+           json["recoil"]["execution"]["records"][0]["command_id"] == 9, "重载成功或失败后均不补关闭期间压枪记录");
     const auto segment = read_json(fixture.root / "session/segment-1.json");
     expect(segment["trigger"]["execution"]["events"].size() == 1 &&
-           segment["trigger"]["execution"]["events"][0]["sequence"] == "6", "全程归档不补关闭期间扳机事件");
+           segment["trigger"]["execution"]["events"][0]["sequence"] == "7", "全程归档不补关闭期间扳机事件");
+}
+
+void cancelled_report_resume() {
+    RuntimeSnapshot snapshot; snapshot.state = RuntimeState::RUNNING;
+    snapshot.detector_reload_state = DetectorReloadState::LOADING;
+    for (bool stopped : {false, true}) {
+        app::detail::ReportResume resume;
+        int starts = 0;
+        const auto open = [&](const auto&) { ++starts; return true; };
+        resume.reload_requested(true); resume.diagnostics_changed(true);
+        resume.poll(snapshot, false, open);
+        if (stopped) {
+            snapshot.state = RuntimeState::STOPPED;
+            resume.poll(snapshot, false, open);
+            snapshot.state = RuntimeState::RUNNING;
+        } else resume.cancel();
+        snapshot.detector_reload_state = DetectorReloadState::SUCCEEDED;
+        resume.poll(snapshot, false, open);
+        expect(starts == 0, "停止或取消清除整个恢复意图，晚到的重载结果不能重新开段");
+        snapshot.detector_reload_state = DetectorReloadState::LOADING;
+    }
+    app::detail::ReportResume disabled;
+    disabled.reload_requested(true); disabled.diagnostics_changed(true);
+    disabled.diagnostics_changed(false);
+    snapshot.detector_reload_state = DetectorReloadState::FAILED;
+    const auto outcome = disabled.poll(snapshot, false, [](const auto&) { return false; });
+    expect(outcome.reload_finished && !outcome.report_started, "加载期间再次关闭记录，重载失败后也不生成报告");
 }
 
 void failed_session_restart() {
@@ -143,20 +197,88 @@ void failed_session_restart() {
         });
     });
     if (!deferred) start();
-    expect(starts == 0 && !restart.take_ready(job.valid()), "后台封尾未结束时不重置 Runtime 或报告");
+    expect(starts == 0 && restart.take_ready(job.valid()) == ReportRestartTarget::NONE, "后台封尾未结束时不重置 Runtime 或报告");
     allow_finish.set_value(); if (job.valid()) job.get();
-    if (restart.take_ready(false)) start();
-    expect(starts == 1 && !restart.take_ready(false), "回收封尾结果后只重启一次");
+    if (restart.take_ready(false) == ReportRestartTarget::RUNTIME) start();
+    expect(starts == 1 && restart.take_ready(false) == ReportRestartTarget::NONE, "回收封尾结果后只重启一次");
     const bool exists = std::filesystem::exists(old_config.json_path);
     expect(exists, "故障重启保留旧段最终报告");
     if (exists) expect(read_json(old_config.json_path)["sample_count"] == 1, "旧报告保留故障前样本");
     restart.defer_if_active(true, [] {}); restart.cancel();
-    expect(!restart.take_ready(false), "用户停止或退出撤销排队重启");
+    expect(restart.take_ready(false) == ReportRestartTarget::NONE, "用户停止或退出撤销排队重启");
     for (const bool busy : {true, false}) {
         restart.defer_if_active(true, [] {});
-        expect(!restart.take_ready(busy, true) && !restart.take_ready(false),
+        expect(restart.take_ready(busy, true) == ReportRestartTarget::NONE &&
+               restart.take_ready(false) == ReportRestartTarget::NONE,
                "键盘或界面急停在封尾中或刚完成时均优先撤销重启");
+        restart.request_application([] {});
+        expect(restart.take_ready(busy, true) == ReportRestartTarget::NONE &&
+               restart.take_ready(false) == ReportRestartTarget::NONE, "停止或急停同样撤销跨运行时重启");
     }
+}
+
+void final_report_failure_recovery(ReportRestartTarget target) {
+    Fixture fixture; Source source; source.append(5, 7);
+    app::detail::ReportBoundary boundary; boundary.begin_segment(source);
+    app::detail::ReportFinalization finalization;
+    app::detail::ReportRestart restart;
+    const auto request_restart = [&] {
+        if (target == ReportRestartTarget::APPLICATION) restart.request_application([] {});
+        else restart.defer_if_active(true, [] {});
+    };
+    DebugReport report; SessionArchive archive; std::string error;
+    auto config = fixture.config("retry");
+    const auto blocked = fixture.root / "blocked";
+    { std::ofstream file(blocked); file << "模拟报告父目录被文件占用"; }
+    config.csv_path = (blocked / "retry.csv").string();
+    config.json_path = (blocked / "retry.json").string();
+    bool active = report.start(config, error), archive_active = false;
+    expect(active, "启动等待封尾的报告");
+    source.append(6, 8); source.state.state = RuntimeState::FAILED;
+    source.state.last_error = "合成运行故障";
+    RuntimePipelineSample sample; sample.sequence = 41;
+    int freezes = 0, drains = 0;
+    const auto attempt = [&] {
+        auto job = std::async(std::launch::async, [&] {
+            return finalization.finish(active, archive_active, boundary, report, archive,
+                [&] { ++freezes; return source.snapshot(); },
+                [&](const auto&) { ++drains; report.ingest(std::span(&sample, 1)); });
+        });
+        const bool finished = job.get();
+        restart.finish_completed(finished);
+        return finished;
+    };
+    request_restart();
+    expect(restart.take_ready(true) == ReportRestartTarget::NONE, "两种重启都必须等待后台封尾结果");
+    const bool finished = attempt();
+    expect(!finished, "最终报告发布失败必须传回失败结果");
+    expect(active && report.active() && finalization.pending(), "失败后保留旧报告与冻结快照");
+    expect(finalization.failed() && !finalization.error().empty(), "发布失败保留可见错误");
+    expect(restart.take_ready(false) == ReportRestartTarget::NONE, "发布失败必须取消 Runtime 或跨运行时自动重启");
+    if (finished || !active) return; // 红灯时不把缺少产物误报为 JSON 解析故障。
+    source.append(99, 99); source.state.last_error = "后续状态不能替换旧故障";
+    expect(!attempt(), "故障未解除的再次封尾仍明确失败");
+    expect(freezes == 1 && drains == 1, "失败重试不扩大事件截止或重复摄入旧样本");
+    std::filesystem::remove(blocked); std::filesystem::create_directory(blocked);
+    request_restart();
+    expect(attempt(), "解除磁盘故障后可通过同一生产封尾入口重试");
+    expect(!active && !report.active() && !finalization.pending() && !finalization.failed(), "成功发布后才释放旧段");
+    expect(restart.take_ready(false) == target && restart.take_ready(false) == ReportRestartTarget::NONE,
+           "显式重试成功后只允许一次对应目标的重启");
+    const auto json = read_json(config.json_path);
+    expect(json["sample_count"] == 1, "重试保留故障前样本且不重复");
+    expect(json["final_snapshot"]["last_error"] == "合成运行故障", "重试仍保留旧段故障原因");
+    expect(json["recoil"]["execution"]["records"].size() == 1 &&
+           json["recoil"]["execution"]["records"][0]["command_id"] == 8, "重试保留原冻结压枪事件");
+    expect(json["trigger"]["execution"]["events"].size() == 1 &&
+           json["trigger"]["execution"]["events"][0]["sequence"] == "6", "重试不丢原扳机事件或混入后续事件");
+    expect(freezes == 1 && drains == 1, "成功重试仍使用原冻结范围");
+    const auto new_config = fixture.config("after-recovery");
+    expect(report.start(new_config, error), "原段保存成功后允许创建独立新段");
+    sample.sequence = 73; report.ingest(std::span(&sample, 1));
+    expect(report.finalize({}, error), "新段独立封尾");
+    expect(read_json(new_config.json_path)["sample_count"] == 1 && read_json(config.json_path) == json,
+           "新段不混入旧样本，也不覆盖已恢复的旧文件");
 }
 }
 int main() {
@@ -164,7 +286,10 @@ int main() {
     try {
         final_archive_state(false); final_archive_state(true);
         reopen_during_reload(DetectorReloadState::SUCCEEDED); reopen_during_reload(DetectorReloadState::FAILED);
+        cancelled_report_resume();
         failed_session_restart();
+        final_report_failure_recovery(ReportRestartTarget::RUNTIME);
+        final_report_failure_recovery(ReportRestartTarget::APPLICATION);
     } catch (const std::exception& error) { ++failures; std::cerr << error.what() << '\n'; }
     Log::shutdown();
     std::cout << "App 报告生命周期失败数: " << failures << '\n';
