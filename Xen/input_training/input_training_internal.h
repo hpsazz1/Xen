@@ -11,6 +11,7 @@ class SessionTestAccess {
 public:
     static void before_replay_event(Session& session,
         std::function<void(const Event&, const std::atomic_bool&)> operation);
+    static void before_worker_start(Session& session, std::function<void()> operation);
 };
 }
 

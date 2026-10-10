@@ -562,9 +562,12 @@ public:
     std::atomic<std::shared_ptr<State>> state;
     std::thread worker;
     std::function<void(const Event&, const std::atomic_bool&)> before_replay_event;
+    std::function<void()> before_worker_start;
     std::shared_ptr<const Snapshot> idle = std::make_shared<Snapshot>();
 
     bool start(const std::filesystem::path& directory, Limits limits, Reader reader, bool replay) noexcept {
+        std::shared_ptr<State> next;
+        std::shared_ptr<const Snapshot> start_failure;
         try {
             const auto current = state.load();
             if ((current && !current->finished) || directory.empty() || !valid_limits(limits)) return false;
@@ -573,17 +576,29 @@ public:
                 if (directory.has_parent_path()) std::filesystem::create_directories(directory.parent_path());
                 if (!std::filesystem::create_directory(directory)) return false;
             }
-            auto next = std::make_shared<State>(limits);
+            next = std::make_shared<State>(limits);
             next->directory = directory; next->reader = std::move(reader); next->replay = replay;
             next->before_replay_event = before_replay_event;
             next->status = replay ? Status::REPLAYING : Status::RECORDING;
             next->accepting = !replay; next->publish(true);
-            state.store(next);
+            // 在线程构造前备好失败快照；构造分配失败的收尾不再分配内存。
+            auto failure = std::make_shared<Snapshot>(*next->published.load());
+            failure->status = Status::FAILED;
+            failure->error = "输入记录或回放后台线程启动失败";
+            start_failure = std::move(failure);
+            if (before_worker_start) before_worker_start();
             worker = std::thread([next] { next->run(); });
+            state.store(next);
             return true;
         } catch (...) {
-            const auto current = state.load();
-            if (current) { current->accepting = false; current->finished = true; }
+            if (next && start_failure) {
+                next->accepting = false;
+                next->reader = {};
+                next->status = Status::FAILED;
+                next->finished = true;
+                next->published.store(std::move(start_failure));
+                state.store(std::move(next));
+            }
             return false;
         }
     }
@@ -607,6 +622,9 @@ void detail::SessionTestAccess::before_replay_event(Session& session,
     session.impl_->before_replay_event = std::move(operation);
 }
 Session::~Session() { stop(); }
+void detail::SessionTestAccess::before_worker_start(Session& session, std::function<void()> operation) {
+    session.impl_->before_worker_start = std::move(operation);
+}
 bool Session::start(const std::filesystem::path& directory, Limits limits, Reader reader) noexcept { return impl_->start(directory, limits, std::move(reader), false); }
 bool Session::load(const std::filesystem::path& directory, Limits limits) noexcept { return impl_->start(directory, limits, {}, true); }
 bool Session::submit(const Event& event) noexcept {

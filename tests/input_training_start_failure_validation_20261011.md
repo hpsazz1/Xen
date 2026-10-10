@@ -1,0 +1,11 @@
+# D23输入训练线程启动失败
+
+基线b21b0597540b7c24ad97d39873f26835d51572f1，分支fix/input-training-start-failure-20261011。独立测试EXE替换当前调用线程的operator new；Session的内部before_worker_start钩子只开启分配故障，真实std::thread构造、生产Session异常处理均不替换。本机MSVC14.51.36231的thread::_Start首先make_unique<Tuple>；独立原生thread控制确认在实际构造中抛bad_alloc，未耗尽OS线程资源。
+
+首次/已完成会话后的record和replay四场景，原实现均返回false却保留RECORDING/REPLAYING；其中两record场景还保留Reader订阅闭包。四个状态反例与两订阅反例独立失败，正常重试控制原已通过。
+
+现在先准备无需后续分配的失败快照，线程构造成功后才发布活动会话。构造失败发布FAILED与错误、释放Reader并标记完成。最终四场景均通过，Reader从未执行，无失败归档清单；同一Session随后实际录制和回放正常。补充测试持续拒绝分配直到start/load返回，注入仍仅命中构造分配一次，证明失败收尾没有再分配。
+
+三项CTest（input_training_start_failure_tests、input_training_tests、runtime_input_training_tests）通过1.07秒；补充持续分配失败控制后仅重跑受影响专项通过。文档19文件195链接0错误。正式Release、完整提交、产物身份及远端/CI见本地docs/evidence/XEN-INPUT-START-FAILURE-20261011-001/RESULT.md。初版夹具Reader类型缺少Session限定的编译失败已修正、日志保留，不计运行红例。
+
+所有新输入都是空合成归档与内存闭包；既有Runtime回归使用内存Monitor并检查零输出，无真实采集/设备/系统输入/UI或受限候选入口。start/load/stop仍遵守同一生命周期owner串行调用合同。D22超时与磁盘清单提交竞态未包含，保持开放。
