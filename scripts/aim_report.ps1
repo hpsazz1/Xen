@@ -77,6 +77,38 @@ function Get-XenAimSampleField([object]$Sample, [string]$Name) {
     return $Sample.PSObject.Properties[$Name].Value
 }
 
+function Get-XenAimContinuityKey([object]$Sample) {
+    $key = [ordered]@{ sequence = $null; epoch = $null }
+    foreach ($name in @('sequence', 'aim_observation_epoch')) {
+        if (-not (Test-XenAimSampleField $Sample $name)) { continue }
+        $value = Get-XenAimSampleField $Sample $name
+        if ($null -eq $value -or
+            ($name -eq 'aim_observation_epoch' -and $value -isnot [string]) -or
+            ($value -isnot [string] -and
+             [Type]::GetTypeCode($value.GetType()).ToString() -notin
+                @('SByte', 'Byte', 'Int16', 'UInt16', 'Int32', 'UInt32', 'Int64', 'UInt64'))) {
+            throw "Aim 诊断身份必须为无损整数：$name"
+        }
+        [uint64]$parsed = 0
+        if ([string]$value -notmatch '^[0-9]+$' -or
+            -not [uint64]::TryParse([string]$value, [ref]$parsed)) {
+            throw "Aim 诊断身份不是有效 uint64：$name"
+        }
+        if ($name -eq 'sequence') { $key.sequence = $parsed } else {
+            $key.epoch = $parsed.ToString([Globalization.CultureInfo]::InvariantCulture)
+        }
+    }
+    return [pscustomobject]$key
+}
+
+function Test-XenAimContinuity([object]$Previous, [object]$Current) {
+    if ($null -eq $Previous -or $Previous.epoch -ne $Current.epoch) { return $false }
+    if ($null -eq $Previous.sequence) { return $null -eq $Current.sequence }
+    if ($null -eq $Current.sequence) { return $false }
+    # Decimal preserves all uint64 digits and avoids overflow at the final value.
+    return ([decimal]$Current.sequence - [decimal]$Previous.sequence) -eq 1
+}
+
 function Assert-XenAimTrackingRequestReportFields {
     param([Parameter(Mandatory = $true)][object]$Report)
 
@@ -343,11 +375,17 @@ function Get-XenAimReportSummary {
     [uint64]$previousTrackId = 0
     [string]$previousTrackState = ""
     $previousTrackPredicted = $false
+    $previousContinuity = $null
     $predictionEnabledValue = $PredictionEnabled -eq "on"
     $geometryTolerance = 0.01
 
     for ($index = 0; $index -lt $items.Count; ++$index) {
         $sample = $items[$index]
+        $continuity = Get-XenAimContinuityKey $sample
+        if (-not (Test-XenAimContinuity $previousContinuity $continuity)) {
+            $hasPreviousTarget = $false
+        }
+        $previousContinuity = $continuity
         if ([string]$sample.aim_status -ne "SUCCESS") {
             ++$violations.aim_status_frames
             $hasPreviousTarget = $false

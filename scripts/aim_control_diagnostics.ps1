@@ -190,19 +190,18 @@ function Get-XenAimControlDiagnosticsSummary {
     [uint64]$directionReversals = 0
     [int]$previousNonzeroSign = 0
     [uint64]$previousTrackId = 0
-    [uint64]$previousSequence = 0
+    $previousContinuity = $null
     $zeroWindowReasons = [System.Collections.Generic.List[string]]::new()
 
     foreach ($sample in $items) {
-        $sequence = [uint64]$sample.sequence
-        if ($previousSequence -ne 0 -and $sequence -le $previousSequence) {
-            # 多段报告可能来自独立 Runtime 生命周期；序号未继续增长时，
-            # 不得把上一段末尾与下一段开头拼成一次虚假的物理反转。
+        $continuity = Get-XenAimContinuityKey $sample
+        if (-not (Test-XenAimContinuity $previousContinuity $continuity)) {
+            # 丢帧可能覆盖一次性reset；持久epoch或序号断点仍须分段。
             $previousNonzeroSign = 0
             $previousTrackId = 0
             $zeroWindowReasons.Clear()
         }
-        $previousSequence = $sequence
+        $previousContinuity = $continuity
         $controllable = [string]$sample.aim_status -eq "SUCCESS" -and
             [bool]$sample.aim_has_target -and
             [string]$sample.aim_track_state -eq "CONFIRMED" -and

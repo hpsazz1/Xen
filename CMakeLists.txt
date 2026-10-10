@@ -2440,6 +2440,11 @@ if(BUILD_TESTING)
         tests/debug_tests.cpp)
     target_link_libraries(debug_tests PRIVATE xen_debug log)
     add_test(NAME debug_tests COMMAND debug_tests)
+    add_executable(aim_diagnostic_epoch_fixture tests/aim_diagnostic_epoch_fixture.cpp)
+    target_link_libraries(aim_diagnostic_epoch_fixture PRIVATE xen_debug log)
+    xen_add_windows_powershell_test(aim_diagnostic_epoch_tests
+        "${PROJECT_SOURCE_DIR}/tests/aim_diagnostic_epoch_tests.ps1"
+        -FixtureExecutable "$<TARGET_FILE:aim_diagnostic_epoch_fixture>")
     add_executable(benchmark_report_fixture tests/benchmark_report_fixture.cpp)
     target_link_libraries(benchmark_report_fixture PRIVATE xen_debug log)
     xen_add_windows_powershell_test(benchmark_evidence_snapshot_tests
