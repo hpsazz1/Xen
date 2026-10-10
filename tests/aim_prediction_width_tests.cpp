@@ -24,7 +24,8 @@ double median(std::vector<double> values) {
 }
 enum class Width { FIXED, ALTERNATING, SEEDED_ALTERNATING };
 struct Summary { double lead = 0, required = 0; unsigned samples = 0; };
-Summary replay(Width width, std::ostream* csv, bool closed_loop = false) {
+Summary replay(Width width, std::ostream* csv, bool closed_loop = false,
+               float source_scale = 1, float source_step = .75f, float source_deadzone = 1.5f) {
     AimConfig config;
     config.min_confirmed_hits = 1;
     config.enable_prediction = config.enable_delay_compensation = true;
@@ -33,7 +34,7 @@ Summary replay(Width width, std::ostream* csv, bool closed_loop = false) {
     config.max_delay_compensation_percent = 15;
     config.max_prediction_lead_percent = 35;
     config.counts_per_pixel_x = config.counts_per_pixel_y = .5f;
-    config.deadzone_pixels = 1.5f;
+    config.deadzone_pixels = source_deadzone;
     config.soft_zone_radius_percent = 0;
     config.acquisition_range_percent = 100;
     Aim aim(config);
@@ -48,25 +49,26 @@ Summary replay(Width width, std::ostream* csv, bool closed_loop = false) {
     for (int n = 0; n < frames; ++n) {
         camera += delayed[n % delayed.size()] / config.counts_per_pixel_x * .18f;
         delayed[n % delayed.size()] = 0;
-        const float center = 160.0f + .75f * n - camera;
-        const float size = 20.0f + ((width == Width::ALTERNATING ||
-            (width == Width::SEEDED_ALTERNATING && n >= 40)) ? n % 2 : 0);
+        const float center = (160.0f + source_step * n - camera) / source_scale;
+        const float size = (20.0f + ((width == Width::ALTERNATING ||
+            (width == Width::SEEDED_ALTERNATING && n >= 40)) ? n % 2 : 0)) / source_scale;
         AimFrame frame;
         frame.sequence = n + 1;
         frame.captured_at = begin + std::chrono::nanoseconds(static_cast<long long>(n) * 1000000000 / 240);
         frame.control_at = frame.captured_at + 3ms;
-        frame.roi_width = frame.roi_height = 320;
-        frame.control_center_x = frame.control_center_y = 160;
+        frame.roi_width = frame.roi_height = static_cast<int>(std::lround(320/source_scale));
+        frame.control_center_x = frame.control_center_y = 160/source_scale;
+        frame.source_pixels_per_roi_pixel_x = frame.source_pixels_per_roi_pixel_y = source_scale;
         frame.lock_active = true;
         frame.observation_epoch = 1;
-        frame.detections = {{center-size/2, 141.1f, center+size/2, 195.1f, .95f, 0}};
+        frame.detections = {{center-size/2, 141.1f/source_scale, center+size/2, 195.1f/source_scale, .95f, 0}};
         if (n > 0) {
             auto& bg = frame.background_motion_x;
             bg.status = AimBackgroundMotionStatus::VALID;
             bg.previous_sequence = previous.sequence; bg.sequence = frame.sequence;
             bg.previous_captured_at = previous.captured_at; bg.captured_at = frame.captured_at;
             bg.observation_epoch = frame.observation_epoch;
-            bg.dx_roi_pixels = -(camera-previous_camera); bg.usable_patch_count = 2; bg.min_response = 1;
+            bg.dx_roi_pixels = -(camera-previous_camera)/source_scale; bg.usable_patch_count = 2; bg.min_response = 1;
         }
         const auto result = aim.process(frame);
         if (!identity && result.has_target) identity = result.target.track_id;
@@ -76,16 +78,16 @@ Summary replay(Width width, std::ostream* csv, bool closed_loop = false) {
             "每帧必须是真实匹配的同一CONFIRMED目标");
         if (n > 0) expect(result.control.background_motion_use_x == AimBackgroundMotionUse::CONSUMED,
             "每个后续帧必须实际消费合法背景帧对，不能空测");
-        const double lead = result.target.prediction_aim_x - result.target.base_aim_x;
+        const double lead = (result.target.prediction_aim_x - result.target.base_aim_x)*source_scale;
         const double dt = n > 0 ? std::chrono::duration<double>(frame.captured_at-previous.captured_at).count() : 0;
-        const double truth_velocity = n > 0 ? .75 / dt : 0;
+        const double truth_velocity = n > 0 ? source_step / dt : 0;
         const double one_horizon = truth_velocity *
             (std::chrono::duration<double>(frame.control_at-frame.captured_at).count() + config.control_delay_ms/1000.0);
         if (n >= frames-20) { leads.push_back(lead); required.push_back(one_horizon); }
         if (csv) *csv << static_cast<int>(width) + (closed_loop ? 3 : 0) << ',' << n << ',' << center << ',' << size << ','
-            << truth_velocity << ',' << result.target.velocity_x << ',' << lead << ',' << one_horizon << ','
+            << truth_velocity << ',' << result.target.velocity_x*source_scale << ',' << lead << ',' << one_horizon << ','
             << result.target.delay_compensation_ms_x << ',' << result.target.lead_active << ','
-            << static_cast<int>(result.control.background_motion_use_x) << ',' << result.target.track_id << '\n';
+            << static_cast<int>(result.control.background_motion_use_x) << ',' << result.target.track_id << ',' << source_scale << '\n';
         const int executed = closed_loop && result.has_command ? result.command.dx_counts : 0;
         delayed[n % delayed.size()] = executed;
         expect(aim.record_backend_completed_command(frame.sequence, frame.control_at, executed, 0),
@@ -97,6 +99,55 @@ Summary replay(Width width, std::ostream* csv, bool closed_loop = false) {
 }
 
 enum class Boundary { WIDTH_ONLY, ONE_EDGE, CAMERA_ONLY, STOP_REVERSE, SOURCE_BREAK };
+std::vector<std::array<int, 3>> loss_replay(bool prediction, float legacy_gain) {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.max_lost_frames = 8;
+    config.enable_prediction = prediction;
+    config.predicted_gain = legacy_gain;
+    Aim aim(config);
+    const auto begin = Clock::time_point{} + 30s;
+    std::uint64_t identity = 0;
+    int commands_before = 0, commands_after = 0, lost_frames = 0;
+    std::vector<std::array<int, 3>> outputs;
+    for (int n = 0; n < 60; ++n) {
+        AimFrame frame;
+        frame.sequence = n + 1;
+        frame.captured_at = begin + n * 4ms;
+        frame.control_at = frame.captured_at + 3ms;
+        frame.roi_width = frame.roi_height = 320;
+        frame.control_center_x = frame.control_center_y = 160;
+        frame.lock_active = true;
+        frame.observation_epoch = 1;
+        const bool lost = n == 40 || n == 41;
+        if (!lost) frame.detections = {{190 + .25f*n, 141.1f, 210 + .25f*n, 195.1f, .95f, 0}};
+        const auto result = aim.process(frame);
+        if (!identity && result.has_target) identity = result.target.track_id;
+        expect(result.status == AimStatus::SUCCESS && result.has_target && identity != 0 &&
+            result.target.track_id == identity, "丢失与恢复必须保持同一真实建立的身份");
+        if (lost) {
+            ++lost_frames;
+            expect(result.target.predicted && !result.target.matched_observation_valid &&
+                !result.has_command && result.command.dx_counts == 0 && result.command.dy_counts == 0,
+                "预测开关和旧比例均不能令丢失目标产生移动输出");
+        } else {
+            expect(!result.target.predicted && result.target.matched_observation_valid &&
+                result.target.state == TrackState::CONFIRMED, "丢失前后必须实际匹配并确认目标");
+            if (result.has_command && (result.command.dx_counts || result.command.dy_counts)) {
+                if (n < 40) ++commands_before; else ++commands_after;
+            }
+        }
+        outputs.push_back({result.has_command, result.command.dx_counts, result.command.dy_counts});
+        expect(aim.record_backend_completed_command(frame.sequence, frame.control_at, 0, 0),
+            "丢失回放必须明确记录零执行回执");
+    }
+    expect(lost_frames == 2 && commands_before > 0 && commands_after > 0,
+        "丢失停输出测试必须覆盖实际纠偏、两帧丢失和恢复纠偏，不能空测");
+    std::cout << "loss prediction=" << prediction << "; legacy_gain=" << legacy_gain
+              << "; commands before/after=" << commands_before << '/' << commands_after << '\n';
+    return outputs;
+}
+
 void boundary_replay(Boundary kind) {
     AimConfig config;
     config.min_confirmed_hits = 1;
@@ -174,7 +225,7 @@ int main(int argc, char** argv) try {
     if (argc == 2) {
         csv.open(argv[1]);
         if (!csv) throw std::runtime_error("无法创建回放CSV");
-        csv << "width_mode,frame,center,width,truth_velocity,target_velocity,lead,one_horizon,projection_ms_x,lead_active,background_use,track_id\n";
+        csv << "width_mode,frame,center_roi,width_roi,truth_velocity_source,target_velocity_source,lead_source,one_horizon_source,projection_ms_x,lead_active,background_use,track_id,source_scale\n";
     }
     const auto fixed = replay(Width::FIXED, csv.is_open() ? &csv : nullptr);
     const auto alternating = replay(Width::ALTERNATING, csv.is_open() ? &csv : nullptr);
@@ -193,6 +244,25 @@ int main(int argc, char** argv) try {
            "真实回执与独立延迟相机 plant 下，宽度变化不得使前探低于一次独立时域位移");
     for (auto kind : {Boundary::WIDTH_ONLY, Boundary::ONE_EDGE, Boundary::CAMERA_ONLY,
                       Boundary::STOP_REVERSE, Boundary::SOURCE_BREAK}) boundary_replay(kind);
+    // 同一个source轨迹与物理死区，仅改变ROI缩放；末段仍逐帧检查身份/来源/零回执。
+    // 3source-px死区的一半为1.5source-px。上下两个运动量隔离缩放门槛，避开0.25ROI政策下限。
+    for (float source_step : {.4f, 50.0f/240}) {
+        const auto half = replay(Width::FIXED,csv.is_open()?&csv:nullptr,false,.5f,source_step,3);
+        const auto one = replay(Width::FIXED,csv.is_open()?&csv:nullptr,false,1,source_step,3);
+        const auto two = replay(Width::FIXED,csv.is_open()?&csv:nullptr,false,2,source_step,3);
+        std::cout << "source_step=" << source_step << "; scale 0.5/1/2 lead source P50="
+                  << half.lead << '/' << one.lead << '/' << two.lead << '\n';
+        expect(std::abs(half.lead-one.lead)<.01 && std::abs(two.lead-one.lead)<.01,
+            "同一source运动和死区不能因ROI缩放而改变预测激活");
+        if(source_step>.3f) expect(one.lead>=one.required,"阈值上方基准必须实际激活并覆盖独立时域");
+        else expect(std::abs(one.lead)<.01,"阈值下方基准必须保持未激活");
+    }
+    for (bool prediction : {false, true}) {
+        const auto baseline = loss_replay(prediction, 0);
+        for (float gain : {.5f, 1.0f})
+            expect(loss_replay(prediction, gain) == baseline,
+                "旧比例0/0.5/1必须产生相同的检测、丢失和恢复输出序列");
+    }
     Log::shutdown();
     return failures ? 1 : 0;
 } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 2; }

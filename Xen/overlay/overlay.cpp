@@ -3558,11 +3558,9 @@ struct Overlay::Impl {
                 &app_config.aim.max_prediction_lead_percent,
                 1.0f, 50.0f, "%.0f%%");
             form_row(
-                "丢失轨迹控制比例",
-                "目标短时丢失并由预测轨迹继续控制时，缩放该轨迹的控制请求，范围 0～1；正常观测下的运动提前不使用此比例。预测关闭时可预先编辑，但不执行丢失轨迹输出。");
-            slider_float_control(
-                "predicted_gain", &app_config.aim.predicted_gain,
-                0.0f, 1.0f, "%.2f");
+                "目标短时丢失",
+                "保留轨迹供重新关联；丢失期间停止移动输出，重新检测到目标后恢复。预测开关不改变此行为。");
+            ImGui::TextWrapped("停止输出，等待重新检测");
             ImGui::EndTable();
         }
         end_config_panel();

@@ -3987,12 +3987,14 @@ struct Aim::Impl {
                          kGeometricProjectionMaximumSeconds) *
                 kPredictionAdditionalHorizonScale;
             const float activation_distance_x = std::max(
-                {0.25f, config.deadzone_pixels * 0.50f,
+                {0.25f, config.deadzone_pixels * 0.50f /
+                            frame.source_pixels_per_roi_pixel_x,
                  0.50f /
                      (config.counts_per_pixel_x *
                       frame.source_pixels_per_roi_pixel_x)});
             const float activation_distance_y = std::max(
-                {0.25f, config.deadzone_pixels * 0.50f,
+                {0.25f, config.deadzone_pixels * 0.50f /
+                            frame.source_pixels_per_roi_pixel_y,
                  0.50f /
                      (config.counts_per_pixel_y *
                       frame.source_pixels_per_roi_pixel_y)});

@@ -534,6 +534,16 @@ int wmain(int argc, wchar_t** argv) {
             runtime.state = RuntimeState::STOPPED;
             frame(); frame();
 
+            select_page(2);
+            auto* aim_content = preview_window("content");
+            ImGui::SetScrollY(aim_content, aim_content->ScrollMax.y);
+            frame(); frame(); frame();
+            require_page_table("prediction_form");
+            require(capture.text.find("停止输出，等待重新检测") != std::string::npos &&
+                capture.text.find("丢失轨迹控制比例") == std::string::npos,
+                "瞄准页必须明确丢失停输出且不显示误导比例控件");
+            save_window(capture, output / "usability-aim-loss-policy.png");
+
             workspace.job_running = true;
             workspace.job_operation = "env_check";
             workspace.job_state = "RUNNING";
@@ -633,7 +643,7 @@ int wmain(int argc, wchar_t** argv) {
 
             { std::ofstream report(output / "usability-audit.txt", std::ios::binary);
               report << "PASS 日志返回、侧栏 Tab/Shift+Tab/Space/Enter、开关键盘操作及禁用约束、"
-                  "训练/采集首屏作业入口、折叠与重复取消、完成态禁用、采集排空和写盘失败状态。\n"
+                  "训练/采集首屏作业入口、折叠与重复取消、完成态禁用、采集排空和写盘失败状态、丢失停输出说明。\n"
                   "合成工作区动作：取消4次，打开目录2次；全部只核对意图，不执行。\n"
                   "Runtime/真实设备输入/系统键鼠注入：0。截图仅包含本进程渲染目标。\n";
               require(report.good(), "可用性验收报告写入失败"); }
