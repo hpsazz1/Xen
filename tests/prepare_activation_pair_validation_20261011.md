@@ -1,0 +1,13 @@
+# D09 远端Prepare实际入口配对验证
+
+基线dd8350eb31199151d2c1d3f28ede4103ec54f429；分支fix/prepare-activation-pair-20261011。完整执行生产invoke_aim_manual_acceptance.ps1的Prepare模式，所有路径指向唯一临时合成包；EXE、模型、辅助脚本均为不可执行文本，不调用SSH、Launch、真实Provider、采集或设备。
+
+原实现健康流程及解除占用后的两次重试通过，三种实际负例失败：以Read/FileShare.Read持有manifest，第二次真实File.Replace失败后留下新config；同包.worker-delta.lock被独占时仍完成Prepare；manifest缺config记录时先改写config后才拒绝。失败轮没有完整task.json，但包内配对已不一致。
+
+修复使Activate-Config取得同包锁，冻结原始配对、从备份快照解析清单，在写入前确认唯一config记录和当前模型/依赖。每项真实替换成功即登记提交事实，失败仅回滚本事务仍拥有的字节；原始备份不被恢复操作消耗。未知恢复或并发改动明确报错并保留完整阶段，锁在清理异常时也释放。不新增发布包模块依赖，不改变Launch物理授权门禁和配置内容。
+
+最终十例通过：健康、manifest占用、包锁占用、缺记录、两次解锁重试、config/manifest提交后清理异常、回滚被只读句柄占用、并发字节改变。后四例仅在真实File.Replace后的Remove-Item注入故障，先读取目标验证已提交；没有替换生产事务或原子写入器。未知恢复保留两份旧备份；并发字节不被覆盖。所有受测返回路径均能重新独占打开包锁。
+
+四个相关CTest通过6.30秒（prepare_activation_pair_tests、prepare_commit_accounting_tests、publication_script_tests、aim_marker_snapshot_tests）；双机脚本及公开文档19文件195链接0错误通过。正式Release、远端完整SHA和CI证据另见本地docs/evidence/XEN-PREPARE-ACTIVATION-PAIR-20261011-001/RESULT.md。
+
+这是一项文件事务修复；不承诺进程崩溃或断电时的多文件原子提交，也不声称跨机器SSH真实执行已验证。激活锁覆盖包内配置/清单事务，既有任务后续文件生成流程保持原样。平台拒绝的候选消费/保存/采用入口未接触。

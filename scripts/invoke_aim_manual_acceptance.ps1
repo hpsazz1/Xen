@@ -122,7 +122,8 @@ function Start-DiagnosticProcess([string]$Executable, [string]$WorkingDirectory)
     } finally { [Environment]::SetEnvironmentVariable('XEN_RUNTIME_DIAGNOSTICS', $previous, 'Process') }
 }
 
-function Write-TextAtomically([string]$Path, [string]$Content) {
+function Write-TextAtomically([string]$Path, [string]$Content, [object]$Committed = $null) {
+    if ($null -ne $Committed) { $Committed.Value = $false }
     $parent = Split-Path -Parent $Path
     New-Item -ItemType Directory -Path $parent -Force | Out-Null
     $pending = "$Path.pending-$([guid]::NewGuid().ToString('N'))"
@@ -133,6 +134,7 @@ function Write-TextAtomically([string]$Path, [string]$Content) {
             $backup = "$Path.backup-$([guid]::NewGuid().ToString('N'))"
             try {
                 [System.IO.File]::Replace($pending, $Path, $backup)
+                if ($null -ne $Committed) { $Committed.Value = $true }
             } finally {
                 if (Test-Path -LiteralPath $backup) {
                     Remove-Item -LiteralPath $backup -Force
@@ -140,6 +142,7 @@ function Write-TextAtomically([string]$Path, [string]$Content) {
             }
         } else {
             Move-Item -LiteralPath $pending -Destination $Path
+            if ($null -ne $Committed) { $Committed.Value = $true }
         }
     } finally {
         if (Test-Path -LiteralPath $pending) {
@@ -1112,8 +1115,7 @@ function Publish-CompletedPixelEvidenceIncoming(
     return $result
 }
 
-function Read-Manifest() {
-    $path = Join-Path $PackageRoot "manifest.json"
+function Read-Manifest([string]$Path = (Join-Path $PackageRoot 'manifest.json')) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "完整发布包缺少 manifest.json：$PackageRoot"
     }
@@ -1311,23 +1313,87 @@ function Activate-Config(
         [string]$ConfigText,
         [string]$SourceLabel,
         [string]$ModelName) {
-    $configPath = Join-Path $PackageRoot "config.ini"
-    Write-TextAtomically $configPath $ConfigText
-    $record = @($ManifestResult.Value.files | Where-Object {
-        [string]$_.path -ieq "config.ini"
-    })
-    if ($record.Count -ne 1) {
-        throw "完整包清单必须且只能登记一个 config.ini。"
+    # 与差量发布共用包锁；发布脚本自身可独立分发，不新增包内模块依赖。
+    $directory = [IO.DirectoryInfo]::new($PackageRoot)
+    while ($null -ne $directory) {
+        if (([IO.File]::GetAttributes($directory.FullName) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Prepare activation rejects a reparse point in the package path.'
+        }
+        $directory = $directory.Parent
     }
-    $file = Get-Item -LiteralPath $configPath
-    $record[0].size = [long]$file.Length
-    $record[0].sha256 = (Get-FileHash -LiteralPath $configPath `
-        -Algorithm SHA256).Hash.ToLowerInvariant()
-    $record[0].source = $SourceLabel
-    Write-JsonAtomically $ManifestResult.Path $ManifestResult.Value
-    $verified = Read-Manifest
-    Assert-TaskManifestFiles $verified.Value $ModelName
-    return $verified
+    foreach ($name in @('config.ini', 'manifest.json', '.worker-delta.lock')) {
+        $path = Join-Path $PackageRoot $name
+        if ((Test-Path -LiteralPath $path) -and
+            (([IO.File]::GetAttributes($path) -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+            throw "Prepare activation rejects a reparse point: $name"
+        }
+    }
+    $lock = [IO.File]::Open((Join-Path $PackageRoot '.worker-delta.lock'),
+        [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    $stage = Join-Path $PackageRoot ('.prepare-activate-' + [guid]::NewGuid().ToString('N'))
+    $applied = [Collections.Generic.List[string]]::new()
+    $oldHashes = @{}; $newHashes = @{}
+    $stageOwned = $false; $restored = $true
+    try {
+        New-Item -ItemType Directory -Path $stage | Out-Null
+        $stageOwned = $true
+        foreach ($name in @('config.ini', 'manifest.json')) {
+            $path = Join-Path $PackageRoot $name
+            Copy-Item -LiteralPath $path -Destination (Join-Path $stage "$name.backup")
+            $oldHashes[$name] = (Get-FileHash -LiteralPath (Join-Path $stage "$name.backup") -Algorithm SHA256).Hash
+        }
+        # 锁内解析备份快照，避免把锁外验证后的陈旧清单覆盖到新发布包。
+        $current = Read-Manifest (Join-Path $stage 'manifest.json.backup')
+        if ((Get-ModelName $current.Value) -cne $ModelName) { throw 'Prepare model changed before activation.' }
+        Assert-TaskManifestFiles $current.Value $ModelName -AllowConfigMismatch
+        $record = @($current.Value.files | Where-Object { [string]$_.path -ieq 'config.ini' })
+        if ($record.Count -ne 1) { throw '完整包清单必须且只能登记一个 config.ini。' }
+        $configPath = Join-Path $stage 'config.ini'
+        Write-TextAtomically $configPath $ConfigText
+        $record[0].size = [long](Get-Item -LiteralPath $configPath).Length
+        $record[0].sha256 = (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $record[0].source = $SourceLabel
+        Write-JsonAtomically (Join-Path $stage 'manifest.json') $current.Value
+        foreach ($name in @('config.ini', 'manifest.json')) {
+            $newHashes[$name] = (Get-FileHash -LiteralPath (Join-Path $stage $name) -Algorithm SHA256).Hash
+        }
+        foreach ($name in @('config.ini', 'manifest.json')) {
+            $path = Join-Path $PackageRoot $name
+            if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -cne $oldHashes[$name]) {
+                throw 'Prepare activation target changed before publication.'
+            }
+            $committed = $false
+            try {
+                Write-TextAtomically $path ([IO.File]::ReadAllText((Join-Path $stage $name))) ([ref]$committed)
+            } finally { if ($committed) { $applied.Add($name) } }
+        }
+        $verified = Read-Manifest
+        Assert-TaskManifestFiles $verified.Value $ModelName
+        return $verified
+    } catch {
+        $failure = $_
+        try {
+            for ($index = $applied.Count - 1; $index -ge 0; $index--) {
+                $name = $applied[$index]
+                $path = Join-Path $PackageRoot $name
+                if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -cne $newHashes[$name]) {
+                    throw 'Prepare activation target changed; refuse to overwrite concurrent changes.'
+                }
+                # 原始备份永不被替换调用消耗；恢复失败时仍有完整配对材料。
+                $pending = Join-Path $stage "$name.rollback"
+                Copy-Item -LiteralPath (Join-Path $stage "$name.backup") -Destination $pending
+                [IO.File]::Replace($pending, $path, (Join-Path $stage "$name.displaced"))
+            }
+        } catch {
+            $restored = $false
+            throw "Prepare activation rollback not verified; retain $stage. Original error: $failure; rollback: $_"
+        }
+        throw $failure
+    } finally {
+        try {
+            if ($stageOwned -and $restored) { Remove-Item -LiteralPath $stage -Recurse -Force }
+        } finally { $lock.Dispose() }
+    }
 }
 
 function Get-ScenarioDefinition() {
