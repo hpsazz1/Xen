@@ -2216,8 +2216,9 @@ if(BUILD_TESTING)
         tests/mouse_effect_probe_scheduler_study_driver_tests.cpp)
     target_include_directories(mouse_effect_probe_scheduler_study_driver_tests PRIVATE
         "${PROJECT_SOURCE_DIR}/Xen")
+    # 测试包含真实 Seal 入口，必须同步链接其无设备报告校验依赖。
     target_link_libraries(mouse_effect_probe_scheduler_study_driver_tests PRIVATE
-        nlohmann_json::nlohmann_json bcrypt)
+        mouse_effect_probe_report_validation nlohmann_json::nlohmann_json bcrypt)
     add_test(NAME mouse_effect_probe_scheduler_study_driver_tests
         COMMAND mouse_effect_probe_scheduler_study_driver_tests)
     add_test(NAME mouse_effect_probe_scheduler_study_cli_tests
