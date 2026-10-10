@@ -450,6 +450,15 @@ Physical B 工具包包含此模块，固定清单由 24 项更新为 25 项；G
 命令，不修改用户或仓库配置。
 
 `windows_long_path_cli_tests`、`probe_native_process_tests` 以及原 Prepare/owner 回归覆盖深路径、
-Unicode/空格、参数引用、目标冲突和失败清理。当前 VS 18/MSVC 14.51/CUDA 13.2 的
-`runtime_component_producer_tests` 在本轮深构建根仍失败；同目录扩展路径实验也被 FileTracker、
-CL 或 NVCC 拒绝。该项保留失败，未通过缩根或跳过编译器检测改成绿色。
+Unicode/空格、参数引用、目标冲突和失败清理。
+
+运行库组件元数据由 `resolve_onnxruntime.cmake` 和 `runtime_metadata.cmake` 与真实工程共用。
+`runtime_component_producer_tests` 在原 owned 深根用 Ninja Multi-Config / `LANGUAGES NONE`
+验证白名单、缺件拒绝、真实 TensorRT Provider 导入关系、CRT、身份和发布分组；另外检查更深
+Unicode 输出的内容一致性。Ninja 缺失只使该测试明确失败，不影响真实根工程配置。
+夹具不编译合成 DLL，也不运行部署目标。
+
+真实根工程仍启用 CXX/CUDA 并检查 MSVC/NVCC，CRT 来源仍由实际工具链发现。
+此前完整嵌套工程在 VS 18/MSVC 14.51/CUDA 13.2 深根的 FileTracker/CL/NVCC 失败继续作为
+工具链边界保留；同根 Ninja 完整配置也在深 PDB 失败。元数据回归通过不代表任意深路径工程
+可编译，没有缩短用户路径、伪造编译器可用状态或修改系统设置。

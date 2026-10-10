@@ -4,6 +4,7 @@ foreach(required_variable IN ITEMS
         XEN_SOURCE_DIR
         XEN_COMPONENT_TEST_ROOT
         XEN_GENERATOR
+        XEN_METADATA_NINJA_EXECUTABLE
         XEN_OPENCV_DIR
         XEN_CUDA_ROOT
         XEN_TENSORRT_PROVIDER_DLL
@@ -11,13 +12,19 @@ foreach(required_variable IN ITEMS
         XEN_SPDLOG_SOURCE_DIR
         XEN_SIMPLEINI_SOURCE_DIR
         XEN_NLOHMANN_JSON_SOURCE_DIR
-        XEN_IMGUI_SOURCE_DIR)
+        XEN_IMGUI_SOURCE_DIR
+        XEN_RUNTIME_LINKER
+        XEN_MSVC_REDIST_ROOT)
     if(NOT DEFINED ${required_variable} OR
        "${${required_variable}}" STREQUAL "")
         message(FATAL_ERROR
             "运行库组件 producer 测试缺少参数：${required_variable}")
     endif()
 endforeach()
+if(NOT EXISTS "${XEN_METADATA_NINJA_EXECUTABLE}")
+    message(FATAL_ERROR
+        "运行库元数据测试需要 Ninja（Visual Studio CMake 工具随附）；缺失时测试明确失败，不阻断真实根工程配置。")
+endif()
 if(NOT EXISTS "${XEN_TENSORRT_PROVIDER_DLL}" OR
    NOT XEN_TENSORRT_MAJOR MATCHES "^[0-9]+$")
     message(FATAL_ERROR
@@ -141,11 +148,11 @@ function(make_fake_sdk fixture_root omit_cudnn_name omit_tensorrt_resource_id)
         "must-not-be-authorized\n")
 endfunction()
 
-function(run_root_configure fixture_root build_name result_var output_var)
+function(run_metadata_configure fixture_root build_name result_var output_var)
     set(build_dir "${test_root}/${build_name}")
     set(command
         "${CMAKE_COMMAND}"
-        -S "${source_dir}"
+        -S "${source_dir}/tests/runtime_component_project"
         -B "${build_dir}"
         -G "${XEN_GENERATOR}")
     if(DEFINED XEN_GENERATOR_PLATFORM AND
@@ -153,6 +160,10 @@ function(run_root_configure fixture_root build_name result_var output_var)
         list(APPEND command -A "${XEN_GENERATOR_PLATFORM}")
     endif()
     list(APPEND command
+        "-DCMAKE_MAKE_PROGRAM=${XEN_METADATA_NINJA_EXECUTABLE}"
+        "-DXEN_SOURCE_DIR=${source_dir}"
+        "-DXEN_RUNTIME_LINKER=${XEN_RUNTIME_LINKER}"
+        "-DXEN_MSVC_REDIST_ROOT=${XEN_MSVC_REDIST_ROOT}"
         "-DONNXRUNTIME_ROOT=${fixture_root}/ort"
         "-DOpenCV_DIR=${XEN_OPENCV_DIR}"
         "-DXEN_CUDA_ROOT=${XEN_CUDA_ROOT}"
@@ -160,13 +171,7 @@ function(run_root_configure fixture_root build_name result_var output_var)
         "-DXEN_TENSORRT_ROOT=${fixture_root}/tensorrt"
         "-DXEN_TENSORRT_MAJOR=${XEN_TENSORRT_MAJOR}"
         "-DXEN_DIRECTML_ROOT="
-        "-DXEN_NDI_SDK_ROOT="
-        "-DBUILD_TESTING=OFF"
-        "-DFETCHCONTENT_FULLY_DISCONNECTED=ON"
-        "-DFETCHCONTENT_SOURCE_DIR_SPDLOG=${XEN_SPDLOG_SOURCE_DIR}"
-        "-DFETCHCONTENT_SOURCE_DIR_SIMPLEINI=${XEN_SIMPLEINI_SOURCE_DIR}"
-        "-DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=${XEN_NLOHMANN_JSON_SOURCE_DIR}"
-        "-DFETCHCONTENT_SOURCE_DIR_IMGUI=${XEN_IMGUI_SOURCE_DIR}")
+        "-DXEN_NDI_SDK_ROOT=")
     if(ARGC GREATER 4)
         list(APPEND command "-DXEN_MSVC_REDIST_ROOT=${ARGV4}")
     endif()
@@ -181,7 +186,7 @@ endfunction()
 
 set(complete_fixture "${test_root}/complete-sdk")
 make_fake_sdk("${complete_fixture}" "" "")
-run_root_configure("${complete_fixture}" "build-complete"
+run_metadata_configure("${complete_fixture}" "build-complete"
     complete_result complete_output)
 if(NOT complete_result EQUAL 0)
     list(APPEND test_failures
@@ -194,6 +199,11 @@ else()
         list(APPEND test_failures "完整配置未生成 build identity")
     else()
         file(READ "${identity_path}" identity_content)
+        string(FIND "${identity_content}"
+            "\"source_root\": \"${source_dir}\"" identity_source_index)
+        if(identity_source_index EQUAL -1)
+            list(APPEND test_failures "元数据身份的 source_root 不是实际产品根")
+        endif()
         string(REGEX MATCH
             "\"components\"[ \t\r\n]*:[ \t\r\n]*\\[([^]]*)\\]"
             identity_components_match "${identity_content}")
@@ -288,7 +298,7 @@ foreach(crt_name IN ITEMS msvcp140.dll msvcp140_1.dll msvcp140_2.dll
         msvcp140_codecvt_ids.dll vcruntime140.dll vcruntime140_1.dll concrt140.dll)
     file(WRITE "${missing_crt_root}/${crt_name}" "configure-only fixture\n")
 endforeach()
-run_root_configure("${complete_fixture}" "build-missing-crt"
+run_metadata_configure("${complete_fixture}" "build-missing-crt"
     missing_crt_result missing_crt_output "${missing_crt_root}")
 if(missing_crt_result EQUAL 0 OR NOT missing_crt_output MATCHES
         "Required official MSVC runtime is missing:.*msvcp140_atomic_wait\\.dll")
@@ -297,7 +307,7 @@ endif()
 
 set(missing_fixture "${test_root}/missing-sdk")
 make_fake_sdk("${missing_fixture}" "cudnn_ops64_9.dll" "")
-run_root_configure("${missing_fixture}" "build-missing"
+run_metadata_configure("${missing_fixture}" "build-missing"
     missing_result missing_output)
 if(missing_result EQUAL 0 OR
    NOT missing_output MATCHES
@@ -308,13 +318,56 @@ endif()
 
 set(missing_tensorrt_fixture "${test_root}/missing-tensorrt-sdk")
 make_fake_sdk("${missing_tensorrt_fixture}" "" "sm120")
-run_root_configure("${missing_tensorrt_fixture}" "build-missing-tensorrt"
+run_metadata_configure("${missing_tensorrt_fixture}" "build-missing-tensorrt"
     missing_tensorrt_result missing_tensorrt_output)
 if(missing_tensorrt_result EQUAL 0 OR
    NOT missing_tensorrt_output MATCHES
        "Required.*TensorRT.*nvinfer_builder_resource_sm120_${XEN_TENSORRT_MAJOR}\\.dll|nvinfer_builder_resource_sm120_${XEN_TENSORRT_MAJOR}\\.dll.*required")
     list(APPEND test_failures
         "缺少当前必需 TensorRT builder resource 时未在配置期失败：${missing_tensorrt_output}")
+endif()
+
+# 真正执行原 Provider 的导入检查，防止 NONE 夹具因没有隐式 MSVC 变量跳过 ABI 边界。
+set(original_tensorrt_major "${XEN_TENSORRT_MAJOR}")
+math(EXPR XEN_TENSORRT_MAJOR "${original_tensorrt_major} + 1")
+set(mismatched_fixture "${test_root}/mismatched-tensorrt-sdk")
+make_fake_sdk("${mismatched_fixture}" "" "")
+run_metadata_configure("${mismatched_fixture}" "build-mismatched-tensorrt"
+    mismatched_result mismatched_output)
+set(XEN_TENSORRT_MAJOR "${original_tensorrt_major}")
+if(mismatched_result EQUAL 0 OR NOT mismatched_output MATCHES
+        "TensorRT SDK major.*is incompatible with the selected")
+    list(APPEND test_failures "真实 TensorRT Provider ABI 不匹配未拒绝：${mismatched_output}")
+endif()
+
+# 原四组目录保持原值，另在更深的 Unicode/空格输出路径验证同一元数据 producer。
+set(unicode_build_name "元数据 Unicode 深路径")
+foreach(segment RANGE 1 6)
+    string(APPEND unicode_build_name "/runtime metadata 深路径 segment ${segment}")
+endforeach()
+string(LENGTH "${test_root}/${unicode_build_name}" unicode_path_length)
+if(unicode_path_length LESS 300)
+    list(APPEND test_failures "Unicode 元数据夹具没有达到预期深度")
+endif()
+run_metadata_configure("${complete_fixture}" "${unicode_build_name}"
+    unicode_result unicode_output)
+if(NOT unicode_result EQUAL 0)
+    list(APPEND test_failures "深 Unicode 元数据配置失败：${unicode_output}")
+else()
+    foreach(metadata_file IN ITEMS
+            xen-build-identity.json xen-runtime-authorized-Release.cmake
+            Release/xen-release-layout.json)
+        if(NOT EXISTS "${test_root}/build-complete/${metadata_file}" OR
+           NOT EXISTS "${test_root}/${unicode_build_name}/${metadata_file}")
+            list(APPEND test_failures "正常或深 Unicode 路径缺少元数据：${metadata_file}")
+            continue()
+        endif()
+        file(READ "${test_root}/build-complete/${metadata_file}" normal_metadata)
+        file(READ "${test_root}/${unicode_build_name}/${metadata_file}" unicode_metadata)
+        if(NOT normal_metadata STREQUAL unicode_metadata)
+            list(APPEND test_failures "深 Unicode 路径改变了元数据内容：${metadata_file}")
+        endif()
+    endforeach()
 endif()
 
 execute_process(
@@ -339,4 +392,4 @@ if(test_failures)
 endif()
 
 message(STATUS
-    "运行库 producer nested allowlist、必需文件与 build identity components 测试通过。")
+    "运行库 producer 原四组合同、真实 TensorRT ABI 拒绝和深 Unicode 元数据一致性通过。")
