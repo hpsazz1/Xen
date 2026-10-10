@@ -1579,6 +1579,156 @@ void test_disabled_features_preserve_parameters_until_enabled() {
     std::filesystem::remove_all(directory, ignored);
 }
 
+void test_disabled_feature_hotkeys_preserve_reuse_until_enabled() {
+    const auto directory = make_temp_test_directory("disabled_hotkeys");
+    expect(!directory.empty(), "禁用快捷键复用测试应创建隔离目录");
+    if (directory.empty()) return;
+    const auto path = directory / "config.ini";
+    const char* feature_names[] = {
+        "急停允许键", "急停释放键", "扳机许可键", "调试测试键",
+        "身法总开关", "旋转跳子开关", "大跳子开关"};
+    for (int feature = 0; feature < 7; ++feature) {
+        AppConfig config;
+        configure_test_kmbox(config);
+        config.gsi.enabled = true;
+        config.trigger.require_stop = false;
+        if (feature < 3) {
+            config.movement.enabled = true;
+            config.movement.spin_trigger = movement::Trigger::KEY;
+            config.movement.spin_virtual_key = 'J';
+        } else {
+            config.keyboard.runtime_toggle_virtual_keys = {'J'};
+        }
+        switch (feature) {
+            case 0: config.auto_stop.activation_virtual_key = 'J'; break;
+            case 1: config.auto_stop.release_virtual_keys = {'J'}; break;
+            case 2: config.trigger.hold_virtual_key = 'J'; break;
+            case 3: config.keyboard.debug_test_virtual_keys = {'J'}; break;
+            case 4:
+                config.movement.spin_trigger = movement::Trigger::KEY;
+                config.movement.spin_virtual_key = 'J'; break;
+            case 5:
+                config.movement.enabled = true;
+                config.movement.spin_enabled = false;
+                config.movement.spin_trigger = movement::Trigger::KEY;
+                config.movement.spin_virtual_key = 'J'; break;
+            case 6:
+                config.movement.enabled = true;
+                config.movement.large_enabled = false;
+                config.movement.large_trigger = movement::Trigger::KEY;
+                config.movement.large_virtual_key = 'J'; break;
+        }
+        const std::string label = feature_names[feature];
+        std::string error;
+        AppConfig loaded;
+        const bool round_trip = validate_app_config(config, error) &&
+            save_app_config(path.string(), config, error) &&
+            load_app_config(path.string(), loaded, error);
+        expect(round_trip, label + "禁用时旧J允许被启用功能复用并保存重载：" + error);
+        if (!round_trip) continue;
+        expect(loaded.movement == config.movement &&
+                   loaded.auto_stop.activation_virtual_key == config.auto_stop.activation_virtual_key &&
+                   loaded.auto_stop.release_virtual_keys == config.auto_stop.release_virtual_keys &&
+                   loaded.trigger.hold_virtual_key == config.trigger.hold_virtual_key &&
+                   loaded.keyboard.debug_test_virtual_keys == config.keyboard.debug_test_virtual_keys &&
+                   loaded.keyboard.runtime_toggle_virtual_keys == config.keyboard.runtime_toggle_virtual_keys,
+               label + "禁用旧绑定与当前有效绑定均应保留");
+        switch (feature) {
+            case 0: case 1: loaded.auto_stop.enabled = true; break;
+            case 2: loaded.trigger.enabled = true; break;
+            case 3: loaded.keyboard.debug_test_enabled = true; break;
+            case 4: loaded.movement.enabled = true; break;
+            case 5: loaded.movement.spin_enabled = true; break;
+            case 6: loaded.movement.large_enabled = true; break;
+        }
+        const auto before = read_file_bytes(path);
+        expect(!validate_app_config(loaded, error) &&
+                   !save_app_config(path.string(), loaded, error) &&
+                   read_file_bytes(path) == before,
+               label + "重新启用须拒绝J冲突且不覆盖原配置");
+    }
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+}
+
+void test_shared_movement_key_can_be_disabled_saved_and_reloaded() {
+    const auto directory = make_temp_test_directory("shared_movement_key");
+    expect(!directory.empty(), "共键身法启停测试应创建隔离目录");
+    if (directory.empty()) return;
+    const auto path = directory / "config.ini";
+    AppConfig config;
+    configure_test_kmbox(config);
+    config.movement.enabled = true;
+    config.movement.spin_trigger = movement::Trigger::KEY;
+    config.movement.spin_virtual_key = 'J';
+    config.auto_stop.enabled = false;
+    config.auto_stop.activation_virtual_key = 'J';
+    std::string error;
+    AppConfig loaded;
+    expect(save_app_config(path.string(), config, error) &&
+               load_app_config(path.string(), loaded, error) &&
+               loaded.movement.enabled && loaded.movement.spin_virtual_key == 'J' &&
+               !loaded.auto_stop.enabled && loaded.auto_stop.activation_virtual_key == 'J',
+           "启用身法与禁用急停合法共键J应保存重载");
+    loaded.movement.enabled = false;
+    expect(save_app_config(path.string(), loaded, error) &&
+               load_app_config(path.string(), loaded, error) && !loaded.movement.enabled &&
+               loaded.movement.spin_virtual_key == 'J' && loaded.auto_stop.activation_virtual_key == 'J',
+           "关闭身法后再次保存重载必须保持关闭及两份旧绑定");
+    const auto before = read_file_bytes(path);
+    loaded.movement.enabled = true;
+    loaded.auto_stop.enabled = true;
+    expect(!validate_app_config(loaded, error) &&
+               !save_app_config(path.string(), loaded, error) && read_file_bytes(path) == before,
+           "重载后同时开启共键身法和急停必须拒绝并保留关闭配置");
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+}
+
+void test_permitted_auxiliary_hotkey_sharing_is_preserved() {
+    const auto directory = make_temp_test_directory("permitted_shared_hotkeys");
+    expect(!directory.empty(), "允许共键兼容测试应创建隔离目录");
+    if (directory.empty()) return;
+    const auto path = directory / "config.ini";
+    AppConfig config;
+    configure_test_kmbox(config);
+    config.gsi.enabled = true;
+    config.keyboard.aim_hold_virtual_keys = {'J'};
+    config.auto_stop.enabled = true;
+    config.auto_stop.activation_virtual_key = 'J';
+    config.auto_stop.release_virtual_keys = {VK_F8, VK_END};
+    config.trigger.enabled = true;
+    config.trigger.hold_virtual_key = 'J';
+    std::string error;
+    AppConfig loaded;
+    expect(validate_app_config(config, error) &&
+               save_app_config(path.string(), config, error) &&
+               load_app_config(path.string(), loaded, error) &&
+               loaded.keyboard.aim_hold_virtual_keys == std::vector<int>{'J'} &&
+               loaded.auto_stop.activation_virtual_key == 'J' && loaded.trigger.hold_virtual_key == 'J' &&
+               loaded.auto_stop.release_virtual_keys == std::vector<int>{VK_F8, VK_END},
+           "瞄准、急停和扳机许可允许共键，急停释放键保留与全局安全键共享：" + error);
+    for (int reserved = 0; reserved < 5; ++reserved) {
+        auto conflicting = config;
+        switch (reserved) {
+            case 0: conflicting.keyboard.runtime_toggle_virtual_keys = {'J'}; break;
+            case 1: conflicting.keyboard.emergency_virtual_keys = {'J'}; break;
+            case 2: conflicting.keyboard.anomaly_mark_virtual_keys = {'J'}; break;
+            case 3:
+                conflicting.keyboard.debug_test_enabled = true;
+                conflicting.keyboard.debug_test_virtual_keys = {'J'}; break;
+            case 4:
+                conflicting.movement.enabled = true;
+                conflicting.movement.spin_trigger = movement::Trigger::KEY;
+                conflicting.movement.spin_virtual_key = 'J'; break;
+        }
+        expect(!validate_app_config(conflicting, error),
+               "允许按住许可共键不得放宽其他已启用功能的互斥");
+    }
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+}
+
 void test_auxiliary_cycle_config() {
     const auto directory = make_temp_test_directory("auxiliary_cycle");
     if (directory.empty()) { expect(false, "循环配置隔离目录"); return; }
@@ -1891,6 +2041,9 @@ int main(int argc, char** argv) {
     test_runtime_diagnostics_preference();
     test_movement_config();
     test_disabled_features_preserve_parameters_until_enabled();
+    test_disabled_feature_hotkeys_preserve_reuse_until_enabled();
+    test_shared_movement_key_can_be_disabled_saved_and_reloaded();
+    test_permitted_auxiliary_hotkey_sharing_is_preserved();
     test_team_filter_config();
     test_trigger_legacy_timing_migration();
     test_current_code_defaults();

@@ -8,6 +8,7 @@
 #undef ERROR
 #endif
 
+#include "config/hotkey_config_internal.h"
 #include "overlay/overlay_internal.h"
 #include "recoil/recoil.h"
 
@@ -380,13 +381,17 @@ void test_auxiliary_capture_requires_fresh_edge_and_cancel_wins() {
 }
 
 void test_aim_and_auto_stop_hotkeys_share_without_bypassing_safety() {
-    using namespace overlay::detail;
-    using Target = HotkeyConflictTarget;
-    const std::array<int, 1> runtime{VK_F8}, emergency{VK_END};
-    const std::array<int, 3> aim{VK_XBUTTON1, VK_XBUTTON2, 'K'};
+    using Target = config::detail::HotkeyTarget;
+    AppConfig config;
+    config.keyboard.aim_hold_virtual_keys = {VK_XBUTTON1, VK_XBUTTON2, 'K'};
+    config.auto_stop.enabled = true;
+    config.auto_stop.activation_virtual_key = VK_XBUTTON1;
+    config.auto_stop.release_virtual_keys = {'R'};
+    config.trigger.enabled = true;
+    config.trigger.hold_virtual_key = VK_XBUTTON2;
+    config.keyboard.debug_test_enabled = true;
     const auto conflicts = [&](Target target, int key) {
-        return hotkey_binding_conflicts(target, key, runtime, aim, emergency,
-            VK_XBUTTON1, VK_XBUTTON2, 'R');
+        return config::detail::hotkey_binding_conflicts(config, target, key);
     };
     expect(!conflicts(Target::AIM_HOLD, VK_XBUTTON1) &&
         !conflicts(Target::AUTO_STOP, VK_XBUTTON1) && !conflicts(Target::AUTO_STOP, 'K'),
@@ -401,24 +406,68 @@ void test_aim_and_auto_stop_hotkeys_share_without_bypassing_safety() {
         expect(conflicts(target, VK_XBUTTON1) && conflicts(target, VK_XBUTTON2) && conflicts(target, 'K'),
             "安全急停与管线启停反向采集也不能占用瞄准、急停或扳机共键");
     }
-    const std::array<int,1> debug_keys{VK_XBUTTON2};
-    const std::array<int,1> marker_keys{VK_F9};
     for (const auto target : {Target::RUNTIME_TOGGLE,Target::EMERGENCY,Target::AIM_HOLD,Target::AUTO_STOP,Target::DEBUG_TEST})
-        expect(hotkey_binding_conflicts(target,VK_F9,runtime,aim,emergency,0,0,0,{},marker_keys),
+        expect(conflicts(target, VK_F9),
             "控制和测试绑定不能占用异常标记键");
     for (const int key : std::array<int,7>{VK_LBUTTON,'W','A','S','D',VK_F8,VK_END})
-        expect(hotkey_binding_conflicts(Target::ANOMALY_MARK,key,runtime,aim,emergency,0,0,0,{},marker_keys),
+        expect(conflicts(Target::ANOMALY_MARK, key),
             "异常标记绑定不得与控制动作冲突");
+    config.keyboard.debug_test_virtual_keys = {VK_F10};
     for (const auto target : {Target::RUNTIME_TOGGLE,Target::EMERGENCY,Target::AIM_HOLD,Target::AUTO_STOP})
-        expect(hotkey_binding_conflicts(target,VK_XBUTTON2,runtime,aim,emergency,0,0,0,debug_keys),
+        expect(conflicts(target, VK_F10),
             "反向采集其他功能不得占用已有调试测试键");
     for (const int key : std::array<int,9>{VK_LBUTTON,'W','A','S','D',VK_F8,VK_END,VK_XBUTTON1,'R'})
-        expect(hotkey_binding_conflicts(Target::DEBUG_TEST,key,runtime,aim,emergency,VK_XBUTTON1,0,'R',debug_keys),
-            "调试测试键拒绝左键、WASD及全局和生产许可冲突");
-    expect(!hotkey_binding_conflicts(Target::DEBUG_TEST,'J',runtime,aim,emergency,0,0,0,debug_keys),
+        expect(conflicts(Target::DEBUG_TEST, key),
+            "调试测试键拒绝左键、WASD及全局、生产许可和急停释放冲突");
+    expect(!conflicts(Target::DEBUG_TEST, 'J'),
         "未冲突的调试键可以绑定");
     expect(conflicts(Target::RUNTIME_TOGGLE, VK_END) && conflicts(Target::EMERGENCY, VK_F8),
         "管线启停与安全急停之间继续互斥");
+}
+
+void test_disabled_hotkey_drafts_and_reverse_capture_share_one_policy() {
+    using Target = config::detail::HotkeyTarget;
+    for (const auto target : {Target::AUTO_STOP, Target::AUTO_STOP_RELEASE,
+             Target::TRIGGER, Target::DEBUG_TEST, Target::MOVEMENT_SPIN, Target::MOVEMENT_LARGE}) {
+        AppConfig config;
+        config.keyboard.anomaly_mark_virtual_keys = {'J'};
+        config.auto_stop.activation_virtual_key = target == Target::AUTO_STOP ? 'J' : 0;
+        config.auto_stop.release_virtual_keys = target == Target::AUTO_STOP_RELEASE
+            ? std::vector<int>{'J'} : std::vector<int>{};
+        config.trigger.hold_virtual_key = 'J';
+        config.keyboard.debug_test_virtual_keys = {'J'};
+        config.movement.spin_trigger = movement::Trigger::KEY;
+        config.movement.spin_virtual_key = 'J';
+        config.movement.large_trigger = movement::Trigger::KEY;
+        config.movement.large_virtual_key = 'J';
+        config.movement.spin_enabled = config.movement.large_enabled = false;
+        const auto set_enabled = [&](bool enabled) {
+            switch (target) {
+                case Target::AUTO_STOP: case Target::AUTO_STOP_RELEASE:
+                    config.auto_stop.enabled = enabled; break;
+                case Target::TRIGGER: config.trigger.enabled = enabled; break;
+                case Target::DEBUG_TEST: config.keyboard.debug_test_enabled = enabled; break;
+                case Target::MOVEMENT_SPIN:
+                    config.movement.enabled = true;
+                    config.movement.spin_enabled = enabled; break;
+                case Target::MOVEMENT_LARGE:
+                    config.movement.enabled = true;
+                    config.movement.large_enabled = enabled; break;
+                default: break;
+            }
+        };
+        expect(!config::detail::hotkey_binding_conflicts(config, target, 'J'),
+            "禁用功能可以保留已被启用功能占用的J草稿");
+        set_enabled(true);
+        expect(config::detail::hotkey_binding_conflicts(config, target, 'J'),
+            "启用功能捕获不得使用现有异常标记J");
+        config.keyboard.anomaly_mark_virtual_keys = {VK_F9};
+        expect(config::detail::hotkey_binding_conflicts(config, Target::ANOMALY_MARK, 'J'),
+            "异常标记反向捕获不得使用已启用辅助功能J");
+        set_enabled(false);
+        expect(!config::detail::hotkey_binding_conflicts(config, Target::ANOMALY_MARK, 'J'),
+            "辅助功能禁用后异常标记反向捕获可以复用J");
+    }
 }
 
 void test_repeated_aim_capture_accepts_independent_keys() {
@@ -582,6 +631,7 @@ int main() {
     test_hotkey_capture_state_machine();
     test_auxiliary_capture_requires_fresh_edge_and_cancel_wins();
     test_aim_and_auto_stop_hotkeys_share_without_bypassing_safety();
+    test_disabled_hotkey_drafts_and_reverse_capture_share_one_policy();
     test_repeated_aim_capture_accepts_independent_keys();
     test_recoil_editor_preview_uses_production_curve_without_mutating_base();
     test_output_arm_requires_input_health();

@@ -202,7 +202,7 @@ void require_page_table(const char* table_name, ImGuiID scope = 0) {
 // 仅使用合成快照渲染生产 Overlay，并保存本进程窗口；动作不被执行。
 int wmain(int argc, wchar_t** argv) {
     try {
-        require(argc >= 2, "用法：model_workspace_ui_preview.exe <截图目录> [--minimum] [--dark] [--archive-only] [--layout-audit] [--dpi-125]");
+        require(argc >= 2, "用法：model_workspace_ui_preview.exe <截图目录> [--minimum] [--dark] [--archive-only] [--layout-audit] [--hotkey-audit] [--dpi-125]");
         const auto output = std::filesystem::absolute(argv[1]);
         std::filesystem::create_directories(output);
         LogConfig logs;
@@ -222,6 +222,7 @@ int wmain(int argc, wchar_t** argv) {
         config.trigger.require_stop = true;
         bool archive_only = false;
         bool layout_audit = false;
+        bool hotkey_audit = false;
         float font_scale = 1.0f;
         for (int index = 2; index < argc; ++index) {
             const std::wstring_view argument(argv[index]);
@@ -230,6 +231,7 @@ int wmain(int argc, wchar_t** argv) {
             } else if (argument == L"--dark") config.ui.theme = UiTheme::DARK;
             else if (argument == L"--archive-only") archive_only = true;
             else if (argument == L"--layout-audit") layout_audit = true;
+            else if (argument == L"--hotkey-audit") hotkey_audit = true;
             else if (argument == L"--dpi-125") font_scale = 1.25f;
             else throw std::runtime_error("未知预览参数");
         }
@@ -307,8 +309,10 @@ int wmain(int argc, wchar_t** argv) {
             require(!actions.start_requested && actions.runtime_intents.empty() &&
                     !actions.stop_requested && !actions.reload_detector_requested && !actions.refresh_models_requested &&
                     (!actions.save_config_requested || allow_config_save) && !actions.log_level_changed && !actions.preview_enabled &&
-                    actions.workspace_action == model_workspace::Action::NONE && !config.mouse.allow_send_input &&
-                    !config.auto_stop.enabled && !config.trigger.enabled && !config.recoil.enabled,
+                    actions.workspace_action == model_workspace::Action::NONE &&
+                    actions.debug_action == debug_session::Action::NONE && !actions.debug_allow_physical_output &&
+                    !config.mouse.allow_send_input && !config.recoil.enabled &&
+                    (hotkey_audit || (!config.auto_stop.enabled && !config.trigger.enabled)),
                     "验收输入误触业务动作，停止执行");
             saw_config_save |= actions.save_config_requested;
         };
@@ -373,6 +377,178 @@ int wmain(int argc, wchar_t** argv) {
             input.down = false; frame();
             input.position = {400,40}; frame(); frame();
         };
+        if (hotkey_audit) {
+            std::ostringstream failures;
+            int scenarios = 0;
+            auto check = [&](bool success, const std::string& message) {
+                if (!success) failures << message << '\n';
+            };
+            auto click = [&](const char* label, const char* panel, const char* table) {
+                auto* window = preview_window(panel);
+                const auto id = ImHashStr(label, 0, window->GetID(table));
+                if (std::string_view(label) == "##movement_enabled") {
+                    // InvisibleButton 不参与导航；从当帧表格首行取坐标，再核对真实悬停 ID。
+                    auto first_toggle_rect = [&] {
+                        auto* form = ImGui::GetCurrentContext()->Tables.GetByKey(window->GetID(table));
+                        require(form && form->LastFrameActive == ImGui::GetFrameCount(), "身法表格未渲染");
+                        const ImVec2 position(form->Columns[1].WorkMinX,
+                            form->WorkRect.Min.y + ImGui::GetStyle().CellPadding.y);
+                        return ImRect(position, ImVec2(position.x + 38.0f, position.y + 22.0f));
+                    };
+                    ImGui::ScrollToRect(window, first_toggle_rect(), ImGuiScrollFlags_AlwaysCenterY);
+                    frame(); frame();
+                    input.position = first_toggle_rect().GetCenter(); input.down = false; frame();
+                    require(ImGui::GetCurrentContext()->HoveredId == id, "身法开关坐标没有命中真实生产控件");
+                    input.down = true; frame(); input.down = false; frame();
+                    return;
+                }
+                input.down = false; input.focus_window = window; input.focus_id = id; frame();
+                auto* context = ImGui::GetCurrentContext();
+                require(context->NavId == id && context->NavIdIsAlive,
+                    (std::string("快捷键回归未找到生产控件：") + label).c_str());
+                auto rect = ImGui::WindowRectRelToAbs(window, window->NavRectRel[ImGuiNavLayer_Main]);
+                ImGui::ScrollToRect(window, rect, ImGuiScrollFlags_AlwaysCenterY); frame(); frame();
+                rect = ImGui::WindowRectRelToAbs(window, window->NavRectRel[ImGuiNavLayer_Main]);
+                require(window->ClipRect.Contains(rect.GetCenter()), "快捷键回归控件未滚入可点击区域");
+                input.position = rect.GetCenter(); frame();
+                input.down = true; frame(); input.down = false; frame();
+            };
+            const auto saved_path = output / "hotkey-config.ini";
+            const auto saved_utf8 = saved_path.u8string();
+            const std::string saved_name(reinterpret_cast<const char*>(saved_utf8.data()), saved_utf8.size());
+            auto round_trip = [&] {
+                std::string error;
+                const bool saved = save_app_config(saved_name, config, error);
+                require(saved, error.c_str());
+                AppConfig loaded;
+                const bool loaded_ok = load_app_config(saved_name, loaded, error);
+                require(loaded_ok, error.c_str());
+                config = std::move(loaded);
+            };
+            // 所有启用状态仅为传入 Overlay 的配置；没有 Runtime、输入路由或设备实例。
+            const AppConfig baseline = config;
+            for (const auto state : {RuntimeState::STOPPED, RuntimeState::RUNNING}) {
+                config = baseline;
+                config.movement.enabled = true;
+                config.movement.spin_trigger = movement::Trigger::KEY;
+                config.movement.spin_virtual_key = 'J';
+                config.auto_stop.activation_virtual_key = 'J';
+                round_trip();
+                runtime.state = state;
+                select_page(3);
+                click("##movement_enabled", "movement_panel", "movement_form");
+                frame(); frame();
+                check(!config.movement.enabled, state == RuntimeState::RUNNING ?
+                    "运行中合法共键配置关闭身法后被回滚" : "停止时合法共键配置关闭身法后被回滚");
+                round_trip();
+                check(!config.movement.enabled && config.movement.spin_virtual_key == 'J' &&
+                    config.auto_stop.activation_virtual_key == 'J' && !config.auto_stop.enabled,
+                    "关闭身法保存回读后必须保持关闭及禁用功能草稿键");
+                ++scenarios;
+            }
+            runtime.state = RuntimeState::STOPPED;
+            enum class Owner { AUTO_STOP, AUTO_STOP_RELEASE, TRIGGER, DEBUG_TEST, MOVEMENT };
+            enum class Binding { ANOMALY_MARK, DEBUG_TEST, AUTO_STOP, AUTO_STOP_RELEASE, TRIGGER };
+            auto binding_keys = [&](Binding binding) -> std::vector<int> {
+                switch (binding) {
+                case Binding::ANOMALY_MARK: return config.keyboard.anomaly_mark_virtual_keys;
+                case Binding::DEBUG_TEST: return config.keyboard.debug_test_virtual_keys;
+                case Binding::AUTO_STOP: return {config.auto_stop.activation_virtual_key};
+                case Binding::AUTO_STOP_RELEASE: return config.auto_stop.release_virtual_keys;
+                case Binding::TRIGGER: return {config.trigger.hold_virtual_key};
+                }
+                throw std::runtime_error("未知回归绑定目标");
+            };
+            auto reuse_key = [&](Owner owner, Binding binding, const char* name) {
+                for (const bool owner_enabled : {false, true}) {
+                    config = baseline;
+                    config.gsi.enabled = true;
+                    config.trigger.require_stop = false;
+                    const char* label = nullptr;
+                    const char* panel = nullptr;
+                    const char* table = nullptr;
+                    int page = 3;
+                    switch (binding) {
+                    case Binding::ANOMALY_MARK:
+                        page = 7; label = "##anomaly_mark_virtual_keys";
+                        panel = "keyboard_panel"; table = "keyboard_form"; break;
+                    case Binding::DEBUG_TEST:
+                        config.keyboard.debug_test_enabled = true;
+                        page = 6; label = "##debug_test_keys";
+                        panel = "content"; table = "debug_hotkey_form"; break;
+                    case Binding::AUTO_STOP:
+                        config.auto_stop.enabled = true;
+                        label = "##auto_stop_activation_key";
+                        panel = "auto_stop_panel"; table = "auto_stop_form"; break;
+                    case Binding::AUTO_STOP_RELEASE:
+                        config.auto_stop.enabled = true;
+                        label = "##auto_stop_release_keys";
+                        panel = "auto_stop_panel"; table = "auto_stop_form"; break;
+                    case Binding::TRIGGER:
+                        config.trigger.enabled = true;
+                        label = "##trigger_hold_key";
+                        panel = "trigger_panel"; table = "trigger_form"; break;
+                    }
+                    switch (owner) {
+                    case Owner::AUTO_STOP:
+                        config.auto_stop.enabled = owner_enabled;
+                        config.auto_stop.activation_virtual_key = 'J'; break;
+                    case Owner::AUTO_STOP_RELEASE:
+                        config.auto_stop.enabled = owner_enabled;
+                        config.auto_stop.release_virtual_keys = {'J'}; break;
+                    case Owner::TRIGGER:
+                        config.trigger.enabled = owner_enabled;
+                        config.trigger.hold_virtual_key = 'J'; break;
+                    case Owner::DEBUG_TEST:
+                        config.keyboard.debug_test_enabled = owner_enabled;
+                        config.keyboard.debug_test_virtual_keys = {'J'}; break;
+                    case Owner::MOVEMENT:
+                        config.movement.enabled = owner_enabled;
+                        config.movement.spin_trigger = movement::Trigger::KEY;
+                        config.movement.spin_virtual_key = 'J'; break;
+                    }
+                    round_trip();
+                    const auto before = binding_keys(binding);
+                    select_page(page);
+                    click(label, panel, table);
+                    capture_input.capture_virtual_keys['J'] = true; frame();
+                    require(actions.hotkey_capture_consumed, "绑定捕获没有消费合成按键事件");
+                    capture_input.capture_virtual_keys['J'] = false; frame(); frame();
+                    const auto after = binding_keys(binding);
+                    const bool reused = std::find(after.begin(), after.end(), 'J') != after.end();
+                    check(owner_enabled ? after == before : reused,
+                        std::string(name) + (owner_enabled ? "：启用后冲突未拒绝" : "：禁用后旧键不能复用"));
+                    // 界面接受的配置必须还能经生产保存、加载接口往返。
+                    std::string error;
+                    if (validate_app_config(config, error)) {
+                        round_trip();
+                        check(binding_keys(binding) == after, std::string(name) + "：保存回读改变了绑定");
+                    } else check(false, std::string(name) + "：界面产生不能保存的配置：" + error);
+                    ++scenarios;
+                }
+            };
+            reuse_key(Owner::AUTO_STOP, Binding::ANOMALY_MARK, "异常标记复用急停允许键");
+            reuse_key(Owner::AUTO_STOP_RELEASE, Binding::ANOMALY_MARK, "异常标记复用急停释放键");
+            reuse_key(Owner::TRIGGER, Binding::ANOMALY_MARK, "异常标记复用扳机许可键");
+            reuse_key(Owner::DEBUG_TEST, Binding::ANOMALY_MARK, "异常标记复用调试测试键");
+            reuse_key(Owner::MOVEMENT, Binding::ANOMALY_MARK, "异常标记复用身法触发键");
+            reuse_key(Owner::AUTO_STOP_RELEASE, Binding::DEBUG_TEST, "调试测试复用急停释放键");
+            reuse_key(Owner::DEBUG_TEST, Binding::AUTO_STOP, "急停允许键复用调试测试键");
+            reuse_key(Owner::DEBUG_TEST, Binding::AUTO_STOP_RELEASE, "急停释放键复用调试测试键");
+            reuse_key(Owner::DEBUG_TEST, Binding::TRIGGER, "扳机许可键复用调试测试键");
+            { std::ofstream result(output / "hotkey-audit.txt", std::ios::binary);
+              result << "生产 Overlay 与 INI 往返场景：" << scenarios << "；真实设备输入：0。\n" << failures.str();
+              require(result.good(), "快捷键回归报告写入失败"); }
+            require(failures.str().empty(), failures.str().c_str());
+            ImGui::RemoveContextHook(ImGui::GetCurrentContext(), capture_hook_id);
+            ImGui::RemoveContextHook(ImGui::GetCurrentContext(), frame_hook_id);
+            ImGui::RemoveContextHook(ImGui::GetCurrentContext(), hook_id);
+            overlay.shutdown(); Log::shutdown();
+            require(std::filesystem::remove(fixture_path), "快捷键UI临时曲线夹具清理失败");
+            require(std::filesystem::remove(fixture_directory), "快捷键UI临时夹具目录清理失败");
+            std::cout << "PASS " << scenarios << " 个生产 Overlay 快捷键场景及 INI 保存回读；真实设备输入：0。\n";
+            return 0;
+        }
         if (layout_audit) {
             std::ostringstream failures;
             runtime.active_model_path = "E:/一个用于检查换行和窗口适配的很长目录/模型版本/生产模型/"

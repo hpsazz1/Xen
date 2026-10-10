@@ -1935,7 +1935,7 @@ if(BUILD_TESTING)
     add_executable(overlay_tests
         tests/overlay_tests.cpp)
     target_include_directories(overlay_tests PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
-    target_link_libraries(overlay_tests PRIVATE recoil trigger)
+    target_link_libraries(overlay_tests PRIVATE config)
     add_test(NAME overlay_tests COMMAND overlay_tests)
 
     add_executable(hotkey_device_capture_tests tests/hotkey_device_capture_tests.cpp)

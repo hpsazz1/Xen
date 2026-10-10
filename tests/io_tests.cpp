@@ -396,8 +396,77 @@ void test_debug_test_hotkey() {
     config.debug_test_enabled = false;
     keyboard::detail::KeyboardEventState state;
     expect(keyboard::detail::update_keyboard_events(state,config,device->snapshot_.virtual_keys).count == 0, "独立开关关闭不得产生调试事件");
-    for (int key : {1,0x57,0x41,0x53,0x44,0x77}) { config.debug_test_virtual_keys = {key}; expect(!valid_keyboard_config(config), "测试动作或全局冲突绑定必须拒绝"); }
+    for (const bool enabled : {false, true}) {
+        config.debug_test_enabled = enabled;
+        for (const int key : {0, 256, 1, 0x57, 0x41, 0x53, 0x44}) {
+            config.debug_test_virtual_keys = {key};
+            expect(!valid_keyboard_config(config), "调试开关不放宽虚拟键范围及左键、WASD限制");
+        }
+        config.debug_test_virtual_keys = {0x79, 0x79};
+        expect(!valid_keyboard_config(config), "禁用或启用调试均拒绝组内重复绑定");
+        config.debug_test_virtual_keys = {0x77};
+        expect(valid_keyboard_config(config) == !enabled,
+               "禁用调试的旧F8允许复用，重新启用时仍拒绝运行切换冲突");
+    }
     config.debug_test_virtual_keys = {0x05}; expect(valid_keyboard_config(config), "未被占用侧键应与现有快捷键一致支持");
+}
+
+void test_disabled_debug_binding_reused_by_enabled_keyboard_events() {
+    for (const auto expected_event : {
+             KeyboardEventType::RUNTIME_TOGGLE,
+             KeyboardEventType::AIM_HOLD_CHANGED,
+             KeyboardEventType::EMERGENCY_STOP,
+             KeyboardEventType::ANOMALY_MARK}) {
+        KeyboardConfig config;
+        config.debug_test_enabled = false;
+        config.debug_test_virtual_keys = {'J'};
+        switch (expected_event) {
+            case KeyboardEventType::RUNTIME_TOGGLE:
+                config.runtime_toggle_virtual_keys = {'J'}; break;
+            case KeyboardEventType::AIM_HOLD_CHANGED:
+                config.aim_hold_virtual_keys = {'J'}; break;
+            case KeyboardEventType::EMERGENCY_STOP:
+                config.emergency_virtual_keys = {'J'}; break;
+            case KeyboardEventType::ANOMALY_MARK:
+                config.anomaly_mark_virtual_keys = {'J'}; break;
+            default: break;
+        }
+        auto device = std::make_shared<FakeInputDevice>();
+        device->snapshot_.status = InputMonitorStatus::READY;
+        device->snapshot_.state_valid = true;
+        device->snapshot_.sequence = 1;
+        KeyboardListener listener(config, device);
+        const bool opened = listener.open();
+        expect(opened && listener.status() == KeyboardStatus::READY,
+               "禁用调试旧键被启用功能复用时监听器必须正常打开");
+        if (opened) {
+            const auto initial = listener.poll();
+            expect(initial.input_healthy && initial.events.empty(),
+                   "合法共键配置应先建立健康的释放基线");
+            device->snapshot_.virtual_keys['J'] = true;
+            ++device->snapshot_.sequence;
+            const auto pressed = listener.poll();
+            expect(pressed.input_healthy && pressed.events.size() == 1 &&
+                       pressed.events[0].type == expected_event && pressed.events[0].active,
+                   "复用J仅产生已启用功能事件，不产生禁用调试事件");
+            ++device->snapshot_.sequence;
+            expect(listener.poll().events.empty(), "复用J持续按住不重复产生事件");
+            device->snapshot_.virtual_keys['J'] = false;
+            ++device->snapshot_.sequence;
+            const auto released = listener.poll();
+            expect(expected_event == KeyboardEventType::AIM_HOLD_CHANGED
+                       ? released.events.size() == 1 &&
+                             released.events[0].type == expected_event && !released.events[0].active
+                       : released.events.empty(),
+                   "复用J释放只产生瞄准许可必要的释放边沿");
+            listener.close();
+        }
+        config.debug_test_enabled = true;
+        KeyboardListener conflicting_listener(config, device);
+        expect(!conflicting_listener.open() &&
+                   conflicting_listener.status() == KeyboardStatus::FAILURE,
+               "重新启用调试必须在监听器打开前拒绝复用键冲突");
+    }
 }
 void test_keyboard_listener_uses_selected_device() {
     auto device = std::make_shared<FakeInputDevice>();
@@ -1637,6 +1706,7 @@ int main() {
     test_ndi_receive_loop_watchdog_covers_receiver_errors();
     test_invalid_keyboard_config();
     test_debug_test_hotkey();
+    test_disabled_debug_binding_reused_by_enabled_keyboard_events();
     test_keyboard_event_state_machine();
     test_keyboard_listener_uses_selected_device();
     test_invalid_capture_config();

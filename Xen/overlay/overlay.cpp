@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 
 #include "overlay/overlay.h"
+#include "config/hotkey_config_internal.h"
 #include "config/ui_palette.h"
 #include "overlay/overlay_internal.h"
 #include "overlay/recoil_panel.h"
@@ -74,17 +75,7 @@ enum class WorkspacePage {
     SETTINGS,
 };
 
-enum class HotkeyBindingTarget {
-    NONE,
-    RUNTIME_TOGGLE,
-    AIM_HOLD,
-    EMERGENCY,
-    AUTO_STOP,
-    AUTO_STOP_RELEASE,
-    DEBUG_TEST,
-    ANOMALY_MARK,
-    TRIGGER,
-};
+using HotkeyBindingTarget = config::detail::HotkeyTarget;
 
 std::array<bool, 256> current_virtual_key_state() noexcept {
     std::array<bool, 256> result{};
@@ -3043,22 +3034,8 @@ struct Overlay::Impl {
             }
         }
         show_help_tooltip("兼容参数只影响后续动作；需根据设备实际报告调整。");
-        const auto trigger_conflicts = [&](bool enabled, movement::Trigger trigger, int key) {
-            if (!enabled || trigger != movement::Trigger::KEY || key == 0) return false;
-            const auto contains = [key](const std::vector<int>& keys) {
-                return std::find(keys.begin(), keys.end(), key) != keys.end();
-            };
-            return contains(app_config.keyboard.emergency_virtual_keys) ||
-                contains(app_config.keyboard.runtime_toggle_virtual_keys) ||
-                contains(app_config.keyboard.aim_hold_virtual_keys) ||
-                contains(app_config.keyboard.debug_test_virtual_keys) ||
-                contains(app_config.keyboard.anomaly_mark_virtual_keys) ||
-                contains(app_config.auto_stop.release_virtual_keys) ||
-                key == app_config.auto_stop.activation_virtual_key || key == app_config.trigger.hold_virtual_key;
-        };
-        if (!movement::valid_config(move) ||
-            trigger_conflicts(move.spin_enabled, move.spin_trigger, move.spin_virtual_key) ||
-            trigger_conflicts(move.large_enabled, move.large_trigger, move.large_virtual_key)) {
+        if (move.enabled && (!movement::valid_config(move) ||
+            config::detail::movement_hotkeys_conflict(app_config))) {
             move = previous_movement;
             ImGui::TextWrapped("参数越界或触发与其他功能冲突，已保留上一次有效参数。");
         }
@@ -3770,25 +3747,6 @@ struct Overlay::Impl {
         return nullptr;
     }
 
-    bool virtual_key_assigned_elsewhere(
-            const AppConfig& app_config,
-            const std::vector<int>* current_binding,
-            int virtual_key) const noexcept {
-        using Target = overlay::detail::HotkeyConflictTarget;
-        const auto target = current_binding == &app_config.keyboard.runtime_toggle_virtual_keys ? Target::RUNTIME_TOGGLE :
-            current_binding == &app_config.keyboard.aim_hold_virtual_keys ? Target::AIM_HOLD :
-            current_binding == &app_config.keyboard.emergency_virtual_keys ? Target::EMERGENCY :
-            current_binding == &app_config.keyboard.anomaly_mark_virtual_keys ? Target::ANOMALY_MARK :
-            current_binding == &app_config.keyboard.debug_test_virtual_keys ? Target::DEBUG_TEST : Target::AUTO_STOP;
-        return overlay::detail::hotkey_binding_conflicts(target, virtual_key,
-            app_config.keyboard.runtime_toggle_virtual_keys, app_config.keyboard.aim_hold_virtual_keys,
-            app_config.keyboard.emergency_virtual_keys, app_config.auto_stop.activation_virtual_key,
-            app_config.trigger.hold_virtual_key, 0,
-            app_config.keyboard.debug_test_virtual_keys, app_config.keyboard.anomaly_mark_virtual_keys) ||
-            (target == Target::ANOMALY_MARK && std::find(app_config.auto_stop.release_virtual_keys.begin(),
-                app_config.auto_stop.release_virtual_keys.end(), virtual_key) != app_config.auto_stop.release_virtual_keys.end());
-    }
-
     void begin_hotkey_binding(
             HotkeyBindingTarget target,
             const std::array<bool, 256>& key_active) noexcept {
@@ -3843,8 +3801,7 @@ struct Overlay::Impl {
                     binding->clear(); hotkey_capture_message = "调试测试快捷键已清空";
                 } else if (capture_result.type == overlay::detail::HotkeyCaptureResultType::ASSIGNED) {
                     const int key = capture_result.virtual_key;
-                    if (virtual_key_assigned_elsewhere(app_config,binding,key) ||
-                        std::find(app_config.auto_stop.release_virtual_keys.begin(),app_config.auto_stop.release_virtual_keys.end(),key) != app_config.auto_stop.release_virtual_keys.end())
+                    if (config::detail::hotkey_binding_conflicts(app_config, hotkey_binding_target, key))
                         hotkey_capture_message = "调试测试键不能使用左键、WASD或其他已绑定功能键";
                     else if (std::find(binding->begin(),binding->end(),key) == binding->end()) {
                         binding->push_back(key); hotkey_capture_message = "调试测试键已追加；保存配置后生效，每次按下只执行一组";
@@ -3856,13 +3813,8 @@ struct Overlay::Impl {
                     hotkey_capture_message = "扳机许可键已清空";
                 } else if (capture_result.type == overlay::detail::HotkeyCaptureResultType::ASSIGNED) {
                     const int key = capture_result.virtual_key;
-                    const auto assigned = [key](const std::vector<int>& keys) {
-                        return std::find(keys.begin(), keys.end(), key) != keys.end();
-                    };
-                    if (key == 1 || key == VK_END || key == VK_F8 || key == 'W' || key == 'A' || key == 'S' || key == 'D' ||
-                        assigned(app_config.keyboard.emergency_virtual_keys) || assigned(app_config.keyboard.runtime_toggle_virtual_keys) ||
-                        assigned(app_config.keyboard.debug_test_virtual_keys) || assigned(app_config.keyboard.anomaly_mark_virtual_keys)) {
-                        hotkey_capture_message = "扳机许可键不能使用左键、WASD、安全急停或运行启停键";
+                    if (config::detail::hotkey_binding_conflicts(app_config, hotkey_binding_target, key)) {
+                        hotkey_capture_message = "扳机许可键非法或与其他已启用功能冲突";
                     } else {
                         app_config.trigger.hold_virtual_key = key;
                         hotkey_capture_message = "扳机许可键已设置，可与瞄准共用";
@@ -3876,12 +3828,8 @@ struct Overlay::Impl {
                 } else if (capture_result.type ==
                         overlay::detail::HotkeyCaptureResultType::ASSIGNED) {
                     const int key = capture_result.virtual_key;
-                    if (key == 'W' || key == 'A' || key == 'S' || key == 'D') {
-                        hotkey_capture_message = "允许键不能使用 WASD";
-                    } else if (std::find(app_config.auto_stop.release_virtual_keys.begin(),
-                            app_config.auto_stop.release_virtual_keys.end(), key) != app_config.auto_stop.release_virtual_keys.end() ||
-                            virtual_key_assigned_elsewhere(app_config, nullptr, key)) {
-                        hotkey_capture_message = "该按键已被其他功能占用";
+                    if (config::detail::hotkey_binding_conflicts(app_config, hotkey_binding_target, key)) {
+                        hotkey_capture_message = "允许键非法或与其他已启用功能冲突";
                     } else {
                         app_config.auto_stop.activation_virtual_key = key;
                         hotkey_capture_message = "允许键已设置，可与瞄准输出或自动扳机共用";
@@ -3893,10 +3841,8 @@ struct Overlay::Impl {
                     hotkey_capture_message = "急停释放键已清空";
                 } else if (capture_result.type == overlay::detail::HotkeyCaptureResultType::ASSIGNED) {
                     const int key = capture_result.virtual_key;
-                    if (key == 'W' || key == 'A' || key == 'S' || key == 'D' || key == app_config.auto_stop.activation_virtual_key ||
-                        std::find(app_config.keyboard.debug_test_virtual_keys.begin(),app_config.keyboard.debug_test_virtual_keys.end(),key) != app_config.keyboard.debug_test_virtual_keys.end() ||
-                        std::find(app_config.keyboard.anomaly_mark_virtual_keys.begin(),app_config.keyboard.anomaly_mark_virtual_keys.end(),key) != app_config.keyboard.anomaly_mark_virtual_keys.end())
-                        hotkey_capture_message = "释放键不能使用WASD、急停允许键或调试测试键";
+                    if (config::detail::hotkey_binding_conflicts(app_config, hotkey_binding_target, key))
+                        hotkey_capture_message = "释放键非法或与其他已启用功能冲突";
                     else if (std::find(binding->begin(), binding->end(), key) == binding->end()) {
                         binding->push_back(key);
                         hotkey_capture_message = "释放键已追加，任意一个键即可释放急停";
@@ -3909,8 +3855,7 @@ struct Overlay::Impl {
             } else if (binding && capture_result.type ==
                     overlay::detail::HotkeyCaptureResultType::ASSIGNED) {
                 const int virtual_key = capture_result.virtual_key;
-                if (virtual_key_assigned_elsewhere(
-                        app_config, binding, virtual_key)) {
+                if (config::detail::hotkey_binding_conflicts(app_config, hotkey_binding_target, virtual_key)) {
                     hotkey_capture_message = "该按键已被其他功能占用";
                 } else if (std::find(
                         binding->begin(), binding->end(), virtual_key) ==

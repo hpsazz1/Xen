@@ -352,6 +352,19 @@ cmake --build $buildDirectory --config Release --target model_workspace_ui_previ
 & "$buildDirectory/Release/model_workspace_ui_preview.exe" "C:\path\to\new-dark-preview" --minimum --dark
 ```
 
-将示例截图路径替换为本次新目录。该程序以合成快照渲染生产Overlay，不构造Runtime或输入设备，不执行界面业务动作；截图是界面预览，不是实战证据。
+将示例截图路径替换为本次新目录。该程序以合成快照渲染生产Overlay，不构造Runtime或输入设备，不执行设备或模型业务动作；专项模式可编辑隔离配置。截图是界面预览，不是实战证据。
+
+快捷键一致性回归使用同一目标的 `--hotkey-audit` 模式：
+
+```powershell
+& "$buildDirectory/Release/model_workspace_ui_preview.exe" "temp/<任务ID>/hotkey-ui" --hotkey-audit
+```
+
+该模式实际点击生产控件并注入本进程合成监听快照，覆盖合法共键 INI 加载后关闭身法（停止/运行两种
+快照）、禁用功能旧键复用、启用后反向捕获拒绝和保存回读。失败返回非零退出码并保留
+`hotkey-audit.txt` 与失败帧；成功仅证明界面和配置契约，不证明真实 Runtime 清理或设备释放。
+配套运行 `config_tests`、`io_tests`、`overlay_tests` 和 `hotkey_device_capture_tests`；
+`Config` 与 `Overlay` 共用 `Xen/config/hotkey_config_internal.h`，修改绑定占用规则时同时核对配置、
+Keyboard 监听器和生产界面，不在面板或捕获分支另写一套占用判断。
 
 技术栈：C++20、CMake、ONNX Runtime、OpenCV、spdlog、SimpleIni、Dear ImGui、nlohmann/json。

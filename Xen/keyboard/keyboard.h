@@ -32,7 +32,7 @@ struct KeyboardConfig {
     std::vector<int> anomaly_mark_virtual_keys{0x78}; // VK_F9，仅标记诊断
 };
 
-// 空集合表示该功能未绑定；集合内任意键均可生效。所有已绑定的全局语义
+// 空集合表示该功能未绑定；集合内任意键均可生效。所有已启用的全局语义
 // 必须互斥，避免一次按键同时改变运行生命周期和物理输出安全状态。
 inline bool valid_keyboard_config(const KeyboardConfig& config) noexcept {
     std::array<bool, 256> assigned{};
@@ -53,10 +53,13 @@ inline bool valid_keyboard_config(const KeyboardConfig& config) noexcept {
     for (const int key : config.anomaly_mark_virtual_keys) {
         if (key == 1 || key == 'W' || key == 'A' || key == 'S' || key == 'D') return false;
     }
-    return claim(config.aim_hold_virtual_keys) &&
-           claim(config.emergency_virtual_keys) &&
-           claim(config.runtime_toggle_virtual_keys) && claim(config.debug_test_virtual_keys) &&
-           claim(config.anomaly_mark_virtual_keys);
+    if (!claim(config.aim_hold_virtual_keys) ||
+        !claim(config.emergency_virtual_keys) ||
+        !claim(config.runtime_toggle_virtual_keys) ||
+        !claim(config.anomaly_mark_virtual_keys)) return false;
+    // 禁用调试保留草稿，只校验自身键值和重复；不能占用其他功能的按键。
+    if (!config.debug_test_enabled) assigned.fill(false);
+    return claim(config.debug_test_virtual_keys);
 }
 
 struct KeyboardEvent {

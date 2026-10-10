@@ -1,4 +1,5 @@
 #include "config/config.h"
+#include "config/hotkey_config_internal.h"
 #include "weapon/weapon_catalog.h"
 
 #include "aim/aim_config_internal.h"
@@ -968,62 +969,21 @@ bool validate_app_config(const AppConfig& config,
             error = "Mouse 配置非法";
             return false;
         }
-        const auto auxiliary_key_conflict = [&](int key) {
-            return (config.trigger.enabled && key == config.trigger.hold_virtual_key) ||
-                (config.auto_stop.enabled && (key == config.auto_stop.activation_virtual_key ||
-                 std::find(config.auto_stop.release_virtual_keys.begin(), config.auto_stop.release_virtual_keys.end(), key) != config.auto_stop.release_virtual_keys.end()));
-        };
-        for (const int key : config.keyboard.debug_test_virtual_keys) {
-            if (config.keyboard.debug_test_enabled && auxiliary_key_conflict(key)) {
-                error = "调试测试快捷键与急停或扳机功能键冲突"; return false;
-            }
-        }
-        for (const int key : config.keyboard.anomaly_mark_virtual_keys) {
-            if (auxiliary_key_conflict(key)) {
-                error = "异常标记快捷键与急停或扳机功能键冲突"; return false;
-            }
-        }
-        const auto movement_key_conflicts = [&](bool enabled, movement::Trigger trigger, int key) {
-            if (!config.movement.enabled || !enabled || trigger != movement::Trigger::KEY || key == 0) return false;
-            const auto contains = [key](const std::vector<int>& keys) {
-                return std::find(keys.begin(), keys.end(), key) != keys.end();
-            };
-            return contains(config.keyboard.emergency_virtual_keys) ||
-                contains(config.keyboard.runtime_toggle_virtual_keys) ||
-                contains(config.keyboard.aim_hold_virtual_keys) ||
-                (config.keyboard.debug_test_enabled && contains(config.keyboard.debug_test_virtual_keys)) ||
-                contains(config.keyboard.anomaly_mark_virtual_keys) ||
-                auxiliary_key_conflict(key);
-        };
-        if (movement_key_conflicts(config.movement.spin_enabled, config.movement.spin_trigger, config.movement.spin_virtual_key) ||
-            movement_key_conflicts(config.movement.large_enabled, config.movement.large_trigger, config.movement.large_virtual_key)) {
-            error = "身法触发键与急停或其他功能键冲突"; return false;
+        if (config::detail::hotkey_config_conflicts(config)) {
+            error = "快捷键非法或与其他已启用功能冲突"; return false;
         }
         if (config.auto_stop.enabled) {
-            const int stop_key = config.auto_stop.activation_virtual_key;
             if (config.auto_stop.counter_hold_ms < 1 || config.auto_stop.counter_hold_ms > 200 ||
                 config.auto_stop.shot_after_release_ms < 0 || config.auto_stop.shot_after_release_ms > 200) {
                 error = "H40急停反向保持须为1至200ms，释放后等待须为0至200ms"; return false;
             }
             std::array<bool, 256> release_keys{};
             for (const int key : config.auto_stop.release_virtual_keys) {
-                if (key <= 0 || key > 255 || key == 'W' || key == 'A' ||
-                    key == 'S' || key == 'D' || key == stop_key || release_keys[key]) {
+                if (key <= 0 || key > 255 || release_keys[key]) {
                     error = "急停释放键非法、重复、使用 WASD 或与允许键冲突";
                     return false;
                 }
                 release_keys[key] = true;
-            }
-            const auto contains_stop_key = [stop_key](const std::vector<int>& keys) {
-                return std::find(keys.begin(), keys.end(), stop_key) != keys.end();
-            };
-            if (stop_key < 0 || stop_key > 0xFF || stop_key == 'W' ||
-                stop_key == 'A' || stop_key == 'S' || stop_key == 'D' ||
-                (stop_key != 0 &&
-                 (contains_stop_key(config.keyboard.emergency_virtual_keys) ||
-                  contains_stop_key(config.keyboard.runtime_toggle_virtual_keys)))) {
-                error = "自动急停允许键非法、使用 WASD 或与其他功能冲突";
-                return false;
             }
             if (config.mouse.backend != MouseBackend::KMBOX_NET) {
                 error = "自动急停仅支持 KMBOX NET 后端";
@@ -1038,14 +998,7 @@ bool validate_app_config(const AppConfig& config,
         auto trigger_config = config.trigger;
         trigger_config.person_class_ids = config.aim.person_class_ids;
         trigger_config.head_class_ids = config.aim.head_class_ids;
-        const int trigger_key = config.trigger.hold_virtual_key;
-        const auto trigger_conflict = [trigger_key](const std::vector<int>& keys) {
-            return trigger_key != 0 && std::find(keys.begin(), keys.end(), trigger_key) != keys.end();
-        };
-        if (config.trigger.enabled && (!valid_trigger_config(trigger_config) || trigger_key == 1 || trigger_key == 0x23 || trigger_key == 0x77 ||
-            trigger_key == 'W' || trigger_key == 'A' || trigger_key == 'S' || trigger_key == 'D' ||
-            trigger_conflict(config.keyboard.emergency_virtual_keys) ||
-            trigger_conflict(config.keyboard.runtime_toggle_virtual_keys) ||
+        if (config.trigger.enabled && (!valid_trigger_config(trigger_config) ||
             config.mouse.backend != MouseBackend::KMBOX_NET || !config.gsi.enabled ||
             (config.trigger.require_stop && !config.auto_stop.enabled))) {
             error = "自动扳机参数、绑定键、后端、GSI或急停依赖非法";
