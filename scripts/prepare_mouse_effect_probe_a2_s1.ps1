@@ -32,6 +32,7 @@
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot "probe_native_process.psm1") -ErrorAction Stop
 
 . (Join-Path $PSScriptRoot "probe_ndi_runtime_support.ps1")
 Assert-XenProbeNdiRuntime $ToolRoot
@@ -228,7 +229,8 @@ $stagingDirectory = Join-Path $runParent (
 if (Test-Path -LiteralPath $stagingDirectory) {
     throw "A2 S1 staging 已存在：$stagingDirectory"
 }
-[void](New-Item -ItemType Directory -Path $stagingDirectory)
+$stagingOwner = New-XenProbeStagingDirectory -Path $stagingDirectory -Parent $runParent
+try {
 $toolDirectory = Join-Path $stagingDirectory "tool"
 [void](New-Item -ItemType Directory -Path $toolDirectory)
 
@@ -313,18 +315,15 @@ $obsCopy = Copy-NewPublishedFile `
     "A2 S1 OBS binding copy"
 
 $sequencePath = Join-Path $stagingDirectory "sequence.json"
-& (Join-Path $toolDirectory "XenMouseEffectProbeSequence.exe") `
-    --output $sequencePath `
-    --profile s1-liveness-a2 `
-    --run-role $RunRole `
-    --challenge-pulses $ChallengePulseCount `
-    --challenge-stride-samples $ChallengeStrideSampleCount `
-    --peak-hold-samples $PeakHoldSampleCount `
-    --settle-samples $SettleSampleCount `
-    --baseline-samples $BaselineSampleCount
-if ($LASTEXITCODE -ne 0) {
-    throw "A2 S1 sequence tool 失败，ExitCode=$LASTEXITCODE"
-}
+Invoke-XenProbeNativeTool -Executable (Join-Path $toolDirectory "XenMouseEffectProbeSequence.exe") `
+    -Description "A2 S1 sequence tool" -Arguments @(
+        '--output', $sequencePath,
+        '--profile', 's1-liveness-a2', '--run-role', $RunRole,
+        '--challenge-pulses', [string]$ChallengePulseCount,
+        '--challenge-stride-samples', [string]$ChallengeStrideSampleCount,
+        '--peak-hold-samples', [string]$PeakHoldSampleCount,
+        '--settle-samples', [string]$SettleSampleCount,
+        '--baseline-samples', [string]$BaselineSampleCount)
 $sequence = Get-Content -LiteralPath $sequencePath -Raw -Encoding utf8 |
     ConvertFrom-Json
 $samples = @($sequence.samples)
@@ -592,8 +591,13 @@ $summary = [ordered]@{
 Write-NewUtf8Json `
     (Join-Path $stagingDirectory "prepare-summary.json") $summary
 
-Move-Item -LiteralPath $stagingDirectory -Destination $resolvedRun
+Complete-XenProbeStagingDirectory -Owner $stagingOwner -Destination $resolvedRun
 Write-Host "Physical A2 S1 $roleLabel Prepare 完成；未启动 Mouse、sidecar 或 Launch。"
 Write-Host "BundleDirectory=$resolvedRun"
 Write-Host "PublishedRunDirectory=$resolvedPublishedRun"
 Write-Host $launchCommand
+} catch {
+    $failure = $_
+    Undo-XenProbeStagingDirectory -Owner $stagingOwner -Failure $failure
+    throw $failure
+}

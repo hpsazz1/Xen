@@ -1,3 +1,4 @@
+#include "platform/filesystem_path_internal.h"
 #include "mouse_effect_probe/mouse_effect_probe.h"
 #include "mouse_effect_probe/report_validation_internal.h"
 
@@ -2268,7 +2269,7 @@ bool write_mouse_effect_probe_sequence(
             set_error(error, "序列发布路径不能为空");
             return false;
         }
-        const auto final_path = std::filesystem::absolute(path);
+        const auto final_path = xen::filesystem_detail::windows_io_path(path);
         if (std::filesystem::exists(final_path)) {
             set_error(error, "序列发布目标已存在，拒绝覆盖");
             return false;
@@ -2348,19 +2349,20 @@ bool read_mouse_effect_probe_sequence(
         std::string& error) noexcept {
     sequence = {};
     try {
+        const auto input_path = xen::filesystem_detail::windows_io_path(path);
         std::error_code filesystem_error;
         if (path.empty() || !std::filesystem::is_regular_file(
-                path, filesystem_error) || filesystem_error) {
+                input_path, filesystem_error) || filesystem_error) {
             set_error(error, "序列输入不是可读普通文件");
             return false;
         }
-        const auto bytes = std::filesystem::file_size(path, filesystem_error);
+        const auto bytes = std::filesystem::file_size(input_path, filesystem_error);
         if (filesystem_error || bytes == 0 ||
             bytes > kMaximumSequenceFileBytes) {
             set_error(error, "序列输入为空或超过固定文件容量边界");
             return false;
         }
-        std::ifstream input(path, std::ios::binary);
+        std::ifstream input(input_path, std::ios::binary);
         if (!input) {
             set_error(error, "无法打开序列输入文件");
             return false;

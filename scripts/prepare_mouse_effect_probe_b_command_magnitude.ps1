@@ -23,6 +23,7 @@
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot "probe_native_process.psm1") -ErrorAction Stop
 
 . (Join-Path $PSScriptRoot "probe_ndi_runtime_support.ps1")
 Assert-XenProbeNdiRuntime $ToolRoot
@@ -279,13 +280,13 @@ $stagingDirectory = Join-Path $runParent (
 if (Test-Path -LiteralPath $stagingDirectory) {
     throw "Physical B 多幅值 staging 已存在：$stagingDirectory"
 }
-[void](New-Item -ItemType Directory -Path $stagingDirectory)
+$stagingOwner = New-XenProbeStagingDirectory -Path $stagingDirectory -Parent $runParent
+try {
 $toolDirectory = Join-Path $stagingDirectory "tool"
 $inputDirectory = Join-Path $stagingDirectory "inputs"
 [void](New-Item -ItemType Directory -Path $toolDirectory)
 [void](New-Item -ItemType Directory -Path $inputDirectory)
 
-try {
 $resolvedToolRoot = (Resolve-Path -LiteralPath $ToolRoot).ProviderPath
 $publishedTool = Join-Path $resolvedPublishedRun "tool"
 $publishedInputs = Join-Path $resolvedPublishedRun "inputs"
@@ -339,16 +340,11 @@ $b0Copy = Copy-NewPublishedFile `
     "B0 fidelity evaluation copy"
 
 $sequencePath = Join-Path $stagingDirectory "sequence.json"
-& (Join-Path $toolDirectory "XenMouseEffectProbeSequence.exe") `
-    --output $sequencePath `
-    --profile physical-b-command-magnitude `
-    --run-role primary `
-    --baseline-samples 64 `
-    --response-samples 48 `
-    --guard-samples 32
-if ($LASTEXITCODE -ne 0) {
-    throw "Physical B 多幅值 sequence tool 失败，ExitCode=$LASTEXITCODE"
-}
+Invoke-XenProbeNativeTool -Executable (Join-Path $toolDirectory "XenMouseEffectProbeSequence.exe") `
+    -Description "Physical B command-magnitude sequence tool" -Arguments @(
+        '--output', $sequencePath, '--profile', 'physical-b-command-magnitude',
+        '--run-role', 'primary', '--baseline-samples', '64',
+        '--response-samples', '48', '--guard-samples', '32')
 $sequence = Get-Content -LiteralPath $sequencePath -Raw -Encoding utf8 |
     ConvertFrom-Json
 $samples = @($sequence.samples)
@@ -587,30 +583,13 @@ $summary = [ordered]@{
 Write-NewUtf8Json `
     (Join-Path $stagingDirectory "prepare-summary.json") $summary
 
-Move-Item -LiteralPath $stagingDirectory -Destination $resolvedRun
+Complete-XenProbeStagingDirectory -Owner $stagingOwner -Destination $resolvedRun
 Write-Host "Physical B command-magnitude Primary Prepare 完成；未启动 Mouse、sidecar 或 Launch。"
 Write-Host "BundleDirectory=$resolvedRun"
 Write-Host "PublishedRunDirectory=$resolvedPublishedRun"
 Write-Host $launchCommand
 } catch {
     $failure = $_
-    if (Test-Path -LiteralPath $stagingDirectory -PathType Container) {
-        $stagingFull = [IO.Path]::GetFullPath($stagingDirectory)
-        $runParentFull = [IO.Path]::GetFullPath($runParent)
-        $runParentPrefix = $runParentFull.TrimEnd(
-            [IO.Path]::DirectorySeparatorChar,
-            [IO.Path]::AltDirectorySeparatorChar) +
-            [IO.Path]::DirectorySeparatorChar
-        $expectedStagingPrefix = ".{0}.incoming-" -f $runName
-        if (-not $stagingFull.StartsWith(
-                $runParentPrefix,
-                [StringComparison]::OrdinalIgnoreCase) -or
-            -not (Split-Path -Leaf $stagingFull).StartsWith(
-                $expectedStagingPrefix,
-                [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Physical B 多幅值 staging 清理目标越界：$stagingFull"
-        }
-        Remove-Item -LiteralPath $stagingFull -Recurse -Force
-    }
+    Undo-XenProbeStagingDirectory -Owner $stagingOwner -Failure $failure
     throw $failure
 }

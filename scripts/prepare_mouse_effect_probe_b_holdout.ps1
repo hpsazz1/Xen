@@ -25,6 +25,7 @@
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot "probe_native_process.psm1") -ErrorAction Stop
 
 . (Join-Path $PSScriptRoot "probe_ndi_runtime_support.ps1")
 Assert-XenProbeNdiRuntime $ToolRoot
@@ -242,13 +243,13 @@ $stagingDirectory = Join-Path $runParent (
 if (Test-Path -LiteralPath $stagingDirectory) {
     throw "Physical B holdout staging 已存在：$stagingDirectory"
 }
-[void](New-Item -ItemType Directory -Path $stagingDirectory)
+$stagingOwner = New-XenProbeStagingDirectory -Path $stagingDirectory -Parent $runParent
+try {
 $toolDirectory = Join-Path $stagingDirectory "tool"
 $evidenceDirectory = Join-Path $stagingDirectory "evidence"
 [void](New-Item -ItemType Directory -Path $toolDirectory)
 [void](New-Item -ItemType Directory -Path $evidenceDirectory)
 
-try {
     $publishedTool = Join-Path $resolvedPublishedRun "tool"
     $publishedEvidence = Join-Path $resolvedPublishedRun "evidence"
     function Copy-Tool([string]$Name, [string]$Description) {
@@ -362,19 +363,14 @@ try {
     $request = $plan.sequence
     $frozenOfflineSequence = $plan.offline_sequence
     $sequencePath = Join-Path $stagingDirectory "sequence.json"
-    & (Join-Path $toolDirectory "XenMouseEffectProbeSequence.exe") `
-        --output $sequencePath `
-        --profile physical-b-holdout `
-        --guard-samples 32 `
-        --lfsr-order ([uint64]$request.lfsr.order) `
-        --feedback-mask ([uint64]$request.lfsr.feedback_mask) `
-        --seed ([uint64]$request.lfsr.seed) `
-        --phase ([uint64]$request.lfsr.phase) `
-        --offline-sequence-semantic-sha256 `
-            ([string]$request.sequence_semantic_sha256)
-    if ($LASTEXITCODE -ne 0) {
-        throw "Physical B holdout sequence tool 失败，ExitCode=$LASTEXITCODE"
-    }
+    Invoke-XenProbeNativeTool -Executable (Join-Path $toolDirectory "XenMouseEffectProbeSequence.exe") `
+        -Description "Physical B holdout sequence tool" -Arguments @(
+            '--output', $sequencePath, '--profile', 'physical-b-holdout',
+            '--guard-samples', '32', '--lfsr-order', [string][uint64]$request.lfsr.order,
+            '--feedback-mask', [string][uint64]$request.lfsr.feedback_mask,
+            '--seed', [string][uint64]$request.lfsr.seed,
+            '--phase', [string][uint64]$request.lfsr.phase,
+            '--offline-sequence-semantic-sha256', [string]$request.sequence_semantic_sha256)
     $sequence = Get-Content -LiteralPath $sequencePath -Raw -Encoding utf8 |
         ConvertFrom-Json
     $samples = @($sequence.samples)
@@ -664,30 +660,13 @@ try {
     Write-NewUtf8Json `
         (Join-Path $stagingDirectory "prepare-summary.json") $summary
 
-    Move-Item -LiteralPath $stagingDirectory -Destination $resolvedRun
+    Complete-XenProbeStagingDirectory -Owner $stagingOwner -Destination $resolvedRun
     Write-Host "Physical B holdout Prepare 完成；未启动 Mouse、sidecar 或 Launch。"
     Write-Host "BundleDirectory=$resolvedRun"
     Write-Host "PublishedRunDirectory=$resolvedPublishedRun"
     Write-Host $launchCommand
 } catch {
     $failure = $_
-    if (Test-Path -LiteralPath $stagingDirectory -PathType Container) {
-        $stagingFull = [IO.Path]::GetFullPath($stagingDirectory)
-        $runParentFull = [IO.Path]::GetFullPath($runParent)
-        $runParentPrefix = $runParentFull.TrimEnd(
-            [IO.Path]::DirectorySeparatorChar,
-            [IO.Path]::AltDirectorySeparatorChar) +
-            [IO.Path]::DirectorySeparatorChar
-        $expectedStagingPrefix = ".{0}.incoming-" -f $runName
-        if (-not $stagingFull.StartsWith(
-                $runParentPrefix,
-                [StringComparison]::OrdinalIgnoreCase) -or
-            -not (Split-Path -Leaf $stagingFull).StartsWith(
-                $expectedStagingPrefix,
-                [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Physical B holdout staging 清理目标越界：$stagingFull"
-        }
-        Remove-Item -LiteralPath $stagingFull -Recurse -Force
-    }
+    Undo-XenProbeStagingDirectory -Owner $stagingOwner -Failure $failure
     throw $failure
 }

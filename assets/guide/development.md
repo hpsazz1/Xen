@@ -436,3 +436,20 @@ ReportLifecycle 与 Runtime，在合成采集和写盘屏障上验证交错；`r
 相位检查在已验证的长曲线上复用有序极值索引，窗口仍为闭区间；插值、浮点累计、相等值的先后和轨迹身份不变。短曲线保留扫描且不分配索引。性能比较使用 `recoil_tuner_phase_benchmark` 的完整 optimize 报告与原实现逐位对照，不能只比汇总。合成基准记录完整分位数与内存取舍，不外推为真实闭环性能。
 
 本轮[合成热点验证快照](../../tests/hotspot_performance_20261010.md)记录基准、完整分位数及内存取舍。运动账本固定预留原型没有足够收益，生产实现保持不变。
+
+### 离线工具的 Windows 长路径
+
+Output-off Producer 和 Mouse Effect Probe Sequence 在文件 API 边界使用宽字符扩展绝对路径；
+对外路径、相对证据字段和 UTF-8 配置接口保持原约定。发布仍拒绝既有目标，失败只清理本次取得
+所有权的临时目录。该转换不替代调用方的路径授权、目录归属和 reparse 检查。
+
+A2 S1、B holdout 和 B command-magnitude Prepare 通过共享 `probe_native_process.psm1`
+同步运行已冻结的离线 Sequence 副本，显式传入程序路径并返回真实退出码。启动失败、超时或
+非零退出会保留错误；清理错误不会覆盖原业务错误。Prepare 仍只生成任务，不启动设备或 Launch。
+Physical B 工具包包含此模块，固定清单由 24 项更新为 25 项；Git 长路径选项仅用于当前发布检查
+命令，不修改用户或仓库配置。
+
+`windows_long_path_cli_tests`、`probe_native_process_tests` 以及原 Prepare/owner 回归覆盖深路径、
+Unicode/空格、参数引用、目标冲突和失败清理。当前 VS 18/MSVC 14.51/CUDA 13.2 的
+`runtime_component_producer_tests` 在本轮深构建根仍失败；同目录扩展路径实验也被 FileTracker、
+CL 或 NVCC 拒绝。该项保留失败，未通过缩根或跳过编译器检测改成绿色。

@@ -29,7 +29,7 @@ foreach ($required in @(
         'mouse_effect_probe_a2_s1_task',
         'dependency_calibration_a2_s1_$RunRole',
         '[ValidateSet("primary", "validation")]',
-        '--profile s1-liveness-a2',
+        "'--profile', 's1-liveness-a2'",
         '--peak-hold-samples',
         '[uint64]$PeakHoldSampleCount = 64',
         'challenge_pulse_count',
@@ -44,7 +44,7 @@ foreach ($required in @(
         'PREPARED_NOT_LAUNCHED',
         'physical_launch_executed = $false',
         'XEN_MOUSE_EFFECT_PROBE_A_SENDS_REAL_KMBOX_INPUT',
-        'Move-Item -LiteralPath $stagingDirectory')) {
+        'Complete-XenProbeStagingDirectory -Owner $stagingOwner')) {
     if (-not $prepare.Contains($required)) {
         throw "A2 S1 Prepare is missing contract text: $required"
     }

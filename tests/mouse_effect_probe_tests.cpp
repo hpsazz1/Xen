@@ -869,6 +869,30 @@ void test_sequence_file_round_trip_rejects_overwrite_and_tampering() {
            "sample 被篡改后必须因结构或 SHA 不一致而拒绝");
 }
 
+void test_sequence_long_unicode_path_roundtrip() {
+    TemporaryDirectory temporary;
+    const auto owned = temporary.path() / L"长路径 空格 🧪";
+    auto path = owned;
+    while (path.native().size() < 330) path /= L"deep path boundary-0123456789";
+    path /= L"序列 🧪.json";
+    mouse_effect_probe::MouseEffectProbeSequence sequence, loaded;
+    std::string error;
+    expect(mouse_effect_probe::make_sparse_pulse_sequence(
+               {.baseline_sample_count = 2, .response_sample_count = 3,
+                .guard_sample_count = 2}, sequence, error), "长路径夹具应生成成功");
+    expect(mouse_effect_probe::write_mouse_effect_probe_sequence(path, sequence, error),
+           "深 Unicode 路径应原子发布: " + error);
+    expect(mouse_effect_probe::read_mouse_effect_probe_sequence(path, loaded, error) &&
+               loaded.sequence_sha256 == sequence.sequence_sha256,
+           "公有 reader 应回读同一深路径且保持语义 SHA: " + error);
+    expect(!mouse_effect_probe::write_mouse_effect_probe_sequence(path, sequence, error),
+           "深路径既有序列也必须拒绝覆盖");
+    std::error_code cleanup_error;
+    // 只清理本 TemporaryDirectory 内新建的固定 child；独立使用 Win32 文件路径表示。
+    std::filesystem::remove_all(std::filesystem::path(L"\\\\?\\" + owned.native()), cleanup_error);
+    expect(!cleanup_error, "深路径 fixture 应完整清理");
+}
+
 void test_executor_consumes_one_sample_per_frame_and_never_catches_up() {
     mouse_effect_probe::MouseEffectProbeSequence sequence;
     std::string error;
@@ -1381,6 +1405,7 @@ int main() {
     test_physical_b_command_magnitude_sequences_are_fixed_and_bounded();
     test_physical_b_composite_phase_sequence_is_precommitted();
     test_sequence_file_round_trip_rejects_overwrite_and_tampering();
+    test_sequence_long_unicode_path_roundtrip();
     test_executor_consumes_one_sample_per_frame_and_never_catches_up();
     test_executor_failure_stops_without_compensation();
     test_executor_complete_and_user_stop_contracts();

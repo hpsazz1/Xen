@@ -1,4 +1,5 @@
 #include "aim_production_red/aim_production_red.h"
+#include "platform/filesystem_path_internal.h"
 
 #include <windows.h>
 
@@ -81,6 +82,6 @@ int wmain(int argc, wchar_t* argv[]) {
         << "Aim production red producer: physical_output_capability=false, "
         << "physical_dispatch_count=0, traces=" << result.trace_count
         << ", samples=" << result.sample_count
-        << ", manifest=\"" << result.manifest_path.string() << "\"\n";
+        << ", manifest=\"" << xen::filesystem_detail::path_utf8(result.manifest_path) << "\"\n";
     return 0;
 }

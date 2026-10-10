@@ -110,9 +110,6 @@ foreach ($role in @("primary", "validation")) {
         -BaselineSampleCount 64 `
         -SidecarFrames 256 `
         -MaxSeconds 15
-    if ($LASTEXITCODE -ne 0) {
-        throw "A2 S1 $role Prepare 失败，ExitCode=$LASTEXITCODE"
-    }
     $task = Get-Content -Raw -Encoding utf8 -LiteralPath (
         Join-Path $runDirectory "task.json") | ConvertFrom-Json
     $summary = Get-Content -Raw -Encoding utf8 -LiteralPath (

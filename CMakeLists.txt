@@ -1610,6 +1610,15 @@ if(BUILD_TESTING)
             "${PROJECT_SOURCE_DIR}/tests/producer_integer_bounds_tests.py"
             --producer "$<TARGET_FILE:xen_aim_production_red_producer>"
             --output-root "${CMAKE_BINARY_DIR}/producer-integer-fixtures")
+    add_test(NAME windows_long_path_cli_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+            "${PROJECT_SOURCE_DIR}/tests/windows_long_path_cli_tests.py"
+            --producer "$<TARGET_FILE:xen_aim_production_red_producer>"
+            --sequence "$<TARGET_FILE:xen_mouse_effect_probe_sequence>"
+            --evaluator "${PROJECT_SOURCE_DIR}/scripts/evaluate_aim_production_red.py"
+            --powershell-executable "${XEN_POWERSHELL7_EXECUTABLE}"
+            --test-root "${CMAKE_BINARY_DIR}/windows-long-path-cli-tests")
+    set_tests_properties(windows_long_path_cli_tests PROPERTIES TIMEOUT 120)
     set_tests_properties(producer_integer_bounds_tests PROPERTIES TIMEOUT 90)
     add_test(NAME producer_completion_overflow_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
@@ -2291,6 +2300,10 @@ if(BUILD_TESTING)
             -PublishScript "${PROJECT_SOURCE_DIR}/scripts/publish_mouse_effect_probe_b.ps1"
             -TestRoot "${CMAKE_BINARY_DIR}/test-root-owner-cli-tests")
 
+    xen_add_windows_powershell_test(probe_native_process_tests
+        "${PROJECT_SOURCE_DIR}/tests/probe_native_process_tests.ps1"
+        -SequenceExecutable "$<TARGET_FILE:xen_mouse_effect_probe_sequence>"
+        -TestRoot "${CMAKE_BINARY_DIR}/probe-native-process-tests")
     xen_add_windows_powershell_test(powershell_module_path_tests
         "${PROJECT_SOURCE_DIR}/tests/powershell_module_path_tests.ps1"
         -CMakeCommand "${CMAKE_COMMAND}"

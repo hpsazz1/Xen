@@ -3,6 +3,7 @@
 
 #include "aim/aim.h"
 #include "config/config.h"
+#include "platform/filesystem_path_internal.h"
 
 #include <nlohmann/json.hpp>
 
@@ -32,6 +33,9 @@ namespace aim_production_red {
 namespace {
 
 using json = nlohmann::json;
+using xen::filesystem_detail::windows_io_path;
+using xen::filesystem_detail::path_utf8;
+using xen::filesystem_detail::generic_path_utf8;
 
 constexpr int kPlanSchemaVersion = 1;
 constexpr int kRedSchemaVersion = 1;
@@ -80,7 +84,7 @@ bool compute_file_sha256(const std::filesystem::path& path,
     value.clear();
     std::ifstream stream(path, std::ios::binary);
     if (!stream) {
-        error = "无法读取 SHA-256 输入: " + path.string();
+        error = "无法读取 SHA-256 输入: " + path_utf8(path);
         return false;
     }
 
@@ -153,12 +157,13 @@ bool compute_file_sha256(const std::filesystem::path& path,
     return true;
 }
 
-bool copy_verified(const std::filesystem::path& source,
+bool copy_verified(const std::filesystem::path& source_path,
                    const std::filesystem::path& destination,
                    std::string& sha256,
                    std::string& error) {
+    const auto source = windows_io_path(source_path);
     if (!std::filesystem::is_regular_file(source)) {
-        error = "输入文件不存在: " + source.string();
+        error = "输入文件不存在: " + path_utf8(source);
         return false;
     }
     std::string source_sha256;
@@ -171,7 +176,7 @@ bool copy_verified(const std::filesystem::path& source,
         return false;
     }
     if (source_sha256 != destination_sha256) {
-        error = "输入文件复制后 SHA-256 不一致: " + source.string();
+        error = "输入文件复制后 SHA-256 不一致: " + path_utf8(source);
         return false;
     }
     sha256 = std::move(destination_sha256);
@@ -190,9 +195,9 @@ void write_json(const std::filesystem::path& path, const json& value,
                 const detail::CloseFileOperation& close_file) {
     std::ofstream stream(path, std::ios::binary | std::ios::trunc);
     stream << value.dump(2) << '\n';
-    if (!stream) throw std::runtime_error("写入 JSON 失败: " + path.string());
+    if (!stream) throw std::runtime_error("写入 JSON 失败: " + path_utf8(path));
     close_file(stream, path);
-    if (!stream) throw std::runtime_error("关闭 JSON 失败: " + path.string());
+    if (!stream) throw std::runtime_error("关闭 JSON 失败: " + path_utf8(path));
 }
 
 void write_json_lines(const std::filesystem::path& path,
@@ -201,10 +206,10 @@ void write_json_lines(const std::filesystem::path& path,
     std::ofstream stream(path, std::ios::binary | std::ios::trunc);
     for (const auto& row : rows) stream << row.dump() << '\n';
     if (!stream) {
-        throw std::runtime_error("写入 JSONL 失败: " + path.string());
+        throw std::runtime_error("写入 JSONL 失败: " + path_utf8(path));
     }
     close_file(stream, path);
-    if (!stream) throw std::runtime_error("关闭 JSONL 失败: " + path.string());
+    if (!stream) throw std::runtime_error("关闭 JSONL 失败: " + path_utf8(path));
 }
 
 double finite_number(const json& object,
@@ -873,12 +878,13 @@ bool detail::produce_output_off_bundle(
         }
         const auto output = std::filesystem::absolute(
             options.output_directory).lexically_normal();
-        incoming = output;
+        const auto output_io = windows_io_path(output);
+        incoming = output_io;
         incoming += ".incoming";
-        if (std::filesystem::exists(output)) {
+        if (std::filesystem::exists(output_io)) {
             throw std::runtime_error("拒绝覆盖既有 output 或 incoming");
         }
-        std::filesystem::create_directories(output.parent_path());
+        std::filesystem::create_directories(output_io.parent_path());
         // 只有本次原子新建的目录才归本次调用清理；既有目录返回 false，
         // 不能用先 exists 再无条件置 owner 的方式接管其他调用的产物。
         owns_incoming = std::filesystem::create_directory(incoming);
@@ -901,13 +907,13 @@ bool detail::produce_output_off_bundle(
                 config_sha256, error)) {
             throw std::runtime_error(error);
         }
-        std::string reference_extension =
-            options.measured_reference_source_path.extension().string();
+        std::wstring reference_extension =
+            options.measured_reference_source_path.extension().native();
         if (reference_extension.empty() || reference_extension.size() > 12) {
-            reference_extension = ".bin";
+            reference_extension = L".bin";
         }
         const auto reference_relative = std::filesystem::path("sources") /
-            ("measured-reference" + reference_extension);
+            (L"measured-reference" + reference_extension);
         if (!copy_verified(
                 options.measured_reference_source_path,
                 incoming / reference_relative,
@@ -948,7 +954,7 @@ bool detail::produce_output_off_bundle(
         AppConfig app_config;
         std::string config_error;
         if (!load_app_config(
-                (incoming / "sources" / "config.ini").string(),
+                path_utf8(incoming / "sources" / "config.ini"),
                 app_config, config_error)) {
             throw std::runtime_error("Aim config 无效: " + config_error);
         }
@@ -1006,13 +1012,13 @@ bool detail::produce_output_off_bundle(
                     {"block_kind", block_kind},
                     {"variant", "B0"},
                     {"plant_profile_id", profile.id},
-                    {"relative_path", relative_path.generic_string()},
+                    {"relative_path", generic_path_utf8(relative_path)},
                     {"sha256", trace_sha256},
                     {"sample_count", rows.size()},
                     {"score_begin", score.begin},
                     {"score_end", score.end},
                     {"measured_reference", make_measured_reference(
-                        measured, reference_relative.generic_string(),
+                        measured, generic_path_utf8(reference_relative),
                         reference_sha256)},
                 });
                 total_samples += rows.size();
@@ -1022,7 +1028,7 @@ bool detail::produce_output_off_bundle(
         write_json(incoming / "manifest.json", manifest, close_file);
         std::string rename_error;
         if (!detail::rename_directory_with_retry(
-                incoming, output, 5, std::chrono::milliseconds(50),
+                incoming, output_io, 5, std::chrono::milliseconds(50),
                 [](const std::filesystem::path& source,
                    const std::filesystem::path& destination) {
                     std::filesystem::rename(source, destination);

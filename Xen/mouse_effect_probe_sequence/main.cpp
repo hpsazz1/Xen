@@ -1,3 +1,4 @@
+#include "platform/filesystem_path_internal.h"
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -344,7 +345,7 @@ int wmain(int argc, wchar_t* argv[]) {
         std::cerr << "生成 Mouse Effect Probe 序列失败: " << error << '\n';
         return 1;
     }
-    std::cout << "序列已原子发布: path=" << output_path
+    std::cout << "序列已原子发布: path=" << xen::filesystem_detail::path_utf8(output_path)
               << ", profile=" << sequence.profile
               << ", samples=" << sequence.samples.size()
               << ", net_x_counts=" << sequence.net_x_counts

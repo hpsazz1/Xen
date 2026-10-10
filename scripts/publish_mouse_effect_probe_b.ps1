@@ -74,7 +74,8 @@ function Invoke-GitChecked(
     $previousErrorAction = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
-        $output = & $GitExecutable -C $Repository @Arguments 2>&1
+        # 仅此调用启用 Git for Windows 内置长路径支持，不写仓库或全局配置。
+        $output = & $GitExecutable -c core.longpaths=true -C $Repository @Arguments 2>&1
         $exitCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $previousErrorAction
@@ -89,9 +90,9 @@ function Assert-TrackedClean([string]$Repository) {
     $previousErrorAction = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
-        & $GitExecutable -C $Repository diff --quiet --no-ext-diff
+        & $GitExecutable -c core.longpaths=true -C $Repository diff --quiet --no-ext-diff
         $worktreeExitCode = $LASTEXITCODE
-        & $GitExecutable -C $Repository diff --cached --quiet --no-ext-diff
+        & $GitExecutable -c core.longpaths=true -C $Repository diff --cached --quiet --no-ext-diff
         $indexExitCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $previousErrorAction
@@ -178,7 +179,7 @@ function Assert-Package(
         -not [bool]$Manifest.composite_phase_tooling_included -or
         [bool]$Manifest.composite_phase_run_included -or
         [int]$Manifest.file_count -ne @($Manifest.files).Count -or
-        @($Manifest.files).Count -ne 24) {
+        @($Manifest.files).Count -ne 25) {
         throw "Physical B 工具包 manifest 身份或安全边界无效"
     }
     $declared = [Collections.Generic.HashSet[string]]::new(
@@ -230,6 +231,7 @@ if ($commit -notmatch '^[0-9a-f]{40}$') {
 
 $scriptNames = @(
     "probe_ndi_runtime_support.ps1",
+    "probe_native_process.psm1",
     "prepare_mouse_effect_probe_b.ps1",
     "prepare_mouse_effect_probe_b_holdout.ps1",
     "prepare_mouse_effect_probe_b_command_magnitude.ps1",

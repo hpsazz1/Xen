@@ -28,11 +28,11 @@ $launch = Get-Content -LiteralPath $LaunchScript -Raw -Encoding utf8
 foreach ($required in @(
         'mouse_effect_probe_b_command_magnitude_task',
         'physical_b_command_magnitude_primary',
-        '--profile physical-b-command-magnitude',
-        '--run-role primary',
-        '--baseline-samples 64',
-        '--response-samples 48',
-        '--guard-samples 32',
+        "'--profile', 'physical-b-command-magnitude'",
+        "'--run-role', 'primary'",
+        "'--baseline-samples', '64'",
+        "'--response-samples', '48'",
+        "'--guard-samples', '32'",
         '1,1,4,4,13,13,2,2,8,8',
         'primary_estimation_amplitudes = @(1, 4, 13)',
         'within_run_confirmation_amplitudes = @(2, 8)',
@@ -44,7 +44,7 @@ foreach ($required in @(
         'XEN_MOUSE_EFFECT_PROBE_B_MAGNITUDE_PRIMARY_SENDS_REAL_KMBOX_INPUT',
         'PREPARED_NOT_LAUNCHED',
         'physical_launch_executed = $false',
-        'Move-Item -LiteralPath $stagingDirectory')) {
+        'Complete-XenProbeStagingDirectory -Owner $stagingOwner')) {
     if (-not $prepare.Contains($required)) {
         throw "Physical B command-magnitude Prepare is missing contract text: $required"
     }

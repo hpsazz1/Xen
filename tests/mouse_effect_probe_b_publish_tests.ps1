@@ -21,7 +21,7 @@ function Invoke-Git([string]$Repository, [string[]]$Arguments) {
     $previousErrorAction = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
-        $output = & $GitExecutable -C $Repository @Arguments 2>&1
+        $output = & $GitExecutable -c core.longpaths=true -C $Repository @Arguments 2>&1
         $exitCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $previousErrorAction
@@ -61,6 +61,7 @@ $destination = Join-Path $resolvedTestRoot "remote"
 
 foreach ($name in @(
         "probe_ndi_runtime_support.ps1",
+        "probe_native_process.psm1",
         "prepare_mouse_effect_probe_b.ps1",
         "prepare_mouse_effect_probe_b_holdout.ps1",
         "prepare_mouse_effect_probe_b_command_magnitude.ps1",
@@ -92,7 +93,7 @@ foreach ($name in @(
 $previousErrorAction = $ErrorActionPreference
 try {
     $ErrorActionPreference = "Continue"
-    & $GitExecutable init $repository 2>&1 | Out-Null
+    & $GitExecutable -c core.longpaths=true init $repository 2>&1 | Out-Null
     $gitInitExitCode = $LASTEXITCODE
 } finally {
     $ErrorActionPreference = $previousErrorAction
@@ -303,13 +304,14 @@ Assert-True ([int]$manifest.schema_version -eq 1 -and
              -not [bool]$manifest.command_magnitude_run_included -and
              [bool]$manifest.composite_phase_tooling_included -and
              -not [bool]$manifest.composite_phase_run_included -and
-             [int]$manifest.file_count -eq 24 -and
-             @($manifest.files).Count -eq 24) `
+             [int]$manifest.file_count -eq 25 -and
+             @($manifest.files).Count -eq 25) `
     "Physical B manifest 身份、clean/Launch 边界或文件数错误"
 $manifestNames = @($manifest.files | ForEach-Object { [string]$_.name })
 foreach ($requiredName in @(
         "evidence_publication.py",
         "probe_ndi_runtime_support.ps1",
+        "probe_native_process.psm1",
         "xen-runtime-deployment.json",
         "prepare_mouse_effect_probe_b_holdout.ps1",
         "analyze_mouse_effect_probe_b_holdout.py",
