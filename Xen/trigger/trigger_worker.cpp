@@ -394,11 +394,10 @@ public:
         try {
             std::shared_ptr<const TriggerObservation> consumed;
             while (!stopping.load()) {
-                const auto now = TriggerClock::now();
                 if (canceled.exchange(false)) {
                     if (manual_stop_id) { cancel_stop(manual_stop_id); manual_stop_id = 0; }
                     reserved_stop_id = 0;
-                    execute(controller.cancel(TriggerReason::CANCELED, now));
+                    execute(controller.cancel(TriggerReason::CANCELED, TriggerClock::now()));
                 }
                 auto observation = latest.load();
                 const auto p = permit(true);
@@ -411,6 +410,8 @@ public:
                         manual_stop_id = id; consumed_cycle_stop_id = id; cycle_stop_id = 0;
                     }
                 }
+                // 先取得并发发布的观测与许可，再取决策时间；旧now可能早于刚发布的健康观测。
+                const auto now = TriggerClock::now();
                 if (observation && observation != consumed) {
                     evaluated_observation = observation;
                     execute(controller.observe(*observation, p, now));

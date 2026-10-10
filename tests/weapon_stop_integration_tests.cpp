@@ -900,6 +900,18 @@ void stationary_owner_does_not_interrupt_shot() {
     }
     until([&] { return mouse->ups == 1; });
     const auto log = trigger.execution_log();
+    const bool unexpected_up = std::any_of(log.events.begin(), log.events.end(), [](const auto& event) {
+        return event.button_action == TriggerButtonAction::UP && event.backend_called &&
+            event.snapshot.reason != TriggerReason::RELEASED;
+    });
+    if (unexpected_up) {
+        std::cerr << "stationary完整事件 dropped=" << log.dropped_count << '\n';
+        for (const auto& event : log.events)
+            std::cerr << "event=" << event.sequence << " action=" << static_cast<int>(event.button_action)
+                << " reason=" << TriggerReasonName(event.snapshot.reason) << " backend=" << event.backend_called
+                << " source_ns=" << ns(event.source_observed_at) << " planned_ns=" << ns(event.planned_at)
+                << " observed_ns=" << ns(event.observed_at) << '\n';
+    }
     for (const auto& event : log.events)
         if (event.button_action == TriggerButtonAction::UP && event.backend_called) {
             if (event.snapshot.reason != TriggerReason::RELEASED)
