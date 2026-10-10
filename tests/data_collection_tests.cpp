@@ -37,6 +37,39 @@ void automatic(data_collection::Collector& collector, CapturedFrame& frame,
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     } while (std::chrono::steady_clock::now() < deadline);
 }
+void bound_identity_test(const data_collection::Config& config) {
+    data_collection::Collector collector;
+    std::string error;
+    expect(!collector.start(config, error, {2, 0}) && !collector.snapshot().active,
+        "拒绝只绑定Runtime的半身份");
+    expect(!collector.start(config, error, {0, 7}) && !collector.snapshot().active,
+        "拒绝只绑定模型的半身份");
+    expect(collector.start(config, error, {2, 7}), "权威身份绑定后开放采集");
+    CapturedFrame frame;
+    frame.width = frame.height = 32;
+    frame.bgr = cv::Mat(32, 32, CV_8UC3, cv::Scalar(10, 20, 30));
+    collector.request_sample();
+    for (const auto runtime_generation : {0ULL, 1ULL, 3ULL}) {
+        const auto before = collector.snapshot().filtered;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        do { collector.offer(frame, {}, DetectionStatus::SUCCESS, 7, true, runtime_generation); }
+        while (collector.snapshot().filtered == before && std::chrono::steady_clock::now() < deadline);
+        const auto result = collector.snapshot();
+        expect(result.filtered > before && result.saved == 0 && result.manual_pending && !result.paused,
+            "错误Runtime身份不能冒用相同模型代次或消耗人工请求");
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    do { collector.offer(frame, {}, DetectionStatus::SUCCESS, 7, true, 2); }
+    while (collector.snapshot().manual_pending && std::chrono::steady_clock::now() < deadline);
+    settle(collector);
+    expect(collector.snapshot().saved == 1 && !collector.snapshot().paused, "正确身份可继续保存");
+    for (int attempt = 0; attempt < 100 && !collector.snapshot().paused; ++attempt) {
+        collector.offer(frame, {}, DetectionStatus::SUCCESS, 8, true, 2);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    expect(collector.snapshot().paused && collector.snapshot().saved == 1,
+        "旧会话遇到更高模型代次仍需结束重开");
+}
 void configured_log_level_test(const data_collection::Config& config) {
     for (const auto level : {LogLevel::OFF, LogLevel::INFO}) {
         LogConfig logging;
@@ -101,6 +134,7 @@ int wmain(int argc, wchar_t** argv) {
         config.model_path = model.string();
         config.class_names = {"person"};
         config.interval_ms = 0;
+        bound_identity_test(config);
         config.exploration_interval_ms = 60000;
         configured_log_level_test(config);
         data_collection::Collector collector;

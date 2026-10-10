@@ -6,6 +6,7 @@
 #include "model_workspace/actions_internal.h"
 #include "log/log.h"
 #include <nlohmann/json.hpp>
+#include <opencv2/imgcodecs.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -156,6 +157,111 @@ struct Fixture {
                "写盘屏障未释放时，真实输入路由已消费保持键释放与End");
     }
 };
+class FrameCapture final : public ICapture {
+public:
+    explicit FrameCapture(std::atomic<unsigned>& requested) : requested_(requested) {}
+    bool open() noexcept override { return true; }
+    CaptureStatus grab(CapturedFrame& frame) noexcept override {
+        const auto sequence = requested_.exchange(0);
+        if (!sequence) { std::this_thread::sleep_for(1ms); return CaptureStatus::NO_FRAME; }
+        frame = {};
+        frame.width = frame.height = frame.source_width = frame.source_height = 32;
+        frame.encoded_width = frame.encoded_height = 32;
+        frame.bgr = cv::Mat(32, 32, CV_8UC3, cv::Scalar(10, 20, 30));
+        frame.bgr.setTo(cv::Scalar(10 * sequence, 20, 30));
+        frame.timing.sequence = sequence;
+        frame.timing.captured_at = std::chrono::steady_clock::now();
+        return CaptureStatus::FRAME;
+    }
+    void close() noexcept override {}
+    CaptureStatus status() const noexcept override { return CaptureStatus::READY; }
+    std::string last_error() const override { return {}; }
+private:
+    std::atomic<unsigned>& requested_;
+};
+void collection_frame_identity(const char* model, const char* reload_model) {
+    const auto root = std::filesystem::temp_directory_path() /
+        ("xen-collection-frame-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directory(root);
+    auto collector = std::make_shared<data_collection::Collector>();
+    auto mouse = std::make_shared<NoOutputMouse>();
+    std::atomic<unsigned> requested{0}, offered{0};
+    std::atomic<std::uint64_t> old_generation{0}, new_generation{0};
+    std::atomic<DetectionStatus> old_status{DetectionStatus::NOT_RUN}, new_status{DetectionStatus::NOT_RUN};
+    Gate old_frame;
+    runtime::detail::StartupAdapter adapter;
+    adapter.create_capture = [&](const CaptureConfig&) { return std::make_unique<FrameCapture>(requested); };
+    adapter.before_collection_offer = [&](std::uint64_t generation, DetectionStatus status) {
+        if (offered.fetch_add(1) == 0) { old_generation = generation; old_status = status; old_frame.enter(); }
+        else { new_generation = generation; new_status = status; }
+    };
+    auto runtime = runtime::detail::make_runtime_with_startup_adapter(std::move(adapter));
+    struct Cleanup {
+        Gate& frame; Runtime& runtime;
+        ~Cleanup() { frame.release(); runtime.stop(); }
+    } cleanup{old_frame, *runtime};
+    AppConfig config;
+    config.detector.model_path = model; config.detector.backend = BackendType::CPU;
+    config.capture.backend = CaptureBackend::UDP_MJPEG; config.capture.udp_url = "udp://127.0.0.1:19876";
+    config.mouse.allow_send_input = false;
+    if (!runtime->set_data_collector(collector) || !runtime->start(config, mouse))
+        throw std::runtime_error("真实帧Runtime启动失败：" + runtime->snapshot().last_error);
+    const auto first = runtime->snapshot();
+    requested = 1;
+    if (!old_frame.wait_entered()) throw std::runtime_error("真实CPU detect未完成并进入旧帧屏障");
+    expect(old_status == DetectionStatus::SUCCESS && old_generation == first.detector_generation,
+        "旧帧必须经过真实CPU Detector成功推理并缓存旧代次");
+    config.detector.model_path = reload_model;
+    expect(runtime->reload_detector(config.detector), "旧帧在offer前等待时允许真实模型重载");
+    if (!await([&] { return runtime->snapshot().detector_reload_state == DetectorReloadState::SUCCEEDED; }))
+        throw std::runtime_error("真实模型重载未完成");
+    const auto current = runtime->snapshot();
+    expect(current.detector_generation > first.detector_generation, "重载提交必须产生新模型代次");
+    data_collection::Config collection;
+    collection.root_directory = root; collection.model_path = current.active_model_path;
+    collection.class_names = {"person"};
+    std::string error;
+    if (!await([&] { return runtime->start_data_collection(collection, current, error); }))
+        throw std::runtime_error("重载后真实Runtime采集准入失败：" + error);
+    collector->request_sample();
+    old_frame.release();
+    if (!await([&] { return runtime->snapshot().processed_frames >= 1; }))
+        throw std::runtime_error("旧帧没有完成真实offer路径");
+    expect(await([&] { return collector->snapshot().queued == 0; }), "旧帧采集写入应已收敛");
+    const auto old_result = collector->snapshot();
+    expect(old_result.dropped == 0, "旧帧不能因try_lock争用而绕过本次代次验证");
+    expect(old_result.saved == 0 && old_result.manual_pending && !old_result.paused,
+        "新会话必须拒绝旧帧且保留人工请求，不能让首帧绑定旧模型");
+    requested = 2;
+    if (!await([&] { return runtime->snapshot().processed_frames >= 2; }))
+        throw std::runtime_error("正确模型的新帧没有完成推理与offer");
+    expect(await([&] { return collector->snapshot().queued == 0; }), "正确新帧写入应已收敛");
+    const auto result = collector->snapshot();
+    expect(new_status == DetectionStatus::SUCCESS && new_generation == current.detector_generation,
+        "第二帧必须经过重载后的真实Detector成功推理");
+    expect(result.dropped == 0 && result.saved == 1 && result.active && !result.paused && !result.manual_pending,
+        "正确代次的新帧必须正常保存，不能被旧帧首绑定误暂停");
+    std::ifstream manifest_stream(result.session_directory / "session.json");
+    const auto manifest = nlohmann::json::parse(manifest_stream);
+    std::ifstream record_stream(result.session_directory / "samples/1.json");
+    const auto record = nlohmann::json::parse(record_stream);
+    expect(record.at("detector_generation") == current.detector_generation && record.at("sequence") == 2,
+        "实际保存记录应只来自正确的新帧和模型代次");
+    expect(record.at("session_id") == manifest.at("session_id") &&
+        manifest.at("model_path") == std::filesystem::absolute(current.active_model_path).generic_string(),
+        "保存记录归属当前模型的采集会话");
+    expect(manifest.at("runtime_generation") == current.runtime_generation &&
+        manifest.at("detector_generation") == current.detector_generation &&
+        record.at("runtime_generation") == current.runtime_generation,
+        "会话与样本保存同一Runtime和模型代次");
+    const auto image = cv::imread((result.session_directory / "images/1.png").string());
+    expect(!image.empty() && image.at<cv::Vec3b>(0, 0) == cv::Vec3b(20, 20, 30),
+        "实际保存PNG来自第二帧，不能只替换旧帧记录身份");
+    expect(mouse->moves == 0, "完整真实Detector与Runtime链保持零设备输出");
+    std::cout << "collection_frame old_generation=" << old_generation << " new_generation=" << new_generation
+              << " old_saved=" << old_result.saved << " saved=" << result.saved << " paused=" << result.paused
+              << " record_generation=" << record.at("detector_generation") << '\n';
+}
 void ui_response(Fixture& f, bool fail_write) {
     f.queue(fail_write);
     f.runtime->post_intent({RuntimeIntentType::AIM_HOLD_CHANGED, true});
@@ -327,11 +433,16 @@ void collection_admission(Fixture& f, const std::string& scenario) {
 }
 }
 int main(int argc, char** argv) {
-    if (argc != 3) return 2;
+    if (argc != 3 && !(argc == 4 && std::string(argv[2]) == "--frame-identity")) return 2;
     LogConfig logging;
     logging.enable_console = logging.enable_file = logging.enable_debug_file = false;
     Log::init(logging);
     try {
+        if (std::string(argv[2]) == "--frame-identity") {
+            collection_frame_identity(argv[1], argc == 4 ? argv[3] : argv[1]);
+            Log::shutdown();
+            return failures ? 1 : 0;
+        }
         Fixture fixture(argv[1]);
         if (std::string(argv[2]) == "--stop-interleave") stop_interleave(fixture);
         else if (std::string(argv[2]) == "--concurrent-stop") concurrent_stop(fixture);

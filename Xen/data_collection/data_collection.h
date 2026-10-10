@@ -42,6 +42,11 @@ struct Snapshot {
     std::filesystem::path session_directory;
     std::string error;
 };
+// Runtime 在生命周期锁内确认的会话身份；全零保留独立 Collector 的首次绑定语义。
+struct SessionIdentity {
+    std::uint64_t runtime_generation = 0;
+    std::uint64_t detector_generation = 0;
+};
 // start/stop 串行拥有线程句柄；多个 stop 调用等待同一次回收。offer 只有一个生产者。
 // 原图只复制到本模块预分配槽，后台不保留 Capture 的引用。
 class Collector {
@@ -50,7 +55,7 @@ public:
     ~Collector();
     Collector(const Collector&) = delete;
     Collector& operator=(const Collector&) = delete;
-    bool start(const Config& config, std::string& error) noexcept;
+    bool start(const Config& config, std::string& error, SessionIdentity identity = {}) noexcept;
     // UI 只封口；poll_stop 仅在写入线程已完成时尝试回收，不等待写盘。
     void request_stop() noexcept;
     void poll_stop() noexcept;
@@ -61,7 +66,7 @@ public:
     // automatic_allowed 只限制自动采集；人工请求仍可保存用于诊断。
     void offer(const CapturedFrame& frame, std::span<const Detection> detections,
                DetectionStatus status, std::uint64_t detector_generation,
-               bool automatic_allowed = true) noexcept;
+               bool automatic_allowed = true, std::uint64_t runtime_generation = 0) noexcept;
     Snapshot snapshot() const;
 private:
     friend std::unique_ptr<Collector> detail::make_collector_with_lifecycle_adapter(detail::LifecycleAdapter);

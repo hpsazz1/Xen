@@ -808,6 +808,8 @@ struct Runtime::Impl {
     }
 
     void pipeline_loop() noexcept {
+        // start 在创建线程前分配代次；stop 回收本线程前不会启动下一代 Runtime。
+        const auto frame_runtime_generation = runtime_generation;
         std::uint64_t last_sequence = 0;
         runtime::detail::RuntimeObservationClock observation_clock;
         runtime::detail::CameraMotionEstimator camera_motion;
@@ -1122,12 +1124,14 @@ struct Runtime::Impl {
                 config.capture.backend == CaptureBackend::NDI &&
                     !config.capture.ndi_clock_sync_url.empty());
             if (data_collector && collect_frame) {
+                if (startup_adapter.before_collection_offer)
+                    startup_adapter.before_collection_offer(frame_detector_generation, profile.detector.status);
                 const auto collection_weapon = config.gsi.enabled
                     ? gsi_receiver.snapshot() : weapon::WeaponSnapshot{};
                 data_collector->offer(*frame, preview_detections,
                     profile.detector.status, frame_detector_generation,
                     runtime::detail::collection_game_context_allowed(config.gsi.enabled,
-                        collection_weapon, std::chrono::steady_clock::now()));
+                        collection_weapon, std::chrono::steady_clock::now()), frame_runtime_generation);
             }
             const float control_center_x = frame->source_pixels_per_pixel_x > 0.0
                 ? static_cast<float>(
@@ -1396,7 +1400,8 @@ bool Runtime::start_data_collection(const data_collection::Config& config,
         }
         if (!impl_->data_collector) { error = "图片采集模块未接入"; return false; }
         // 模型哈希和会话创建可能访问磁盘，不持snapshot锁；生命周期锁阻止stop或新重载穿过提交。
-        return impl_->data_collector->start(config, error);
+        return impl_->data_collector->start(config, error,
+            {expected.runtime_generation, expected.detector_generation});
     } catch (const std::exception& exception) {
         error = exception.what();
         return false;

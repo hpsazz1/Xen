@@ -101,7 +101,7 @@ struct Collector::Impl {
         FrameTiming timing;
         int width{}, height{}, source_width{}, source_height{}, encoded_width{}, encoded_height{};
         double roi_x{}, roi_y{}, scale_x{}, scale_y{};
-        std::uint64_t generation{}, id{};
+        std::uint64_t generation{}, runtime_generation{}, id{};
         DetectionStatus status{};
         const char* reason = "novel";
         bool automatic_allowed = true;
@@ -119,6 +119,7 @@ struct Collector::Impl {
     std::vector<std::size_t> queue;
     std::size_t queue_head{}, queue_size{};
     std::uint64_t accepted{}, bound_generation{};
+    SessionIdentity session_identity;
     bool generation_bound = false;
     bool stopping = false;
     bool worker_running = false;
@@ -156,7 +157,7 @@ struct Collector::Impl {
         for (const auto& box : slot.detections) boxes.push_back({{"class_id", box.class_id}, {"x1", box.x1}, {"y1", box.y1}, {"x2", box.x2}, {"y2", box.y2}, {"confidence", box.confidence}});
         Json record = {{"schema_version", 1}, {"sample_id", sample_id}, {"session_id", session_id},
             {"image", utf8(image_relative)}, {"image_sha256", hash_bytes(encoded)}, {"width", slot.width}, {"height", slot.height},
-            {"sequence", slot.timing.sequence}, {"detector_generation", slot.generation}, {"detection_status", DetectionStatusName(slot.status)},
+            {"sequence", slot.timing.sequence}, {"runtime_generation", slot.runtime_generation}, {"detector_generation", slot.generation}, {"detection_status", DetectionStatusName(slot.status)},
             {"reason", slot.reason}, {"automatic_allowed", slot.automatic_allowed}, {"review_state", slot.status == DetectionStatus::SUCCESS ? "PRELABELED" : "RAW"}, {"detections", boxes},
             {"geometry", {{"roi_x", slot.roi_x}, {"roi_y", slot.roi_y}, {"source_width", slot.source_width}, {"source_height", slot.source_height}, {"encoded_width", slot.encoded_width}, {"encoded_height", slot.encoded_height}, {"source_pixels_per_pixel_x", slot.scale_x}, {"source_pixels_per_pixel_y", slot.scale_y}}},
             {"timing", {{"captured_steady_ns", nanoseconds(slot.timing.captured_at)}, {"source_sequence", slot.timing.source_sequence}, {"source_sequence_valid", slot.timing.source_sequence_valid}, {"source_timestamp", slot.timing.source_timestamp}, {"source_timestamp_valid", slot.timing.source_timestamp_valid}, {"source_time_basis", SourceTimeBasisName(slot.timing.source_time_basis)}, {"source_clock_status", SourceClockStatusName(slot.timing.source_clock_status)}}}};
@@ -228,11 +229,13 @@ std::unique_ptr<Collector> detail::make_collector_with_lifecycle_adapter(Lifecyc
     return collector;
 }
 Collector::~Collector() { stop(); }
-bool Collector::start(const Config& config, std::string& error) noexcept {
+bool Collector::start(const Config& config, std::string& error, SessionIdentity identity) noexcept {
     std::lock_guard lifecycle_lock(impl_->lifecycle_mutex);
     impl_->request_stop();
     impl_->join();
     try {
+        if ((identity.runtime_generation == 0) != (identity.detector_generation == 0))
+            throw std::runtime_error("采集会话必须同时绑定 Runtime 与模型代次");
         if (config.root_directory.empty() || config.model_path.empty() || config.class_names.empty() ||
             !config.queue_capacity || config.queue_capacity > 64 ||
             config.buffer_bytes < (config.queue_capacity + 1) * 3 || config.buffer_bytes > 512ULL * 1024 * 1024 ||
@@ -254,7 +257,9 @@ bool Collector::start(const Config& config, std::string& error) noexcept {
         p.contention_drops = 0;
         p.queue_head = p.queue_size = 0;
         p.accepted = 0;
-        p.generation_bound = false;
+        p.session_identity = identity;
+        p.bound_generation = identity.detector_generation;
+        p.generation_bound = identity.detector_generation != 0;
         p.stopping = false;
         p.writer_failed = false;
         p.have_previous = false;
@@ -272,6 +277,7 @@ bool Collector::start(const Config& config, std::string& error) noexcept {
         std::filesystem::create_directory(p.state.session_directory / "images");
         std::filesystem::create_directory(p.state.session_directory / "samples");
         Json session = {{"schema_version", 1}, {"session_id", p.session_id}, {"class_names", config.class_names}, {"model_path", utf8(std::filesystem::absolute(model_path))}, {"model_sha256", model_hash},
+            {"runtime_generation", identity.runtime_generation}, {"detector_generation", identity.detector_generation},
             {"policy", {{"version", 3}, {"continuous", true}, {"interval_ms", config.interval_ms}, {"novelty_threshold", config.novelty_threshold}, {"exploration_interval_ms", config.exploration_interval_ms}, {"exploration_rule", "uniform_interval_0.5_to_1.5_independent_of_detections"}, {"empty_detection_rule", "exploration_or_manual"}, {"automatic_flat_rule", "all_channels_at_most_1_or_at_least_254"}, {"manual_bypasses_quality_filters", true}, {"exploration_seed", p.config.exploration_seed}, {"uncertain_confidence", config.uncertain_confidence}, {"queue_capacity", config.queue_capacity}, {"buffer_bytes", config.buffer_bytes}}}};
         const auto text = session.dump(2);
         write_file(p.state.session_directory / "session.pending", text.data(), text.size());
@@ -318,13 +324,19 @@ Snapshot Collector::snapshot() const {
     result.dropped += impl_->contention_drops.load();
     return result;
 }
-void Collector::offer(const CapturedFrame& frame, std::span<const Detection> detections, DetectionStatus status, std::uint64_t generation, bool automatic_allowed) noexcept {
+void Collector::offer(const CapturedFrame& frame, std::span<const Detection> detections, DetectionStatus status, std::uint64_t generation, bool automatic_allowed, std::uint64_t runtime_generation) noexcept {
     auto& p = *impl_;
     if (!p.enabled.load(std::memory_order_acquire)) return;
     std::unique_lock lock(p.mutex, std::try_to_lock);
     if (!lock.owns_lock()) { ++p.contention_drops; return; }
     if (!p.state.active || p.state.paused) return;
     try {
+        // 新会话开放前已绑定权威身份；迟到旧帧不能重绑、暂停会话或消耗人工请求。
+        if (p.session_identity.runtime_generation &&
+            (runtime_generation != p.session_identity.runtime_generation || generation < p.bound_generation)) {
+            ++p.state.filtered;
+            return;
+        }
         if (p.generation_bound && generation != p.bound_generation) { p.fail("模型代次已变化，请结束并重新开启采集会话"); return; }
         p.bound_generation = generation; p.generation_bound = true;
         if (frame.storage != CapturedFrameStorage::CPU_BGR) { p.fail("当前 GPU-only 画面不支持采集；未执行 GPU 回读"); return; }
@@ -391,7 +403,7 @@ void Collector::offer(const CapturedFrame& frame, std::span<const Detection> det
             p.fail("采集样本序号耗尽");
             return;
         }
-        slot.status = status; slot.generation = generation; slot.id = ++p.accepted;
+        slot.status = status; slot.generation = generation; slot.runtime_generation = runtime_generation; slot.id = ++p.accepted;
         slot.automatic_allowed = automatic_allowed;
         slot.reason = manual ? "manual" : exploration ? "exploration" : uncertain ? "uncertain" : "novel";
         slot.occupied = true;
