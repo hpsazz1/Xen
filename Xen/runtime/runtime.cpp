@@ -382,7 +382,14 @@ struct Runtime::Impl {
                     std::free(token);
                 }
                 if (!source_context_client.start(context_config)) {
-                    set_error("源状态桥接启动失败，请核对配置和认证环境变量"); return false;
+                    const auto error = "源状态桥接未启动：" + source_context_client.last_error() +
+                        "。采集和检测继续；瞄准、自动急停、扳机和压枪等待源状态。修复后停止并重新启动 Runtime。";
+                    {
+                        std::lock_guard<std::mutex> lock(snapshot_mutex);
+                        current_snapshot.source_context_error = error;
+                    }
+                    // 保留 enabled，所有依赖焦点的输出仍按不可用快照拒绝。
+                    LOG_WARN("runtime", "{}", error);
                 }
             }
         if (config.gsi.enabled) {

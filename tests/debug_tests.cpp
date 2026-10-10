@@ -423,6 +423,7 @@ void test_report_summary_and_atomic_files() {
     RuntimeSnapshot final_snapshot;
     final_snapshot.debug_samples_dropped = 7;
     final_snapshot.provider = "CPUExecutionProvider";
+    final_snapshot.source_context_error = "缺少认证环境变量 \"XEN_SOURCE_CONTEXT_TOKEN\"";
     final_snapshot.active_model_path = "models/test.onnx";
     final_snapshot.detector_generation = 3;
     final_snapshot.captured_frames = 5;
@@ -504,6 +505,14 @@ void test_report_summary_and_atomic_files() {
     const std::string json_text(
         (std::istreambuf_iterator<char>(json)),
         std::istreambuf_iterator<char>());
+    expect(json_text.find(
+               "\"source_context_error\": \"缺少认证环境变量 \\\"XEN_SOURCE_CONTEXT_TOKEN\\\"\"") !=
+               std::string::npos,
+           "JSON 最终快照必须保留独立桥接告警并转义引号");
+    expect(csv_text.find(
+               "# final_source_context_error,\"缺少认证环境变量 \"\"XEN_SOURCE_CONTEXT_TOKEN\"\"\"") !=
+               std::string::npos,
+           "CSV 最终快照必须保留独立桥接告警并双写引号");
     expect(json_text.find("\"aim_dispatch_rejections\": {\"schema\": 1") != std::string::npos &&
                json_text.find("\"entry_deadline_expired\": 1") != std::string::npos &&
                json_text.find("\"compute_deadline_expired\": 1") != std::string::npos &&

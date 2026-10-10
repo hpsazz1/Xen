@@ -4306,6 +4306,8 @@ struct Overlay::Impl {
         render_notice(
             "runtime_error", snapshot.last_error, kDanger, kDangerSoft);
         render_notice(
+            "source_context_error", snapshot.source_context_error, kWarning, kWarningSoft);
+        render_notice(
             "detector_reload_error", snapshot.detector_reload_error,
             kDanger, kDangerSoft);
 

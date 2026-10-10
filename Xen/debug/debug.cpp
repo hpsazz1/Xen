@@ -763,6 +763,7 @@ void append_csv_snapshot(std::ostringstream& output,
         << "# final_active_model_path,"
         << csv_escape(snapshot.active_model_path) << '\n'
         << "# final_last_error," << csv_escape(snapshot.last_error) << '\n'
+        << "# final_source_context_error," << csv_escape(snapshot.source_context_error) << '\n'
         << "# final_detector_reload_error,"
         << csv_escape(snapshot.detector_reload_error) << '\n'
         << "# final_detector_generation,"
@@ -847,6 +848,8 @@ void append_json_snapshot(std::ostringstream& output,
         << json_escape(snapshot.active_model_path)
         << "\",\n    \"last_error\": \""
         << json_escape(snapshot.last_error)
+        << "\",\n    \"source_context_error\": \""
+        << json_escape(snapshot.source_context_error)
         << "\",\n    \"detector_reload_error\": \""
         << json_escape(snapshot.detector_reload_error) << "\",\n"
         << "    \"detector_generation\": "

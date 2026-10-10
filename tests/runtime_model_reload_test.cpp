@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <numeric>
@@ -358,6 +359,47 @@ int main(int argc, char** argv) {
            "stop() 必须回收重载线程并恢复 IDLE");
     expect(!runtime.reload_detector(config.detector),
            "Runtime 停止后必须拒绝 Detector 重载");
+
+    // 只移除测试进程继承的凭据，不读取或记录部署秘密；桥接故障不得阻断观测链。
+    expect(_putenv_s("XEN_SOURCE_CONTEXT_TOKEN", "") == 0,
+           "测试进程必须移除源状态桥接认证环境");
+    config.source_context.enabled = true;
+    config.source_context.host = "127.0.0.1";
+    config.source_context.port = 5012;
+    config.source_context.process_name = "game.exe";
+    config.source_context.token.clear();
+    const bool degraded_started = runtime.start(config);
+    expect(degraded_started, "缺少桥接认证时 Runtime 仍必须启动采集检测");
+    if (degraded_started) {
+        expect(wait_until([&] {
+            return runtime.snapshot().processed_frames >= 3;
+        }, 10s), "桥接启动失败后真实 CPU Detector 必须继续处理 UDP 帧");
+        const RuntimeSnapshot degraded = runtime.snapshot();
+        expect(degraded.state == RuntimeState::RUNNING &&
+                   degraded.last_error.empty(),
+               "桥接启动失败不得成为 Runtime 致命错误");
+        expect(degraded.source_context_error.find("XEN_SOURCE_CONTEXT_TOKEN") !=
+                   std::string::npos,
+               "独立桥接告警必须指明缺少认证环境变量");
+        expect(!degraded.source_context.available &&
+                   !degraded.source_context.focused && !degraded.output_armed,
+               "桥接故障不得伪造前台证据或自动武装输出");
+    }
+    runtime.stop();
+
+    config.source_context.enabled = false;
+    const bool recovered_started = runtime.start(config);
+    expect(recovered_started, "禁用桥接后必须能够重新启动 Runtime");
+    if (recovered_started) {
+        expect(wait_until([&] {
+            return runtime.snapshot().processed_frames >= 3;
+        }, 10s), "禁用桥接重启后采集检测必须正常处理帧");
+        const RuntimeSnapshot recovered = runtime.snapshot();
+        expect(recovered.source_context_error.empty() &&
+                   recovered.last_error.empty(),
+               "新的启动周期必须清除旧桥接告警");
+    }
+    runtime.stop();
 
     sender_running.store(false, std::memory_order_release);
     if (sender.joinable()) sender.join();

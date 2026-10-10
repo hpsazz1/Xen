@@ -281,14 +281,22 @@ SourceContextClient::~SourceContextClient() { stop(); }
 bool SourceContextClient::start(const SourceContextConfig& config) noexcept {
     stop();
     try {
-        if (!detail::valid_config(config)) { impl_->set_error("源端状态配置无效或未启用"); return false; }
+        if (!config.enabled) { impl_->set_error("源端状态未启用"); return false; }
+        if (config.token.size() < 32 || config.token.size() > 1024) {
+            impl_->set_error("认证环境变量 XEN_SOURCE_CONTEXT_TOKEN 缺失或长度无效"); return false;
+        }
+        if (!detail::valid_config(config)) { impl_->set_error("源端地址、端口、进程名或有效期配置无效"); return false; }
         impl_->config = config;
-        if (!impl_->socket.open(config, false)) { impl_->set_error("连接源端状态失败"); return false; }
+        if (!impl_->socket.open(config, false)) { impl_->set_error("源端 UDP 初始化失败，请检查 IPv4 地址及网络配置"); return false; }
         impl_->set_error("");
         impl_->stop_requested.store(false);
         impl_->worker = std::thread([this] { impl_->run(); });
         return true;
-    } catch (...) { stop(); return false; }
+    } catch (...) {
+        stop();
+        try { impl_->set_error("源端状态客户端初始化异常"); } catch (...) {}
+        return false;
+    }
 }
 void SourceContextClient::stop() noexcept {
     impl_->stop_requested.store(true);

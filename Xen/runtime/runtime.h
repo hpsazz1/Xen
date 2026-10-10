@@ -286,6 +286,8 @@ struct RuntimeSnapshot {
     OutputArbiterSnapshot output_arbitration;
     bool output_arbitration_available = false;
     source_context::SourceContextSnapshot source_context;
+    // 桥接初始化失败仅降级依赖源状态的能力，不替代 Runtime 致命错误。
+    std::string source_context_error;
     RecoilSnapshot recoil;
     bool recoil_telemetry_available = false;
     RecoilExecutionLog recoil_execution_log;
