@@ -238,10 +238,10 @@ bool source_pair_has_proven_zero_commands(const AimFrame& frame, const Track& tr
             coverage.evicted_latest_at + delay, coverage.evicted_latest_sequence,
             track.raw_previous_at, track.raw_previous_sequence, delay_ms == 0.0f))
         return false;
-    // 完成时间可与发行顺序不同，必须逐条判断，不能按完成时间提前 break。
+    // D从控制发行时刻计起；回执只确认计数，不能从完成时刻再次启动D。
     for (std::size_t offset = 0; offset < count; ++offset) {
         const auto& entry = commands[(next + Capacity - 1U - offset) % Capacity];
-        const auto effect = (entry.backend_completed ? entry.backend_completed_at : entry.issued_at) + delay;
+        const auto effect = entry.issued_at + delay;
         const bool before = zero_anchor_command_visible(effect, entry.sequence,
             track.raw_previous_at, track.raw_previous_sequence, delay_ms == 0.0f);
         const bool now = zero_anchor_command_visible(effect, entry.sequence,
@@ -267,10 +267,10 @@ std::optional<float> source_pair_command_sum_x(const AimFrame& frame, const Trac
             coverage.evicted_latest_sequence, track.raw_previous_at, track.raw_previous_sequence,
             delay_ms == 0.0f)) return std::nullopt;
     double sum = 0.0;
-    // 后端完成可乱序；与零锚共用精确source可见性，不按插入顺序提前退出。
+    // 与零锚共用控制起点和精确source可见性，不按插入顺序提前退出。
     for (std::size_t offset = 0; offset < count; ++offset) {
         const auto& entry = commands[(next + Capacity - 1U - offset) % Capacity];
-        const auto effect = (entry.backend_completed ? entry.backend_completed_at : entry.issued_at) + delay;
+        const auto effect = entry.issued_at + delay;
         const bool before = zero_anchor_command_visible(effect, entry.sequence,
             track.raw_previous_at, track.raw_previous_sequence, delay_ms == 0.0f);
         const bool now = zero_anchor_command_visible(effect, entry.sequence,
@@ -3133,7 +3133,7 @@ struct Aim::Impl {
         }
         if (issued_command_count == issued_commands.size()) {
             const auto& old = issued_commands[issued_command_next];
-            const auto stamp = old.backend_completed ? old.backend_completed_at : old.issued_at;
+            const auto stamp = old.issued_at;
             if (!zero_anchor_history.evicted || stamp > zero_anchor_history.evicted_latest_at ||
                 (stamp == zero_anchor_history.evicted_latest_at && old.sequence > zero_anchor_history.evicted_latest_sequence)) {
                 zero_anchor_history.evicted_latest_at = stamp;
@@ -3205,12 +3205,11 @@ struct Aim::Impl {
                 (issued_command_next + issued_commands.size() - 1U - offset) %
                 issued_commands.size();
             const IssuedCommand& candidate = issued_commands[index];
-            const auto command_effective_at = candidate.backend_completed
-                ? candidate.backend_completed_at : candidate.issued_at;
-            // 发行顺序不保证后端完成顺序；按最新有效时间选择，同刻保留较晚发行者。
+            const auto command_effective_at = candidate.issued_at;
+            // 按最新控制起点选择，同刻保留较晚发行者；B不改变预计作用时间。
             if (command_effective_at <= effective_at &&
                 (!best || command_effective_at >
-                    (best->backend_completed ? best->backend_completed_at : best->issued_at))) {
+                    best->issued_at)) {
                 best = &candidate;
             }
         }
@@ -3218,8 +3217,7 @@ struct Aim::Impl {
         const float age_seconds = static_cast<float>(
             std::chrono::duration<double>(
                 effective_at -
-                (best->backend_completed
-                     ? best->backend_completed_at : best->issued_at))
+                best->issued_at)
                 .count());
         if (age_seconds > kControllerCommandHistoryMaximumAgeSeconds) {
             return {0.0f, 0.0f};
@@ -3251,14 +3249,13 @@ struct Aim::Impl {
                 (issued_command_next + issued_commands.size() - 1U - offset) %
                 issued_commands.size();
             const IssuedCommand& candidate = issued_commands[index];
-            const auto command_effective_at = candidate.backend_completed
-                ? candidate.backend_completed_at : candidate.issued_at;
+            const auto command_effective_at = candidate.issued_at;
             if (command_effective_at <= effective_at) continue;
             if (command_effective_at <= query_at) {
                 if (candidate.backend_completed) {
                     const float age_seconds = static_cast<float>(
                         std::chrono::duration<double>(
-                            query_at - candidate.backend_completed_at)
+                            query_at - candidate.issued_at)
                             .count());
                     const float remaining_age_weight = std::clamp(
                         1.0f - age_seconds / delay_seconds, 0.0f, 1.0f);
@@ -3288,10 +3285,10 @@ struct Aim::Impl {
         // process已验证该区间完整。这里只合成物理执行库存视图；外部
         // 回执不进入issued_commands，不能被Aim的零回执或reset改写。
         for (const auto& event : frame.external_motion.events) {
-            if (event.completed_at <= cutoff || event.completed_at > at) continue;
+            if (event.issued_at <= cutoff || event.issued_at > at) continue;
             const float x = static_cast<float>(event.dx_counts);
             const float y = static_cast<float>(event.dy_counts);
-            const float age = std::chrono::duration<float>(at - event.completed_at).count();
+            const float age = std::chrono::duration<float>(at - event.issued_at).count();
             inventory.net_x += x; inventory.net_y += y;
             inventory.absolute_x += std::fabs(x); inventory.absolute_y += std::fabs(y);
             inventory.backend_completed_weighted_x += x * std::clamp(1.0f - age / delay_seconds, 0.0f, 1.0f);
@@ -4513,7 +4510,7 @@ struct Aim::Impl {
         const auto external_delay = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
             std::chrono::duration<float>(config.control_delay_ms / 1000.0f));
         const auto external_pair = track.raw_observation_pair_valid
-            ? external_motion_sum(frame.external_motion,
+            ? external_motion_issued_sum(frame.external_motion,
                 track.raw_previous_at - external_delay, frame.captured_at - external_delay)
             : std::optional<std::pair<double, double>>{std::pair{0.0, 0.0}};
         // 不完整外部区间不更新模型；实测背景已包含所有相机运动，可以独立消费。
@@ -4594,7 +4591,7 @@ struct Aim::Impl {
             const bool zero_model_interval = source_pair_has_proven_zero_commands(
                 frame, track, config.control_delay_ms, issued_commands,
                 issued_command_next, issued_command_count, zero_anchor_history) &&
-                external_motion_proven_zero_x(frame.external_motion,
+                external_motion_issued_proven_zero_x(frame.external_motion,
                     track.raw_previous_at - external_delay, frame.captured_at - external_delay);
             // 验证与提交共用同一候选计算；独立来源用双线性，模型回退保留原运算。
             const auto proposed_observer_velocity = [&]() -> double {
@@ -4999,11 +4996,11 @@ struct Aim::Impl {
             for (std::size_t offset = 0; offset < issued_command_count; ++offset) {
                 const auto& entry = issued_commands[(issued_command_next + issued_commands.size() -
                     1U - offset) % issued_commands.size()];
-                const auto effective_at = entry.backend_completed ? entry.backend_completed_at : entry.issued_at;
+                const auto effective_at = entry.issued_at;
                 if (effective_at <= cutoff) continue;
                 if (effective_at <= current_controller_at) unseen_counts += entry.dx_counts;
             }
-            if (const auto external = external_motion_sum(frame.external_motion, cutoff, current_controller_at))
+            if (const auto external = external_motion_issued_sum(frame.external_motion, cutoff, current_controller_at))
                 unseen_counts += external->first;
             diagnostic_world_preview = config.enable_delay_compensation && background_role
                 ? static_cast<double>(tracking_target_velocity_counts_per_second_x) * horizon_seconds : 0.0;
@@ -5546,11 +5543,11 @@ struct Aim::Impl {
             const auto cutoff = frame.captured_at - std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<float>(config.control_delay_ms / 1000.0f));
             for (std::size_t offset=0; offset<issued_command_count; ++offset) {
                 const auto& entry=issued_commands[(issued_command_next+issued_commands.size()-1U-offset)%issued_commands.size()];
-                const auto stamp=entry.backend_completed ? entry.backend_completed_at : entry.issued_at;
+                const auto stamp=entry.issued_at;
                 if(stamp<=cutoff) continue;
                 if(stamp<=current_controller_at) unseen_y+=entry.dy_counts;
             }
-            if (const auto external = external_motion_sum(frame.external_motion, cutoff, current_controller_at))
+            if (const auto external = external_motion_issued_sum(frame.external_motion, cutoff, current_controller_at))
                 unseen_y += static_cast<float>(external->second);
             const float direction_y = error_y > 0.0f ? 1.0f : -1.0f;
             const float remaining_y_counts=std::max(0.0f,
@@ -5880,7 +5877,7 @@ struct Aim::Impl {
         if (frame.external_motion.enabled && track.raw_observation_pair_valid) {
             const auto delay = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                 std::chrono::duration<float>(config.control_delay_ms / 1000.0f));
-            const auto external = external_motion_sum(frame.external_motion,
+            const auto external = external_motion_issued_sum(frame.external_motion,
                 track.raw_previous_at - delay, frame.captured_at - delay);
             if (!external) return;
             const float source_dt = std::chrono::duration<float>(frame.captured_at - track.raw_previous_at).count();
@@ -6206,7 +6203,7 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
                frame.source_pixels_per_roi_pixel_x <= 0.0f ||
                frame.source_pixels_per_roi_pixel_y <= 0.0f) {
         invalid_reason = "ROI 到 source 的像素比例非法";
-    } else if (frame.external_motion.enabled && !external_motion_sum(frame.external_motion,
+    } else if (frame.external_motion.enabled && !external_motion_issued_sum(frame.external_motion,
             frame.captured_at - std::max(
                 std::chrono::duration_cast<clock::duration>(std::chrono::duration<float>(impl_->config.control_delay_ms / 1000.0f)),
                 std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(static_cast<double>(impl_->config.control_delay_ms) / 1000.0))),
@@ -6259,7 +6256,7 @@ AimResult Aim::process(const AimFrame& frame) noexcept {
         const auto selected = clock::now();
 
         if (target && frame.external_motion.enabled && target->raw_observation_pair_valid &&
-            !external_motion_sum(frame.external_motion,
+            !external_motion_issued_sum(frame.external_motion,
                 target->raw_previous_at - std::chrono::duration_cast<clock::duration>(
                     std::chrono::duration<float>(impl_->config.control_delay_ms / 1000.0f)),
                 frame.captured_at)) {

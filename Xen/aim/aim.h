@@ -341,7 +341,7 @@ public:
     AimResult process(const AimFrame& frame) noexcept;
     // Runtime 在 Mouse 后端返回后确认本帧的后端结果。成功发送传回原命令，
     // 安全门拒绝或后端失败传回 (0,0)。该时刻不是 protocol ACK
-    // 或物理效果；issued_at 继续保留，延迟库存只用 backend completion 生效。
+    // 或物理效果；延迟库存始终按控制起点 issued_at+D 预计作用，B不重新启动D。
     bool record_backend_completed_command(
         std::uint64_t sequence,
         std::chrono::steady_clock::time_point backend_completed_at,

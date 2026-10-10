@@ -15,10 +15,13 @@ bool MotionLedger::permits(const MouseMoveCommand& command, std::chrono::steady_
     return std::hypot(static_cast<double>(command.dx_counts),
         static_cast<double>(command.dy_counts)) <= limit_;
 }
-bool MotionLedger::record(const MouseMoveCommand& command, const MouseMoveReceipt& receipt, bool external) {
+bool MotionLedger::record(const MouseMoveCommand& command, const MouseMoveReceipt& receipt, bool external,
+        std::chrono::steady_clock::time_point issued_at) {
     std::lock_guard lock(mutex_);
     if (fault_ || !receipt.succeeded || receipt.backend_completed_at == std::chrono::steady_clock::time_point{} ||
-        receipt.backend_completed_at < last_completed_) {
+        receipt.backend_completed_at < last_completed_ ||
+        (external && (issued_at == std::chrono::steady_clock::time_point{} ||
+                      issued_at > receipt.backend_completed_at))) {
         fault_ = true;
         if (revision_ != std::numeric_limits<std::uint64_t>::max()) ++revision_;
         return false;
@@ -26,7 +29,7 @@ bool MotionLedger::record(const MouseMoveCommand& command, const MouseMoveReceip
     last_completed_ = receipt.backend_completed_at;
     if (!external) return true;
     if (revision_ == std::numeric_limits<std::uint64_t>::max()) { fault_ = true; return false; }
-    external_.push_back({++revision_, receipt.backend_completed_at, command.dx_counts, command.dy_counts});
+    external_.push_back({++revision_, receipt.backend_completed_at, command.dx_counts, command.dy_counts, issued_at});
     while (external_.size() > 4096) {
         covered_from_ = external_.front().completed_at;
         external_.pop_front();

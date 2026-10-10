@@ -220,7 +220,8 @@ void delayed_own_receipt_preserves_maintenance(bool mirror) {
     config.counts_per_pixel_y = 0.4f;
     config.max_counts_per_frame = 14.0f;
     config.enable_delay_compensation = true;
-    config.control_delay_ms = 15.0f;
+    // 用真实配置的30ms作用窗口覆盖后继维护；晚ACK本身不能延长15ms库存。
+    config.control_delay_ms = 30.0f;
     config.max_delay_compensation_ms = 44.0f;
     config.max_delay_compensation_percent = 15.0f;
     config.enable_prediction = false;
@@ -229,6 +230,7 @@ void delayed_own_receipt_preserves_maintenance(bool mirror) {
     Aim aim(config);
     const int direction = mirror ? -1 : 1;
     int delayed_x = 0, delayed_y = 0;
+    std::uint64_t delayed_sequence = 0;
     bool delayed_valid = false;
     int window_frames = 0, window_commands = 0;
     float window_float = 0, first_residual = 0, previous_remaining = 0;
@@ -262,10 +264,12 @@ void delayed_own_receipt_preserves_maintenance(bool mirror) {
         const auto r = aim.process(f);
         const auto& c = r.control;
         expect(r.status == AimStatus::SUCCESS, "公有接口须正常处理");
-        // 只延迟本分支已实际生成的2504命令，至2507处理完才报告ACK。
-        if (s.sequence == 2504 && r.has_command) {
+        // 延迟本分支实际生成的首个旧向命令，不假设长D下2504仍产生请求。
+        // ACK可晚于其预计作用，但不能延长库存；窗口非空断言仍审查其余旧库存。
+        if (!delayed_valid && s.sequence <= 2504 && r.has_command && direction * r.command.dx_counts < 0) {
             delayed_x = r.command.dx_counts;
             delayed_y = r.command.dy_counts;
+            delayed_sequence = s.sequence;
             delayed_valid = true;
             expect(direction * delayed_x < 0, "本分支必须自己产生旧向命令");
         } else if (r.has_command) {
@@ -274,7 +278,7 @@ void delayed_own_receipt_preserves_maintenance(bool mirror) {
         }
         if (s.sequence == 2507) {
             expect(delayed_valid, "必须有可延迟的自身命令");
-            expect(aim.record_backend_completed_command(2504, f.control_at, delayed_x, delayed_y),
+            expect(aim.record_backend_completed_command(delayed_sequence, f.control_at, delayed_x, delayed_y),
                    "到期才报告旧命令ACK，不提前注入未来回执");
         }
         const float error = r.target.base_aim_x - f.control_center_x;
@@ -428,7 +432,8 @@ void observed_position_share(bool background, bool mirror,
             expect(aim.record_backend_completed_command(frame.sequence, completed_at,
                        result.command.dx_counts, result.command.dy_counts),
                    "位置职责分支只能记录自身backend命令");
-            completed.push_back({completed_at, static_cast<float>(result.command.dx_counts)});
+            // 回执确认计数，权重按配置定义的控制起点计龄。
+            completed.push_back({frame.control_at, static_cast<float>(result.command.dx_counts)});
         }
     }
     if (background) {

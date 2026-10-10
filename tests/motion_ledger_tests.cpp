@@ -46,10 +46,11 @@ int main(int argc, char** argv) {
         check(ledger.permits({0, 5}, t + milliseconds(2)), "下一帧合法输出不累计节流");
         check(!ledger.permits({14, 14}, t + milliseconds(2)), "保留Aim单帧二维步长上限");
         receipt.backend_completed_at = t + milliseconds(2);
-        ledger.record({0, 4}, receipt, true);
+        check(ledger.record({0, 4}, receipt, true, t), "外部命令必须保留独立规划时刻");
         auto window = ledger.snapshot(t + milliseconds(3));
         check(window.complete && window.revision == 1 && window.events.size() == 1 &&
-            window.events[0].dy_counts == 4, "只把外部已完成位移交给Aim");
+            window.events[0].dy_counts == 4 && window.events[0].issued_at == t,
+            "只把外部已完成位移及真实控制起点交给Aim");
         check(ledger.permits({14, 0}, t + milliseconds(3)), "Recoil外部位移不消费Aim单帧上限");
         check(!ledger.permits({15, 0}, t + milliseconds(3)) && !ledger.permits({0, -15}, t + milliseconds(3)),
             "Aim正负单次上限仍有效");
@@ -61,8 +62,16 @@ int main(int argc, char** argv) {
             !ledger.permits({1, 0}, t + seconds(10)), "未知不能当零或下一窗口恢复");
         ledger.reset(14, 16, t);
         receipt.backend_completed_at = t - milliseconds(1);
-        check(!ledger.record({1, 0}, receipt, true) && !ledger.snapshot(t).complete,
+        check(!ledger.record({1, 0}, receipt, true, t - milliseconds(2)) && !ledger.snapshot(t).complete,
             "完成时间倒序不能污染有序额度或外部账本");
+        ledger.reset(14, 16, t);
+        receipt.backend_completed_at = t + milliseconds(2);
+        check(!ledger.record({1, 0}, receipt, true) && !ledger.snapshot(t + milliseconds(3)).complete,
+            "外部控制起点缺失必须失败，不能猜为完成时间");
+        ledger.reset(14, 16, t);
+        check(!ledger.record({1, 0}, receipt, true, t + milliseconds(3)) &&
+              !ledger.snapshot(t + milliseconds(3)).complete,
+            "控制起点晚于完成时间必须失去可信账本");
         std::cout << "motion_ledger_tests passed\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

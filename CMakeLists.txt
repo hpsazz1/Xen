@@ -1606,6 +1606,11 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(aim_prediction_width_tests OPENCV)
     add_test(NAME aim_prediction_width_tests COMMAND aim_prediction_width_tests)
 
+    add_executable(aim_delay_origin_tests tests/aim_delay_origin_tests.cpp)
+    target_link_libraries(aim_delay_origin_tests PRIVATE aim recoil log)
+    xen_deploy_runtime_dlls(aim_delay_origin_tests OPENCV)
+    add_test(NAME aim_delay_origin_tests COMMAND aim_delay_origin_tests)
+
     add_executable(aim_background_observation_time_tests
         tests/aim_background_observation_time_tests.cpp)
     target_link_libraries(aim_background_observation_time_tests PRIVATE aim log)

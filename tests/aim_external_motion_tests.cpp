@@ -52,6 +52,14 @@ void test_window() {
     expect(!external_motion_sum(broken, t, t + 10ms), "非零revision不能伪造空账本");
     broken = w; broken.events[1].completed_at = t + 1ms;
     expect(!external_motion_sum(broken, t, t + 10ms), "完成时间逆序拒绝");
+    expect(!external_motion_issued_sum(w,t,t+10ms),"缺少控制起点不能猜测模型时域");
+    w.events[0].issued_at=t+1ms; w.events[1].issued_at=t+2ms;
+    expect(external_motion_issued_sum(w,t,t+1ms)->first==9,
+        "模型按控制起点筛选，完成查询仍保留独立B事实");
+    expect(external_motion_sum(w,t,t+1ms)->first==0,"完成事件查询不被模型起点改写");
+    expect(!external_motion_issued_proven_zero_x(w,t,t+10ms),"模型正反净零不能伪称没有运动");
+    broken=w; broken.events[0].issued_at=t+3ms;
+    expect(!external_motion_issued_sum(broken,t,t+10ms),"控制起点晚于完成不可消费");
     // FIFO已淘汰前缀允许从声明边界继续查询，不要求首id从1重新开始。
     w.events.erase(w.events.begin()); w.covered_from = t + 2ms;
     expect(external_motion_sum(w, t + 2ms, t + 10ms)->first == -9, "合法保留后缀可用");
@@ -88,7 +96,7 @@ void test_coverage_and_accounting() {
     auto second = frame(2, t + 4ms); background(second, first);
     auto moved = second;
     moved.external_motion.revision = 1;
-    moved.external_motion.events.push_back({1, second.control_at - 1ms, 6, 1000});
+    moved.external_motion.events.push_back({1, second.control_at - 1ms, 6, 1000, second.control_at - 1ms});
     const auto a = baseline.process(second), b = observed.process(moved);
     expect(a.status == AimStatus::SUCCESS && b.status == AimStatus::SUCCESS && a.control.evaluated && b.control.evaluated,
            "有完整账本的控制实际完成");
@@ -108,6 +116,12 @@ void test_coverage_and_accounting() {
     const auto denied = truncated.process(missing);
     expect(denied.status == AimStatus::INVALID_INPUT && !denied.has_command,
            "仅当前库存完整但raw帧对历史缺失禁止旧模型输出");
+    Aim unknown(c);
+    unknown.process(first); zero_receipt(unknown,first);
+    auto no_origin=moved; no_origin.external_motion.events[0].issued_at={};
+    const auto invalid=unknown.process(no_origin);
+    expect(invalid.status==AimStatus::INVALID_INPUT && !invalid.has_command,
+        "真实Aim入口必须拒绝缺控制起点的外部事件，不能当零输出继续");
 }
 void test_background_not_double_counted() {
     const auto t = Clock::time_point{} + 10s;
@@ -116,7 +130,7 @@ void test_background_not_double_counted() {
     auto first = frame(1, t); a.process(first); zero_receipt(a, first);
     auto second = frame(2, t + 4ms); background(second, first, -3);
     second.external_motion.revision = 1;
-    second.external_motion.events.push_back({1, second.captured_at - 16ms, 10, 0});
+    second.external_motion.events.push_back({1, second.captured_at - 16ms, 10, 0, second.captured_at - 16ms});
     const auto result = a.process(second);
     expect(result.status == AimStatus::SUCCESS && result.control.background_motion_use_x == AimBackgroundMotionUse::CONSUMED &&
            result.control.observer_camera_motion_x_source_pixels == -3,

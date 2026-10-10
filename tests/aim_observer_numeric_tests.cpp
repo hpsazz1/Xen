@@ -79,7 +79,12 @@ void test_zero_observation_requires_complete_command_history() {
     config.counts_per_pixel_x = 0.4f;
     const auto origin = std::chrono::steady_clock::now() + std::chrono::seconds(1);
     for (int scenario = 0; scenario < 2; ++scenario) {
-        Aim aim(config);
+        auto scenario_config = config;
+        if (scenario == 1) {
+            scenario_config.control_delay_ms = 90.0f;
+            scenario_config.max_delay_compensation_ms = 100.0f;
+        }
+        Aim aim(scenario_config);
         std::uint64_t sequence = 0;
         const auto process = [&](int milliseconds, float center, bool confirm_zero) {
             AimFrame frame;
@@ -110,25 +115,25 @@ void test_zero_observation_requires_complete_command_history() {
                    first.command.dx_counts, first.command.dy_counts),
                "公有接口必须接受A较晚完成的合法记录");
         if (scenario == 0) {
-            // 发行顺序A/B/C与完成顺序不同，不能遇到B早于区间就跳过A。
+            // 软件时序反事实：回执B可乱序，但A预计在控制0ms+15ms生效。
             process(10, 180.0f, true);
-            const auto before = process(30, 181.0f, true);
+            const auto before = process(12, 181.0f, true);
             expect(before.control.pending_net_x_counts == first.command.dx_counts,
-                   "完成时间乱序的A仍在30ms查询的15ms库存窗口内，不能被较晚发行的零B遮蔽");
+                   "控制起点0ms的A仍在12ms查询的15ms库存窗口内");
             expect(before.control.execution_unseen_command_x_counts == first.command.dx_counts,
-                   "执行P未见库存必须包含完成20ms的A，不能因B已在窗口外提前停止");
+                   "15ms预计作用之前必须保留A，完成20ms不能更改该窗口");
             expect(before.control.observer_target_velocity_x_counts_per_second > 0.0f,
                    "真实框位移必须先建立非零运动估计");
-            const auto current = process(35, 181.0f, true);
+            const auto current = process(15, 181.0f, true);
             expect(current.control.delayed_command_x_counts == first.command.dx_counts,
-                   "到期命令须按有效完成时间选最新A，不能按发行逆序先返回旧零B");
+                   "A在控制0ms+15ms到期，B的控制10ms+15ms尚未到期");
             expect(current.control.reverse_translation_raw_left_x_roi_pixels == 0.0f &&
                        current.control.reverse_translation_raw_right_x_roi_pixels == 0.0f,
                    "乱序完成回归必须实际覆盖双边零观测");
             expect(current.control.observer_target_velocity_x_counts_per_second > 0.0f,
                    "A的模型事件位于源区间内，不得被误判为无命令而清空估计");
         } else {
-            // 逐出记录A的模型事件在115ms；环内查不到A不能证明区间完整。
+            // 配置D=90ms使逐出A的模型事件在90ms，不能依靠晚ACK延长窗口。
             for (int milliseconds = 1; milliseconds <= 65; ++milliseconds) {
                 process(milliseconds, 180.0f, true);
             }
@@ -180,19 +185,19 @@ void test_y_inventory_is_independent_of_completion_order() {
                first_reordered.command.dy_counts == 1 && first_ordered.command.dy_counts == 1,
            "两分支首发必须确有非零Y且X为零");
     expect(reordered.record_backend_completed_command(1, origin + std::chrono::milliseconds(20), 0, 1) &&
-               ordered.record_backend_completed_command(1, origin, 0, 0),
-           "首发Y和对照零命令必须成功确认");
+               ordered.record_backend_completed_command(1, origin, 0, 1),
+           "同一控制起点的首发Y在两支按不同完成时刻确认");
     const auto second_reordered = step(reordered, 2, 10, 160.0f);
     const auto second_ordered = step(ordered, 2, 10, 160.0f);
     expect(second_reordered.command.dx_counts == 0 && second_ordered.command.dx_counts == 0 &&
                second_reordered.command.dy_counts == 1 && second_ordered.command.dy_counts == 1,
            "两分支第二发行也必须有相同非零Y请求");
     expect(reordered.record_backend_completed_command(2, origin + std::chrono::milliseconds(10), 0, 0) &&
-               ordered.record_backend_completed_command(2, origin + std::chrono::milliseconds(20), 0, 1),
-           "完成排序不同但有效Y事件相同的记录必须成功确认");
-    // 两分支都只有20ms完成的+1Y有效；发行顺序不能改变当前库存支付。
-    const auto current_reordered = step(reordered, 3, 30, 169.7f);
-    const auto current_ordered = step(ordered, 3, 30, 169.7f);
+               ordered.record_backend_completed_command(2, origin + std::chrono::milliseconds(20), 0, 0),
+           "第二控制起点均确认零应用，完成顺序不同不改变控制历史");
+    // 两分支都只有C=0的+1Y在15ms预计作用；完成乱序不能将其推迟至35ms。
+    const auto current_reordered = step(reordered, 3, 20, 169.7f);
+    const auto current_ordered = step(ordered, 3, 20, 169.7f);
     expect(current_reordered.target.base_aim_y == current_ordered.target.base_aim_y &&
                current_reordered.target.aim_y == current_ordered.target.aim_y,
            "Y库存对照必须保持同一当前瞄点");

@@ -271,7 +271,7 @@ public:
                             if(output.backend_completed_at==RecoilTime{} || output.backend_completed_at<backend_called_at ||
                                 output.backend_completed_at>returned_at) output.succeeded=false;
                             // 未知不能视作零后重试；同owner后续输出也失去可信账本。
-                            const bool recorded=ledger->record(command, output, true);
+                            const bool recorded=ledger->record(command, output, true, intent.planned_at);
                             receipt.status = output.succeeded&&recorded ? RecoilReceiptStatus::ACKNOWLEDGED : RecoilReceiptStatus::UNKNOWN;
                             receipt.completed_at = output.backend_completed_at;
                             if (receipt.status==RecoilReceiptStatus::UNKNOWN) arbiter->latch_output_fault();

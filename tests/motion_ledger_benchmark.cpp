@@ -135,7 +135,7 @@ void run_case(std::size_t total_records, std::size_t iterations, std::size_t war
         receipt.backend_completed_at = start + std::chrono::microseconds(i + 1);
         const MouseMoveCommand command{
             static_cast<int>(i % 7) - 3, static_cast<int>(i % 11) - 5};
-        if (!ledger.record(command, receipt, true)) throw std::runtime_error("fixture record failed");
+        if (!ledger.record(command, receipt, true, receipt.backend_completed_at)) throw std::runtime_error("fixture record failed");
     }
     const auto now = start + std::chrono::seconds(1);
     const auto fixture = ledger.snapshot(now);
