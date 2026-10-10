@@ -43,6 +43,7 @@ int wmain(int argc, wchar_t* argv[]) {
                   << mouse_effect_probe_usage();
         return 2;
     }
+    prepare_mouse_effect_probe_console_control();
     if (!SetConsoleCtrlHandler(mouse_effect_probe_control_handler, TRUE)) {
         std::cerr << "无法安装控制台中止处理器，Win32Error="
                   << GetLastError() << '\n';

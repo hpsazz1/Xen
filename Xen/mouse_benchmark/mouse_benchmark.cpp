@@ -33,6 +33,8 @@ constexpr std::uint64_t kMaximumWarmupPairs = 100000;
 constexpr std::uint64_t kMaximumSamplePairs = 500000;
 
 std::atomic<bool> stop_requested{false};
+std::atomic<bool> stop_epoch_prepared{false};
+static_assert(decltype(stop_requested)::is_always_lock_free);
 
 void set_error(std::string& output, const std::string& value) noexcept {
     try {
@@ -912,12 +914,19 @@ bool run_mouse_benchmark(
         const MouseBenchmarkOptions& options,
         MouseBenchmarkResult& result,
         std::string& error) noexcept {
+    if (!stop_epoch_prepared.exchange(false, std::memory_order_acq_rel)) {
+        stop_requested.store(false, std::memory_order_release);
+    }
     result = {};
     if (!validate_mouse_benchmark_options(options, error)) return false;
     if (options.peer_test_boundary ==
             MouseBenchmarkPeerTestBoundary::IN_MEMORY_SERIAL_FAKE) {
         set_error(error,
             "in-memory serial fake 只允许通过公有 writer 验证，不得打开设备");
+        return false;
+    }
+    if (stop_requested.load(std::memory_order_acquire)) {
+        set_error(error, "鼠标基准在初始化前被人工中止");
         return false;
     }
     bool owns_log = false;
@@ -946,9 +955,6 @@ bool run_mouse_benchmark(
             set_error(error, "鼠标基准报告目录在物理输出前创建失败");
             return false;
         }
-        // 从这里开始属于新会话；随后到达的 Ctrl+C 在设备初始化和握手期间也必须保留。
-        stop_requested.store(false, std::memory_order_release);
-
         owns_log = !Log::initialized();
         if (owns_log) {
             LogConfig log_config;
@@ -1186,6 +1192,12 @@ std::string mouse_benchmark_usage() {
         "  MAKCU: --makcu-port <COM1..COM256> [--makcu-baud-rate 4000000]\n"
         "  设备:  [--connect-timeout-ms 1000] [--command-timeout-ms 300]\n"
         "说明: 工具会向系统或设备发送真实相对移动，每组均发送等量反向命令。\n";
+}
+
+void prepare_mouse_benchmark_console_control() noexcept {
+    // 安装handler后到达的取消属于本轮，runner只消费边界，不再清除此状态。
+    stop_requested.store(false, std::memory_order_release);
+    stop_epoch_prepared.store(true, std::memory_order_release);
 }
 
 void request_mouse_benchmark_stop() noexcept {

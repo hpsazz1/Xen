@@ -118,6 +118,9 @@ bool run_mouse_benchmark(
     std::string& error) noexcept;
 
 std::string mouse_benchmark_usage();
+// CLI在安装handler前建立本轮边界；直接run调用自行建立新轮次。
+// 不能在一个正在执行的run期间重置。
+void prepare_mouse_benchmark_console_control() noexcept;
 void request_mouse_benchmark_stop() noexcept;
 
 #endif // MOUSE_BENCHMARK_H

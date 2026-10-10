@@ -214,6 +214,9 @@ bool run_mouse_effect_probe(
     MouseEffectProbeRunResult& result,
     std::string& error) noexcept;
 
+// 在CLI安装handler之前建立本轮停止边界；不能在活动run中重置。
+// 非CLI直接run仍会自动建立新的轮次。
+void prepare_mouse_effect_probe_console_control() noexcept;
 void request_mouse_effect_probe_stop() noexcept;
 
 #endif // MOUSE_EFFECT_PROBE_RUNNER_H

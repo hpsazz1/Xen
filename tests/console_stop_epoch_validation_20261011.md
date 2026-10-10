@@ -1,0 +1,11 @@
+# D18 正式CLI停止轮次验证
+
+基线5787f85ab752db72705f5b5946ac8725d15a76db，分支fix/console-stop-epoch-20261011。两个回归编译包含生产CLI的main.cpp，重命名wmain，替换控制台注册调用，在安装成功边界同步调用真实handler。没有向操作系统或其他进程发送控制事件。MouseBenchmark测试包装器强制127.0.0.1 KMBOX fake及当前测试进程owner；Probe只使用output-off和唯一临时目录，不加载真实输入。
+
+原八个取消负例失败：CTRL_C、CTRL_BREAK、CTRL_CLOSE、CTRL_SHUTDOWN四种handler请求在各入口都被run清零。基准每次仍返回0并向本机假接收端发送10包（8个相对移动命令）；Probe继续到缺失binding错误、stop_reason=none。未处理CTRL_LOGOFF与注册失败控制均通过。关闭/关机枚举这里只是同步handler输入，不是实际OS终止试验。
+
+CLI现在在安装handler前准备本轮停止状态；run消费一次准备标记，不再清除已接收取消。非CLI直接run保持开启新轮语义。Probe参数解析不再修改停止状态；早停返回STOPPED/USER_STOP。初始化前已收到取消时，基准不打开fake peer，Probe不读取binding。
+
+最终十二个CLI场景通过：八取消反例改为基准退出1/0包、Probe USER_STOP；两种控制各两例保持。补充控制验证参数解析保留本轮停止，已取消轮次之后的直接run正常开始，基准实际本机fake重跑成功，Probe恢复到预期缺binding拒绝。两个相关CTest及全部既有模块用例通过1.34秒；文档19文件195链接0错误。正式Release、完整提交及远端/CI核对见本地docs/evidence/XEN-CONSOLE-STOP-EPOCH-20261011-001/RESULT.md。
+
+初版控制数组类型编译失败及直接重跑夹具生命周期混用日志保留，不计通过。后者原把模拟CLI注册失败后应结束的进程状态当成已完成run；修正为明确准备并完成取消轮次，再验证直接重跑。没有移除既有用例或放宽授权/Provider/审核边界。不支持在活动run中调用prepare，也不新增并行run合同。没有真实设备、系统/游戏输入、实际采集、UI操作或平台拒绝入口操作。

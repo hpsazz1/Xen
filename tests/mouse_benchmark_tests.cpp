@@ -11,6 +11,7 @@
 
 #include "log/log.h"
 #include "mouse_benchmark/mouse_benchmark.h"
+#include "console_registration_fixture.h"
 
 #include <algorithm>
 #include <array>
@@ -25,6 +26,26 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+namespace mouse_cli_fixture {
+bool run(const MouseBenchmarkOptions& options, MouseBenchmarkResult& result, std::string& error) noexcept {
+    if (options.mouse.backend != MouseBackend::KMBOX_NET || options.mouse.kmbox_ip != "127.0.0.1" ||
+        options.peer_test_boundary != MouseBenchmarkPeerTestBoundary::LOOPBACK_UDP_FAKE) {
+        error = "CLI fixture refuses anything except the local fake peer";
+        return false;
+    }
+    auto isolated = options;
+    isolated.owner_scope = MouseOutputOwnerScope::CURRENT_PROCESS_TEST;
+    return run_mouse_benchmark(isolated, result, error);
+}
+}
+#define wmain mouse_benchmark_production_cli
+#define SetConsoleCtrlHandler console_registration_fixture::register_handler
+#define run_mouse_benchmark mouse_cli_fixture::run
+#include "../Xen/mouse_benchmark/main.cpp"
+#undef run_mouse_benchmark
+#undef SetConsoleCtrlHandler
+#undef wmain
 
 namespace {
 
@@ -349,6 +370,38 @@ void test_parse_and_safety_gate() {
            "127/8 endpoint 必须拒绝 external peer 声明");
 }
 
+void test_production_cli_retains_stop_after_handler_install() {
+    const std::array<DWORD, 6> events{CTRL_C_EVENT, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT,
+        CTRL_SHUTDOWN_EVENT, CTRL_LOGOFF_EVENT, 100U};
+    for (const DWORD event : events) {
+        FakeKmboxDevice device(std::vector<AckMode>(10, AckMode::VALID), 180);
+        expect(device.valid(), "CLI取消假接收端必须只绑定本机回环");
+        if (!device.valid()) continue;
+        const auto path = unique_report_path((L"cli-stop-" + std::to_wstring(event)).c_str());
+        std::vector<std::wstring> args{L"XenMouseBenchmark", L"--backend", L"kmbox_net",
+            L"--kmbox-ip", L"127.0.0.1", L"--kmbox-port", std::to_wstring(device.port()),
+            L"--kmbox-uuid", L"A1B2C3D4", L"--connect-timeout-ms", L"80",
+            L"--command-timeout-ms", L"60", L"--warmup-pairs", L"1", L"--sample-pairs", L"2",
+            L"--report", path.wstring(), L"--peer-test-boundary", L"loopback_udp_fake",
+            L"--allow-physical-output", L"--confirm-physical-output", L"XEN_MOUSE_BENCHMARK_SENDS_REAL_INPUT"};
+        std::vector<wchar_t*> argv;
+        for (auto& argument : args) argv.push_back(argument.data());
+        const bool registration_failure = event == 100U;
+        console_registration_fixture::reset(!registration_failure, event, registration_failure);
+        const int result = mouse_benchmark_production_cli(static_cast<int>(argv.size()), argv.data());
+        device.finish();
+        const bool cancelled = event != CTRL_LOGOFF_EVENT && !registration_failure;
+        const auto packets = device.packets();
+        expect(registration_failure ? result == 3 : cancelled ? result == 1 : result == 0,
+            "实际MouseBenchmark CLI退出状态必须保留注册后取消: " + std::to_string(event));
+        expect((cancelled || registration_failure) ? packets.empty() && !std::filesystem::exists(path) : packets.size() == 10 && std::filesystem::exists(path),
+            "取消/注册失败不应打开fake peer；后续独立轮与不支持事件可正常执行");
+        expect(console_registration_fixture::installs == 1 && console_registration_fixture::removes == (registration_failure ? 0 : 1) &&
+            (registration_failure || console_registration_fixture::handled == (cancelled ? TRUE : FALSE)), "真实handler返回与注册/卸载配对");
+        std::cout << "CLI stop event=" << event << " exit=" << result << " packets=" << packets.size() << '\n';
+    }
+}
+
 void test_summary() {
     const std::array<double, 4> values{1.0, 2.0, 3.0, 4.0};
     const auto summary = summarize_mouse_benchmark_timings(values);
@@ -370,6 +423,13 @@ void test_successful_kmbox_run_and_report() {
     auto options = make_kmbox_options(device.port(), report_path);
     MouseBenchmarkResult result;
     std::string error;
+    // 明确完成一轮取消，再检查普通直接run不继承旧轮次stop。
+    // 不把模拟CLI注册失败（实际进程已退出）的未消费准备状态当作已结束run。
+    prepare_mouse_benchmark_console_control();
+    request_mouse_benchmark_stop();
+    expect(!run_mouse_benchmark(options, result, error) && device.packets().empty(),
+           "已准备轮次的取消应在打开本机fake peer前结束");
+    request_mouse_benchmark_stop();
     expect(run_mouse_benchmark(options, result, error),
            "本机假 KMBOX 正式路径应成功: " + error);
     device.finish();
@@ -680,6 +740,7 @@ int main(int argc, char* argv[]) {
     Log::init(log_config);
 
     test_parse_and_safety_gate();
+    test_production_cli_retains_stop_after_handler_install();
     test_summary();
     test_successful_kmbox_run_and_report();
     test_failed_command_does_not_publish();

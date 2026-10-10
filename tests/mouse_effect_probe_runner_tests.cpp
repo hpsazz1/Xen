@@ -1,12 +1,21 @@
 #include "mouse_effect_probe_runner/mouse_effect_probe_runner.h"
+#include "console_registration_fixture.h"
 
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#define wmain mouse_effect_probe_production_cli
+#define SetConsoleCtrlHandler console_registration_fixture::register_handler
+#include "../Xen/mouse_effect_probe_runner/main.cpp"
+#undef SetConsoleCtrlHandler
+#undef wmain
 
 namespace {
 
@@ -33,6 +42,56 @@ std::vector<std::wstring_view> common_arguments() {
         L"--activation-epoch", L"7",
         L"--max-seconds", L"15",
     };
+}
+
+void test_production_cli_preserves_early_user_stop() {
+    const auto root = std::filesystem::temp_directory_path() /
+        (L"xen-probe-cli-stop-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+    expect(std::filesystem::create_directory(root), "CLI取消夹具必须创建唯一临时目录");
+    for (const DWORD event : std::array<DWORD, 6>{CTRL_C_EVENT, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_SHUTDOWN_EVENT, CTRL_LOGOFF_EVENT, 100UL}) {
+        std::vector<std::wstring> args{L"XenMouseEffectProbe"};
+        for (const auto value : common_arguments()) args.emplace_back(value);
+        for (std::size_t index = 1; index + 1 < args.size(); ++index) {
+            if (args[index] == L"--config") args[index + 1] = (root / L"config.ini").wstring();
+            if (args[index] == L"--sequence") args[index + 1] = (root / L"sequence.json").wstring();
+            if (args[index] == L"--binding") args[index + 1] = (root / L"absent-binding.json").wstring();
+            if (args[index] == L"--sidecar-pid") args[index + 1] = std::to_wstring(GetCurrentProcessId());
+            if (args[index] == L"--sidecar-incoming") args[index + 1] = (root / (L"pixel.incoming-" + std::to_wstring(GetCurrentProcessId()))).wstring();
+            if (args[index] == L"--report") args[index + 1] = (root / (L"report-" + std::to_wstring(event) + L".json")).wstring();
+        }
+        std::vector<wchar_t*> argv;
+        for (auto& argument : args) argv.push_back(argument.data());
+        const bool registration_failure = event == 100UL;
+        console_registration_fixture::reset(!registration_failure, event, registration_failure);
+        std::ostringstream captured;
+        const auto previous = std::cerr.rdbuf(captured.rdbuf());
+        const int result = mouse_effect_probe_production_cli(static_cast<int>(argv.size()), argv.data());
+        std::cerr.rdbuf(previous);
+        const bool cancelled = event != CTRL_LOGOFF_EVENT && !registration_failure;
+        const std::string stop_marker = "stop_reason=" + std::string(mouse_effect_probe::probe_stop_reason_name(mouse_effect_probe::ProbeStopReason::USER_STOP));
+        const bool stopped = captured.str().find(stop_marker) != std::string::npos;
+        expect(registration_failure ? result == 3 : result == 1 && stopped == cancelled,
+            "实际output-off CLI必须保留注册后USER_STOP；下一轮不支持事件应进入缺binding控制: " + captured.str());
+        expect(console_registration_fixture::installs == 1 && console_registration_fixture::removes == (registration_failure ? 0 : 1) &&
+            (registration_failure || console_registration_fixture::handled == (cancelled ? TRUE : FALSE)), "Probe实际handler语义及注册/卸载配对");
+        expect(!std::filesystem::exists(root / (L"report-" + std::to_wstring(event) + L".json")), "早停或缺输入不应发布成功报告");
+        std::cout << "Probe CLI event=" << event << " exit=" << result << " user_stop=" << stopped << '\n';
+        if (event == CTRL_C_EVENT) {
+            prepare_mouse_effect_probe_console_control();
+            request_mouse_effect_probe_stop();
+            std::vector<std::wstring_view> views;
+            for (std::size_t index = 1; index < args.size(); ++index) views.push_back(args[index]);
+            MouseEffectProbeRunOptions options;
+            MouseEffectProbeRunResult run_result;
+            std::string error;
+            expect(parse_mouse_effect_probe_options(views, options, error) == MouseEffectProbeParseStatus::READY,
+                "准备轮次期间的独立参数解析必须成功");
+            expect(!run_mouse_effect_probe(options, run_result, error) && run_result.execution.stop_reason == mouse_effect_probe::ProbeStopReason::USER_STOP,
+                "参数解析不能重置已经准备的当前轮次停止请求");
+            expect(!run_mouse_effect_probe(options, run_result, error) && run_result.execution.stop_reason != mouse_effect_probe::ProbeStopReason::USER_STOP && error.find("binding") != std::string::npos,
+                "非CLI直接调用应开启下一轮，恢复到合成缺binding控制");
+        }
+    }
 }
 
 void test_parser_separates_output_off_and_physical_authority() {
@@ -576,6 +635,7 @@ void test_physical_safety_ledger_distinguishes_explicit_release() {
 } // namespace
 
 int main() {
+    test_production_cli_preserves_early_user_stop();
     test_parser_separates_output_off_and_physical_authority();
     test_parser_isolates_physical_b_authority_from_physical_a();
     test_parser_recognizes_physical_b_holdout_authority();

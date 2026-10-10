@@ -45,6 +45,8 @@ constexpr std::wstring_view kPhysicalBCompositePhaseConfirmation =
 constexpr std::size_t kMaximumSafetyObservationCount = 8192U;
 constexpr std::size_t kMaximumMonitorPacketCount = 8192U;
 std::atomic<bool> stop_requested{false};
+std::atomic<bool> stop_epoch_prepared{false};
+static_assert(decltype(stop_requested)::is_always_lock_free);
 std::mutex stop_event_mutex;
 HANDLE active_stop_event = nullptr;
 
@@ -1548,7 +1550,6 @@ MouseEffectProbeParseStatus parse_mouse_effect_probe_options(
                 "output-off rehearsal 禁止物理输出授权或 safety ledger 参数");
             return MouseEffectProbeParseStatus::INVALID;
         }
-        stop_requested.store(false, std::memory_order_release);
         error.clear();
         return MouseEffectProbeParseStatus::READY;
     } catch (const std::exception& exception) {
@@ -1827,6 +1828,11 @@ bool calculate_composite_phase_interval_q32(
     return true;
 }
 
+void prepare_mouse_effect_probe_console_control() noexcept {
+    stop_requested.store(false, std::memory_order_release);
+    stop_epoch_prepared.store(true, std::memory_order_release);
+}
+
 void request_mouse_effect_probe_stop() noexcept {
     stop_requested.store(true, std::memory_order_release);
     std::lock_guard lock(stop_event_mutex);
@@ -1837,8 +1843,16 @@ bool run_mouse_effect_probe(
         const MouseEffectProbeRunOptions& options,
         MouseEffectProbeRunResult& result,
         std::string& error) noexcept {
+    if (!stop_epoch_prepared.exchange(false, std::memory_order_acq_rel)) {
+        stop_requested.store(false, std::memory_order_release);
+    }
     result = {};
-    stop_requested.store(false, std::memory_order_release);
+    if (stop_requested.load(std::memory_order_acquire)) {
+        result.execution.state = mouse_effect_probe::ProbeExecutionState::STOPPED;
+        result.execution.stop_reason = mouse_effect_probe::ProbeStopReason::USER_STOP;
+        set_error(error, "Mouse Effect Probe 在初始化前被人工中止");
+        return false;
+    }
     try {
         if (std::filesystem::exists(options.report_path) ||
             (is_physical_dispatch(options.dispatch_mode) &&
