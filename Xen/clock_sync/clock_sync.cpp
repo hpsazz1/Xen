@@ -630,7 +630,7 @@ struct Server::Impl {
             socket_handle, reinterpret_cast<char*>(request_packet.data()),
             static_cast<int>(request_packet.size()), 0,
             reinterpret_cast<sockaddr*>(&source), &source_size);
-        const std::uint64_t source_received_at = utc_now_ns();
+        const std::uint64_t source_received_at = utc_now();
         if (received != static_cast<int>(request_packet.size()) ||
             source_size != sizeof(source)) {
             return true;
@@ -644,7 +644,13 @@ struct Server::Impl {
             request.requester_send_steady_ns;
         response.source_session_id = session_id;
         response.source_receive_utc_ns = source_received_at;
-        response.source_send_utc_ns = utc_now_ns();
+        response.source_send_utc_ns = utc_now();
+        // UTC可能在一次请求内回拨，或暂时无法取得有效值。
+        // 丢弃本次不可信交换，保留服务等待后续请求；不伪造或钳位时间戳。
+        if (response.source_receive_utc_ns == 0 ||
+            response.source_send_utc_ns < response.source_receive_utc_ns) {
+            return true;
+        }
         std::array<std::uint8_t, detail::kResponseBytes> response_packet{};
         if (!detail::serialize_response(response, response_packet)) {
             return set_error("源机时钟响应序列化失败");
@@ -691,6 +697,7 @@ struct Server::Impl {
     SOCKET socket_handle = INVALID_SOCKET;
     bool winsock_ready = false;
     std::uint64_t session_id = 0;
+    detail::ServerTestAccess::UtcNow utc_now = utc_now_ns;
     mutable std::mutex error_mutex;
     std::string error;
 };
@@ -742,6 +749,14 @@ Server::Server() noexcept {
 }
 
 Server::~Server() { close(); }
+
+bool detail::ServerTestAccess::set_utc_now(
+        Server& server, UtcNow clock) noexcept {
+    if (!server.impl_ || !clock ||
+        server.impl_->socket_handle != INVALID_SOCKET) return false;
+    server.impl_->utc_now = clock;
+    return true;
+}
 
 bool Server::open(const ServerConfig& config) noexcept {
     return impl_ && impl_->open(config);

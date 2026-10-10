@@ -14,6 +14,12 @@ namespace clock_sync::detail {
 inline constexpr std::size_t kRequestBytes = 40;
 inline constexpr std::size_t kResponseBytes = 64;
 
+// 仅供内部回归在尚未打开的实例上替换UTC读取；不修改系统时钟或协议。
+struct ServerTestAccess {
+    using UtcNow = std::uint64_t (*)() noexcept;
+    static bool set_utc_now(Server& server, UtcNow clock) noexcept;
+};
+
 struct Request {
     std::uint64_t request_id = 0;
     std::uint64_t requester_send_steady_ns = 0;

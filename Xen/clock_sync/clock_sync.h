@@ -8,6 +8,8 @@
 
 namespace clock_sync {
 
+namespace detail { struct ServerTestAccess; }
+
 enum class MappingStatus {
     UNSYNCHRONIZED,
     WARMING,
@@ -79,6 +81,7 @@ public:
     std::string last_error() const;
 
 private:
+    friend struct detail::ServerTestAccess;
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

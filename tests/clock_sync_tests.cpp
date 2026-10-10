@@ -232,12 +232,123 @@ void test_client_server_loopback() {
            "源机时钟服务回环期间不得发生协议或套接字失败");
 }
 
+thread_local std::array<std::uint64_t, 2> exchange_utc{};
+thread_local std::size_t exchange_clock_calls = 0;
+
+std::uint64_t read_exchange_utc() noexcept {
+    const auto index = exchange_clock_calls++;
+    return exchange_utc[index < exchange_utc.size() ? index : 1];
+}
+
+void test_server_recovers_after_invalid_exchange() {
+    struct Case {
+        const char* name;
+        std::uint64_t received;
+        std::uint64_t sent;
+        bool response_expected;
+    };
+    constexpr std::array cases{
+        Case{"回拨", 2'000'000, 1'000'000, false},
+        Case{"无效接收时间", 0, 1'000'000, false},
+        Case{"无效发送时间", 1'000'000, 0, false},
+        Case{"正向时间", 1'000'000, 2'000'000, true},
+        Case{"相等时间", 1'000'000, 1'000'000, true},
+    };
+    for (const auto& test : cases) {
+        const auto port = reserve_loopback_port();
+        expect(port != 0, "交换恢复回归必须取得本机临时端口");
+        if (!port) continue;
+        clock_sync::Server server;
+        expect(clock_sync::detail::ServerTestAccess::set_utc_now(
+                   server, read_exchange_utc),
+               "未打开的独立Server必须能设置内部测试时钟");
+        clock_sync::ServerConfig config;
+        config.bind_url = "udp://127.0.0.1:" + std::to_string(port);
+        const bool opened = server.open(config);
+        expect(opened, "实际时钟服务必须打开本机环回端点");
+        if (!opened) continue;
+        expect(!clock_sync::detail::ServerTestAccess::set_utc_now(
+                   server, read_exchange_utc),
+               "已打开Server不能修改内部读取函数");
+        struct SocketOwner {
+            SOCKET handle = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+            ~SocketOwner() {
+                if (handle != INVALID_SOCKET) closesocket(handle);
+            }
+        } peer;
+        expect(peer.handle != INVALID_SOCKET, "交换恢复回归必须创建UDP请求端");
+        if (peer.handle == INVALID_SOCKET) continue;
+        sockaddr_in target{};
+        target.sin_family = AF_INET;
+        target.sin_port = htons(port);
+        target.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        bool alive = true;
+        std::uint64_t session = 0;
+        const auto exchange = [&](std::uint64_t id, std::uint64_t received,
+                                  std::uint64_t sent) {
+            // 与正式CLI一致：serve_once=false后停止服务，不人为再次调用恢复。
+            if (!alive) return false;
+            exchange_utc = {received, sent};
+            exchange_clock_calls = 0;
+            clock_sync::detail::Request request{id, 9'000'000};
+            std::array<std::uint8_t, clock_sync::detail::kRequestBytes> packet{};
+            expect(clock_sync::detail::serialize_request(request, packet),
+                   "回归必须发送实际协议编码的合法请求");
+            const auto sent_bytes = sendto(
+                peer.handle, reinterpret_cast<const char*>(packet.data()),
+                static_cast<int>(packet.size()), 0,
+                reinterpret_cast<const sockaddr*>(&target), sizeof(target));
+            expect(sent_bytes == static_cast<int>(packet.size()),
+                   "回归请求必须实际发送到UDP环回端点");
+            alive = server.serve_once(1000);
+            expect(exchange_clock_calls == 2,
+                   "实际服务必须分别读取接收和发送UTC");
+            fd_set readable;
+            FD_ZERO(&readable);
+            FD_SET(peer.handle, &readable);
+            timeval timeout{0, 100'000};
+            const int available = select(0, &readable, nullptr, nullptr, &timeout);
+            expect(available != SOCKET_ERROR, "响应可读性检查不得失败");
+            if (available != 1) return false;
+            std::array<std::uint8_t, clock_sync::detail::kResponseBytes> reply{};
+            const auto size = recv(peer.handle, reinterpret_cast<char*>(reply.data()),
+                                   static_cast<int>(reply.size()), 0);
+            clock_sync::detail::Response response;
+            const bool valid = size == static_cast<int>(reply.size()) &&
+                clock_sync::detail::parse_response(reply, response);
+            expect(valid && response.request_id == id &&
+                       response.requester_send_steady_ns == request.requester_send_steady_ns &&
+                       response.source_receive_utc_ns == received &&
+                       response.source_send_utc_ns == sent,
+                   "实际响应必须保留原始时间戳与请求身份，不能钳位或伪造");
+            if (session == 0) session = response.source_session_id;
+            expect(session != 0 && response.source_session_id == session,
+                   "丢弃坏交换不能重启或改变健康服务session");
+            return valid;
+        };
+        expect(exchange(1, 500'000, 500'100), "故障前健康交换必须正常响应");
+        const bool response = exchange(2, test.received, test.sent);
+        expect(response == test.response_expected,
+               std::string(test.name) + "：只允许时间戳合法的响应发出");
+        const bool survived = alive;
+        const bool recovered = exchange(3, 3'000'000, 3'000'100);
+        expect(survived && recovered && server.last_error().empty(),
+               std::string(test.name) + "：单次时间异常不能使服务退出，后续必须恢复响应");
+        std::cout << test.name << ": response=" << response
+                  << " survived=" << survived << " recovered=" << recovered << '\n';
+    }
+    clock_sync::Server closed;
+    expect(!closed.serve_once(0) && !closed.last_error().empty(),
+           "尚未打开的Server仍须返回失败，不能吞掉真正的生命周期错误");
+}
+
 } // namespace
 
 int main() {
     test_protocol_round_trip();
     test_affine_mapping_and_expiry();
     test_client_server_loopback();
+    test_server_recovers_after_invalid_exchange();
     if (failures != 0) {
         std::cerr << "时钟同步测试失败数: " << failures << '\n';
         return 1;
