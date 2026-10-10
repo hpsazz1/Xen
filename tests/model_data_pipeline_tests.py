@@ -1,6 +1,8 @@
 """模型数据 CLI 契约专项；合成 PNG 与训练器替身，不代表真实训练通过。"""
 import importlib.util
 import json
+import copy
+import random
 from pathlib import Path
 import subprocess
 import sys
@@ -8,6 +10,7 @@ import tempfile
 import types
 import unittest
 from unittest.mock import patch
+from model_data_leakage_benchmark import original_check_leakage, make_fixture
 
 from PIL import Image
 import numpy as np
@@ -83,6 +86,86 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(replaced), 1)
         self.assertFalse((output / "dataset_identity.json").exists())
         self.assertFalse((self.root / "split_registry.json").exists())
+
+    def test_leakage_stops_exact_scan_after_bound_is_exceeded(self):
+        import builtins
+        from unittest.mock import patch
+        visits = []
+        def counted_abs(value):
+            visits.append(value)
+            return builtins.abs(value)
+        entries = [dict(split="train", sample=dict(image_sha256="left", _thumb=((0,)*3,)*256)),
+                   dict(split="test", sample=dict(image_sha256="right", _thumb=((255,)*3,)*256))]
+        with patch.object(pipeline, "abs", counted_abs, create=True):
+            pipeline.check_leakage(entries)
+        self.assertLessEqual(len(visits), 9,
+                             "RGB累计差超过1536后必须停止访问剩余通道")
+
+    def test_leakage_matches_original_oracle_at_boundaries_and_in_error_order(self):
+        def entry(split, digest, raw):
+            return dict(split=split, sample=dict(image_sha256=digest,
+                _thumb=tuple(tuple(raw[i:i+3]) for i in range(0,len(raw),3))))
+        def outcome(check, entries):
+            try:
+                check(entries)
+                return ("PASS", "")
+            except Exception as error:
+                return (type(error).__name__, str(error))
+        zeros = [0]*768
+        cases = []
+        for total in (1535,1536,1537):
+            raw = [2]*768
+            raw[-1] += total-1536
+            cases.append([entry("train","left",zeros),entry("val","right",raw)])
+        cases += [
+            [entry("train","same",zeros),entry("val","different",[2]*768),entry("test","same",[255]*768)],
+            [entry("train","same",zeros),entry("val","same",[255]*768),entry("test","different",[2]*768)],
+            [entry("train","one",zeros),entry("train","two",[2]*768)],
+            [entry("train","one",zeros),entry("test","two",[0]*699+[255]*69)],
+        ]
+        rng=random.Random(20261010)
+        for _ in range(120):
+            entries=make_fixture(rng.randrange(2,18),rng.choice(("random","low-contrast","late-difference")),rng.randrange(100000))
+            for item in entries: item["split"]=rng.choice(("train","val","test"))
+            if rng.randrange(2):
+                left,right=rng.sample(range(len(entries)),2)
+                entries[right]["sample"]["_thumb"]=entries[left]["sample"]["_thumb"]
+                if rng.randrange(2): entries[right]["sample"]["image_sha256"]=entries[left]["sample"]["image_sha256"]
+            cases.append(entries)
+        for index,entries in enumerate(cases):
+            with self.subTest(case=index):
+                before=copy.deepcopy(entries)
+                self.assertEqual(outcome(pipeline.check_leakage,entries),outcome(original_check_leakage,entries))
+                self.assertEqual(entries,before)
+
+    def test_leakage_preserves_noncanonical_thumbnail_behavior(self):
+        class DifferentIndexedPixel(tuple):
+            def __getitem__(self, index):
+                return 255
+        class DifferentIndexedThumbnail(tuple):
+            def __getitem__(self, index):
+                return (255,255,255)
+        class ExceptionalChannel(int):
+            def __sub__(self, other):
+                raise RuntimeError("subclass arithmetic")
+        class NegativeAbsolute(int):
+            def __sub__(self, other):
+                return self
+            def __abs__(self):
+                return -1000
+        thumbs=[(),((0,),),((0,0),(2,3,4)),((10**400,0,0),),((0.5,1.5,2.5),), ((255,255,255),)*255+((ExceptionalChannel(0),0,0),), ((NegativeAbsolute(0),0,0),), (DifferentIndexedPixel((0,0,0)),), DifferentIndexedThumbnail(((0,0,0),))]
+        for left in thumbs:
+            for right in thumbs:
+                entries=[dict(split="train",sample=dict(image_sha256="left",_thumb=left)),
+                         dict(split="val",sample=dict(image_sha256="right",_thumb=right))]
+                def outcome(check):
+                    try:
+                        check(entries)
+                        return ("PASS", "")
+                    except Exception as error:
+                        return (type(error).__name__,str(error))
+                with self.subTest(left=left,right=right):
+                    self.assertEqual(outcome(pipeline.check_leakage),outcome(original_check_leakage))
 
     def test_complete_cli_export_and_explicit_empty_labels(self):
         dataset = self.freeze()

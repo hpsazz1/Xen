@@ -560,6 +560,16 @@ def import_labels(ctx):
 
 def check_leakage(entries):
     # RGB 缩略图平均绝对差 <= 2/255 视为近重复；保守拒绝，人工重新分组。
+    rgb_cache = {}
+    def rgb_thumbnail(thumb):
+        identity = id(thumb)
+        if identity not in rgb_cache:
+            rgb_cache[identity] = type(thumb) in (tuple, list) and all(
+                type(pixel) in (tuple, list) and len(pixel) == 3 and
+                all(type(value) is int and 0 <= value <= 255 for value in pixel)
+                for pixel in thumb)
+        return rgb_cache[identity]
+
     for index, left in enumerate(entries):
         for right in entries[index + 1:]:
             if left["split"] == right["split"]:
@@ -567,7 +577,18 @@ def check_leakage(entries):
             if left["sample"]["image_sha256"] == right["sample"]["image_sha256"]:
                 raise PipelineError("相同图片跨 train/val/test 泄漏，请调整 session 分组")
             a, b = left["sample"]["_thumb"], right["sample"]["_thumb"]
-            distance = sum(abs(x-y) for p, q in zip(a, b) for x, y in zip(p, q)) / (len(a)*3)
+            if rgb_thumbnail(a) and rgb_thumbnail(b):
+                difference = 0
+                limit = len(a) * 6
+                for p, q in zip(a, b):
+                    difference += abs(p[0]-q[0]) + abs(p[1]-q[1]) + abs(p[2]-q[2])
+                    # 非负整数和一旦严格超过门槛，后续通道不能使其回落。
+                    if difference > limit:
+                        break
+                distance = difference / (len(a)*3)
+            else:
+                # 保留非标准缩略图的 zip 截断、浮点与异常行为。
+                distance = sum(abs(x-y) for p, q in zip(a, b) for x, y in zip(p, q)) / (len(a)*3)
             if distance <= 2:
                 raise PipelineError("近重复图片跨 train/val/test；请将关联 session 放同组或排除重复")
 
