@@ -2110,6 +2110,11 @@ if(BUILD_TESTING)
     add_test(NAME aim_production_red_evaluator_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/tests/aim_production_red_evaluator_tests.py")
+    add_test(NAME evaluator_time_contract_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+            "${PROJECT_SOURCE_DIR}/tests/evaluator_time_contract_tests.py"
+            --output-root "${CMAKE_BINARY_DIR}/evaluator-time-fixtures")
+    set_tests_properties(evaluator_time_contract_tests PROPERTIES TIMEOUT 30)
     add_test(NAME aim_production_red_plan_builder_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/tests/aim_production_red_plan_builder_tests.py"

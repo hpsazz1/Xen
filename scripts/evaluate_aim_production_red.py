@@ -199,6 +199,13 @@ def red_schema_contract() -> dict[str, Any]:
             "camera_visible_effect": "source_pixels_xy",
             "physical_dispatch_count": "events",
         },
+        "time_contract": {
+            "observation_age_ns": "control_at_ns-captured_at_ns",
+            "controller_dt_ns_after_first_sample": (
+                "control_at_ns-previous_control_at_ns"),
+            "controller_dt_ns_first_sample": "positive_without_previous_sample",
+            "controller_dt_encoding": "unclamped_input_duration",
+        },
         "scoring": {
             "evaluation_unit": "block_id+plant_profile_id+variant",
             "tail_primary_metrics": [
@@ -399,6 +406,7 @@ def _validate_trace_rows(
     source_assets: set[tuple[str, str]] = set()
     previous_sequence: int | None = None
     previous_timestamp: int | None = None
+    previous_control_at_ns: int | None = None
     for index, row in enumerate(rows):
         if row["red_schema"] != RED_SCHEMA_VERSION or \
                 row["asset_id"] != manifest.get("asset_id") or \
@@ -437,10 +445,17 @@ def _validate_trace_rows(
         if any(not isinstance(row[field], int) or isinstance(row[field], bool)
                for field in integer_fields):
             invalid.append("ROW_INTEGER_FIELD_INVALID")
-        elif row["controller_dt_ns"] <= 0 or \
-                row["control_at_ns"] < row["captured_at_ns"] or \
-                row["backend_completed_at_ns"] < row["control_at_ns"]:
-            invalid.append("ROW_TIME_CONTRACT_INVALID")
+        else:
+            if row["controller_dt_ns"] <= 0 or \
+                    row["control_at_ns"] < row["captured_at_ns"] or \
+                    row["backend_completed_at_ns"] < row["control_at_ns"] or \
+                    row["observation_age_ns"] != \
+                    row["control_at_ns"] - row["captured_at_ns"] or \
+                    (previous_control_at_ns is not None and
+                     row["controller_dt_ns"] !=
+                     row["control_at_ns"] - previous_control_at_ns):
+                invalid.append("ROW_TIME_CONTRACT_INVALID")
+            previous_control_at_ns = row["control_at_ns"]
         if not _is_numeric_vector(row["matched_observation_box"], 4) or \
                 not _is_numeric_vector(row["base_point"], 2) or \
                 not _is_numeric_vector(row["delay_compensated_point"], 2) or \
