@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 #include "scheduler_study_internal.h"
+#include "mouse_effect_probe/report_validation_internal.h"
 
 #include <algorithm>
 #include <array>
@@ -380,7 +381,7 @@ bool parse_options(int argc, wchar_t* argv[], Options& options,
 
 bool calculate_report_semantic(
         const std::filesystem::path& path, std::string& claimed,
-        std::string& actual, std::string& error) {
+        std::string& actual, std::string& error, bool verify) {
     std::string content;
     if (!read_file(path, content, error, kMaximumJsonBytes)) return false;
     try {
@@ -389,6 +390,8 @@ bool calculate_report_semantic(
             error = "command report 必须是 JSON object";
             return false;
         }
+        if (verify && !mouse_effect_probe::detail::validate_report_structure_and_execution(document, error))
+            return false;
         claimed.clear();
         const auto iterator = document.find("report_sha256");
         if (iterator != document.end()) {
@@ -1309,7 +1312,7 @@ int wmain(int argc, wchar_t* argv[]) {
             std::string claimed;
             std::string actual;
             if (!calculate_report_semantic(
-                    options.report, claimed, actual, error)) {
+                    options.report, claimed, actual, error, options.mode == Mode::VERIFY_REPORT)) {
                 std::cerr << "command report 校验失败: " << error << '\n';
                 return 2;
             }

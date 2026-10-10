@@ -11,6 +11,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 from typing import Any
 
 import importlib.util
@@ -76,7 +77,14 @@ def finite_number(value: Any, context: str) -> float:
 
 def read_object(path: pathlib.Path, label: str) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8-sig"))
+        return parse_object(path.read_bytes(), label)
+    except OSError as error:
+        raise ProducerError(f"{label} 无法读取: {error}") from error
+
+
+def parse_object(content: bytes, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(content.decode("utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ProducerError(f"{label} 无法读取: {error}") from error
     if not isinstance(value, dict):
@@ -193,7 +201,10 @@ def produce(options: argparse.Namespace) -> tuple[dict[str, Any],
     manifest_path = options.manifest.resolve()
     assessment_path = options.human_assessment.resolve()
     plan = read_object(plan_path, "plan")
-    report = read_object(report_path, "command report")
+    # 同一次读取的字节用于解析、原生校验和下游身份，不再回读可被替换的原路径。
+    report_bytes = report_path.read_bytes()
+    report_file_sha256 = bytes_sha256(report_bytes)
+    report = parse_object(report_bytes, "command report")
     schedule = read_object(schedule_path, "schedule ledger")
     safety = read_object(safety_path, "safety ledger")
     manifest = read_object(manifest_path, "sidecar manifest")
@@ -216,9 +227,12 @@ def produce(options: argparse.Namespace) -> tuple[dict[str, Any],
             seal.get("report_verifier_file_sha256") !=
             file_sha256(verifier_path)):
         raise ProducerError("producer/report verifier 未由冻结 plan 绑定")
-    verified_report = subprocess.run(
-        [str(verifier_path), "--verify-report", str(report_path)],
-        check=False, capture_output=True, text=True, encoding="utf-8")
+    with tempfile.TemporaryDirectory(prefix="xen-report-verify-") as temporary:
+        frozen_report = pathlib.Path(temporary) / "command-report.json"
+        frozen_report.write_bytes(report_bytes)
+        verified_report = subprocess.run(
+            [str(verifier_path), "--verify-report", str(frozen_report)],
+            check=False, capture_output=True, text=True, encoding="utf-8")
     if verified_report.returncode != 0:
         detail = (verified_report.stderr or verified_report.stdout).strip()
         raise ProducerError(
@@ -270,7 +284,7 @@ def produce(options: argparse.Namespace) -> tuple[dict[str, Any],
             schedule.get("composite_plan_file_sha256") !=
                 file_sha256(plan_path) or
             schedule.get("command_report_file_sha256") !=
-                file_sha256(report_path) or
+                report_file_sha256 or
             schedule.get("safety_ledger_file_sha256") !=
                 file_sha256(safety_path)):
         raise ProducerError("plan/report/schedule/safety identity 漂移")
@@ -666,6 +680,13 @@ def produce(options: argparse.Namespace) -> tuple[dict[str, Any],
     if len(source_sessions) != 1 or len(frame_records) != 252 or \
             len(command_events) != 38 or len(command_controls) != 4:
         raise ProducerError("最终 frame/pulse/control/session 数量无效")
+    source_counts = {
+        "source_dispatch_count": sum(event["dispatch_attempted"] for event in report_events),
+        "source_backend_completion_count": sum(event["backend_succeeded"] for event in report_events),
+        "source_delivery_ack_count": sum(event["protocol_ack_received"] for event in report_events),
+    }
+    if any(count != len(command_events) for count in source_counts.values()):
+        raise ProducerError("完整报告的派发/完成/ACK数量与已绑定命令不一致")
     submission_session = next(iter(source_sessions))
     mapping_segment = stable_event_id(
         "mapping", run_uuid, completion_session, submission_session)
@@ -699,7 +720,7 @@ def produce(options: argparse.Namespace) -> tuple[dict[str, Any],
         },
         "uncertainty_includes_mapping_fit_and_transport": True,
         "raw_ntp_statistics_exported": False,
-        "source_timing_evidence_sha256": file_sha256(report_path),
+        "source_timing_evidence_sha256": report_file_sha256,
         "policy_sha256": policy_semantic,
         "stale": False,
     }
@@ -760,10 +781,8 @@ def produce(options: argparse.Namespace) -> tuple[dict[str, Any],
         "capture_policy_semantic_sha256": policy_semantic,
         "capture_binding_semantic_sha256": binding["semantic_sha256"],
         "clock_mapping_semantic_sha256": mapping["semantic_sha256"],
-        "source_dispatch_count": 38,
-        "source_backend_completion_count": 38,
-        "source_delivery_ack_count": 38,
-        "command_report_file_sha256": file_sha256(report_path),
+        **source_counts,
+        "command_report_file_sha256": report_file_sha256,
         "schedule_ledger_file_sha256": file_sha256(schedule_path),
         "events": command_events,
         "negative_controls": command_controls,

@@ -39,13 +39,21 @@ if ([string]::IsNullOrWhiteSpace($BuildDirectory)) {
 }
 
 function Get-FileEvidence {
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param([Parameter(Mandatory = $true)][string]$Path, [byte[]]$Content)
     $file = Get-Item -LiteralPath $Path -ErrorAction Stop
+    if ($PSBoundParameters.ContainsKey("Content")) {
+        $hash = [System.Security.Cryptography.SHA256]::Create()
+        try { $digest = [BitConverter]::ToString($hash.ComputeHash($Content)).Replace("-", "") }
+        finally { $hash.Dispose() }
+        $length = [long]$Content.LongLength
+    } else {
+        $digest = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+        $length = [long]$file.Length
+    }
     return [ordered]@{
         path = $file.FullName
-        length = [long]$file.Length
-        sha256 = (Get-FileHash -LiteralPath $file.FullName `
-            -Algorithm SHA256).Hash
+        length = $length
+        sha256 = $digest
         last_write_utc = $file.LastWriteTimeUtc.ToString("o")
         file_version = $file.VersionInfo.FileVersion
         product_version = $file.VersionInfo.ProductVersion
@@ -125,6 +133,8 @@ $finalEnvironment = "$ReportPrefix.sender.environment.json"
 $pendingId = [guid]::NewGuid().ToString("N")
 $pendingReport = "$finalReport.pending-$pendingId"
 $pendingEnvironment = "$finalEnvironment.pending-$pendingId"
+$frozenReport = "$finalReport.frozen-$pendingId"
+$frozenReportOwned = $false
 foreach ($path in @($finalReport, $finalEnvironment)) {
     if (Test-Path -LiteralPath $path) {
         throw "XUDP 发送基准目标已存在，拒绝覆盖：$path"
@@ -191,8 +201,11 @@ try {
             "部署 DLL $name"
     }
 
-    $report = Get-Content -LiteralPath $pendingReport -Raw -Encoding UTF8 |
-        ConvertFrom-Json
+    # sender路径只读取一次；判断、摘要与发布都属于同一冻结字节。
+    $reportBytes = [System.IO.File]::ReadAllBytes($pendingReport)
+    $reportEvidence = Get-FileEvidence $pendingReport -Content $reportBytes
+    $reportText = [System.Text.UTF8Encoding]::new($false, $true).GetString($reportBytes).TrimStart([char]0xfeff)
+    $report = $reportText | ConvertFrom-Json
     if ($report.schema -ne 1 -or -not $report.complete -or
         $report.stop_reason -ne "duration" -or
         [double]$report.elapsed_seconds -lt $DurationSeconds -or
@@ -261,7 +274,7 @@ try {
             wire_bytes_sent = [uint64]$report.stats.wire_bytes_sent
             timing = $report.timing
         }
-        report = Get-FileEvidence $pendingReport
+        report = $reportEvidence
     }
     $environment.report["path"] = $finalReport
     $environmentText = $environment | ConvertTo-Json -Depth 12
@@ -269,7 +282,13 @@ try {
         $pendingEnvironment, $environmentText,
         [System.Text.UTF8Encoding]::new($false))
 
-    [System.IO.File]::Move($pendingReport, $finalReport)
+    # 原sender文件可能继续变化；发布私有副本，不重新按原路径验证或移动。
+    $frozenStream = [System.IO.FileStream]::new($frozenReport,
+        [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    $frozenReportOwned = $true
+    try { $frozenStream.Write($reportBytes, 0, $reportBytes.Length) }
+    finally { $frozenStream.Dispose() }
+    [System.IO.File]::Move($frozenReport, $finalReport)
     $published.Add($finalReport)
     [System.IO.File]::Move($pendingEnvironment, $finalEnvironment)
     $published.Add($finalEnvironment)
@@ -284,6 +303,9 @@ try {
     }
     throw
 } finally {
+    if ($frozenReportOwned) {
+        Remove-Item -LiteralPath $frozenReport -Force -ErrorAction SilentlyContinue
+    }
     Remove-Item -LiteralPath $pendingReport -Force `
         -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $pendingEnvironment -Force `

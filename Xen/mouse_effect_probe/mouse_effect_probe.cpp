@@ -1,4 +1,5 @@
 #include "mouse_effect_probe/mouse_effect_probe.h"
+#include "mouse_effect_probe/report_validation_internal.h"
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -83,9 +84,8 @@ constexpr std::uint64_t kMaximumDependencyCalibrationBlocks = 64;
 constexpr std::uint64_t kMaximumS1LivenessSamples = 2'400;
 constexpr std::uint64_t kMaximumS1LivenessChallengePulseCount = 64;
 constexpr std::uintmax_t kMaximumSequenceFileBytes = 128U * 1024U * 1024U;
-constexpr std::uint32_t kReportSchema = 1;
-constexpr std::string_view kReportEvidenceType =
-    "backend_completed_command_to_visible_background_response";
+using detail::kReportSchema;
+using detail::kReportEvidenceType;
 constexpr std::uintmax_t kMaximumReportFileBytes = 256U * 1024U * 1024U;
 constexpr std::uintmax_t kMaximumBindingFileBytes = 16U * 1024U * 1024U;
 
@@ -1432,22 +1432,7 @@ bool parse_command_magnitude_run_role(
     return false;
 }
 
-bool valid_run_uuid(std::string_view value) noexcept {
-    if (value.size() != 36U) return false;
-    for (std::size_t index = 0; index < value.size(); ++index) {
-        if (index == 8U || index == 13U || index == 18U || index == 23U) {
-            if (value[index] != '-') return false;
-            continue;
-        }
-        const char character = value[index];
-        if (!((character >= '0' && character <= '9') ||
-              (character >= 'a' && character <= 'f') ||
-              (character >= 'A' && character <= 'F'))) {
-            return false;
-        }
-    }
-    return true;
-}
+using detail::valid_run_uuid;
 
 bool parse_document(const nlohmann::ordered_json& document,
                     MouseEffectProbeSequence& sequence,
@@ -2787,13 +2772,7 @@ const ProbeExecutionResult& MouseEffectProbeExecutor::result() const noexcept {
 
 namespace {
 
-bool valid_sha256_text(std::string_view value) noexcept {
-    if (value.size() != 64U) return false;
-    return std::all_of(value.begin(), value.end(), [](char character) {
-        return (character >= '0' && character <= '9') ||
-               (character >= 'a' && character <= 'f');
-    });
-}
+using detail::valid_sha256_text;
 
 bool validate_report_inputs(
         const ProbeExecutionOptions& options,
@@ -2814,228 +2793,7 @@ bool validate_report_inputs(
         set_error(error, "probe report 与 sidecar/source binding 身份非法");
         return false;
     }
-    if (result.dispatch_mode != options.dispatch_mode ||
-        (result.state != ProbeExecutionState::COMPLETED &&
-         result.state != ProbeExecutionState::STOPPED) ||
-        result.stop_reason == ProbeStopReason::NONE ||
-        result.events.size() != result.consumed_sample_count ||
-        result.consumed_sample_count > sequence.samples.size()) {
-        set_error(error, "probe report 只能记录一致的终态执行结果");
-        return false;
-    }
-    if ((result.state == ProbeExecutionState::COMPLETED) != result.complete ||
-        (result.complete &&
-         (result.stop_reason != ProbeStopReason::NORMAL_COMPLETION ||
-          result.consumed_sample_count != sequence.samples.size())) ||
-        (!result.complete &&
-         result.stop_reason == ProbeStopReason::NORMAL_COMPLETION)) {
-        set_error(error, "probe report complete/state/stop reason 不一致");
-        return false;
-    }
-
-    std::int64_t requested_x = 0;
-    std::int64_t backend_completed_x = 0;
-    std::optional<std::uint64_t> previous_source_frame;
-    std::optional<std::int64_t> previous_source_timestamp;
-    std::string source_clock_session_id;
-    for (std::size_t index = 0; index < result.events.size(); ++index) {
-        const auto& event = result.events[index];
-        const auto& sample = sequence.samples[index];
-        if (event.run_uuid != options.run_uuid ||
-            event.activation_epoch != options.activation_epoch ||
-            event.sequence_sha256 != sequence.sequence_sha256 ||
-            event.sample_index != sample.sample_index ||
-            event.block_id != sample.block_id ||
-            event.nominal_dx_counts != sample.dx_counts ||
-            event.nominal_dy_counts != sample.dy_counts ||
-            !event.source_timestamp_valid ||
-            event.source_timestamp <= 0 ||
-            event.source_time_basis != "NDI_SDK_SUBMISSION" ||
-            event.source_clock_status != "VALID" ||
-            event.source_time_at_steady_ns <= 0 ||
-            event.source_clock_session_id.empty() ||
-            !std::isfinite(event.source_clock_uncertainty_ms) ||
-            event.source_clock_uncertainty_ms < 0.0 ||
-            !std::isfinite(event.source_clock_rtt_ms) ||
-            event.source_clock_rtt_ms < 0.0 ||
-            !std::isfinite(event.source_clock_rate) ||
-            event.source_clock_rate <= 0.0 ||
-            !std::isfinite(event.source_clock_mapping_age_ms) ||
-            event.source_clock_mapping_age_ms < 0.0 ||
-            event.source_clock_sample_count == 0 ||
-            event.source_dropped_frames != 0 ||
-            event.transport_dropped_frames != 0 ||
-            event.transport_invalid_packets != 0 ||
-            event.scheduled_at_steady_ns <= 0) {
-            set_error(error, "probe report event 与序列/source timing 不一致");
-            return false;
-        }
-        if (source_clock_session_id.empty()) {
-            source_clock_session_id = event.source_clock_session_id;
-        } else if (event.source_clock_session_id != source_clock_session_id) {
-            set_error(error, "probe report event source clock session 改变");
-            return false;
-        }
-        if (previous_source_frame.has_value() &&
-            (*previous_source_frame ==
-                 std::numeric_limits<std::uint64_t>::max() ||
-             event.source_frame_sequence != *previous_source_frame + 1U)) {
-            set_error(error, "probe report event source frame 不连续");
-            return false;
-        }
-        previous_source_frame = event.source_frame_sequence;
-        if (previous_source_timestamp.has_value() &&
-            event.source_timestamp <= *previous_source_timestamp) {
-            set_error(error,
-                "probe report event source timestamp 未严格递增");
-            return false;
-        }
-        previous_source_timestamp = event.source_timestamp;
-
-        const bool nominal_zero = sample.dx_counts == 0 &&
-                                  sample.dy_counts == 0;
-        if (options.dispatch_mode ==
-                ProbeDispatchMode::OUTPUT_OFF_REHEARSAL) {
-            if (event.dispatch_attempted ||
-                event.requested_dx_counts != 0 ||
-                event.requested_dy_counts != 0 ||
-                event.backend_succeeded ||
-                event.protocol_ack_received ||
-                event.issued_at_steady_ns != 0 ||
-                event.backend_completed_at_steady_ns != 0 ||
-                event.protocol_ack_received_at_steady_ns != 0 ||
-                event.returned_at_steady_ns != 0) {
-                set_error(error,
-                    "output-off report event 不得包含实际 Mouse 请求或回执");
-                return false;
-            }
-        } else if (nominal_zero) {
-            if (event.dispatch_attempted ||
-                event.requested_dx_counts != 0 ||
-                event.requested_dy_counts != 0 ||
-                event.backend_succeeded ||
-                event.protocol_ack_received ||
-                event.issued_at_steady_ns != 0 ||
-                event.backend_completed_at_steady_ns != 0 ||
-                event.protocol_ack_received_at_steady_ns != 0 ||
-                event.returned_at_steady_ns != 0) {
-                set_error(error, "零 sample 不得伪造成已 dispatch 命令");
-                return false;
-            }
-        } else {
-            if (!event.safety_allowed || !event.dispatch_attempted ||
-                event.requested_dx_counts != sample.dx_counts ||
-                event.requested_dy_counts != sample.dy_counts ||
-                event.issued_at_steady_ns < event.scheduled_at_steady_ns ||
-                event.returned_at_steady_ns < event.issued_at_steady_ns) {
-                set_error(error, "physical report pulse 的请求或时间线非法");
-                return false;
-            }
-            requested_x += event.requested_dx_counts;
-            if (event.backend_succeeded) {
-                if (event.backend_completed_at_steady_ns <
-                        event.issued_at_steady_ns ||
-                    event.backend_completed_at_steady_ns >
-                        event.returned_at_steady_ns) {
-                    set_error(error,
-                        "physical report backend completion 时间非法");
-                    return false;
-                }
-                backend_completed_x += event.requested_dx_counts;
-            } else if (event.backend_completed_at_steady_ns != 0) {
-                set_error(error,
-                    "失败 backend 不得携带有效 completion 时间");
-                return false;
-            }
-            if (event.protocol_ack_received) {
-                if (event.protocol_ack_received_at_steady_ns <
-                        event.issued_at_steady_ns ||
-                    !event.backend_succeeded ||
-                    event.protocol_ack_received_at_steady_ns >
-                        event.backend_completed_at_steady_ns) {
-                    set_error(error, "physical report ACK 时间非法");
-                    return false;
-                }
-            } else if (event.protocol_ack_received_at_steady_ns != 0) {
-                set_error(error, "缺失 ACK 不得携带 ACK 时间");
-                return false;
-            }
-        }
-        if (event.cumulative_requested_x_counts != requested_x ||
-            event.cumulative_backend_completed_x_counts !=
-                backend_completed_x) {
-            set_error(error, "probe report event 累计输入不守恒");
-            return false;
-        }
-        if (event.stop_reason != ProbeStopReason::NONE &&
-            (index + 1U != result.events.size() ||
-             event.stop_reason != result.stop_reason)) {
-            set_error(error, "probe report event stop reason 位置非法");
-            return false;
-        }
-    }
-    if (requested_x != result.cumulative_requested_x_counts ||
-        backend_completed_x !=
-            result.cumulative_backend_completed_x_counts) {
-        set_error(error, "probe report 结果累计输入不守恒");
-        return false;
-    }
-    if (result.complete &&
-        (requested_x != sequence.net_x_counts ||
-         backend_completed_x != sequence.net_x_counts)) {
-        set_error(error, "正常完成的 probe report 必须保持请求/完成净零");
-        return false;
-    }
-    error.clear();
-    return true;
-}
-
-nlohmann::ordered_json report_event_json(const ProbeCommandEvent& event) {
-    return {
-        {"run_uuid", event.run_uuid},
-        {"activation_epoch", event.activation_epoch},
-        {"block_id", event.block_id},
-        {"sequence_sha256", event.sequence_sha256},
-        {"sample_index", event.sample_index},
-        {"source_frame_sequence", event.source_frame_sequence},
-        {"source_timestamp", event.source_timestamp},
-        {"source_timestamp_valid", event.source_timestamp_valid},
-        {"source_time_at_steady_ns", event.source_time_at_steady_ns},
-        {"source_time_basis", event.source_time_basis},
-        {"source_clock_status", event.source_clock_status},
-        {"source_clock_session_id", event.source_clock_session_id},
-        {"source_clock_uncertainty_ms",
-         event.source_clock_uncertainty_ms},
-        {"source_clock_rtt_ms", event.source_clock_rtt_ms},
-        {"source_clock_rate", event.source_clock_rate},
-        {"source_clock_mapping_age_ms",
-         event.source_clock_mapping_age_ms},
-        {"source_clock_sample_count", event.source_clock_sample_count},
-        {"source_dropped_frames", event.source_dropped_frames},
-        {"transport_dropped_frames", event.transport_dropped_frames},
-        {"transport_invalid_packets", event.transport_invalid_packets},
-        {"scheduled_at_steady_ns", event.scheduled_at_steady_ns},
-        {"issued_at_steady_ns", event.issued_at_steady_ns},
-        {"nominal_dx_counts", event.nominal_dx_counts},
-        {"nominal_dy_counts", event.nominal_dy_counts},
-        {"requested_dx_counts", event.requested_dx_counts},
-        {"requested_dy_counts", event.requested_dy_counts},
-        {"safety_allowed", event.safety_allowed},
-        {"dispatch_attempted", event.dispatch_attempted},
-        {"backend_succeeded", event.backend_succeeded},
-        {"backend_completed_at_steady_ns",
-         event.backend_completed_at_steady_ns},
-        {"protocol_ack_received", event.protocol_ack_received},
-        {"protocol_ack_received_at_steady_ns",
-         event.protocol_ack_received_at_steady_ns},
-        {"returned_at_steady_ns", event.returned_at_steady_ns},
-        {"mouse_status", MouseStatusName(event.mouse_status)},
-        {"cumulative_requested_x_counts",
-         event.cumulative_requested_x_counts},
-        {"cumulative_backend_completed_x_counts",
-         event.cumulative_backend_completed_x_counts},
-        {"stop_reason", probe_stop_reason_name(event.stop_reason)},
-    };
+    return detail::validate_report_execution(options, sequence, result, error);
 }
 
 nlohmann::ordered_json report_payload(
@@ -3045,7 +2803,7 @@ nlohmann::ordered_json report_payload(
         const ProbeExecutionResult& result) {
     nlohmann::ordered_json events = nlohmann::ordered_json::array();
     for (const auto& event : result.events) {
-        events.push_back(report_event_json(event));
+        events.push_back(detail::report_event_json(event, MouseStatusName(event.mouse_status), probe_stop_reason_name(event.stop_reason)));
     }
     return {
         {"schema", kReportSchema},
@@ -3078,97 +2836,9 @@ nlohmann::ordered_json report_payload(
     };
 }
 
-// JSON 正整数解析后会成为 unsigned；有符号累计值仍必须处于 int64 范围。
-bool report_signed_integer(const nlohmann::ordered_json& value) {
-    return value.is_number_integer() &&
-        (!value.is_number_unsigned() || value.get<std::uint64_t>() <=
-            static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()));
-}
-
-bool valid_report_event(const nlohmann::ordered_json& event) {
-    // 和生产 writer 共用唯一字段列表，类型约束由实际事件成员定义。
-    static const auto schema = report_event_json(ProbeCommandEvent{});
-    if (!event.is_object() || event.size() != schema.size()) return false;
-    for (const auto& field : schema.items()) {
-        if (!event.contains(field.key())) return false;
-        const auto& value = event.at(field.key());
-        const auto& expected = field.value();
-        if (expected.is_string()) {
-            if (!value.is_string()) return false;
-        } else if (expected.is_boolean()) {
-            if (!value.is_boolean()) return false;
-        } else if (expected.is_number_unsigned()) {
-            if (!value.is_number_unsigned()) return false;
-        } else if (expected.is_number_integer()) {
-            if (!report_signed_integer(value)) return false;
-        } else if (expected.is_number_float()) {
-            if (!value.is_number() || !std::isfinite(value.get<double>())) return false;
-        } else {
-            return false;
-        }
-    }
-    return true;
-}
-bool valid_report_document(const nlohmann::ordered_json& document,
-                           std::string& error) {
-    if (!has_exact_keys(document,
-            {"schema", "evidence_type", "profile", "run_uuid",
-             "activation_epoch", "dispatch_mode", "sequence_sha256",
-             "binding", "executor_timebase", "result",
-             "report_sha256"}) ||
-        !document.at("schema").is_number_unsigned() ||
-        document.at("schema").get<std::uint64_t>() != kReportSchema ||
-        !document.at("evidence_type").is_string() ||
-        document.at("evidence_type").get<std::string>() !=
-            kReportEvidenceType ||
-        !document.at("profile").is_string() ||
-        !document.at("run_uuid").is_string() ||
-        !document.at("activation_epoch").is_number_unsigned() ||
-        !document.at("dispatch_mode").is_string() ||
-        !document.at("sequence_sha256").is_string() ||
-        !document.at("report_sha256").is_string()) {
-        set_error(error, "probe report 根对象字段集合或类型非法");
-        return false;
-    }
-    const auto& binding = document.at("binding");
-    const auto& timebase = document.at("executor_timebase");
-    const auto& result = document.at("result");
-    if (!has_exact_keys(binding,
-            {"probe_binding_sha256", "sidecar_run_uuid",
-             "capture_source_name"}) ||
-        !binding.at("probe_binding_sha256").is_string() ||
-        !binding.at("sidecar_run_uuid").is_string() ||
-        !binding.at("capture_source_name").is_string() ||
-        !has_exact_keys(timebase, {"name", "ticks_per_second"}) ||
-        !timebase.at("name").is_string() ||
-        timebase.at("name").get<std::string>() !=
-            "steady_clock_nanoseconds_since_epoch" ||
-        !timebase.at("ticks_per_second").is_number_unsigned() ||
-        timebase.at("ticks_per_second").get<std::uint64_t>() !=
-            1'000'000'000ULL ||
-        !has_exact_keys(result,
-            {"state", "stop_reason", "complete",
-             "consumed_sample_count", "cumulative_requested_x_counts",
-             "cumulative_backend_completed_x_counts", "events"}) ||
-        !result.at("state").is_string() ||
-        !result.at("stop_reason").is_string() ||
-        !result.at("complete").is_boolean() ||
-        !result.at("consumed_sample_count").is_number_unsigned() ||
-        !report_signed_integer(result.at("cumulative_requested_x_counts")) ||
-        !report_signed_integer(result.at("cumulative_backend_completed_x_counts")) ||
-        !result.at("events").is_array() ||
-        result.at("consumed_sample_count").get<std::uint64_t>() !=
-            result.at("events").size() ||
-        !std::all_of(result.at("events").begin(), result.at("events").end(),
-                     valid_report_event)) {
-        set_error(error, "probe report binding/timebase/result schema 非法");
-        return false;
-    }
+bool valid_report_document(const nlohmann::ordered_json& document, std::string& error) {
+    if (!detail::validate_report_structure_and_execution(document, error)) return false;
     const auto stored_hash = document.at("report_sha256").get<std::string>();
-    if (!valid_sha256_text(stored_hash)) {
-        set_error(error, "probe report SHA-256 格式非法");
-        return false;
-    }
     auto payload = document;
     payload.erase("report_sha256");
     std::string computed_hash;
@@ -3359,53 +3029,6 @@ bool calculate_mouse_effect_probe_file_sha256(
         set_error(error, "计算 probe binding SHA 时发生未知异常");
         return false;
     }
-}
-
-const char* probe_execution_state_name(ProbeExecutionState state) noexcept {
-    switch (state) {
-        case ProbeExecutionState::IDLE: return "idle";
-        case ProbeExecutionState::RUNNING: return "running";
-        case ProbeExecutionState::COMPLETED: return "completed";
-        case ProbeExecutionState::STOPPED: return "stopped";
-    }
-    return "unknown";
-}
-
-const char* probe_dispatch_mode_name(ProbeDispatchMode mode) noexcept {
-    switch (mode) {
-        case ProbeDispatchMode::OUTPUT_OFF_REHEARSAL:
-            return "output_off_rehearsal";
-        case ProbeDispatchMode::PHYSICAL_A: return "physical_a";
-        case ProbeDispatchMode::PHYSICAL_B: return "physical_b";
-    }
-    return "unknown";
-}
-
-const char* probe_stop_reason_name(ProbeStopReason reason) noexcept {
-    switch (reason) {
-        case ProbeStopReason::NONE: return "none";
-        case ProbeStopReason::NORMAL_COMPLETION: return "normal_completion";
-        case ProbeStopReason::AUTHORIZATION_MISSING:
-            return "authorization_missing";
-        case ProbeStopReason::EXCLUSIVE_OWNER_MISSING:
-            return "exclusive_owner_missing";
-        case ProbeStopReason::SOURCE_TIMING_INVALID:
-            return "source_timing_invalid";
-        case ProbeStopReason::SOURCE_SESSION_CHANGED:
-            return "source_session_changed";
-        case ProbeStopReason::SOURCE_FRAME_GAP: return "source_frame_gap";
-        case ProbeStopReason::SIDECAR_UNAVAILABLE:
-            return "sidecar_unavailable";
-        case ProbeStopReason::SAFETY_RELEASED: return "safety_released";
-        case ProbeStopReason::MOUSE_FAILURE: return "mouse_failure";
-        case ProbeStopReason::PROTOCOL_ACK_MISSING:
-            return "protocol_ack_missing";
-        case ProbeStopReason::SCHEDULER_TIMING_INVALID:
-            return "scheduler_timing_invalid";
-        case ProbeStopReason::RUN_TIMEOUT: return "run_timeout";
-        case ProbeStopReason::USER_STOP: return "user_stop";
-    }
-    return "unknown";
 }
 
 } // namespace mouse_effect_probe

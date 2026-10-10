@@ -126,7 +126,7 @@ def build_raw(root: pathlib.Path, fixture: Any,
             "protocol_ack_received_at_steady_ns": (
                 completion - 50 if dispatched else 0),
             "returned_at_steady_ns": completion + 100 if dispatched else 0,
-            "mouse_status": "connected",
+            "mouse_status": "READY",
             "cumulative_requested_x_counts": 0,
             "cumulative_backend_completed_x_counts": 0,
             "stop_reason": "none",
@@ -160,8 +160,8 @@ def build_raw(root: pathlib.Path, fixture: Any,
             completion_ns if dispatched else 0)
         if dispatched:
             cumulative_x += dx
-            predictor["cumulative_requested_x_counts"] = cumulative_x
-            predictor["cumulative_backend_completed_x_counts"] = cumulative_x
+        predictor["cumulative_requested_x_counts"] = cumulative_x
+        predictor["cumulative_backend_completed_x_counts"] = cumulative_x
         report_events.append(predictor)
 
         marker_ns = completion_ns

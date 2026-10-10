@@ -1059,12 +1059,17 @@ target_link_libraries(mouse_benchmark
     PUBLIC mouse
     PRIVATE crash log)
 
+add_library(mouse_effect_probe_report_validation STATIC
+    Xen/mouse_effect_probe/report_validation.cpp)
+target_include_directories(mouse_effect_probe_report_validation PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(mouse_effect_probe_report_validation PUBLIC nlohmann_json::nlohmann_json)
+
 add_library(mouse_effect_probe STATIC
     Xen/mouse_effect_probe/mouse_effect_probe.cpp)
 target_include_directories(mouse_effect_probe PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(mouse_effect_probe
     PUBLIC mouse
-    PRIVATE nlohmann_json::nlohmann_json bcrypt)
+    PRIVATE mouse_effect_probe_report_validation nlohmann_json::nlohmann_json bcrypt)
 
 add_library(mouse_effect_probe_runner STATIC
     Xen/mouse_effect_probe_runner/mouse_effect_probe_runner.cpp)
@@ -1251,7 +1256,7 @@ add_executable(xen_mouse_effect_probe_composite_seal
 set_target_properties(xen_mouse_effect_probe_composite_seal PROPERTIES
     OUTPUT_NAME XenMouseEffectProbeCompositeSeal)
 target_link_libraries(xen_mouse_effect_probe_composite_seal PRIVATE
-    nlohmann_json::nlohmann_json bcrypt)
+    mouse_effect_probe_report_validation nlohmann_json::nlohmann_json bcrypt)
 
 # ─── 测试 ───────────────────────────────────────────────
 
@@ -2144,6 +2149,14 @@ if(BUILD_TESTING)
             --seal-executable "$<TARGET_FILE:xen_mouse_effect_probe_composite_seal>"
             --selector-executable "$<TARGET_FILE:mouse_effect_probe_scheduler_study_tests>"
             --evidence-root "${CMAKE_BINARY_DIR}/scheduler-study-test-evidence")
+    foreach(report_case semantics frozen-report)
+        add_test(NAME composite_report_${report_case}
+            COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+                "${PROJECT_SOURCE_DIR}/tests/composite_report_validation_tests.py"
+                --seal-executable "$<TARGET_FILE:xen_mouse_effect_probe_composite_seal>"
+                --case "${report_case}")
+        set_tests_properties(composite_report_${report_case} PROPERTIES TIMEOUT 60)
+    endforeach()
     add_test(NAME mouse_effect_probe_b_composite_phase_producer_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_b_composite_phase_producer_tests.py"
@@ -2201,6 +2214,9 @@ if(BUILD_TESTING)
         -PowerShell7Executable "${XEN_POWERSHELL7_EXECUTABLE}"
         -BuildDirectory "${CMAKE_BINARY_DIR}"
         -Configuration "$<CONFIG>")
+    xen_add_windows_powershell_test(benchmark_xudp_snapshot_tests
+        "${PROJECT_SOURCE_DIR}/tests/benchmark_xudp_snapshot_tests.ps1"
+        -GitExecutable "${GIT_EXECUTABLE}")
     xen_add_windows_powershell_test(benchmark_mouse_script_tests
         "${PROJECT_SOURCE_DIR}/tests/benchmark_mouse_script_tests.ps1"
         -BuildDirectory "${CMAKE_BINARY_DIR}"
