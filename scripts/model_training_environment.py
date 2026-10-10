@@ -25,7 +25,6 @@ import uuid
 
 
 SCHEMA = 1
-VERSIONS = {"torch": "2.8.0", "torchvision": "0.23.0", "ultralytics": "8.3.203", "onnx": "1.19.0", "onnxruntime": "1.22.1", "Pillow": "11.3.0"}
 TORCH_INDEX = "https://download.pytorch.org/whl/cu128"
 PYPI_INDEX = "https://pypi.org/simple"
 CUDA_WHEELS = {
@@ -40,6 +39,34 @@ class EnvironmentError(Exception):
 
 class Cancelled(EnvironmentError):
     pass
+
+
+def _requirements_contract():
+    """只接受项目既有六个固定声明；不是通用 pip requirements 解析器。"""
+    data = Path(__file__).with_name("model_training_requirements.txt").read_bytes()
+    if len(data) > 65536:
+        raise EnvironmentError("REQUIREMENTS_CONTRACT：固定声明文件过大")
+    versions = {}
+    names = {"torch", "torchvision", "ultralytics", "onnx", "onnxruntime", "Pillow"}
+    for line in data.decode("utf-8-sig").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = re.fullmatch(r"([A-Za-z][A-Za-z0-9_-]*)==([0-9]+\.[0-9]+\.[0-9]+)", line)
+        if not match or match[1] not in names or match[1] in versions:
+            raise EnvironmentError("REQUIREMENTS_CONTRACT：需要唯一、已知包名与完整固定版本")
+        versions[match[1]] = match[2]
+    if set(versions) != names:
+        raise EnvironmentError("REQUIREMENTS_CONTRACT：固定依赖声明不完整")
+    for name, url in CUDA_WHEELS.items():
+        expected = f"{TORCH_INDEX}/{name}-{versions[name]}%2Bcu128-cp312-cp312-win_amd64.whl#sha256="
+        if not url.startswith(expected) or not re.fullmatch(r"[0-9a-f]{64}", url[len(expected):]):
+            raise EnvironmentError("REQUIREMENTS_CONTRACT：固定 CUDA wheel 身份与版本声明不一致")
+    return data, versions
+
+
+# 一次读取供检查、安装记录和 pip 输入共同使用，避免版本与安装字节分离。
+REQUIREMENTS_BYTES, VERSIONS = _requirements_contract()
 
 
 def now():
@@ -181,12 +208,11 @@ def env_install(ctx):
     if os.name != "nt" or sys.version_info[:2] != (3, 12) or struct.calcsize("P") != 8 or platform.machine().lower() not in {"amd64", "x86_64"}:
         raise EnvironmentError("环境配置入口需要 Windows 基础 Python 3.12 x64")
     root = local_path(ctx.job.get("environment_root"))
-    requirements = Path(__file__).resolve().with_name("model_training_requirements.txt")
-    if not requirements.is_file():
-        raise EnvironmentError("脚本同目录缺少 model_training_requirements.txt")
     output = ctx.output()
+    requirements = output / "requirements-frozen.txt"
+    requirements.write_bytes(REQUIREMENTS_BYTES)
     root.mkdir(parents=True, exist_ok=True)
-    identity = "py312-torch280-cu128-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:10]
+    identity = "py312-torch" + VERSIONS["torch"].replace(".", "") + "-cu128-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:10]
     directory = root / identity
     directory.mkdir(exist_ok=False)
     environment_record = dict(schema_version=SCHEMA, state="INSTALLING", ready=False, created_at=now(), environment_directory=str(directory), base_python=str(Path(sys.executable).resolve()), base_version=platform.python_version(), sources=dict(torch=TORCH_INDEX, packages=PYPI_INDEX, cuda_wheels=CUDA_WHEELS), requirements_sha256=sha256(requirements), versions_requested=VERSIONS)

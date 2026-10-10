@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.metadata
+import importlib.util
 import json
 import math
 import os
@@ -27,7 +28,18 @@ import zipfile
 
 
 SCHEMA = 1
-TRAINER_VERSION = "8.3.203"
+
+
+def _trainer_version():
+    # 同目录环境模块仅加载标准库与固定版本声明，不创建环境或加载训练框架。
+    path = Path(__file__).with_name("model_training_environment.py")
+    spec = importlib.util.spec_from_file_location("xen_training_version_contract", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.VERSIONS["ultralytics"]
+
+
+TRAINER_VERSION = _trainer_version()
 VERIFIED = {"VERIFIED_POSITIVE", "VERIFIED_NEGATIVE"}
 REVIEW_TEMPLATE = Path(__file__).with_name("model_data_review.html")
 

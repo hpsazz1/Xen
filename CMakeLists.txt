@@ -2048,6 +2048,11 @@ if(BUILD_TESTING)
     add_test(NAME model_training_environment_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
         "${PROJECT_SOURCE_DIR}/tests/model_training_environment_tests.py")
+    add_test(NAME training_version_contract_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+        "${PROJECT_SOURCE_DIR}/tests/training_version_contract_tests.py"
+        --output-root "${CMAKE_BINARY_DIR}/training-version-fixtures")
+    set_tests_properties(training_version_contract_tests PROPERTIES TIMEOUT 30)
     add_test(NAME model_data_integration_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
         "${PROJECT_SOURCE_DIR}/tests/model_data_integration_tests.py"
