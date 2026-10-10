@@ -100,11 +100,14 @@ function Read-Json([string]$Path, [string]$Description) {
     }
 }
 
-function Replace-FileAtomically([string]$Pending, [string]$Target) {
+function Replace-FileAtomically([string]$Pending, [string]$Target, [object]$Committed = $null) {
+    if ($null -ne $Committed) { $Committed.Value = $false }
     if (Test-Path -LiteralPath $Target -PathType Leaf) {
         $backup = "$Target.backup-$([guid]::NewGuid().ToString('N'))"
         try {
             [System.IO.File]::Replace($Pending, $Target, $backup)
+            # 文件已替换和备份已清理是两个状态；清理抛错不能抹掉提交事实。
+            if ($null -ne $Committed) { $Committed.Value = $true }
         } finally {
             if (Test-Path -LiteralPath $backup -PathType Leaf) {
                 Remove-Item -LiteralPath $backup -Force
@@ -112,6 +115,7 @@ function Replace-FileAtomically([string]$Pending, [string]$Target) {
         }
     } else {
         Move-Item -LiteralPath $Pending -Destination $Target
+        if ($null -ne $Committed) { $Committed.Value = $true }
     }
 }
 
@@ -168,8 +172,13 @@ function Copy-AimPrepareTransaction([string]$RemoteRoot, [string]$LocalRoot) {
             if ((Get-FileHash -LiteralPath (Join-Path $LocalRoot $name) -Algorithm SHA256).Hash -cne $oldHashes[$name]) {
                 throw 'Prepare local target changed before paired publication.'
             }
-            Replace-FileAtomically (Join-Path $stage $name) (Join-Path $LocalRoot $name)
-            $applied.Add($name)
+            $committed = $false
+            try {
+                Replace-FileAtomically (Join-Path $stage $name) (Join-Path $LocalRoot $name) ([ref]$committed)
+                $committed = $true
+            } finally {
+                if ($committed) { $applied.Add($name) }
+            }
         }
     } catch {
         $failure = $_
@@ -179,7 +188,8 @@ function Copy-AimPrepareTransaction([string]$RemoteRoot, [string]$LocalRoot) {
                 if ((Get-FileHash -LiteralPath (Join-Path $LocalRoot $name) -Algorithm SHA256).Hash -cne $hashes[$name]) {
                     throw 'Prepare target changed after publication; refuse to overwrite concurrent changes.'
                 }
-                Replace-FileAtomically (Join-Path $stage "$name.backup") (Join-Path $LocalRoot $name)
+                # 回滚失败或清理结果未知时，stage仍保留完整的旧配对备份。
+                Copy-Atomic (Join-Path $stage "$name.backup") (Join-Path $LocalRoot $name)
             }
         } catch { $restored = $false; throw "Prepare rollback not verified; retain $stage. Original error: $failure; rollback: $_" }
         throw $failure
