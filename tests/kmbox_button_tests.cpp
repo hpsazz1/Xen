@@ -6,9 +6,11 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <iostream>
 #include <mutex>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -41,11 +43,71 @@ public:
     }
     ~Device() {
         stop_ = true;
+        release_observer();
         if (worker_.joinable()) worker_.join();
         if (socket_ != INVALID_SOCKET) closesocket(socket_);
     }
     std::vector<std::array<unsigned char, 72>> packets() {
         std::lock_guard<std::mutex> lock(mutex_); return packets_;
+    }
+    bool wait_outputs(std::size_t count) {
+        std::unique_lock lock(mutex_);
+        changed_.wait_for(lock, std::chrono::milliseconds(500), [&] { return packets_.size() >= count || receiver_error_; });
+        return !receiver_error_ && packets_.size() >= count;
+    }
+    void hold_next_output() {
+        std::lock_guard lock(mutex_); hold_output_ = true;
+    }
+    void release_observer() {
+        { std::lock_guard lock(mutex_); hold_output_ = false; }
+        changed_.notify_all();
+    }
+    // 发送端已停止后，等待接收线程完成一次新的空队列观察；不把UDP当可靠有序流。
+    bool finish_observation() {
+        std::unique_lock lock(mutex_);
+        const auto generation = ++requested_idle_;
+        const bool settled = changed_.wait_for(lock, std::chrono::milliseconds(500),
+            [&] { return observed_idle_ >= generation || receiver_error_; }) && !receiver_error_;
+        stop_ = true;
+        lock.unlock();
+        if (worker_.joinable()) worker_.join();
+        return settled;
+    }
+    void resume_observation() {
+        std::lock_guard lock(mutex_);
+        requested_idle_ = observed_idle_ = 0;
+        stop_ = false;
+        worker_ = std::thread([this] { run(); });
+    }
+    // 负对照也经过真实回环socket，验证最终精确计数不会忽略额外释放包。
+    bool inject_duplicate_output() {
+        std::array<unsigned char, 72> packet;
+        { std::lock_guard lock(mutex_); if (packets_.empty()) return false; packet = packets_.back(); }
+        SOCKET sender = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (sender == INVALID_SOCKET) return false;
+        sockaddr_in address{};
+        address.sin_family = AF_INET; address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = htons(static_cast<unsigned short>(port));
+        const auto sent = sendto(sender, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0,
+            reinterpret_cast<sockaddr*>(&address), sizeof(address));
+        closesocket(sender);
+        return sent == packet.size();
+    }
+    void mark(const char* text) {
+        std::lock_guard lock(mutex_);
+        marks_.push_back({elapsed_us(), text, packets_.size()});
+    }
+    void dump() {
+        std::lock_guard lock(mutex_);
+        std::cerr << "[kmbox-observer] receiver_error=" << receiver_error_ << " gate_expired=" << gate_expired_
+            << " requested_idle=" << requested_idle_ << " observed_idle=" << observed_idle_ << '\n';
+        for (const auto& event : trace_)
+            std::cerr << "[kmbox-observer] recv=" << event.ordinal << " received_us=" << event.received_us
+                << " recorded_us=" << event.recorded_us << " bytes=" << event.length
+                << " source_port=" << event.source_port << " command=" << event.command
+                << " sequence=" << event.sequence << " buttons=" << event.buttons << " ack_mode=" << event.mode << '\n';
+        for (const auto& mark : marks_)
+            std::cerr << "[kmbox-observer] mark=" << mark.text << " us=" << mark.time_us << " outputs=" << mark.outputs << '\n';
     }
     bool physical_left(bool down, bool right_down = false, bool space = false) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -60,24 +122,54 @@ public:
     // 0=匹配ACK，1=丢ACK，2=错序号；只影响输出命令。
     std::atomic<int> response{0};
 private:
+    long long elapsed_us() const {
+        return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started_).count();
+    }
     void run() {
         while (!stop_) {
+            std::size_t idle_generation;
+            { std::lock_guard lock(mutex_); idle_generation = requested_idle_; }
             std::array<unsigned char, 72> bytes{};
             sockaddr_in source{}; int size = sizeof(source);
             int received = recvfrom(socket_, reinterpret_cast<char*>(bytes.data()), 72, 0,
                 reinterpret_cast<sockaddr*>(&source), &size);
-            if (received < 16) continue;
+            if (received < 16) {
+                const int error = received == SOCKET_ERROR ? WSAGetLastError() : 0;
+                if (error == WSAETIMEDOUT) {
+                    {
+                        std::lock_guard lock(mutex_);
+                        observed_idle_ = idle_generation;
+                        if (idle_generation) stop_ = true;
+                    }
+                    changed_.notify_all();
+                } else if (error) {
+                    { std::lock_guard lock(mutex_); receiver_error_ = error; stop_ = true; }
+                    changed_.notify_all();
+                }
+                continue;
+            }
+            const auto received_us = elapsed_us();
             auto command = read(bytes.data() + 12);
             bool output = command == left || command == right || command == keyboard || command == move;
+            const int mode = response.load();
             {
-                std::lock_guard<std::mutex> lock(mutex_);
+                std::unique_lock lock(mutex_);
+                if (output && !changed_.wait_for(lock, std::chrono::seconds(3), [&] { return !hold_output_ || stop_; })) {
+                    gate_expired_ = true;
+                    receiver_error_ = WSAETIMEDOUT;
+                    stop_ = true;
+                }
+                trace_.push_back({trace_.size() + 1, received_us, elapsed_us(), received, ntohs(source.sin_port),
+                    command, read(bytes.data() + 8), read(bytes.data() + 16), mode});
                 if (output) packets_.push_back(bytes);
                 if (command == monitor && read(bytes.data() + 4)) {
                     monitor_destination_ = source;
                     monitor_destination_.sin_port = htons(static_cast<unsigned short>(read(bytes.data() + 4)));
                 }
             }
-            const int mode = response.load();
+            changed_.notify_all();
+            // 生产close单向关闭monitor后立即销毁socket；fixture不向已关闭端口发送无消费者ACK。
+            if (command == monitor && read(bytes.data() + 4) == 0) continue;
             if (output && mode == 1) continue;
             if (output && mode == 2) bytes[8] ^= 1;
             sendto(socket_, reinterpret_cast<char*>(bytes.data()), 16, 0,
@@ -88,6 +180,22 @@ private:
     std::atomic<bool> stop_{false};
     std::thread worker_;
     std::mutex mutex_;
+    std::condition_variable changed_;
+    bool hold_output_ = false;
+    bool gate_expired_ = false;
+    int receiver_error_ = 0;
+    std::size_t requested_idle_ = 0, observed_idle_ = 0;
+    const std::chrono::steady_clock::time_point started_ = std::chrono::steady_clock::now();
+    struct Trace {
+        std::size_t ordinal;
+        long long received_us, recorded_us;
+        int length, source_port;
+        std::uint32_t command, sequence, buttons;
+        int mode;
+    };
+    struct Mark { long long time_us; const char* text; std::size_t outputs; };
+    std::vector<Trace> trace_;
+    std::vector<Mark> marks_;
     sockaddr_in monitor_destination_{};
     std::vector<std::array<unsigned char, 72>> packets_;
 };
@@ -133,23 +241,56 @@ void normal_and_physical() {
     mouse->close();
     expect(mouse->set_left_button(true).disposition == ButtonDisposition::REJECTED, "无owner不得输出");
 }
-void unknown_and_reuse() {
+void unknown_and_reuse(bool delayed_observer = false, bool duplicate_observer = false) {
+    const auto failures_before = failures;
     Device device; auto cfg = config(device); auto mouse = create(cfg);
     expect(mouse && mouse->open(), "unknown测试连接"); if (!mouse) return;
     device.response = 1;
     auto down = mouse->set_left_button(true);
+    device.mark("down_return");
     expect(down.disposition == ButtonDisposition::APPLICATION_UNKNOWN && down.datagram_sent && down.cleanup_required,
         "丢ACK的down必须带债务");
     expect(mouse->left_button_faulted(), "未知down锁存fault");
     expect(!mouse->move({1, 1}) && mouse->set_left_button(true).disposition == ButtonDisposition::REJECTED,
         "fault拒绝move和新down");
     auto up = mouse->set_left_button(false);
+    device.mark("up_return");
     expect(up.disposition == ButtonDisposition::APPLICATION_UNKNOWN && mouse->left_button_faulted(), "未知up保留fault");
+    // UNKNOWN只约束发送侧；先确立前序包观察基线，再观察close新增的唯一释放。
+    expect(device.wait_outputs(2), "前序两包必须被fixture观察");
+    if (delayed_observer) device.hold_next_output();
     const auto before = device.packets().size();
+    expect(before == 2, "close前仅有一次down和一次显式up");
+    device.mark("close_begin");
     mouse->close();
-    expect(device.packets().size() == before + 1, "close仅一次有界释放");
+    device.mark("close_return");
+    device.release_observer();
+    expect(device.wait_outputs(before + 1), "close释放必须被fixture观察");
+    if (duplicate_observer) {
+        expect(device.inject_duplicate_output(), "重复释放负对照必须经真实回环发送");
+        expect(device.wait_outputs(before + 2), "负对照额外包必须被fixture观察");
+    }
+    // producer已经关闭；等待接收线程新的空队列观察后精确检查，不能达到下限就提前成功。
+    expect(device.finish_observation(), "fixture收束观察必须有界完成");
+    device.mark("observation_settled");
+    const auto closed_packets = device.packets();
+    const bool single_release = closed_packets.size() == before + 1 &&
+        read(closed_packets.back().data() + 12) == left && read(closed_packets.back().data() + 16) == 0 &&
+        before == 2 && read(closed_packets.back().data() + 8) == read(closed_packets[1].data() + 8) + 1;
+    if (duplicate_observer) {
+        expect(!single_release && closed_packets.size() == before + 2, "精确释放判据必须拒绝真实重复包");
+    } else expect(single_release, "close仅一次有界释放");
+    if (delayed_observer || failures != failures_before) {
+        std::cerr << "[kmbox-observer] down=" << static_cast<int>(down.disposition)
+            << " down_sent=" << down.datagram_sent << " down_cleanup=" << down.cleanup_required
+            << " up=" << static_cast<int>(up.disposition) << " up_sent=" << up.datagram_sent
+            << " close_fault=" << mouse->left_button_faulted() << " close_cleanup=" << mouse->left_button_cleanup_required()
+            << " error=" << mouse->last_error() << '\n';
+        device.dump();
+    }
     mouse.reset();
     device.response = 0;
+    device.resume_observation();
     mouse = create(cfg);
     expect(mouse && mouse->open(), "可显式重开连接"); if (!mouse) return;
     expect(mouse->left_button_faulted() && mouse->set_left_button(true).disposition == ButtonDisposition::REJECTED,
@@ -252,10 +393,12 @@ void serialized_release() {
     mouse->close();
 }
 }
-int main() {
+int main(int argc, char** argv) {
     WSADATA data{};
     if (WSAStartup(MAKEWORD(2,2), &data)) return 2;
-    normal_and_physical(); unknown_and_reuse(); unsupported(); serialized_release(); combined_buttons_and_space();
+    if (argc == 2 && std::string_view(argv[1]) == "--delayed-close-observer") unknown_and_reuse(true);
+    else if (argc == 2 && std::string_view(argv[1]) == "--duplicate-close-observer") unknown_and_reuse(true, true);
+    else { normal_and_physical(); unknown_and_reuse(); unsupported(); serialized_release(); combined_buttons_and_space(); }
     WSACleanup();
     return failures ? 1 : 0;
 }

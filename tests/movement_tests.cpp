@@ -3,23 +3,35 @@
 #include "movement/movement_internal.h"
 #include "mouse/input_report_internal.h"
 #include <atomic>
+#include <array>
 #include <chrono>
+#include <condition_variable>
 #include <iostream>
 #include <mutex>
+#include <source_location>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
 namespace {
 using Clock = std::chrono::steady_clock;
 void require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
-template<class Predicate> void wait_for(Predicate predicate) {
-    const auto deadline = Clock::now() + std::chrono::seconds(3);
-    while (!predicate()) {
-        if (Clock::now() >= deadline) throw std::runtime_error("身法专项等待超时");
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+std::int64_t steady_us() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(Clock::now().time_since_epoch()).count();
 }
+thread_local std::string diagnostic_iteration;
+class DiagnosticIteration {
+public:
+    DiagnosticIteration(const char* name, int value) : previous_(diagnostic_iteration) {
+        diagnostic_iteration += " " + std::string(name) + "=" + std::to_string(value);
+    }
+    ~DiagnosticIteration() { diagnostic_iteration = previous_; }
+private:
+    std::string previous_;
+};
+
 class Fake final : public IMouseController {
 public:
     mutable std::mutex mutex;
@@ -75,7 +87,17 @@ public:
         std::lock_guard lock(mutex); subscribed = value; return true;
     }
     bool read_movement_reports(InputReportCursor& cursor, InputReportBatch& batch) noexcept override {
-        std::lock_guard lock(mutex);
+        std::unique_lock lock(mutex);
+        // 仅独立诊断 CLI 武装；普通专项没有等待门，不改变原报告交付顺序。
+        if (read_gate_armed_ && cursor.sequence >= read_gate_after_) {
+            read_gate_entered_ = true;
+            read_gate_cv_.notify_all();
+            read_gate_expired_ = !read_gate_cv_.wait_for(lock, std::chrono::seconds(3),
+                [&] { return read_gate_released_; });
+            read_gate_armed_ = false;
+        }
+        const auto before = cursor;
+        ++read_calls_;
         batch = {}; batch.subscribed = subscribed; batch.epoch = epoch; batch.final_sequence = sequence;
         batch.status = InputMonitorStatus::READY;
         if (cursor.epoch != epoch) cursor = {epoch, 0};
@@ -83,6 +105,13 @@ public:
             if (event.epoch == epoch && event.sequence > cursor.sequence && batch.count < batch.events.size()) {
                 batch.events[batch.count++] = event; cursor.sequence = event.sequence;
             }
+        }
+        if (batch.count) {
+            reads_[read_records_++ % reads_.size()] = {
+                steady_us(), before.epoch, before.sequence, cursor.epoch, cursor.sequence,
+                batch.final_sequence, batch.count,
+                batch.events[0].received_at_steady_ns / 1000,
+                batch.events[batch.count - 1].received_at_steady_ns / 1000};
         }
         return true;
     }
@@ -99,7 +128,119 @@ public:
     void new_epoch() { std::lock_guard lock(mutex); ++epoch; sequence = 0; reports.clear(); }
     int total() const { std::lock_guard lock(mutex); int result = 0; for (int value : moves) result += value; return result; }
     std::vector<int> keys() const { std::lock_guard lock(mutex); return software; }
+
+    void arm_read_gate(std::uint64_t after_sequence) {
+        std::lock_guard lock(mutex);
+        read_gate_after_ = after_sequence;
+        read_gate_armed_ = true;
+        read_gate_entered_ = read_gate_released_ = read_gate_expired_ = false;
+    }
+    bool await_read_gate() {
+        std::unique_lock lock(mutex);
+        return read_gate_cv_.wait_for(lock, std::chrono::seconds(3), [&] { return read_gate_entered_; });
+    }
+    void release_read_gate() {
+        { std::lock_guard lock(mutex); read_gate_released_ = true; }
+        read_gate_cv_.notify_all();
+    }
+    void dump_observation() const {
+        std::unique_lock lock(mutex, std::try_to_lock);
+        if (!lock.owns_lock()) {
+            std::cerr << "[movement-observer] fake_mutex=busy\n";
+            return;
+        }
+        std::cerr << "[movement-observer] fake subscribed=" << subscribed
+            << " epoch=" << epoch << " sequence=" << sequence << " read_calls=" << read_calls_
+            << " moves=" << moves.size() << " software=" << software.size() << " masks=" << masks.size()
+            << " cleanups=" << cleanups.load() << " ctrl_down=" << ctrl_down
+            << " gate_after=" << read_gate_after_ << " gate_entered=" << read_gate_entered_
+            << " gate_released=" << read_gate_released_ << " gate_expired=" << read_gate_expired_ << '\n';
+        const auto first_read = read_records_ > reads_.size() ? read_records_ - reads_.size() : 0;
+        for (auto i = first_read; i < read_records_; ++i) {
+            const auto& read = reads_[i % reads_.size()];
+            std::cerr << "[movement-observer] read at_us=" << read.at_us
+                << " cursor=" << read.before_epoch << ':' << read.before_sequence << "->"
+                << read.after_epoch << ':' << read.after_sequence << " final_sequence=" << read.final_sequence
+                << " count=" << read.count << " first_age_us=" << read.at_us - read.first_received_us
+                << " last_age_us=" << read.at_us - read.last_received_us << '\n';
+        }
+        const auto first_report = reports.size() > 8 ? reports.size() - 8 : 0;
+        for (auto i = first_report; i < reports.size(); ++i) {
+            const auto& event = reports[i];
+            std::cerr << "[movement-observer] report epoch=" << event.epoch << " seq=" << event.sequence
+                << " received_us=" << event.received_at_steady_ns / 1000 << " valid=" << event.state_valid
+                << " x=" << event.raw_x << " wheel=" << event.raw_wheel
+                << " usages=" << int(event.keyboard_usages[0]) << ',' << int(event.keyboard_usages[1]) << '\n';
+        }
+        for (const auto& [down, at] : ctrl_events)
+            std::cerr << "[movement-observer] ctrl down=" << down << " at_us="
+                << std::chrono::duration_cast<std::chrono::microseconds>(at.time_since_epoch()).count() << '\n';
+    }
+private:
+    struct ReadObservation {
+        std::int64_t at_us;
+        std::uint64_t before_epoch, before_sequence, after_epoch, after_sequence, final_sequence;
+        std::size_t count;
+        std::int64_t first_received_us, last_received_us;
+    };
+    std::array<ReadObservation, 16> reads_{};
+    std::uint64_t read_calls_ = 0, read_records_ = 0;
+    std::condition_variable read_gate_cv_;
+    std::uint64_t read_gate_after_ = 0;
+    bool read_gate_armed_ = false, read_gate_entered_ = false;
+    bool read_gate_released_ = false, read_gate_expired_ = false;
 };
+
+class WorkerObservation;
+thread_local std::vector<const WorkerObservation*> worker_observations;
+class WorkerObservation {
+public:
+    WorkerObservation(Fake& fake, movement::Worker& worker,
+            std::source_location site = std::source_location::current())
+        : fake_(fake), worker_(worker), site_(site), iteration_(diagnostic_iteration) {
+        worker_observations.push_back(this);
+    }
+    ~WorkerObservation() {
+        // 先打开测试门，再退出观测作用域；此前声明的 Worker 随后才 stop/join。
+        fake_.release_read_gate();
+        worker_observations.pop_back();
+    }
+    void dump() const {
+        const auto snapshot = worker_.snapshot();
+        std::cerr << "[movement-observer] worker=" << site_.function_name()
+            << ':' << site_.line() << iteration_ << " state=" << int(snapshot.state)
+            << " started=" << snapshot.started << " completed=" << snapshot.completed
+            << " canceled=" << snapshot.canceled << " sent_dx=" << snapshot.sent_dx
+            << " error=" << snapshot.error << '\n';
+        fake_.dump_observation();
+    }
+private:
+    Fake& fake_;
+    movement::Worker& worker_;
+    std::source_location site_;
+    std::string iteration_;
+};
+void dump_observations() {
+    for (const auto* observation : worker_observations) observation->dump();
+}
+template<class Predicate> void wait_for_observed(Predicate predicate, const char* expression,
+        std::source_location site = std::source_location::current()) {
+    const auto began = Clock::now();
+    const auto deadline = began + std::chrono::seconds(3);
+    while (!predicate()) {
+        if (Clock::now() >= deadline) {
+            std::cerr << "[movement-observer] timeout function=" << site.function_name()
+                << " line=" << site.line() << diagnostic_iteration << " predicate=" << expression
+                << " elapsed_us=" << std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - began).count() << '\n';
+            dump_observations();
+            throw std::runtime_error("身法专项等待超时");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+// 保留每个原谓词和预算；仅把原调用文本及位置带到失败输出。
+#define wait_for(...) wait_for_observed(__VA_ARGS__, #__VA_ARGS__)
+
 movement::Config config() {
     movement::Config result;
     // 多数场景使用累计滚轮单旋转夹具；相对报告和双模式场景另行显式覆盖。
@@ -121,6 +262,7 @@ void timed_ctrl_lifecycle() {
     require(movement::Config{}.large_angle_degrees == 25 && movement::Config{}.large_duration_ms == 170,
         "正式Long Jump默认参数错误");
     for (int scenario = 0; scenario < 7; ++scenario) {
+        DiagnosticIteration diagnostic_scenario("scenario", static_cast<int>(scenario));
         auto fake = std::make_shared<Fake>(); auto value = config();
         value.spin_enabled = false; value.large_enabled = true; value.large_ctrl_enabled = true;
         value.large_ctrl_delay_ms = 80; value.large_ctrl_hold_ms = 15;
@@ -135,6 +277,7 @@ void timed_ctrl_lifecycle() {
         std::atomic<bool> suspended{false};
         movement::Worker worker(fake, [] { return true; },
             [&](bool value) { suspended = value; return true; });
+        WorkerObservation observation_worker(*fake, worker);
         require(worker.start(value), "Ctrl测试启动失败");
         const auto began = Clock::now(); trigger(fake);
         if (scenario == 1) {
@@ -172,6 +315,7 @@ void long_ctrl_hold_lifecycle() {
         require(!movement::valid_config(value), "Ctrl按住越界未拒绝");
     }
     for (int scenario = 0; scenario < 7; ++scenario) {
+        DiagnosticIteration diagnostic_scenario("scenario", static_cast<int>(scenario));
         auto fake = std::make_shared<Fake>(); auto value = config();
         value.spin_enabled = false; value.large_enabled = true; value.large_ctrl_enabled = true;
         value.large_ctrl_delay_ms = 0; value.large_ctrl_hold_ms = 2000;
@@ -180,6 +324,7 @@ void long_ctrl_hold_lifecycle() {
         std::atomic<bool> allowed{true}, suspended{false};
         movement::Worker worker(fake, [&] { return allowed.load(); },
             [&](bool pause) { suspended = pause; return true; });
+        WorkerObservation observation_worker(*fake, worker);
         require(worker.start(value), "长Ctrl启动失败"); trigger(fake);
         wait_for([&] { return fake->ctrl_held(); });
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -213,11 +358,13 @@ void long_ctrl_hold_lifecycle() {
 
 void relative_field_and_wait_expiry() {
     for (bool relative : {false, true}) {
+        DiagnosticIteration diagnostic_relative("relative", static_cast<int>(relative));
         auto value = config(); value.spin_trigger = movement::Trigger::WHEEL_UP;
         value.large_enabled = true; value.wheel_down_positive = false; value.trigger_guard_ms = 150;
         value.report_mode = relative ? movement::ReportMode::RELATIVE_DELTA : movement::ReportMode::CUMULATIVE;
         auto fake = std::make_shared<Fake>();
         movement::Worker worker(fake, [] { return true; });
+        WorkerObservation observation_worker(*fake, worker);
         require(worker.start(value), "报告对照启动失败");
         fake->report(0,0); fake->report(1,1,true,0x04);
         wait_for([&]{return worker.snapshot().completed == 1;});
@@ -261,6 +408,7 @@ void relative_field_and_wait_expiry() {
 void wheel_mapping_default_regression() {
     auto fake=std::make_shared<Fake>();
     movement::Worker worker(fake,[]{return true;});
+    WorkerObservation observation_worker(*fake, worker);
     auto value=config(); value.spin_trigger=movement::Trigger::WHEEL_UP; value.large_enabled=true;
     value.wheel_down_positive=movement::Config{}.wheel_down_positive;
     require(worker.start(value),"启动失败");
@@ -286,8 +434,10 @@ void guard_boundary_and_packets() {
 }
 void guard_consumes_all_triggers() {
     for(bool large:{false,true}) {
+        DiagnosticIteration diagnostic_large("large", static_cast<int>(large));
         auto fake=std::make_shared<Fake>(); fake->cleanup_delay_ms=20;
         movement::Worker worker(fake,[]{return true;});
+        WorkerObservation observation_worker(*fake, worker);
         auto value=config(); value.wheel_down_positive=false; value.spin_trigger=movement::Trigger::WHEEL_UP;
         value.large_enabled=true; value.trigger_guard_ms=100; value.spin_duration_ms=40;value.large_duration_ms=25;
         require(worker.start(value),"启动失败");
@@ -313,6 +463,7 @@ void guard_consumes_all_triggers() {
 }
 void waiting_guard_key_and_epoch() {
     auto fake=std::make_shared<Fake>();movement::Worker worker(fake,[]{return true;});
+    WorkerObservation observation_worker(*fake, worker);
     auto value=config();value.wheel_down_positive=false;value.spin_trigger=movement::Trigger::WHEEL_UP;
     value.large_enabled=true;value.trigger_guard_ms=80;
     require(worker.start(value),"启动失败");fake->report(0,0);fake->report(0,1);
@@ -326,6 +477,7 @@ void waiting_guard_key_and_epoch() {
     fake->report(0,101,true,0x07);pause();require(worker.snapshot().started==1,"重连旧序号/轮值重放");
     fake->report(0,102,true,0x07);wait_for([&]{return worker.snapshot().completed==1;});worker.stop();
     auto keys=std::make_shared<Fake>();movement::Worker other(keys,[]{return true;});
+    WorkerObservation observation_other(*keys, other);
     value.large_enabled=false;value.spin_trigger=movement::Trigger::KEY;value.spin_virtual_key=0x20;
     require(other.start(value),"启动失败");keys->report(0,0);keys->report(0,0,true,0x2c,0x04);
     wait_for([&]{return other.snapshot().completed==1;});
@@ -337,8 +489,11 @@ void waiting_guard_key_and_epoch() {
 
 void keyboard_direction() {
     for (int sign : {-1, 1}) {
+        DiagnosticIteration diagnostic_sign("sign", static_cast<int>(sign));
         for (bool preheld : {false, true}) {
+            DiagnosticIteration diagnostic_preheld("preheld", static_cast<int>(preheld));
             auto fake = std::make_shared<Fake>(); movement::Worker worker(fake, [] { return true; });
+            WorkerObservation observation_worker(*fake, worker);
             auto value = config(); value.spin_duration_ms = 40;
             require(worker.start(value), "启动失败");
             const auto usage = static_cast<std::uint8_t>(sign < 0 ? 0x04 : 0x07);
@@ -358,6 +513,7 @@ void keyboard_direction() {
 }
 void waiting_and_rearm() {
     auto fake = std::make_shared<Fake>(); movement::Worker worker(fake, [] { return true; });
+    WorkerObservation observation_worker(*fake, worker);
     auto value=config(); value.spin_trigger=movement::Trigger::KEY; value.spin_virtual_key=0x20;
     require(worker.start(value), "启动失败");
     fake->report(0,0); fake->report(100,0,true,0x2c);
@@ -375,6 +531,7 @@ void waiting_and_rearm() {
 void fixed_large_and_tail() {
     auto fake=std::make_shared<Fake>();
     movement::Worker worker(fake, [] { return true; });
+    WorkerObservation observation_worker(*fake, worker);
     auto value=config(); value.spin_trigger=movement::Trigger::WHEEL_UP; value.large_enabled=true;
     require(worker.start(value), "启动失败");
     fake->report(0,0,true,0x1a); fake->report(0,1,true,0x1a);
@@ -394,8 +551,10 @@ void fixed_large_and_tail() {
 }
 void cancellation_and_faults() {
     for (int kind=0; kind<5; ++kind) {
+        DiagnosticIteration diagnostic_kind("kind", static_cast<int>(kind));
         auto fake=std::make_shared<Fake>(); std::atomic<bool> allowed{true};
         movement::Worker worker(fake,[&] { return allowed.load(); });
+        WorkerObservation observation_worker(*fake, worker);
         auto value=config(); value.spin_duration_ms=300;
         require(worker.start(value), "启动失败");
         if (kind==0) { fake->report(0,0); fake->report(0,1); wait_for([&] { return worker.snapshot().state==movement::State::WAITING_DIRECTION; }); }
@@ -408,13 +567,15 @@ void cancellation_and_faults() {
         require(fake->cleanups==(kind==0?0:1), "等待/输出取消清理责任错误"); worker.stop();
     }
     auto fake=std::make_shared<Fake>(); fake->fail_mask=true; fake->fail_cleanup=true;
-    movement::Worker worker(fake,[]{return true;}); require(worker.start(config()),"启动失败"); spin_trigger(fake);
+    movement::Worker worker(fake,[]{return true;});
+    WorkerObservation observation_worker(*fake, worker); require(worker.start(config()),"启动失败"); spin_trigger(fake);
     wait_for([&]{return worker.snapshot().state==movement::State::FAULT;});
     fake->report(0,2,true,0x07); pause(); require(worker.snapshot().started==1,"故障未闭锁");
     worker.stop(); require(!worker.start(config()),"清理欠账重启");
 }
 void reports_and_restart() {
     auto fake=std::make_shared<Fake>(); movement::Worker worker(fake,[]{return true;});
+    WorkerObservation observation_worker(*fake, worker);
     require(worker.start(config()),"启动失败");
     fake->report(0,0); fake->report(0,1,true,0x04,0,200); pause();
     require(fake->keys().empty(),"过期启动事件被接受");
@@ -425,7 +586,9 @@ void reports_and_restart() {
     wait_for([&]{return worker.snapshot().state==movement::State::WAITING_DIRECTION;});
     require(fake->keys().size()==1,"重启复用了上轮方向"); worker.stop();
     for(auto mode:{movement::ReportMode::CUMULATIVE,movement::ReportMode::RELATIVE_DELTA}) {
+        DiagnosticIteration diagnostic_mode("mode", static_cast<int>(mode));
         auto device=std::make_shared<Fake>(); movement::Worker other(device,[]{return true;});
+        WorkerObservation observation_other(*device, other);
         auto value=config(); value.report_mode=mode; require(other.start(value),"启动失败");
         device->report(32760,mode==movement::ReportMode::CUMULATIVE?32767:0);
         device->report(-32760,mode==movement::ReportMode::CUMULATIVE?-32768:1,true,0x07);
@@ -436,23 +599,29 @@ void reports_and_restart() {
 }
 void config_delay_and_fail_move() {
     auto fake=std::make_shared<Fake>(); movement::Worker worker(fake,[]{return true;});
+    WorkerObservation observation_worker(*fake, worker);
     auto value=config(); value.spin_duration_ms=50; require(worker.start(value),"启动失败"); spin_trigger(fake);
     wait_for([&]{return !fake->keys().empty();}); value.spin_angle_degrees=2; worker.configure(value);
     wait_for([&]{return worker.snapshot().completed==1;}); require(fake->total()==-100,"运行配置未冻结");
     fake->report(0,2,true,0x07); wait_for([&]{return worker.snapshot().completed==2;});
     require(fake->total()==100,"下一动作未用新配置"); worker.stop();
     auto failed=std::make_shared<Fake>(); failed->fail_move=true; movement::Worker other(failed,[]{return true;});
+    WorkerObservation observation_other(*failed, other);
     require(other.start(config()),"启动失败"); spin_trigger(failed);
     wait_for([&]{return other.snapshot().canceled==1;}); require(failed->cleanups==1 && other.snapshot().state==movement::State::FAULT,"move失败未清理"); other.stop();
     auto delayed=std::make_shared<Fake>(); delayed->keyboard_delay_ms=30; movement::Worker last(delayed,[]{return true;});
+    WorkerObservation observation_last(*delayed, last);
     require(last.start(config()),"启动失败"); spin_trigger(delayed); wait_for([&]{return last.snapshot().completed==1;});
     {std::lock_guard lock(delayed->mutex); require(delayed->moves==std::vector<int>({-100}),"ACK重新计时");} last.stop();
 }
 void spin_and_symmetric_large() {
     for (auto mode : {movement::Mode::SPIN, movement::Mode::LARGE_JUMP}) {
+        DiagnosticIteration diagnostic_mode("mode", static_cast<int>(mode));
         for (int sign : {-1, 1}) {
+            DiagnosticIteration diagnostic_sign("sign", static_cast<int>(sign));
             auto fake = std::make_shared<Fake>();
             movement::Worker worker(fake, [] { return true; });
+            WorkerObservation observation_worker(*fake, worker);
             auto value = config(); value.spin_enabled = mode == movement::Mode::SPIN; value.large_enabled = !value.spin_enabled;
             require(worker.start(value), "启动失败"); trigger(fake, sign * 10);
             wait_for([&] { return worker.snapshot().completed == 1; });
@@ -469,6 +638,7 @@ void spin_and_symmetric_large() {
 void disabled_has_no_output() {
     auto fake = std::make_shared<Fake>();
     movement::Worker worker(fake, [] { return true; });
+    WorkerObservation observation_worker(*fake, worker);
     auto value = config(); value.enabled = false;
     require(worker.start(value), "禁用启动失败"); trigger(fake);
     std::this_thread::sleep_for(std::chrono::milliseconds(20)); worker.stop();
@@ -476,8 +646,10 @@ void disabled_has_no_output() {
 }
 void cancel_and_permission() {
     for (bool permission_cancel : {false, true}) {
+        DiagnosticIteration diagnostic_permission_cancel("permission_cancel", static_cast<int>(permission_cancel));
         auto fake = std::make_shared<Fake>(); std::atomic<bool> allowed{true};
         movement::Worker worker(fake, [&] { return allowed.load(); });
+        WorkerObservation observation_worker(*fake, worker);
         auto value = config(); value.spin_duration_ms = 300;
         require(worker.start(value), "启动失败"); trigger(fake);
         wait_for([&] { return !fake->keys().empty(); });
@@ -489,6 +661,7 @@ void cancel_and_permission() {
 void fault_latches() {
     auto fake = std::make_shared<Fake>(); fake->fail_mask = true; fake->fail_cleanup = true;
     movement::Worker worker(fake, [] { return true; });
+    WorkerObservation observation_worker(*fake, worker);
     require(worker.start(config()), "启动失败"); trigger(fake);
     wait_for([&] { return worker.snapshot().state == movement::State::FAULT; });
     fake->report(-20, 2, true, 0x04); fake->report(-30, 3, true, 0x04);
@@ -499,6 +672,7 @@ void fault_latches() {
 void wrap_and_relative_dedup() {
     {
         auto fake = std::make_shared<Fake>(); movement::Worker worker(fake, [] { return true; });
+        WorkerObservation observation_worker(*fake, worker);
         require(worker.start(config()), "启动失败");
         fake->report(32760, 32767, true, 0x04); fake->report(-32760, -32768, true, 0x07);
         wait_for([&] { return worker.snapshot().completed == 1; });
@@ -506,6 +680,7 @@ void wrap_and_relative_dedup() {
     }
     {
         auto fake = std::make_shared<Fake>(); movement::Worker worker(fake, [] { return true; });
+        WorkerObservation observation_worker(*fake, worker);
         auto value = config(); value.report_mode = movement::ReportMode::RELATIVE_DELTA;
         require(worker.start(value), "启动失败"); trigger(fake);
         wait_for([&] { return worker.snapshot().completed == 1; });
@@ -518,6 +693,7 @@ void wrap_and_relative_dedup() {
 }
 void running_config_is_frozen() {
     auto fake = std::make_shared<Fake>(); movement::Worker worker(fake, [] { return true; });
+    WorkerObservation observation_worker(*fake, worker);
     auto value = config(); value.spin_duration_ms = 60;
     require(worker.start(value), "启动失败"); trigger(fake);
     wait_for([&] { return worker.snapshot().state == movement::State::TURNING; });
@@ -532,6 +708,7 @@ void running_config_is_frozen() {
 }
 void epoch_and_delay_cancel() {
     auto fake = std::make_shared<Fake>(); movement::Worker worker(fake, [] { return true; });
+    WorkerObservation observation_worker(*fake, worker);
     auto value = config(); value.jump_delay_ms = 200;
     require(worker.start(value), "启动失败"); trigger(fake);
     wait_for([&] { return worker.snapshot().state == movement::State::DELAY; });
@@ -549,6 +726,7 @@ void epoch_and_delay_cancel() {
 }
 void disabling_active_item_cleans_up() {
     auto fake = std::make_shared<Fake>(); movement::Worker worker(fake, [] { return true; });
+    WorkerObservation observation_worker(*fake, worker);
     auto value = config(); value.spin_duration_ms = 500;
     require(worker.start(value), "启动失败"); trigger(fake);
     wait_for([&] { return !fake->keys().empty(); });
@@ -560,6 +738,7 @@ void shared_trigger_clock() {
     require(movement::Config{}.jump_delay_ms == 0, "默认仍起跳后等待");
     auto fake = std::make_shared<Fake>(); fake->keyboard_delay_ms = 30;
     movement::Worker worker(fake, [] { return true; });
+    WorkerObservation observation_worker(*fake, worker);
     require(worker.start(config()), "启动失败"); trigger(fake);
     wait_for([&] { return worker.snapshot().completed == 1; });
     { std::lock_guard lock(fake->mutex);
@@ -570,6 +749,7 @@ void shared_trigger_clock() {
 void long_jump_ack_does_not_consume_turn() {
     auto fake = std::make_shared<Fake>(); fake->keyboard_delay_ms = 60;
     movement::Worker worker(fake, [] { return true; });
+    WorkerObservation observation_worker(*fake, worker);
     auto value = config(); value.spin_enabled = false; value.large_enabled = true;
     value.large_duration_ms = 30;
     require(worker.start(value), "Long Jump启动失败"); const auto began = Clock::now(); trigger(fake);
@@ -585,6 +765,7 @@ void long_jump_ack_does_not_consume_turn() {
     require(elapsed >= std::chrono::milliseconds(180) && elapsed < std::chrono::seconds(1), "Long Jump总时长未包含两次ACK及完整两段，或发生无界等待"); worker.stop();
     auto cancel_fake = std::make_shared<Fake>(); cancel_fake->keyboard_delay_ms = 60;
     movement::Worker canceled(cancel_fake, [] { return true; });
+    WorkerObservation observation_canceled(*cancel_fake, canceled);
     require(canceled.start(value), "取消测试启动失败"); trigger(cancel_fake);
     wait_for([&] { std::lock_guard lock(cancel_fake->mutex); return cancel_fake->masks.size() == 3; });
     canceled.cancel();
@@ -594,6 +775,7 @@ void long_jump_ack_does_not_consume_turn() {
 }
 void latest_direction_and_independent_triggers() {
     auto fake = std::make_shared<Fake>(); movement::Worker worker(fake, [] { return true; });
+    WorkerObservation observation_worker(*fake, worker);
     auto value = config(); value.spin_trigger = movement::Trigger::WHEEL_UP;
     value.large_enabled = true;
     require(worker.start(value), "双项启动失败");
@@ -609,6 +791,7 @@ void latest_direction_and_independent_triggers() {
 }
 void key_trigger_and_stale_direction() {
     auto fake = std::make_shared<Fake>(); movement::Worker worker(fake, [] { return true; });
+    WorkerObservation observation_worker(*fake, worker);
     auto value = config(); value.spin_trigger = movement::Trigger::KEY; value.spin_virtual_key = 0x20;
     require(worker.start(value), "按键模式启动失败");
     fake->report(0, 0, true, 0x04); fake->report(-1, 0, true, 0x2c, 0x04);
@@ -620,6 +803,7 @@ void key_trigger_and_stale_direction() {
     wait_for([&] { return worker.snapshot().completed == 2; });
     worker.stop();
     auto stale = std::make_shared<Fake>(); movement::Worker other(stale, [] { return true; });
+    WorkerObservation observation_other(*stale, other);
     require(other.start(config()), "启动失败"); stale->report(0,0); stale->report(-10,0);
     std::this_thread::sleep_for(std::chrono::milliseconds(150)); stale->report(-10,1);
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -629,6 +813,7 @@ void mouse_failure_and_polarity() {
     {
         auto fake = std::make_shared<Fake>(); fake->fail_move = true;
         movement::Worker worker(fake, [] { return true; });
+        WorkerObservation observation_worker(*fake, worker);
         require(worker.start(config()), "启动失败"); trigger(fake);
         wait_for([&] { return worker.snapshot().canceled == 1; });
         require(worker.snapshot().state == movement::State::FAULT && fake->cleanups == 1,
@@ -636,6 +821,7 @@ void mouse_failure_and_polarity() {
     }
     {
         auto fake = std::make_shared<Fake>(); movement::Worker worker(fake, [] { return true; });
+        WorkerObservation observation_worker(*fake, worker);
         auto value = config(); value.wheel_down_positive = false;
         require(worker.start(value), "启动失败");
         fake->report(0, 0, true, 0x04); fake->report(10, -1, true, 0x07);
@@ -645,8 +831,62 @@ void mouse_failure_and_polarity() {
         require(fake->total() == 200, "滚轮负向或动作结束后首个滚轮被丢弃"); worker.stop();
     }
 }
+
+// 人为控制输入交付/观察先后，用红例检查诊断能力；不声称复现了历史间歇失败。
+// stale/miss-pending/miss-held 直接保留原等待超时及非零退出，不转成“预期失败通过”。
+void observation_diagnostic(std::string_view mode) {
+    require(mode == "fresh" || mode == "baseline" || mode == "stale" ||
+        mode == "miss-pending" || mode == "miss-held", "未知身法观测诊断模式");
+    auto fake = std::make_shared<Fake>();
+    movement::Worker worker(fake, [] { return true; });
+    WorkerObservation observation(*fake, worker);
+    auto value = config();
+    const bool transient = mode == "miss-pending" || mode == "miss-held";
+    if (transient) {
+        value.spin_enabled = false; value.large_enabled = true; value.large_ctrl_enabled = true;
+        value.large_ctrl_delay_ms = 80; value.large_ctrl_hold_ms = 15;
+    }
+    // after=1 在下一次读取停住：前一批已返回并经过 worker 的 observe/advance。
+    fake->arm_read_gate(mode == "baseline" ? 1 : 0);
+    require(worker.start(value), "身法观测诊断启动失败");
+    if (mode == "baseline") fake->report(0, 0, true, 0x04);
+    if (!fake->await_read_gate()) {
+        dump_observations();
+        throw std::runtime_error("身法诊断读取门未到达");
+    }
+    std::cerr << "[movement-observer] mode=" << mode << " gate_entered_us=" << steady_us() << '\n';
+    if (mode == "baseline") {
+        require(worker.snapshot().started == 0, "基线单包意外启动动作");
+        fake->report(-10, 1, true, 0x04);
+    } else trigger(fake);
+    // 使用真实排队年龄；不改写时间戳，不放宽生产的 100 ms 新鲜度门。
+    if (mode == "stale") std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    fake->release_read_gate();
+    wait_for([&] { return worker.snapshot().completed == 1; });
+    if (transient) {
+        // 完成屏障使观察者必然晚到；保留 Ctrl 历史事件用于区别“未发生”和“已错过”。
+        dump_observations();
+        if (mode == "miss-pending")
+            wait_for([&] { return worker.snapshot().state == movement::State::CTRL_PENDING; });
+        else wait_for([&] { return fake->ctrl_held(); });
+    }
+    dump_observations();
+    worker.stop();
+}
 }
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string_view(argv[1]) == "--diagnostic-observation") {
+        try {
+            require(argc == 3, "用法：--diagnostic-observation fresh|baseline|stale|miss-pending|miss-held");
+            LogConfig cfg; cfg.enable_console = false; cfg.enable_file = false; cfg.enable_ringbuf = true;
+            Log::init(cfg);
+            observation_diagnostic(argv[2]);
+            Log::shutdown(); return 0;
+        } catch (const std::exception& error) {
+            for (const auto& line : Log::get_ring_buffer()) std::cerr << "[movement-observer] " << line << '\n';
+            std::cerr << error.what() << '\n'; Log::shutdown(); return 1;
+        }
+    }
     if (argc > 1 && std::string(argv[1]) == "--diagnostic-trace") {
         try {
             LogConfig cfg; cfg.enable_console = false; cfg.enable_file = false; cfg.enable_ringbuf = true;
