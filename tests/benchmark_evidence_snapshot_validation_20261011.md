@@ -1,0 +1,13 @@
+# D07 Runtime报告字节绑定验证
+
+基线acd46c2b54469244ab94c94eb0e0712aec516022，分支fix/benchmark-evidence-snapshot-20261011。本批只关闭benchmark_runtime.ps1的profile/JSON/CSV重复读取与发布，外层network继承环境摘要仍待下一批。
+
+benchmark_report_fixture只构造合成Runtime数据并调用真实DebugReport写入器；独立测试进程仅把这组原始CSV/JSON及合成profile复制到正式benchmark_runtime指定的pending路径。正式脚本校验器未替换，完整经过Provider归属、逐帧Aim、几何、覆盖计数、CSV序列及禁输出校验。Provider字段是合成测试输入，不是实际GPU/模型运行；占位模型与DLL不能加载。
+
+实际Windows PowerShell5在profile、JSON、CSV各自parse→hash与hash→move间替换原进程输出路径为B。修前正常控制通过，六个交错均错误发布B；修后全部发布A，环境摘要逐字节对应A，profile时间元数据与正式文件一致。不是只提取函数测试，也不是替换验证器。
+
+实现把三个文件各复制一次到CreateNew排他创建的本任务副本，持有排他句柄并通过同一stream读取、计算摘要。成功关闭后发布副本，保留既有环境清单最后发布和已发布文件回滚；原输出文件改变不会影响已验证副本。代价是一次额外磁盘复制，不额外长期保存整个byte数组，未宣称性能提升。
+
+新增非法Provider profile、非法JSON、冻结副本创建冲突、正式目标发布冲突四例：不生成完成标记，自有pending/副本清理，外来文件保持。合计11个实际脚本案例通过。初版CSV Split产生尾部空项导致回归失败，已修正为StreamReader.ReadLine，与原逐行读取一致。
+
+相关四项CTest（benchmark_evidence_snapshot_tests、benchmark_output_ownership_tests、publication_script_tests、receiver_run_id_tests）通过6.14秒；双机PS脚本和公开文档19文件195链接0错误。干净提交后的正式Release、产物身份及远端核对记录在本地docs/evidence/XEN-BENCHMARK-EVIDENCE-SNAPSHOT-20261011-001/RESULT.md。未做UI、真实采集、网络传输、设备输出或多Provider验收。

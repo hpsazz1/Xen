@@ -516,10 +516,71 @@ function Assert-Near {
     }
 }
 
+function New-FrozenReportCopy {
+    param([string]$Path, [System.Collections.IList]$OwnedCopies)
+    $source = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    try {
+        $copy = [pscustomobject]@{
+            path = "$Path.verified-$([guid]::NewGuid().ToString('N'))"
+            stream = $null
+            owned = $false
+            evidence = $null
+        }
+        $OwnedCopies.Add($copy) | Out-Null
+        $copy.stream = [System.IO.File]::Open($copy.path,
+            [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None)
+        $copy.owned = $true
+        $source.CopyTo($copy.stream)
+        $copy.stream.Flush()
+        $copy.stream.Position = 0
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hash = [BitConverter]::ToString($sha.ComputeHash($copy.stream)).Replace('-', '')
+        } finally { $sha.Dispose() }
+        $copy.evidence = [ordered]@{
+            path = [System.IO.Path]::GetFullPath($Path)
+            length = $copy.stream.Length
+            sha256 = $hash
+            last_write_utc = [System.IO.File]::GetLastWriteTimeUtc($Path).ToString('o')
+            file_version = $null
+            product_version = $null
+        }
+        return $copy
+    } finally { $source.Dispose() }
+}
+
+function Read-FrozenReportText {
+    param([object]$Copy, [switch]$Lines)
+    $Copy.stream.Position = 0
+    $reader = [System.IO.StreamReader]::new($Copy.stream,
+        [System.Text.UTF8Encoding]::new($false, $true), $true, 4096, $true)
+    try {
+        if ($Lines) {
+            while ($null -ne ($line = $reader.ReadLine())) { $line }
+        } else { return $reader.ReadToEnd() }
+    }
+    finally { $reader.Dispose() }
+}
+
+function Publish-FrozenReportCopy {
+    param([object]$Copy, [string]$Destination)
+    # 整个校验期持有排他句柄；成功关闭后只发布本次生成的副本。
+    $Copy.stream.Dispose()
+    $Copy.stream = $null
+    [System.IO.File]::SetLastWriteTimeUtc($Copy.path,
+        [datetime]::Parse($Copy.evidence.last_write_utc,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind))
+    [System.IO.File]::Move($Copy.path, $Destination)
+    $Copy.owned = $false
+}
+
 function Get-OrtProviderProfileSummary {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Path,
+        [object]$Copy,
         [Parameter(Mandatory = $true)]
         [string]$RequestedBackend,
         [Parameter(Mandatory = $true)]
@@ -528,11 +589,11 @@ function Get-OrtProviderProfileSummary {
 
     # Windows PowerShell 5 会把 ConvertFrom-Json 返回的顶层数组作为单个
     # pipeline 对象传给 @()。先赋给变量再展开，确保 foreach 收到逐个事件。
-    $document = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 |
+    $document = Read-FrozenReportText $Copy |
         ConvertFrom-Json
     $events = @($document)
     if ($events.Count -eq 0) {
-        throw "ORT profile 没有任何事件：$Path"
+        throw "ORT profile 没有任何事件：$($Copy.evidence.path)"
     }
 
     $providerCounts = [ordered]@{}
@@ -583,7 +644,7 @@ function Get-OrtProviderProfileSummary {
         throw "ORT profile 出现请求链之外的 Provider：$($unexpected -join ', ')"
     }
 
-    $file = Get-FileSnapshot $Path
+    $file = $Copy.evidence
     # pending 文件通过校验后会原子移动；环境清单必须引用发布后的稳定路径。
     $file["path"] = [System.IO.Path]::GetFullPath($PublishedPath)
     return [ordered]@{
@@ -711,6 +772,7 @@ $pendingProviderProfile = if ($requiresProviderProfile) {
 $pendingArtifacts = @($pendingCsv, $pendingJson, $pendingEnvironment)
 if ($requiresProviderProfile) { $pendingArtifacts += $pendingProviderProfile }
 # ready由实际创建它的XenBenchmark清理；本脚本不能根据预检或调用参数推定所有权。
+$frozenReports = New-Object System.Collections.Generic.List[object]
 
 try {
 $packageBefore = if ($portablePackage) {
@@ -824,8 +886,9 @@ $providerProfileSummary = if ($requiresProviderProfile) {
     if (-not (Test-Path -LiteralPath $pendingProviderProfile -PathType Leaf)) {
         throw "需要节点级验证的基准没有生成 Provider profile。"
     }
+    $providerProfileCopy = New-FrozenReportCopy $pendingProviderProfile $frozenReports
     Get-OrtProviderProfileSummary `
-        $pendingProviderProfile $Backend $finalProviderProfile
+        $providerProfileCopy $Backend $finalProviderProfile
 } else {
     [ordered]@{
         verified = $true
@@ -876,7 +939,9 @@ if ($portablePackage) {
         $packageBefore.manifest $packageAfter.manifest "便携包清单"
 }
 
-$report = Get-Content -LiteralPath $pendingJson -Raw -Encoding UTF8 |
+$jsonCopy = New-FrozenReportCopy $pendingJson $frozenReports
+$csvCopy = New-FrozenReportCopy $pendingCsv $frozenReports
+$report = Read-FrozenReportText $jsonCopy |
     ConvertFrom-Json
 $expectedProviders = @{
     tensorrt = "TensorrtExecutionProvider"
@@ -906,7 +971,7 @@ $retention = Get-XenRuntimeReportRetention `
 [uint64]$formalSampleCount = $retention.formal_sample_count
 [uint64]$retainedSampleCount = $retention.retained_sample_count
 [uint64]$omittedSampleCount = $retention.omitted_sample_count
-$csvLines = @(Get-Content -LiteralPath $pendingCsv -Encoding UTF8)
+$csvLines = @(Read-FrozenReportText $csvCopy -Lines)
 $csvRetention = Get-XenRuntimeCsvRetentionMetadata -Lines $csvLines
 if ([uint64]$csvRetention.omitted_sample_count -ne $omittedSampleCount) {
     throw "CSV 与 JSON 的 report_samples_dropped 不一致。"
@@ -1270,10 +1335,8 @@ $environment = [ordered]@{
         }
     }
     report = [ordered]@{
-        csv_sha256 = (Get-FileHash -LiteralPath $pendingCsv `
-            -Algorithm SHA256).Hash
-        json_sha256 = (Get-FileHash -LiteralPath $pendingJson `
-            -Algorithm SHA256).Hash
+        csv_sha256 = $csvCopy.evidence.sha256
+        json_sha256 = $jsonCopy.evidence.sha256
         sample_count = [long]$retainedSampleCount
         formal_sample_count = [long]$formalSampleCount
         retained_sample_count = [long]$retainedSampleCount
@@ -1296,13 +1359,12 @@ $environmentText = $environment | ConvertTo-Json -Depth 12
 
 $published = New-Object System.Collections.Generic.List[string]
 try {
-    [System.IO.File]::Move($pendingCsv, $finalCsv)
+    Publish-FrozenReportCopy $csvCopy $finalCsv
     $published.Add($finalCsv)
-    [System.IO.File]::Move($pendingJson, $finalJson)
+    Publish-FrozenReportCopy $jsonCopy $finalJson
     $published.Add($finalJson)
     if ($requiresProviderProfile) {
-        [System.IO.File]::Move(
-            $pendingProviderProfile, $finalProviderProfile)
+        Publish-FrozenReportCopy $providerProfileCopy $finalProviderProfile
         $published.Add($finalProviderProfile)
     }
     # 环境清单最后发布；只有它存在且 complete=true，整组报告才可视为有效。
@@ -1341,6 +1403,14 @@ Write-Host "  环境清单：$finalEnvironment"
 } finally {
     # 任一校验或 XenBenchmark 失败都只能留下日志；pending 报告不构成
     # 有效结果，必须在最外层统一清理。
+    foreach ($copy in $frozenReports) {
+        if ($null -ne $copy.stream) {
+            try { $copy.stream.Dispose() } catch { }
+        }
+        if ($copy.owned) {
+            Remove-Item -LiteralPath $copy.path -Force -ErrorAction SilentlyContinue
+        }
+    }
     foreach ($path in $pendingArtifacts) {
         Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
     }

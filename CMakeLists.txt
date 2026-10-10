@@ -2422,6 +2422,11 @@ if(BUILD_TESTING)
         tests/debug_tests.cpp)
     target_link_libraries(debug_tests PRIVATE xen_debug log)
     add_test(NAME debug_tests COMMAND debug_tests)
+    add_executable(benchmark_report_fixture tests/benchmark_report_fixture.cpp)
+    target_link_libraries(benchmark_report_fixture PRIVATE xen_debug log)
+    xen_add_windows_powershell_test(benchmark_evidence_snapshot_tests
+        "${PROJECT_SOURCE_DIR}/tests/benchmark_evidence_snapshot_tests.ps1"
+        -FixtureExecutable "$<TARGET_FILE:benchmark_report_fixture>")
     add_executable(session_archive_tests tests/session_archive_tests.cpp)
     target_link_libraries(session_archive_tests PRIVATE xen_debug log)
     add_test(NAME session_archive_tests COMMAND session_archive_tests)
