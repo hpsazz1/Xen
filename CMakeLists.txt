@@ -1596,6 +1596,12 @@ if(BUILD_TESTING)
             --evaluator "${PROJECT_SOURCE_DIR}/scripts/evaluate_aim_production_red.py"
             --powershell-executable "${XEN_POWERSHELL7_EXECUTABLE}"
             --test-root "${CMAKE_BINARY_DIR}/aim-production-red-producer-integration")
+    add_test(NAME producer_integer_bounds_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+            "${PROJECT_SOURCE_DIR}/tests/producer_integer_bounds_tests.py"
+            --producer "$<TARGET_FILE:xen_aim_production_red_producer>"
+            --output-root "${CMAKE_BINARY_DIR}/producer-integer-fixtures")
+    set_tests_properties(producer_integer_bounds_tests PROPERTIES TIMEOUT 90)
 
     add_executable(aim_landmark_tests
         tests/aim_landmark_tests.cpp)

@@ -232,6 +232,10 @@ std::int64_t integer(const json& object,
         throw std::runtime_error(
             std::string(context) + " 缺少整数字段 " + std::string(field));
     }
+    if (iterator->is_number_unsigned() &&
+        iterator->get<std::uint64_t>() > static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)())) {
+        throw std::runtime_error(std::string(context) + " 的 " + std::string(field) + " 超出int64范围");
+    }
     return iterator->get<std::int64_t>();
 }
 
@@ -384,7 +388,32 @@ std::array<int, 2> integer_vector2(const json& object,
             std::string(context) + " 的 " + std::string(field) +
             " 必须是二维整数");
     }
+    for (const auto& component : *iterator) {
+        const bool out_of_range = component.is_number_unsigned()
+            ? component.get<std::uint64_t>() > static_cast<std::uint64_t>((std::numeric_limits<int>::max)())
+            : component.get<std::int64_t>() < (std::numeric_limits<int>::min)() ||
+              component.get<std::int64_t>() > (std::numeric_limits<int>::max)();
+        if (out_of_range)
+            throw std::runtime_error(std::string(context) + " 的 " + std::string(field) + " 超出int范围");
+    }
     return {(*iterator)[0].get<int>(), (*iterator)[1].get<int>()};
+}
+
+struct ScoreInterval { int begin = 0, end = 0; };
+
+ScoreInterval parse_score_interval(const json& block) {
+    const auto samples = block.find("samples");
+    if (samples == block.end() || !samples->is_array() || samples->empty() ||
+        samples->size() > kMaximumSamplesPerBlock) {
+        throw std::runtime_error("block samples 数量无效");
+    }
+    const auto begin = integer(block, "score_begin", "block");
+    const auto end = integer(block, "score_end", "block");
+    if (begin < 0 || end <= begin || end > static_cast<std::int64_t>(samples->size())) {
+        throw std::runtime_error("block score interval 无效");
+    }
+    // 样本上限保证通过原数值域检查后可无损收窄；trace和manifest复用此值。
+    return {static_cast<int>(begin), static_cast<int>(end)};
 }
 
 void validate_measured_reference(const json& reference) {
@@ -435,18 +464,18 @@ std::vector<PlantProfile> parse_profiles(const json& plan) {
     for (const auto& value : *iterator) {
         PlantProfile profile;
         profile.id = text(value, "plant_profile_id", "plant profile");
-        profile.delay_samples = static_cast<int>(
-            integer(value, "delay_samples", "plant profile"));
+        const auto delay_samples = integer(value, "delay_samples", "plant profile");
         profile.gain_x = finite_number(
             value, "pixels_per_completed_count_x", "plant profile");
         profile.gain_y = finite_number(
             value, "pixels_per_completed_count_y", "plant profile");
         if (!is_safe_identifier(profile.id) ||
-            profile.delay_samples <= 0 ||
-            profile.delay_samples > kMaximumPlantDelaySamples ||
+            delay_samples <= 0 ||
+            delay_samples > kMaximumPlantDelaySamples ||
             !identities.insert(profile.id).second) {
             throw std::runtime_error("plant profile 身份或 delay 无效");
         }
+        profile.delay_samples = static_cast<int>(delay_samples);
         profiles.push_back(std::move(profile));
     }
     return profiles;
@@ -478,6 +507,7 @@ json make_measured_reference(const json& source,
 std::vector<json> run_trace(
     const json& plan,
     const json& block,
+    const ScoreInterval& score,
     const PlantProfile& profile,
     const AppConfig& app_config,
     std::string_view plan_sha256,
@@ -493,20 +523,7 @@ std::vector<json> run_trace(
          block_kind != "y_only" && block_kind != "xy_limit")) {
         throw std::runtime_error("block 身份、role 或 kind 无效");
     }
-    const auto samples_iterator = block.find("samples");
-    if (samples_iterator == block.end() || !samples_iterator->is_array() ||
-        samples_iterator->empty() ||
-        samples_iterator->size() > kMaximumSamplesPerBlock) {
-        throw std::runtime_error("block samples 数量无效");
-    }
-    const int score_begin = static_cast<int>(
-        integer(block, "score_begin", "block"));
-    const int score_end = static_cast<int>(
-        integer(block, "score_end", "block"));
-    if (score_begin < 0 || score_end <= score_begin ||
-        score_end > static_cast<int>(samples_iterator->size())) {
-        throw std::runtime_error("block score interval 无效");
-    }
+    const auto& samples = block.at("samples");
     const auto initial_world = vector2(
         block, "initial_world_aim_point", "block");
     const auto control_center = vector2(block, "control_center", "block");
@@ -533,7 +550,7 @@ std::vector<json> run_trace(
     std::int64_t previous_source_timestamp = 0;
     std::int64_t previous_control_at_ns = 0;
     std::vector<json> rows;
-    rows.reserve(samples_iterator->size());
+    rows.reserve(samples.size());
 
     const json extractor = make_extractor(producer_sha256);
     const std::string source_session = text(
@@ -542,8 +559,8 @@ std::vector<json> run_trace(
         throw std::runtime_error("source_clock_session_id 不得为空");
     }
 
-    for (std::size_t index = 0; index < samples_iterator->size(); ++index) {
-        const json& sample = (*samples_iterator)[index];
+    for (std::size_t index = 0; index < samples.size(); ++index) {
+        const json& sample = samples[index];
         const auto source_sequence_value = integer(
             sample, "source_sequence", "sample");
         const auto source_timestamp = integer(
@@ -711,8 +728,8 @@ std::vector<json> run_trace(
             {"role", role},
             {"reset", index == 0},
             {"sample_index_in_block", index},
-            {"score_begin", score_begin},
-            {"score_end", score_end},
+            {"score_begin", score.begin},
+            {"score_end", score.end},
             {"plant_profile_id", profile.id},
             {"source_sequence", source_sequence_value},
             {"source_timestamp", source_timestamp},
@@ -957,15 +974,12 @@ bool detail::produce_output_off_bundle(
             const std::string role = text(block, "role", "block");
             const std::string block_kind = text(
                 block, "block_kind", "block");
-            const int score_begin = static_cast<int>(
-                integer(block, "score_begin", "block"));
-            const int score_end = static_cast<int>(
-                integer(block, "score_end", "block"));
+            const auto score = parse_score_interval(block);
             const auto& measured = block.at("measured_reference");
             validate_measured_reference(measured);
             for (const auto& profile : profiles) {
                 std::vector<json> rows = run_trace(
-                    plan, block, profile, app_config,
+                    plan, block, score, profile, app_config,
                     plan_sha256, config_sha256, producer_sha256);
                 const std::string trace_id =
                     block_id + "--" + profile.id + "--B0";
@@ -991,8 +1005,8 @@ bool detail::produce_output_off_bundle(
                     {"relative_path", relative_path.generic_string()},
                     {"sha256", trace_sha256},
                     {"sample_count", rows.size()},
-                    {"score_begin", score_begin},
-                    {"score_end", score_end},
+                    {"score_begin", score.begin},
+                    {"score_end", score.end},
                     {"measured_reference", make_measured_reference(
                         measured, reference_relative.generic_string(),
                         reference_sha256)},
