@@ -184,7 +184,7 @@ struct Session::Impl {
                 catch (const DebugRunFailure& error) {
                     update([&](Snapshot& s) {
                         if (s.generation != current) return;
-                        if (!error.output_not_started && physical) s.cleanup_unknown = true;
+                        if (!error.output_not_started && !error.cleanup_confirmed && physical) s.cleanup_unknown = true;
                         s.state = s.cleanup_unknown ? State::CLEANUP_UNKNOWN : (canceled ? State::CANCELED : State::FAILED);
                         s.message = error.what();
                     });
@@ -312,7 +312,12 @@ struct Session::Impl {
             {"parent_run",work.request.input_path},{"plan",work.plan},{"sampling",result.value("settings",work.sampling)},
             {"physical_output",physical},{"physical_validation_passed",false},{"cleanup_known",cleanup_ok},
             {"success",success},{"cancel_requested",canceled.load()},{"report_directory",task.output.string()}};
-        write_document(work.directory / "result-index.json",index);
+        try {
+            write_document(work.directory / "result-index.json",index);
+        } catch (...) {
+            // 保存失败不改变先前校验的设备清理事实；任务仍失败并撤销重复执行许可。
+            throw DebugRunFailure("结果索引保存失败；本组未完成，请检查原生报告", false, cleanup_ok);
+        }
         auto completed = std::make_shared<const Json>(std::move(result));
         update([&](Snapshot& s) {
             s.result = completed;
