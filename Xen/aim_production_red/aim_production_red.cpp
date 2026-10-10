@@ -573,6 +573,8 @@ std::vector<json> run_trace(
             sample, "controller_dt_ns", "sample");
         if (source_sequence_value <= 0 || source_timestamp <= 0 ||
             captured_at_ns <= 0 || control_at_ns < captured_at_ns ||
+            control_at_ns > (std::numeric_limits<std::int64_t>::max)() -
+                kBackendCompletionDelayNs ||
             controller_dt_ns <= 0 ||
             source_sequence_value <=
                 static_cast<std::int64_t>(previous_source_sequence) ||
@@ -581,6 +583,8 @@ std::vector<json> run_trace(
              control_at_ns - previous_control_at_ns != controller_dt_ns)) {
             throw std::runtime_error("sample source/time 顺序合同无效");
         }
+        const auto backend_completed_at_ns =
+            control_at_ns + kBackendCompletionDelayNs;
         previous_source_sequence = static_cast<std::uint64_t>(
             source_sequence_value);
         previous_source_timestamp = source_timestamp;
@@ -659,8 +663,9 @@ std::vector<json> run_trace(
         if (aim_result.has_command && !backend_failure) {
             completed = {issued_dx, issued_dy};
         }
-        const auto backend_completed_at = frame.control_at +
-            std::chrono::nanoseconds(kBackendCompletionDelayNs);
+        const auto backend_completed_at = std::chrono::steady_clock::time_point(
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::nanoseconds(backend_completed_at_ns)));
         if (aim_result.has_command && !aim.record_backend_completed_command(
                 frame.sequence, backend_completed_at,
                 completed.dx, completed.dy)) {
@@ -738,8 +743,7 @@ std::vector<json> run_trace(
             {"control_at_ns", control_at_ns},
             {"controller_dt_ns", controller_dt_ns},
             {"observation_age_ns", control_at_ns - captured_at_ns},
-            {"backend_completed_at_ns",
-             control_at_ns + kBackendCompletionDelayNs},
+            {"backend_completed_at_ns", backend_completed_at_ns},
             {"completion_status", completion_status},
             {"completion_zero_reason", completion_zero_reason},
             {"protocol_acknowledged", false},

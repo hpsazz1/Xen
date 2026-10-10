@@ -1602,6 +1602,12 @@ if(BUILD_TESTING)
             --producer "$<TARGET_FILE:xen_aim_production_red_producer>"
             --output-root "${CMAKE_BINARY_DIR}/producer-integer-fixtures")
     set_tests_properties(producer_integer_bounds_tests PROPERTIES TIMEOUT 90)
+    add_test(NAME producer_completion_overflow_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+            "${PROJECT_SOURCE_DIR}/tests/producer_completion_overflow_tests.py"
+            --producer "$<TARGET_FILE:xen_aim_production_red_producer>"
+            --output-root "${CMAKE_BINARY_DIR}/producer-completion-fixtures")
+    set_tests_properties(producer_completion_overflow_tests PROPERTIES TIMEOUT 60)
 
     add_executable(aim_landmark_tests
         tests/aim_landmark_tests.cpp)
