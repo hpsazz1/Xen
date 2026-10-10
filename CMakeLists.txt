@@ -1313,6 +1313,9 @@ if(BUILD_TESTING)
     add_test(NAME recoil_tuner_phase_compare_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
             "${PROJECT_SOURCE_DIR}/tests/recoil_tuner_phase_compare.py" --self-test)
+    add_executable(motion_ledger_benchmark
+        tests/motion_ledger_benchmark.cpp Xen/recoil/motion_ledger.cpp)
+    target_include_directories(motion_ledger_benchmark PRIVATE Xen)
     add_executable(recoil_wall_analysis_tests tests/recoil_wall_analysis_tests.cpp)
     target_link_libraries(recoil_wall_analysis_tests PRIVATE recoil_tuner)
     xen_deploy_runtime_dlls(recoil_wall_analysis_tests OPENCV)
