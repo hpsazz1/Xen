@@ -35,8 +35,12 @@ public:
     bool accept(const Message& response, std::string_view process,
                 Clock::time_point now, int ttl_ms) noexcept;
     void invalidate() noexcept;
-    SourceContextSnapshot snapshot(Clock::time_point now) const noexcept;
+    SourceContextSnapshot snapshot(Clock::time_point now) noexcept;
 private:
+    void revoke_trust() noexcept;
+    void observe_expiry(Clock::time_point now) noexcept;
+    bool trusted_ = false;
+    bool epoch_exhausted_ = false;
     Nonce nonce_{};
     bool pending_ = false;
     Clock::time_point sent_at_{};

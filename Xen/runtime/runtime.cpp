@@ -7,6 +7,7 @@
 #include "runtime/weapon_context_internal.h"
 #include "runtime/aim_frame_internal.h"
 #include "runtime/collection_frame_internal.h"
+#include "runtime/source_focus_internal.h"
 #include "runtime/input_training_internal.h"
 #include "auto_stop/auto_stop_worker.h"
 #include "trigger/trigger_worker.h"
@@ -344,12 +345,7 @@ struct Runtime::Impl {
                         while (!stop_request_watermark.compare_exchange_weak(previous, previous + 1));
                         return previous + 1;
                     },
-                    [this, previous_session = std::uint64_t{0}]() mutable {
-                        const auto source = source_context_client.snapshot();
-                        if (!source.available || !source.focused) { previous_session = 0; return false; }
-                        if (source.session_id != previous_session) { previous_session = source.session_id; return false; }
-                        return true;
-                    },
+                    runtime::detail::auto_stop_source_reader([this] { return source_context_client.snapshot(); }),
                     [this, timing_catalog] {
                         if (!config.gsi.enabled) return AutoStopWeaponContext{};
                         // 可被急停及扳机线程同时读取；使用不可变快照，不维护可变闭包。
@@ -436,6 +432,7 @@ struct Runtime::Impl {
                     const auto current = gsi_receiver.snapshot();
                     const auto now = TriggerClock::now();
                     auto result = context.update(current, *timing_catalog, now);
+                    result.source_context_epoch = source_context_client.snapshot().control_safety_epoch;
                     result.team_filter_required = config.team_filter.enabled;
                     result.team_filter_valid = runtime::detail::team_context_valid(current, now);
                     result.team_epoch = current.team_epoch;
@@ -495,6 +492,7 @@ struct Runtime::Impl {
                     }
                     input.device_epoch = 1; input.weapon_generation = generation;
                     input.weapon_trust_generation = weapon.recoil_safety_epoch;
+                    input.source_context_epoch = focus.control_safety_epoch;
                     const auto found = recoil_profiles.find(weapon.canonical_id);
                     if (found != recoil_profiles.end()) input.profile = found->second;
                     input.weapon_block = runtime::detail::recoil_weapon_block(weapon, input.profile != nullptr, RecoilClock::now());

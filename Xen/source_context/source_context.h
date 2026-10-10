@@ -23,6 +23,8 @@ struct SourceContextSnapshot {
     std::uint64_t session_id = 0;
     std::uint64_t sequence = 0;
     int age_ms = -1;
+    // 已接受失焦/未知、会话切换或已观察到TTL缺口的持久代际；后续健康快照不能覆盖。
+    std::uint64_t control_safety_epoch = 0;
 };
 
 class SourceContextClient final {

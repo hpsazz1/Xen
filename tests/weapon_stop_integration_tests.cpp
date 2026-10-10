@@ -3,6 +3,7 @@
 #include "weapon/weapon_timing.h"
 #include "weapon/weapon_internal.h"
 #include "runtime/weapon_context_internal.h"
+#include "runtime/source_focus_internal.h"
 #include "runtime/runtime_internal.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -905,9 +906,93 @@ void stationary_owner_does_not_interrupt_shot() {
     require(stop.snapshot().requests == 0, "原地无需制造急停请求");
     trigger.stop(); stop.stop();
 }
+// 两个生产worker共享Runtime来源适配器；停在适配返回与owner提交之间。
+void source_session_interleaving(bool same_session_break = false) {
+    auto mouse = std::make_shared<FakeMouse>();
+    auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+    std::atomic<std::uint64_t> session{1}, next_id{0};
+    std::atomic<std::uint64_t> source_epoch{0};
+    thread_local bool sampled_new_source = false;
+    auto read = runtime::detail::auto_stop_source_reader([&] {
+        source_context::SourceContextSnapshot result{true, true, session.load(), 1, 0};
+        result.control_safety_epoch = source_epoch.load();
+        sampled_new_source = result.session_id == 2 || result.control_safety_epoch != 0;
+        return result;
+    });
+    std::mutex owner_mutex;
+    std::thread::id stop_owner;
+    std::atomic<bool> gate_armed{false}, gate_entered{false}, gate_release{false}, gate_timed_out{false};
+    auto source = [&] {
+        const auto result = read();
+        bool owner = false;
+        { std::lock_guard lock(owner_mutex);
+          if (stop_owner == std::thread::id{}) stop_owner = std::this_thread::get_id();
+          owner = stop_owner == std::this_thread::get_id(); }
+        if (owner && sampled_new_source && gate_armed.exchange(false)) {
+            gate_entered.store(true);
+            const auto deadline = Clock::now() + 1500ms;
+            while (!gate_release.load() && Clock::now() < deadline) std::this_thread::sleep_for(1ms);
+            if (!gate_release.load()) gate_timed_out.store(true);
+        }
+        return result;
+    };
+    AutoStopWorker stop(mouse, arbiter, [] { return true; }, [&] { return ++next_id; }, source,
+        [] { return AutoStopWeaponContext{}; });
+    std::atomic<std::uint64_t> during_gate{0};
+    std::atomic<std::uint64_t> trigger_completion{0};
+    std::atomic<unsigned> samples{0};
+    TriggerWorker trigger(mouse, arbiter, [] { return true; }, [] { return true; }, [&] { return ++next_id; },
+        [&](std::uint64_t id) { return stop.request(id); }, [&](std::uint64_t id) { stop.cancel(id); },
+        [] { return TriggerContext{}; }, [&] {
+            const auto result = stop.estimated_completion_id();
+            trigger_completion.store(result);
+            if (gate_entered.load() && !gate_release.load()) { during_gate.store(result); ++samples; }
+            return result;
+        });
+    AutoStopConfig sc{true, 5}; sc.cycle_enabled = true; sc.counter_hold_ms = 10; sc.shot_after_release_ms = 0;
+    TriggerConfig tc; tc.enabled = true; tc.hold_virtual_key = 5;
+    tc.require_stop = tc.allow_estimated_stop = true;
+    mouse->physical(0, false);
+    require(stop.start(sc), "来源交错AutoStop启动");
+    until([&] { return mouse->drained() && stop.snapshot().source_focused && !stop.snapshot().recovery_pending; });
+    require(trigger.start(tc), "来源交错Trigger启动");
+    mouse->physical(2, true);
+    std::uint64_t old_id = 0;
+    until([&] {
+        stop.publish_tracking_target(Clock::now() + 500ms); stop.publish_target(Clock::now() + 500ms);
+        old_id = stop.estimated_completion_id(); return old_id != 0;
+    });
+    until([&] { return trigger_completion.load() == old_id; });
+    gate_armed.store(true);
+    if (same_session_break) source_epoch.store(1); else session.store(2);
+    until([&] { return gate_entered.load(); });
+    until([&] { return samples.load() != 0; });
+    const auto leaked = during_gate.load();
+    gate_release.store(true);
+    mouse->physical(0, false);
+    until([&] { return !stop.snapshot().recovery_pending && mouse->released(); });
+    mouse->physical(2, true);
+    std::uint64_t new_id = 0;
+    until([&] {
+        stop.publish_tracking_target(Clock::now() + 500ms); stop.publish_target(Clock::now() + 500ms);
+        new_id = stop.estimated_completion_id(); return new_id != 0 && new_id != old_id;
+    });
+    trigger.stop(); stop.stop();
+    std::cout << "source_session old_id=" << old_id << " concurrent_id=" << leaked
+              << " new_id=" << new_id << " same_session_break=" << same_session_break
+              << " samples=" << samples.load() << " button_down=" << mouse->downs.load() << '\n';
+    require(leaked == 0, "来源换代的并发Trigger读取不得取得旧会话急停完成资格");
+    require(!gate_timed_out, "来源交错必须在屏障仍持有时完成验证，超时释放不能作为通过证据");
+    require(mouse->downs == 0 && mouse->released(), "纯记录设备最终归还且无按钮输出");
+}
 } // namespace
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--source-session") {
+            source_session_interleaving();
+            source_session_interleaving(true);
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--aim-random") {
             target_change_returns_before_next_brake(true, true);
             aim_random_release_lifecycle(true, false);
@@ -935,6 +1020,8 @@ int main(int argc, char** argv) {
             return 0;
         }
         weapon_change_during_admission(false);
+        source_session_interleaving();
+        source_session_interleaving(true);
         target_change_returns_before_next_brake();
         for (const char* item : {"weapon_knife", "weapon_hegrenade"}) gsi_session_recovery(item);
         held_direction_after_overlap_requires_completed_brake();

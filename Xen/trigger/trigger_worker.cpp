@@ -212,7 +212,9 @@ public:
                          decided_context.team_filter_valid && fresh.context.team_epoch != 0 &&
                          fresh.context.team_epoch == decided_context.team_epoch && evaluated_observation &&
                          evaluated_observation->team_epoch == fresh.context.team_epoch));
-                    const bool context_valid = team_valid && fresh.context.required == decided_context.required &&
+                    const bool context_valid = team_valid &&
+                        fresh.context.source_context_epoch == decided_context.source_context_epoch &&
+                        fresh.context.required == decided_context.required &&
                         timing_valid &&
                         (!fresh.context.required || (fresh.context.valid && decided_context.valid &&
                             fresh.context.generation != 0 && fresh.context.generation == decided_context.generation &&
@@ -310,7 +312,8 @@ public:
                         consumed_cycle_stop_id = id;
                         const auto fresh = permit();
                         const auto& firing_context = event.snapshot.firing_context;
-                        const bool same_context = fresh.context.required == firing_context.required &&
+                        const bool same_context = fresh.context.source_context_epoch == firing_context.source_context_epoch &&
+                            fresh.context.required == firing_context.required &&
                             (!fresh.context.required || (fresh.context.valid && firing_context.valid &&
                                 fresh.context.generation == firing_context.generation));
                         // 候选丢失或变化只中止本发：确认UP且会话仍安全后归还移动，下一发重新取得候选和急停资格。

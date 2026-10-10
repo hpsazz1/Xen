@@ -42,8 +42,10 @@ public:
         const auto trust_epoch = weapon_required ? weapon.control_safety_epoch : 0;
         const auto weapon_epoch = weapon_required ? weapon.source_epoch : 0;
         const auto focus_session = focus_required ? source.session_id : 0;
+        const auto focus_epoch = focus_required ? source.control_safety_epoch : 0;
         const std::string_view weapon_id = weapon_required ? weapon.canonical_id : std::string_view{};
-        const bool trust_changed = initialized_ && (trust_epoch_ != trust_epoch || focus_session_ != focus_session);
+        const bool trust_changed = initialized_ && (trust_epoch_ != trust_epoch || focus_session_ != focus_session ||
+            focus_epoch_ != focus_epoch);
         const bool previous_release_required = release_required_;
         if (!trusted || !focused || trust_changed) release_required_ = true;
         // 不健康期间看到的松键不作为新的许可；信任恢复后才接受真实松键。
@@ -59,6 +61,7 @@ public:
         initialized_ = true;
         ready_ = ready; trusted_ = trusted; focused_ = focused;
         weapon_epoch_ = weapon_epoch; trust_epoch_ = trust_epoch; focus_session_ = focus_session;
+        focus_epoch_ = focus_epoch;
         weapon_id_ = weapon_id;
         team_allowed_ = team_allowed; team_epoch_ = team_epoch; team_ = team; game_phase_ = phase;
         return {ready && trusted && focused && team_allowed && !release_required_ && !exhausted_,
@@ -67,7 +70,7 @@ public:
 private:
     bool initialized_ = false, ready_ = false, trusted_ = false, focused_ = false;
     bool release_required_ = false, exhausted_ = false;
-    std::uint64_t weapon_epoch_ = 0, trust_epoch_ = 0, focus_session_ = 0, generation_ = 0;
+    std::uint64_t weapon_epoch_ = 0, trust_epoch_ = 0, focus_session_ = 0, focus_epoch_ = 0, generation_ = 0;
     std::string weapon_id_;
     bool team_allowed_ = true;
     std::uint64_t team_epoch_ = 0;

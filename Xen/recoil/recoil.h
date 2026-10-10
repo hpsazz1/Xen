@@ -72,6 +72,7 @@ struct RecoilInput {
     std::uint64_t weapon_trust_generation = 0;
     RecoilTime firing_started_at{};
     std::shared_ptr<const RecoilProfile> profile;
+    std::uint64_t source_context_epoch = 0;
 };
 struct RecoilIntent {
     std::uint64_t command_id = 0, session_id = 0;
@@ -166,6 +167,6 @@ private:
     bool manual_restart_allowed_ = false;
     std::size_t next_event_ = 0;
     bool deferred_unsent_ = false, ordinary_restart_allowed_ = false, context_latched_ = false;
-    std::uint64_t weapon_trust_generation_ = 0;
+    std::uint64_t weapon_trust_generation_ = 0, source_context_epoch_ = 0;
 };
 #endif

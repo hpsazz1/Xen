@@ -357,13 +357,15 @@ RecoilDecision RecoilController::advance(const RecoilInput& input,RecoilTime now
     state_.context_block=RecoilContextBlock::NONE;
     if(!input.enabled){context_latched_=true;ordinary_restart_allowed_=false;cancel(RecoilReason::DISABLED,now);state_.phase=RecoilPhase::DISABLED;return result();}
     const bool device_changed=device_epoch_&&input.device_epoch!=device_epoch_;
-    const bool trust_changed=input.weapon_trust_generation!=weapon_trust_generation_;
+    const bool trust_changed=input.weapon_trust_generation!=weapon_trust_generation_ ||
+        input.source_context_epoch!=source_context_epoch_;
     const bool weapon_changed=profile_&&input.weapon_generation!=weapon_generation_;
     const bool changed=input.profile!=profile_||input.weapon_generation!=weapon_generation_||input.device_epoch!=device_epoch_;
     if(device_changed||trust_changed) {
         context_latched_=true;ordinary_restart_allowed_=false;cancel(RecoilReason::CONTEXT,now);
     }
     weapon_trust_generation_=input.weapon_trust_generation;
+    source_context_epoch_=input.source_context_epoch;
     if(changed) {
         const bool ordinary_wait=ordinary_restart_allowed_;
         cancel(RecoilReason::PROFILE_CHANGED,now);

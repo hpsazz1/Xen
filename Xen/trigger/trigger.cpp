@@ -176,6 +176,7 @@ std::optional<TriggerDecision> TriggerController::check_context(const TriggerPer
             previous.timing_valid != permit.context.timing_valid || previous.shot_hold_ms != permit.context.shot_hold_ms ||
             previous.fire_interval_ms != permit.context.fire_interval_ms)));
     const bool trust_changed = previous.trust_generation != permit.context.trust_generation ||
+        previous.source_context_epoch != permit.context.source_context_epoch ||
         previous.session_trusted != permit.context.session_trusted;
     const bool team_changed = previous.team_filter_required != permit.context.team_filter_required ||
         (permit.context.team_filter_required && (previous.team_filter_valid != permit.context.team_filter_valid ||

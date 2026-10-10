@@ -123,7 +123,9 @@ public:
     std::shared_ptr<AutoStopOutputArbiter> arbiter;
     std::function<bool()> allowed;
     std::function<std::uint64_t()> allocate_request;
-    std::function<bool()> focused;
+    std::function<source_context::SourceContextSnapshot()> source_context;
+    source_context::SourceContextSnapshot previous_source;
+    bool source_seen = false;
     std::function<AutoStopWeaponContext()> weapon_context;
     bool weapon_context_seen = false;
     std::uint64_t normal_weapon_generation = 0, normal_target_generation = 0, tracked_request_id = 0;
@@ -204,10 +206,33 @@ public:
                 !movement_blocked() && !paused.load(std::memory_order_acquire) && !stopping.load(std::memory_order_acquire);
         } catch (...) { return false; }
     }
+    bool source_permission() noexcept {
+        source_context::SourceContextSnapshot incoming;
+        try { if (source_context) incoming = source_context(); } catch (...) {}
+        std::lock_guard lock(mutex);
+        // 读取可并发，旧读取不能覆盖已提交的新代际；撤销和完成资格属于同一owner。
+        if (source_seen && incoming.control_safety_epoch < previous_source.control_safety_epoch) return false;
+        const bool healthy = incoming.available && incoming.focused && incoming.session_id != 0;
+        const bool changed = source_seen && (incoming.session_id != previous_source.session_id ||
+            incoming.control_safety_epoch != previous_source.control_safety_epoch);
+        if (changed || (state.source_focused && !healthy)) {
+            cancel_generation.fetch_add(1, std::memory_order_acq_rel);
+            pending_id = estimated_id = resume_id = 0;
+            normal_weapon_generation = normal_target_generation = tracked_request_id = 0;
+            target_until = {}; tracking_target_until = {};
+            state.target_available = false;
+            trigger_idle = false; ++trigger_idle_generation;
+        }
+        if (changed || !healthy) state.recovery_pending = true;
+        previous_source = incoming;
+        source_seen = true;
+        state.source_focused = healthy;
+        return healthy && !changed;
+    }
     bool manual_permission(const InputSnapshot& input) noexcept {
         try {
             // 自动恢复只阻断目标循环；人工松键仍独立核验输入和安全许可。
-            return config.use_counterpulse_timing && allocate_request && focused && focused() &&
+            return config.use_counterpulse_timing && allocate_request && source_permission() &&
                 weapon_permission() && allowed && allowed() && !arbiter->faulted_.load() &&
                 input.state_valid && input.status == InputMonitorStatus::READY &&
                 !release_key_held(input) && !input.virtual_keys[0x23] && !movement_blocked() && !paused.load() && !stopping.load();
@@ -225,10 +250,8 @@ public:
     }
     bool session_permission(bool require_target) noexcept {
         try {
-            const bool source_focused = focused && focused();
+            const bool source_focused = source_permission();
             std::lock_guard<std::mutex> lock(mutex);
-            state.source_focused = source_focused;
-            if (!source_focused) state.recovery_pending = true;
             const auto now = Clock::now();
             invalidate_tracking_locked(now);
             state.target_available = now < target_until;
@@ -350,7 +373,7 @@ public:
             InputSnapshot fresh;
             return normal_change && mouse->poll_input(fresh) && fresh.state_valid && fresh.status == InputMonitorStatus::READY &&
                 intent.input_continuous && intent.epoch == active_input_epoch && held_wasd(fresh) == intent.held_mask &&
-                !fresh.virtual_keys[0x23] && !release_key_held(fresh) && allowed && allowed() && focused && focused() &&
+                !fresh.virtual_keys[0x23] && !release_key_held(fresh) && allowed && allowed() && source_permission() &&
                 !movement_blocked() && !paused.load() && !stopping.load() && !arbiter->faulted_.load();
         };
         auto cancel_active = [&](bool force_fault, const char* reason, bool normal_activation_release = false,
@@ -434,7 +457,7 @@ public:
                     weapon_permission();
                     // GSI或调用方撤销只影响输出准入；不能把健康物理事件流改写为断流。
                     rescue_continuous = continuous && intent.input_continuous &&
-                        allowed && allowed() && focused && focused() &&
+                        allowed && allowed() && source_permission() &&
                         !after_cleanup.virtual_keys[0x23] && !movement_blocked() && !paused.load() && !stopping.load() && !arbiter->faulted_.load();
                     if (rescue_continuous) {
                         // 救援后自动核验仍待条件恢复；只保存真实物理流，不承接旧制动资格。
@@ -449,7 +472,7 @@ public:
                          (known_transition && after_cleanup.virtual_keys[config.activation_virtual_key] &&
                           !release_key_held(after_cleanup)));
                     if (continuous && direction_permitted &&
-                        allowed && allowed() && focused && focused() &&
+                        allowed && allowed() && source_permission() &&
                         !after_cleanup.virtual_keys[0x23] && !movement_blocked() && !paused.load() && !stopping.load() && !arbiter->faulted_.load())
                     {
                         resumed = controller.restart_after_cleanup(intent, released_at);
@@ -606,7 +629,7 @@ public:
                             !state.recovery_pending && !fault && manual_fire_id.load() == 0;
                     }
                     normal_switch = normal_switch && input_ok && events_ok && intent.input_continuous &&
-                        allowed && allowed() && focused && focused() && !input.virtual_keys[0x23] &&
+                        allowed && allowed() && source_permission() && !input.virtual_keys[0x23] &&
                         !movement_blocked() && !paused.load() && !arbiter->faulted_.load();
                     {
                         std::lock_guard lock(mutex);
@@ -662,7 +685,7 @@ public:
                     manual_fire_id.load() == 0 && input_ok && events_ok && intent.input_continuous &&
                     !intent.conflicting && intent.epoch == cursor.epoch && intent.sequence == cursor.sequence &&
                     intent.held_mask == held_wasd(input) && weapon_ready &&
-                    (!allocate_request || (focused && focused())) && allowed && allowed() &&
+                    (!allocate_request || (source_permission())) && allowed && allowed() &&
                     !release_key_held(input) && !input.virtual_keys[0x23] &&
                     !movement_blocked() && !paused.load() && !stopping.load() && !arbiter->faulted_.load() &&
                     !mouse->left_button_cleanup_required();
@@ -838,7 +861,7 @@ public:
                         state.weapon_context.session_trusted;
                 }
                 if (normal_weapon_change && input_ok && events_ok && intent.input_continuous &&
-                    intent.epoch == active_input_epoch && allowed && allowed() && focused && focused() &&
+                    intent.epoch == active_input_epoch && allowed && allowed() && source_permission() &&
                     !input.virtual_keys[0x23] && !release_key_held(input) && !movement_blocked() && !paused.load() && !latched_fault) {
                     cancel_active(false, "normal_weapon_transition", false, false, false, true);
                     target_consumed = false;
@@ -1150,9 +1173,19 @@ AutoStopWorker::AutoStopWorker(std::shared_ptr<IMouseController> mouse,
         std::shared_ptr<AutoStopOutputArbiter> arbiter, std::function<bool()> permission,
         std::function<std::uint64_t()> allocate_request, std::function<bool()> focused,
         std::function<AutoStopWeaponContext()> weapon_context)
+    : AutoStopWorker(std::move(mouse), std::move(arbiter), std::move(permission), std::move(allocate_request),
+        [focused = std::move(focused)] {
+            const bool healthy = focused && focused();
+            return source_context::SourceContextSnapshot{healthy, healthy, 1, 0, -1};
+        }, std::move(weapon_context)) {}
+AutoStopWorker::AutoStopWorker(std::shared_ptr<IMouseController> mouse,
+        std::shared_ptr<AutoStopOutputArbiter> arbiter, std::function<bool()> permission,
+        std::function<std::uint64_t()> allocate_request,
+        std::function<source_context::SourceContextSnapshot()> source_context,
+        std::function<AutoStopWeaponContext()> weapon_context)
     : impl_(std::make_unique<Impl>(std::move(mouse), std::move(arbiter), std::move(permission))) {
     impl_->allocate_request = std::move(allocate_request);
-    impl_->focused = std::move(focused);
+    impl_->source_context = std::move(source_context);
     impl_->weapon_context = std::move(weapon_context);
 }
 void AutoStopWorker::publish_target(std::chrono::steady_clock::time_point valid_until, AutoStopBlockReason reason) noexcept {
@@ -1191,6 +1224,8 @@ bool AutoStopWorker::start(const AutoStopConfig& config, int command_timeout_ms)
         impl_->trigger_idle_cursor = {};
         ++impl_->trigger_idle_generation;
         impl_->weapon_context_seen = false;
+        impl_->source_seen = false;
+        impl_->previous_source = {};
         impl_->resume_id = 0;
         impl_->manual_fire_id = 0;
         impl_->tracking_target_until = {};

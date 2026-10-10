@@ -101,6 +101,24 @@ int main() {
     evidence.invalidate();
     expect(!evidence.snapshot(start + 402ms).available && !evidence.snapshot(start + 402ms).focused,
            "停止立即撤销");
+    Evidence continuous;
+    response.session = 20; response.sequence = 1; response.focus = Focus::Foreground;
+    continuous.begin(response.nonce, start);
+    expect(continuous.accept(response, "game.exe", start + 1ms, 100), "健康连续性前置接受");
+    const auto initial_epoch = continuous.snapshot(start + 1ms).control_safety_epoch;
+    response.sequence = 9; response.nonce[0] = 9;
+    continuous.begin(response.nonce, start + 20ms);
+    auto unauthenticated = response; unauthenticated.focus = Focus::Unknown; unauthenticated.nonce[1] ^= 1;
+    expect(!continuous.accept(unauthenticated, "game.exe", start + 21ms, 100), "拒绝的报文不算已观察断点");
+    expect(continuous.accept(response, "game.exe", start + 21ms, 100), "健康序号跳跃仍被接受");
+    expect(continuous.snapshot(start + 21ms).control_safety_epoch == initial_epoch,
+        "健康报文跳号及拒绝的坏nonce均不能制造来源信任断点");
+    const auto expired_epoch = continuous.snapshot(start + 120ms).control_safety_epoch;
+    expect(expired_epoch > initial_epoch && continuous.snapshot(start + 121ms).control_safety_epoch == expired_epoch,
+        "同一次到期只记录一个持久断点，重复轮询不增长代际");
+    continuous.invalidate(); continuous.invalidate();
+    expect(continuous.snapshot(start + 122ms).control_safety_epoch == expired_epoch,
+        "无健康证据时重复停止不制造新断点且不清除已有代际");
     // 只运行纯报文/证据核，不查询真实前台、不绑定端口、不控制设备。
     return failures == 0 ? 0 : 1;
 }

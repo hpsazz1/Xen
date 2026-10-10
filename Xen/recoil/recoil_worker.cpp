@@ -42,7 +42,7 @@ public:
     std::uint64_t sampled_firing_id = 0;
     std::optional<std::int64_t> sampled_firing_uncertainty_ns;
     RecoilTime physical_started{};
-    std::uint64_t observed_device_epoch = 0, observed_trust_generation = 0;
+    std::uint64_t observed_device_epoch = 0, observed_trust_generation = 0, observed_source_context_epoch = 0;
     bool input_seen = false;
     RecoilInput input() {
         auto result = context();
@@ -57,8 +57,10 @@ public:
             (!result.profile_conditions_match && result.weapon_block != RecoilWeaponBlock::ORDINARY_UNAVAILABLE) ||
             result.weapon_block == RecoilWeaponBlock::UNTRUSTED ||
             (input_seen && (result.device_epoch != observed_device_epoch ||
-                result.weapon_trust_generation != observed_trust_generation))) source_blocked = true;
+                result.weapon_trust_generation != observed_trust_generation ||
+                result.source_context_epoch != observed_source_context_epoch))) source_blocked = true;
         observed_device_epoch = result.device_epoch; observed_trust_generation = result.weapon_trust_generation;
+        observed_source_context_epoch = result.source_context_epoch;
         input_seen = true;
         if (result.healthy && synthetic.confirmed_down && !physical) automatic_firing_seen = true;
         if (result.healthy && physical && !physical_previous) {
@@ -246,6 +248,7 @@ public:
                         const MouseMoveCommand command{intent.dx_counts, intent.dy_counts};
                         const bool same = current.profile == before.profile && current.weapon_generation == before.weapon_generation &&
                             current.device_epoch == before.device_epoch && current.weapon_trust_generation == before.weapon_trust_generation &&
+                            current.source_context_epoch == before.source_context_epoch &&
                             current.firing_started_at == before.firing_started_at;
                         if (stopping.load()) rejection = RecoilDispatchRejection::STOPPING;
                         else if (!same) rejection = RecoilDispatchRejection::CONTEXT_CHANGED;

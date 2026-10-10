@@ -1,6 +1,9 @@
 #include "runtime/aim_frame_internal.h"
 #include "runtime/collection_frame_internal.h"
 #include "weapon/weapon_internal.h"
+#include "source_context/source_context_internal.h"
+#include "trigger/trigger.h"
+#include "recoil/recoil.h"
 
 #include <cmath>
 #include <iostream>
@@ -337,6 +340,99 @@ int main() {
         const auto fresh = current_aim.process(frame);
         expect(fresh.has_command && runtime::detail::aim_frame_dispatch_allowed(frame, true, recovered, recovered),
             "恢复后新观测经实际Aim产生可发送新命令");
+    }
+    for (int interruption = 0; interruption != 6; ++interruption) {
+        // 接受器确实观察断点，但消费方只读前后健康快照；不伪造快照代际。
+        using namespace source_context::detail;
+        Evidence evidence;
+        runtime::detail::AimWeaponSessionGate gate;
+        const auto publish = [&](std::uint64_t sequence, Focus focus, int offset, std::uint64_t session = 41) {
+            Message response;
+            response.response = true; response.focus = focus; response.session = session;
+            response.sequence = sequence; response.process_name = "fixture.exe";
+            response.nonce[0] = static_cast<std::uint8_t>(sequence);
+            const auto now = start + std::chrono::milliseconds(offset);
+            evidence.begin(response.nonce, now);
+            expect(evidence.accept(response, "fixture.exe", now + std::chrono::milliseconds(1), 100),
+                "断点回归必须经过合法nonce与递增序号的真实接受器");
+        };
+        publish(1, Focus::Foreground, 0);
+        const auto first = gate.update({}, false, evidence.snapshot(start + std::chrono::milliseconds(1)),
+            true, true, start + std::chrono::milliseconds(1));
+        expect(first.allowed, "来源断点前真实健康前台必须有非空许可");
+        runtime::detail::CollectionFrameGate collection_gate;
+        FrameTiming old_timing; old_timing.captured_at = start + std::chrono::milliseconds(1);
+        expect(collection_gate.accept(true, evidence.snapshot(old_timing.captured_at), old_timing,
+            old_timing.captured_at, false), "采样前健康焦点建立实际时间边界");
+        TriggerController trigger;
+        TriggerConfig trigger_config; trigger_config.enabled = true; trigger_config.hold_virtual_key = 5;
+        trigger_config.fire_delay_ms = 0; trigger_config.fire_mode = TriggerFireMode::AUTOMATIC;
+        trigger_config.max_observation_age_ms = 500;
+        expect(trigger.configure(trigger_config), "来源回归扳机配置有效");
+        TriggerPermit permit; permit.enabled = permit.healthy = permit.focused = permit.armed = true;
+        trigger.tick(permit, start);
+        permit.held = true;
+        TriggerObservation observed; observed.valid = observed.timing_valid = true;
+        observed.observed_at = old_timing.captured_at; observed.epoch = observed.sequence = 1;
+        observed.roi_width = observed.roi_height = 100; observed.center_x = observed.center_y = 50;
+        observed.detections = {{30,30,70,70,.9f,0}};
+        const auto down = trigger.observe(observed, permit, old_timing.captured_at);
+        expect(down.button_action == TriggerButtonAction::DOWN, "来源断点前真实Trigger必须产生DOWN意图");
+        trigger.acknowledge({down.command_id, down.button_action, TriggerReceiptStatus::ACKNOWLEDGED,
+            old_timing.captured_at}, old_timing.captured_at);
+        auto profile = std::make_shared<RecoilProfile>();
+        std::string profile_error;
+        expect(load_recoil_profile(R"({"schema_version":3,"id":"source_fixture","revision":1,
+            "weapon_id":"cz75","sensitivity":1.4,"verified":true,"sample_semantics":"discrete_delta",
+            "events":[[200,0,2]]})", *profile, profile_error), "来源回归曲线经过真实Loader");
+        RecoilController recoil;
+        RecoilInput recoil_input; recoil_input.enabled = recoil_input.healthy = recoil_input.focused =
+            recoil_input.permission = recoil_input.profile_conditions_match = true;
+        recoil_input.weapon_generation = recoil_input.device_epoch = 1; recoil_input.profile = profile;
+        expect(recoil.advance(recoil_input, start).snapshot.phase == RecoilPhase::READY,
+            "来源断点前Recoil健康释放建立READY");
+        recoil_input.held = true; recoil_input.firing_started_at = old_timing.captured_at;
+        expect(recoil.advance(recoil_input, old_timing.captured_at).snapshot.phase == RecoilPhase::FIRING,
+            "来源断点前Recoil真实控制器已进入活动会话");
+        if (interruption == 0) publish(2, Focus::Background, 2);
+        if (interruption == 1) publish(2, Focus::Unknown, 2);
+        if (interruption == 2) (void)evidence.snapshot(start + std::chrono::milliseconds(100));
+        if (interruption == 3) evidence.invalidate();
+        if (interruption == 4) publish(2, Focus::Foreground, 2, 42);
+        // case 5连publisher读取也跳过到期点，新响应到达时仍必须保留已发生TTL缺口。
+        const int recovered_offset = interruption == 2 || interruption == 5 ? 101 : 4;
+        publish(3, Focus::Foreground, recovered_offset);
+        const auto now = start + std::chrono::milliseconds(recovered_offset + 1);
+        const auto source = evidence.snapshot(now);
+        expect(source.available && source.focused && source.session_id == 41 && source.sequence == 3,
+            "末态相同session前台必须真实恢复");
+        expect(!collection_gate.accept(true, source, old_timing, now, false),
+            "跳过焦点断点仍不得采集旧信任时间内的积压帧");
+        FrameTiming fresh_timing; fresh_timing.captured_at = now;
+        expect(collection_gate.accept(true, source, fresh_timing, now, false), "新焦点边界之后的帧可正常采样");
+        permit.context.source_context_epoch = source.control_safety_epoch;
+        const auto up = trigger.tick(permit, now);
+        expect(up.button_action == TriggerButtonAction::UP, "来源断点撤销实际Trigger旧按钮债务");
+        trigger.acknowledge({up.command_id, up.button_action, TriggerReceiptStatus::ACKNOWLEDGED, now}, now);
+        expect(trigger.tick(permit, now).snapshot.reason == TriggerReason::WAIT_RELEASE,
+            "来源断点不能被健康末态抹去，Trigger持续持键仍等待释放");
+        recoil_input.source_context_epoch = source.control_safety_epoch;
+        expect(recoil.advance(recoil_input, now).snapshot.reason == RecoilReason::WAIT_RELEASE,
+            "来源断点不能被健康末态抹去，Recoil持续持键仍等待释放");
+        recoil_input.held = false;
+        expect(recoil.advance(recoil_input, now).snapshot.phase == RecoilPhase::READY,
+            "Recoil在来源健康的真实松键后可恢复");
+        permit.held = false; trigger.tick(permit, now);
+        const auto next_shot = now + std::chrono::milliseconds(200);
+        permit.held = true; observed.observed_at = next_shot; ++observed.sequence;
+        expect(trigger.observe(observed, permit, next_shot).button_action == TriggerButtonAction::DOWN,
+            "Trigger在来源健康的真实松键后可建立新候选");
+        const auto held = gate.update({}, false, source, true, true, now);
+        expect(!held.allowed && held.reset_aim && held.generation != first.generation,
+            "跳过已接受的坏快照仍应撤销旧代际并等待健康松键");
+        gate.update({}, false, source, true, false, now);
+        expect(gate.update({}, false, source, true, true, now).allowed,
+            "断点后健康松键恢复新的来源许可");
     }
     for (int failure = 0; failure != 7; ++failure) {
         weapon::GsiConfig gsi_config;

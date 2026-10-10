@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include "auto_stop/auto_stop.h"
 #include "mouse/mouse.h"
+#include "source_context/source_context.h"
 
 enum class OutputArbiterSource { AIM, TRIGGER, RECOIL };
 enum class OutputArbiterRejection { NONE, LOCK_BUSY, AUXILIARY_PENDING, OUTPUT_FAULT };
@@ -66,6 +67,13 @@ public:
         std::function<std::uint64_t()> allocate_request = {},
         std::function<bool()> focused = {},
         std::function<AutoStopWeaponContext()> weapon_context = {});
+    // 有来源身份时直接提供不可变快照；回调应支持并发读取，不能保存消费者会话状态。
+    AutoStopWorker(std::shared_ptr<IMouseController> mouse,
+        std::shared_ptr<AutoStopOutputArbiter> arbiter,
+        std::function<bool()> output_permission,
+        std::function<std::uint64_t()> allocate_request,
+        std::function<source_context::SourceContextSnapshot()> source_context,
+        std::function<AutoStopWeaponContext()> weapon_context);
     ~AutoStopWorker();
     AutoStopWorker(const AutoStopWorker&) = delete;
     AutoStopWorker& operator=(const AutoStopWorker&) = delete;

@@ -35,9 +35,10 @@ public:
             reset();
             return false;
         }
-        if (!trusted_ || session_ != source.session_id) {
+        if (!trusted_ || session_ != source.session_id || source_epoch_ != source.control_safety_epoch) {
             trusted_ = true;
             session_ = source.session_id;
+            source_epoch_ = source.control_safety_epoch;
             focused_since_ = now;
         }
         // 配置了源时钟则不能在失效时降级到接收时刻。
@@ -62,7 +63,7 @@ private:
         focused_since_ = {};
     }
     bool trusted_ = false;
-    std::uint64_t session_ = 0;
+    std::uint64_t session_ = 0, source_epoch_ = 0;
     std::chrono::steady_clock::time_point focused_since_{};
 };
 

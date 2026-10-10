@@ -199,6 +199,15 @@ bool decode(std::span<const std::uint8_t> packet, std::string_view token, Messag
 void Evidence::begin(const Nonce& nonce, Clock::time_point sent_at) noexcept {
     nonce_ = nonce; sent_at_ = sent_at; pending_ = true;
 }
+void Evidence::revoke_trust() noexcept {
+    if (!trusted_) return;
+    trusted_ = false;
+    if (snapshot_.control_safety_epoch == std::numeric_limits<std::uint64_t>::max()) epoch_exhausted_ = true;
+    else ++snapshot_.control_safety_epoch;
+}
+void Evidence::observe_expiry(Clock::time_point now) noexcept {
+    if (now < evidence_at_ || now >= expires_at_) revoke_trust();
+}
 bool Evidence::accept(const Message& response, std::string_view process,
                       Clock::time_point now, int ttl_ms) noexcept {
     if (!pending_ || !response.response || response.nonce != nonce_ ||
@@ -206,6 +215,9 @@ bool Evidence::accept(const Message& response, std::string_view process,
         !exact_process_match(process, response.process_name) || now < sent_at_ || ttl_ms <= 0 ||
         now >= sent_at_ + std::chrono::milliseconds(ttl_ms) ||
         (response.session == snapshot_.session_id && response.sequence <= snapshot_.sequence)) return false;
+    // 即使没有消费者恰好读取过期快照，也不能用新健康响应抹去旧证据的TTL缺口。
+    observe_expiry(now);
+    if (response.session != snapshot_.session_id || response.focus != Focus::Foreground) revoke_trust();
     pending_ = false;
     snapshot_.available = response.focus != Focus::Unknown;
     snapshot_.focused = response.focus == Focus::Foreground;
@@ -214,16 +226,23 @@ bool Evidence::accept(const Message& response, std::string_view process,
     evidence_at_ = sent_at_;
     // 用请求发送时刻保守计算年龄，网络往返耗时不能免费延长许可。
     expires_at_ = sent_at_ + std::chrono::milliseconds(ttl_ms);
+    trusted_ = snapshot_.available && snapshot_.focused && !epoch_exhausted_;
     return true;
 }
-void Evidence::invalidate() noexcept { snapshot_ = {}; pending_ = false; }
-SourceContextSnapshot Evidence::snapshot(Clock::time_point now) const noexcept {
+void Evidence::invalidate() noexcept {
+    revoke_trust();
+    const auto epoch = snapshot_.control_safety_epoch;
+    snapshot_ = {}; snapshot_.control_safety_epoch = epoch; pending_ = false;
+}
+SourceContextSnapshot Evidence::snapshot(Clock::time_point now) noexcept {
+    // 调用者使用既有Evidence互斥锁；代际属于接受器，不属于任一读取线程。
+    observe_expiry(now);
     auto result = snapshot_;
     if (result.session_id && now >= evidence_at_) {
         const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(now - evidence_at_).count();
         result.age_ms = static_cast<int>(std::min<std::int64_t>(age, std::numeric_limits<int>::max()));
     }
-    if (now < evidence_at_ || now >= expires_at_) { result.available = false; result.focused = false; }
+    if (epoch_exhausted_ || now < evidence_at_ || now >= expires_at_) { result.available = false; result.focused = false; }
     return result;
 }
 } // namespace detail

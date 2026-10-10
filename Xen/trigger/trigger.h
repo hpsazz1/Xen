@@ -77,6 +77,8 @@ struct TriggerContext {
     // 阵营过滤独立于武器信任；观察必须绑定筛选时的同一阵营代际。
     bool team_filter_required = false, team_filter_valid = false;
     std::uint64_t team_epoch = 0;
+    // 独立来源焦点信任断点，即使GSI/武器不变也撤销持续持键资格。
+    std::uint64_t source_context_epoch = 0;
 };
 
 struct TriggerPermit {
