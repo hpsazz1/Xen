@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import pathlib
+import subprocess
 import sys
 import tempfile
 
@@ -1136,7 +1137,7 @@ def test_p_cal_candidate_freezes_tail_mapping_margin_and_gain_before_holdout() -
         observation_path = root / "OBSERVATION.md"
         observation_path.write_text(observation, encoding="utf-8")
         output_path = root / "candidate.json"
-        exit_code = MODULE.main([
+        candidate_arguments = [
             "candidate",
             "--synthetic-calibration", str(root / "synthetic-calibration.json"),
             "--zero-input-calibration", str(root / "zero-input-calibration.json"),
@@ -1146,8 +1147,12 @@ def test_p_cal_candidate_freezes_tail_mapping_margin_and_gain_before_holdout() -
             "--physical-rows-csv", str(rows_path),
             "--observation", str(observation_path),
             "--output", str(output_path),
-        ])
+        ]
+        exit_code = MODULE.main(candidate_arguments)
         emitted = json.loads(output_path.read_text(encoding="utf-8"))
+        expect(emitted["human_observation"]["original_text"] == observation
+               and set(emitted["human_observation"]["assessment_states"].values()) == {"CLEAN"},
+               "candidate 必须保存原始观察文字与明确三态评估")
         expect(exit_code == 0
                and emitted["status"] == "VALID_P_CAL_CANDIDATE"
                and emitted["input_files"]["calibration_plan"]["sha256"]
@@ -1176,7 +1181,7 @@ def test_p_cal_candidate_freezes_tail_mapping_margin_and_gain_before_holdout() -
         holdout_physical["pairs_csv_sha256"] = hashlib.sha256(holdout_rows_path.read_bytes()).hexdigest()
         _write_json(root / "holdout-response.json", holdout_physical)
         decision_path = root / "holdout-decision.json"
-        holdout_exit_code = MODULE.main([
+        holdout_arguments = [
             "holdout",
             "--candidate", str(output_path),
             "--synthetic-calibration", str(root / "synthetic-calibration.json"),
@@ -1188,15 +1193,56 @@ def test_p_cal_candidate_freezes_tail_mapping_margin_and_gain_before_holdout() -
             "--holdout-rows-csv", str(holdout_rows_path),
             "--observation", str(holdout_observation_path),
             "--output", str(decision_path),
-        ])
+        ]
+        holdout_exit_code = MODULE.main(holdout_arguments)
         emitted_decision = json.loads(
             decision_path.read_text(encoding="utf-8")
         )
+        expect(emitted_decision["human_observation"]["original_text"] == holdout_observation,
+               "holdout 必须保存本次原文，不能复用 calibration 人工事实")
         expect(holdout_exit_code == 0
                and emitted_decision["status"] == "A2_DEPENDENCY_GREEN"
                and emitted_decision["input_files"]["candidate"]["sha256"]
                == emitted_candidate_sha256,
                "holdout CLI 必须原子发布并绑定 candidate 与全部输入身份")
+
+        failures = []
+        negative_observations = {
+            "unknown-manual": ("没移动鼠标/WASD", "无法确认是否未移动鼠标/WASD"),
+            "contradictory-manual": ("没移动鼠标/WASD", "没移动鼠标/WASD；实际按了WASD"),
+            "used-manual": ("没移动鼠标/WASD", "移动了鼠标/WASD"),
+            "unknown-witness": ("一致性：一致", "一致性：一致性无法确认"),
+            "unknown-emergency": ("无异常或急停", "无异常或急停尚无法确认"),
+            "no-visible": ("看到轻微视角偏移", "未看到视角偏移"),
+            "duplicate-field": ("遮挡/scene cut：不存在", "遮挡/scene cut：存在\n- 遮挡/scene cut：不存在"),
+        }
+        for role, arguments, original in (
+                ("candidate", candidate_arguments, observation),
+                ("holdout", holdout_arguments, holdout_observation)):
+            positive_arguments = list(arguments)
+            positive_output = root / f"{role}-positive-cli.json"
+            positive_arguments[positive_arguments.index("--output") + 1] = str(positive_output)
+            positive = subprocess.run([sys.executable, "-B", "-X", "utf8", str(MODULE_PATH), *positive_arguments],
+                                      capture_output=True, text=True, encoding="utf-8")
+            expect(positive.returncode == 0 and positive_output.exists(), "真实CLI正例必须通过: " + positive.stderr)
+            for case, (before, after) in negative_observations.items():
+                changed = original.replace(before, after)
+                expect(changed != original, "观察负例必须改变输入")
+                changed_path = root / f"{role}-{case}-observation.md"
+                changed_path.write_text(changed, encoding="utf-8")
+                changed_output = root / f"{role}-{case}.json"
+                changed_arguments = list(arguments)
+                changed_arguments[changed_arguments.index("--observation") + 1] = str(changed_path)
+                changed_arguments[changed_arguments.index("--output") + 1] = str(changed_output)
+                completed = subprocess.run([sys.executable, "-B", "-X", "utf8", str(MODULE_PATH), *changed_arguments],
+                                           capture_output=True, text=True, encoding="utf-8")
+                print(f"observation {role}/{case}: exit={completed.returncode} published={changed_output.exists()}")
+                if completed.returncode != 1 or changed_output.exists():
+                    failures.append(f"{role}/{case}")
+                else:
+                    expect("UNKNOWN" in completed.stderr or "CONTAMINATED" in completed.stderr,
+                           "反例必须因人工观察状态拒绝，而不是借其他校验失败")
+        expect(not failures, "人工观察反例被真实CLI接受: " + ", ".join(failures))
 
     censored_rows = json.loads(json.dumps(rows))
     for row in censored_rows:

@@ -92,6 +92,57 @@ def parse_object(content: bytes, label: str) -> dict[str, Any]:
     return value
 
 
+def verify_sidecar_binding(manifest_path: pathlib.Path,
+                           manifest: dict[str, Any],
+                           plan: dict[str, Any],
+                           report_binding: dict[str, Any]) -> None:
+    reference = manifest.get("source_binding")
+    if not isinstance(reference, dict):
+        raise ProducerError("sidecar source_binding 缺失")
+    relative = reference.get("file")
+    if not isinstance(relative, str) or not relative:
+        raise ProducerError("sidecar source_binding 路径缺失")
+    # 禁止绝对路径、盘符相对路径和上级遍历；resolve 后再核验实际目录边界。
+    relative_path = pathlib.Path(relative)
+    if (relative_path.anchor or ".." in relative_path.parts):
+        raise ProducerError("sidecar source_binding 路径越界")
+    root = manifest_path.parent.resolve()
+    path = (root / relative_path).resolve(strict=True)
+    if root not in path.parents or not path.is_file():
+        raise ProducerError("sidecar source_binding 路径越界或缺失")
+    content = path.read_bytes()
+    digest = bytes_sha256(content)
+    if (not is_sha256(reference.get("sha256")) or
+            digest != reference["sha256"] or
+            digest != report_binding.get("probe_binding_sha256")):
+        raise ProducerError("sidecar/report source_binding SHA-256 漂移")
+    binding = parse_object(content, "sidecar source_binding")
+    expected = {
+        "schema_version": 4,
+        "evidence_type": "mouse_effect_probe_binding",
+        "experiment": "physical_b_composite_phase_calibration",
+        "profile": "physical_b_composite_phase_calibration",
+        "dispatch_mode": "physical_b",
+        "run_role": "calibration_deletion",
+        "run_uuid": plan["run_uuid"],
+        "activation_epoch": plan["activation_epoch"],
+        "scope_id": plan["scope_id"],
+        "sequence_sha256": plan["sequence_binding"]["sequence_semantic_sha256"],
+        "capture_source_name": plan["capture_policy"]["source_name"],
+        "sidecar_physical_output_capability": False,
+        "normal_aim_output_required": False,
+        "dy_counts_required": 0,
+        "max_abs_pulse_counts": 1,
+        "max_abs_prefix_x_counts": 1,
+        "production_aim_changed": False,
+        "new_production_gain_claimed": False,
+    }
+    for key, value in expected.items():
+        actual = binding.get(key)
+        if type(actual) is not type(value) or actual != value:
+            raise ProducerError(f"sidecar source_binding {key} 与冻结计划漂移")
+
+
 def verify_semantic(value: dict[str, Any], field: str,
                     label: str) -> str:
     claimed = value.get(field)
@@ -416,6 +467,7 @@ def produce(options: argparse.Namespace) -> tuple[dict[str, Any],
             capture_config.get("roi_width") != image_width or
             capture_config.get("roi_height") != image_height):
         raise ProducerError("sidecar manifest source/header 无效")
+    verify_sidecar_binding(manifest_path, manifest, plan, report_binding)
     center_roi = capture_config.get("center_roi")
     configured_roi_x = capture_config.get("roi_x")
     configured_roi_y = capture_config.get("roi_y")

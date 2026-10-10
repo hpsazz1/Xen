@@ -1391,8 +1391,46 @@ def _observation_fields(text: str) -> dict[str, str]:
         if not line.startswith("- ") or "：" not in line:
             continue
         name, value = line[2:].split("：", 1)
-        fields[name.strip()] = value.strip()
+        name = name.strip()
+        if name in fields:
+            raise ValueError(f"人工观察重复字段 {name}，保持 UNKNOWN")
+        fields[name] = value.strip()
     return fields
+
+
+def _assess_observation(fields: dict[str, str]) -> dict[str, str]:
+    def normalize(value: str) -> str:
+        return value.strip().rstrip("。.!！").lower()
+
+    def classify(value: str, clean: set[str], contaminated: set[str]) -> str:
+        statement = normalize(value)
+        if statement in clean:
+            return "CLEAN"
+        if statement in contaminated:
+            return "CONTAMINATED"
+        return "UNKNOWN"
+
+    visible = {"看到轻微视角偏移", "看到视角偏移", "观察到视角偏移"}
+    no_visible = {"未看到视角偏移", "没有看到视角偏移", "无可见视角偏移"}
+    no_manual = {"没移动鼠标/wasd", "未移动鼠标/wasd", "未使用物理鼠标/wasd"}
+    manual = {"移动了鼠标/wasd", "使用了物理鼠标/wasd", "实际按了wasd", "有手动输入"}
+    clauses = {normalize(part) for part in fields.get("人工结论", "").replace("；", ";").split(";")}
+    unknown = bool(clauses - visible - no_visible - no_manual - manual)
+
+    def conclusion_state(clean: set[str], contaminated: set[str]) -> str:
+        if clauses & contaminated:
+            return "CONTAMINATED"
+        if unknown or not clauses & clean:
+            return "UNKNOWN"
+        return "CLEAN"
+
+    return {
+        "visible_effect": conclusion_state(visible, no_visible),
+        "manual_input": conclusion_state(no_manual, manual),
+        "witness_consistency": classify(fields.get("左右 witness 一致性", ""), {"一致"}, {"不一致"}),
+        "scene": classify(fields.get("遮挡/scene cut", ""), {"不存在", "无", "没有"}, {"存在", "有"}),
+        "safety": classify(fields.get("异常/急停", ""), {"无异常或急停", "无异常/急停", "无"}, {"有异常", "急停", "已急停"}),
+    }
 
 
 def _rounded_px(value: float) -> float:
@@ -1479,29 +1517,11 @@ def build_physical_candidate(
         raise ValueError("P-CAL physical response 未形成完整双方向成对闭合证据")
 
     observation = _observation_fields(observation_text)
-    human_visible = "视角偏移" in observation.get("人工结论", "")
-    no_manual_input = (
-        "没移动鼠标/WASD" in observation.get("人工结论", "")
-        or "未移动鼠标/WASD" in observation.get("人工结论", "")
-    )
-    witness_consistent = observation.get("左右 witness 一致性", "").startswith("一致")
-    scene_valid = observation.get("遮挡/scene cut", "") == "不存在"
-    no_anomaly_or_emergency = observation.get("异常/急停", "").startswith(
-        "无异常或急停"
-    )
-    if (
-        len(observation_sha256) != 64
-        or not all(
-            (
-                human_visible,
-                no_manual_input,
-                witness_consistent,
-                scene_valid,
-                no_anomaly_or_emergency,
-            )
-        )
-    ):
-        raise ValueError("P-CAL 人工观察未明确闭合可见性、无人工输入、场景与安全事实")
+    observation_states = _assess_observation(observation)
+    if len(observation_sha256) != 64 or any(
+            state != "CLEAN" for state in observation_states.values()):
+        raise ValueError(f"P-CAL 人工观察未明确闭合事实: {observation_states}")
+    human_visible = witness_consistent = scene_valid = True
 
     spatial = synthetic_calibration.get("spatial_error_interval_px", {})
     spatial_lower = float(spatial.get("lower", math.nan))
@@ -1725,6 +1745,9 @@ def build_physical_candidate(
         "holdout_required": True,
         "human_observation": {
             "observation_sha256": observation_sha256,
+            "original_text": observation_text,
+            "fields": observation,
+            "assessment_states": observation_states,
             "visible_effect_reported": human_visible,
             "manual_mouse_or_wasd_used": False,
             "left_right_witness_consistent": witness_consistent,

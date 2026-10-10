@@ -1560,6 +1560,9 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(capture_evidence_tests OPENCV NDI)
     add_test(NAME capture_evidence_tests COMMAND capture_evidence_tests)
     set_tests_properties(capture_evidence_tests PROPERTIES RUN_SERIAL TRUE)
+    add_executable(capture_evidence_producer_fixture tests/capture_evidence_producer_fixture.cpp)
+    target_link_libraries(capture_evidence_producer_fixture PRIVATE capture_evidence nlohmann_json::nlohmann_json)
+    xen_deploy_runtime_dlls(capture_evidence_producer_fixture OPENCV NDI)
 
     add_executable(aim_tests
         tests/aim_tests.cpp
@@ -2157,6 +2160,12 @@ if(BUILD_TESTING)
                 --case "${report_case}")
         set_tests_properties(composite_report_${report_case} PROPERTIES TIMEOUT 60)
     endforeach()
+    add_test(NAME composite_sidecar_binding_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+            "${PROJECT_SOURCE_DIR}/tests/composite_sidecar_binding_tests.py"
+            --seal-executable "$<TARGET_FILE:xen_mouse_effect_probe_composite_seal>"
+            --recorder-fixture "$<TARGET_FILE:capture_evidence_producer_fixture>")
+    set_tests_properties(composite_sidecar_binding_tests PROPERTIES TIMEOUT 60)
     add_test(NAME mouse_effect_probe_b_composite_phase_producer_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_b_composite_phase_producer_tests.py"
@@ -2329,7 +2338,7 @@ if(BUILD_TESTING)
         -ToolRoot "$<TARGET_FILE_DIR:xen_mouse_effect_probe>"
         -PythonExecutable "${XEN_PYTHON_EXECUTABLE}"
         -TestRoot
-            "${CMAKE_BINARY_DIR}/mouse-effect-probe-b-composite-phase-prepare-integration-tests")
+            "${CMAKE_BINARY_DIR}/probe-b-composite-prepare")
     xen_add_windows_powershell_test(
         mouse_effect_probe_b_publish_tests
         "${PROJECT_SOURCE_DIR}/tests/mouse_effect_probe_b_publish_tests.ps1"

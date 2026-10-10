@@ -66,6 +66,23 @@ def load_fixture(path: pathlib.Path) -> Any:
     return module
 
 
+def source_binding_for(plan: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": 4, "evidence_type": "mouse_effect_probe_binding",
+        "experiment": "physical_b_composite_phase_calibration",
+        "profile": "physical_b_composite_phase_calibration",
+        "dispatch_mode": "physical_b", "run_role": "calibration_deletion",
+        "run_uuid": plan["run_uuid"], "activation_epoch": plan["activation_epoch"],
+        "scope_id": plan["scope_id"],
+        "sequence_sha256": plan["sequence_binding"]["sequence_semantic_sha256"],
+        "capture_source_name": plan["capture_policy"]["source_name"],
+        "sidecar_physical_output_capability": False,
+        "normal_aim_output_required": False, "dy_counts_required": 0,
+        "max_abs_pulse_counts": 1, "max_abs_prefix_x_counts": 1,
+        "production_aim_changed": False, "new_production_gain_claimed": False,
+    }
+
+
 def build_raw(root: pathlib.Path, fixture: Any,
               binder: pathlib.Path, evaluator: pathlib.Path,
               producer: pathlib.Path,
@@ -220,6 +237,9 @@ def build_raw(root: pathlib.Path, fixture: Any,
 
     expect(len(report_events) == 295 and len(manifest_frames) == 252,
            "fixture sample/frame 数量漂移")
+    source_binding_path = root / "source-binding.json"
+    write_json(source_binding_path, source_binding_for(plan))
+    source_binding_sha256 = file_sha256(source_binding_path)
     report: dict[str, Any] = {
         "schema": 1,
         "evidence_type":
@@ -231,7 +251,7 @@ def build_raw(root: pathlib.Path, fixture: Any,
         "sequence_sha256": plan["sequence_binding"][
             "sequence_semantic_sha256"],
         "binding": {
-            "probe_binding_sha256": "1" * 64,
+            "probe_binding_sha256": source_binding_sha256,
             "sidecar_run_uuid": plan["run_uuid"],
             "capture_source_name": policy["source_name"],
         },
@@ -279,7 +299,7 @@ def build_raw(root: pathlib.Path, fixture: Any,
         "run_uuid": plan["run_uuid"],
         "activation_epoch": plan["activation_epoch"],
         "composite_plan_file_sha256": file_sha256(plan_path),
-        "probe_binding_sha256": "1" * 64,
+        "probe_binding_sha256": source_binding_sha256,
         "sequence_semantic_sha256": plan["sequence_binding"][
             "sequence_semantic_sha256"],
         "command_report_file_sha256": file_sha256(report_path),
@@ -303,6 +323,7 @@ def build_raw(root: pathlib.Path, fixture: Any,
     schedule_path = root / "composite-schedule-ledger.json"
     write_json(schedule_path, schedule)
     manifest = {
+        "source_binding": {"file": "source-binding.json", "sha256": source_binding_sha256},
         "schema_version": 1,
         "evidence_type": "output_off_capture",
         "physical_output_capability": False,

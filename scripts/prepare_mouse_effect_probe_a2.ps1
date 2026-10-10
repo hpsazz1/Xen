@@ -660,6 +660,11 @@ Write-NewUtf8Text (Join-Path $stagingDirectory "TASK.md") $taskMarkdown
 $observation = @(
     "# Physical A2 人工观察",
     "",
+    "保留用户原话；下列事实只填写明确陈述，不确定时填写无法确认，不能推定通过。",
+    "左右 witness 填一致/不一致；遮挡填不存在/存在；异常填无异常或急停/有异常/已急停。",
+    "人工结论按分号分开记录可见性与输入，例如看到轻微视角偏移；未移动鼠标/WASD。",
+    "未看到视角偏移、移动了鼠标/WASD及无法确认均不能形成有效校准；每个字段只保留一次。",
+    "",
     "- Run UUID：``$runUuid``",
     "- Run role：``$RunRole``",
     "- 用户原话：",
