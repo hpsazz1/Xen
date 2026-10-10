@@ -1,0 +1,9 @@
+# U-ID1 构建身份补齐与实际依赖核对
+
+基线4c202cc55159765b0bc400590dc9b28234e0eb29，分支fix/benchmark-artifact-identity-20261011。
+
+实际构建xen_mouse_benchmark后，正式Assert-XenLinkedArtifactIdentity仍因XenMouseBenchmark.exe.identity.json不存在而拒绝。该目标未使用运行库部署登记，也未像其他独立CLI显式登记链接后身份。现复用既有xen_record_artifact_identity，不修改schema、源状态检查、哈希或发布权限。
+
+本项验收使用真实干净提交构建的文件与正式验证器，不运行MouseBenchmark。验证产物名称、源码根、完整提交、配置、runtime、大小及SHA；缺失侧车、篡改载荷、错误提交和dirty身份仍须拒绝。实际结果、原始日志与应用/CLI干净Release身份保留在本地docs/evidence/XEN-BENCHMARK-ARTIFACT-IDENTITY-20261011-001。
+
+Worker依赖核对只读当前正式Xen.exe、构建配置、实际编译头文件、静态导入表及授权部署报告和实际文件摘要。共享目录的依赖清单不等于单个EXE的导入闭包；Provider运行时动态加载未执行，不能据文件/导入检查声称已实际加载。不得启动原生UI、设备CLI、采集或游戏输入。

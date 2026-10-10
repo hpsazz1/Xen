@@ -2703,6 +2703,7 @@ endif()
 
 if(WIN32)
     xen_finalize_runtime_deployment()
+    xen_record_artifact_identity(xen_mouse_benchmark)
     xen_record_artifact_identity(xen_mouse_effect_probe_sequence)
     xen_record_artifact_identity(xen_mouse_effect_probe_composite_seal)
 endif()
