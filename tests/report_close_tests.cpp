@@ -7,6 +7,7 @@
 #include "benchmark/benchmark_internal.h"
 #include "debug/debug.h"
 #include "sender/report.h"
+#include "mouse_effect_probe/mouse_effect_probe.h"
 
 #include <algorithm>
 #include <codecvt>
@@ -148,6 +149,22 @@ int main() {
         expect(no_temporary_files(root, "debug-" + std::to_string(failure_at) + "."), "DebugReport cleans owned temporary files");
     }
     for (int failure_at : {0, 1, -1}) {
+        {
+            const auto sequence_path = root / ("sequence-" + std::to_string(failure_at) + ".json");
+            mouse_effect_probe::MouseEffectProbeSequence sequence;
+            std::string sequence_error;
+            expect(mouse_effect_probe::make_sparse_pulse_sequence({2, 3, 2}, sequence, sequence_error), "sequence fixture generated without executor");
+            CloseState sequence_state{failure_at};
+            bool sequence_result;
+            {
+                ScopedCloseError scope(sequence_state);
+                sequence_result = mouse_effect_probe::write_mouse_effect_probe_sequence(sequence_path, sequence, sequence_error);
+            }
+            expect(failure_at == 0 ? sequence_result : (!sequence_result && !sequence_error.empty() && !std::filesystem::exists(sequence_path)),
+                   "Sequence writer close " + std::to_string(failure_at));
+            expect((failure_at == -1 ? sequence_state.write_failures > 0 : sequence_state.calls == 1) && no_temporary_files(root, sequence_path.filename().string()),
+                   "Sequence actual stream result and pending cleanup");
+        }
         const auto path = root / ("sender-" + std::to_string(failure_at) + ".json");
         CloseState state{failure_at}; std::string error; bool result;
         {

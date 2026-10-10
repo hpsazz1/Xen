@@ -2294,7 +2294,16 @@ bool write_mouse_effect_probe_sequence(
         }
         auto document = canonical_payload(sequence);
         document["sequence_sha256"] = sequence.sequence_sha256;
-        const std::string content = document.dump(2) + '\n';
+        std::string content = document.dump(2);
+        // 合法大序列的缩进可能越过 reader 容量；语义 SHA 与空白无关。
+        if (content.size() >= kMaximumSequenceFileBytes) {
+            content = document.dump();
+        }
+        if (content.size() >= kMaximumSequenceFileBytes) {
+            set_error(error, "序列编码超过固定文件容量边界");
+            return false;
+        }
+        content += '\n';
         std::ofstream output(
             temporary_path, std::ios::binary | std::ios::trunc);
         output.write(content.data(), static_cast<std::streamsize>(
@@ -2302,8 +2311,8 @@ bool write_mouse_effect_probe_sequence(
         output.flush();
         const bool written = output.good();
         output.close();
-        if (!written) {
-            set_error(error, "序列临时文件写入失败");
+        if (!written || output.fail()) {
+            set_error(error, "序列临时文件写入或关闭失败");
             std::error_code ignored;
             std::filesystem::remove(temporary_path, ignored);
             temporary_path.clear();

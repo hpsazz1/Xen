@@ -1,0 +1,13 @@
+# D26序列容量与D17-E2关闭检查
+
+基线b0db91604528f6625a2df47e75ed6e61f1d546b4；分支fix/sequence-file-budget-20261011。只调用公共纯数据generator/writer/reader与实际文件流，不构造真实Executor、设备或输入任务。
+
+先测百万稀疏样本，原文件133,889,567字节，仍在128MiB上限内；该结果是健康对照，不能算缺陷复现。随后合法64块百万样本（baseline64/response7810/guard1/blocks64）原文件134,758,735字节，writer返回成功但reader因超出134,217,728字节拒绝，两项断言失败。修复后同一语义文件84,755,452字节，实际reader接受、百万样本数和sequence_sha256不变。
+
+writer保留普通文件缩进；仅当缩进编码加换行越过reader容量时改用紧凑JSON，仍在创建文件前检查紧凑编码加换行不超限。不提高reader容量，不减少样本或修改语义SHA。既有目标拒绝覆盖、1000001样本拒绝、小文件可读格式、精确128MiB有效JSON、128MiB加1拒绝且清空结果均通过。大容量CTest设RUN_SERIAL避免与其它测试竞争峰值内存；不是吞吐或硬件性能基准。
+
+同writer新增D17-E2实际关闭故障：复用既有codecvt::unshift控制，真实ofstream写入/flush成功而close设置failbit，原writer仍发布成功。补查close后的fail状态后不发布正式文件，并清理本次pending；正常/写入失败控制及原报告关闭回归保持。没有替换ofstream或伪造IO返回值。
+
+四CTest通过12.53秒：sequence_file_budget_tests、mouse_effect_probe_tests、mouse_effect_probe_sequence_cli_tests、report_close_tests。前述CLI只生成序列文件，既有executor测试使用FakeMouseController。文档19文件195链接0错误。第一次沙箱内MSVC FileTracker访问失败保留为环境日志，不计运行时红例；随后授权构建正常。
+
+正式应用与序列CLI Release身份、完整SHA、远端与CI见本地docs/evidence/XEN-SEQUENCE-FILE-BUDGET-20261011-001/RESULT.md。夹具保留在日志给出的独立临时目录。没有真实采集、游戏/系统输入、校准输出、UI操作、部署或受限候选入口；Provider/禁输出/武装/保持键/End/UNKNOWN边界不变。
