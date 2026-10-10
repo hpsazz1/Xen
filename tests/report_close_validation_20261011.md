@@ -1,0 +1,11 @@
+# D17 真实报告关闭故障验证
+
+基线0c927aae28827587072abeba5f90aa06c463fc1a，分支fix/report-close-validation-20261011。标准codecvt<char,char,mbstate_t>保持逐字节恒等读写，仅指定第N次unshift返回error。实际MSVC std::ofstream在写入及flush后good、unshift尚未调用，真实close随后置failbit并关闭文件；不替换ofstream、文件系统、序列化器或成功验证器。
+
+原代码六个close-only负例全部错误成功：Debug CSV与JSON分别失败、Sender JSON、Benchmark ready、CSV与JSON保留计数补写。同期五组健康写入控制均通过。Debug和Sender通过实际报告API；BenchmarkFileTestAccess仅调用真实ReadyFileGuard生命周期和真实保留计数补写函数，不创建Runtime，不执行采集或Provider。
+
+修复只要求明确close后再检查流状态，写入/flush错误同样先关闭再清理。Debug额外修复了写入失败时尚持有文件而不能删除临时文件的问题。最终十八组writer场景含五健康、六close-only失败、五写入错误和两个既有目标保护控制，均通过；另有两个底层故障真实性断言。失败不发布新的成功报告，旧Debug配对及原保留计数文件保持，Sender/ready不覆盖外来目标，自有临时文件被清理。
+
+四项相关CTest（report_close_tests、debug_tests、benchmark_tests、sender_tests）通过1.24秒。Sender既有回归只发送合成色块到本机XUDP回环，不是屏幕采集或设备输入。公开文档检查19文件195链接0错误。正式Release与产物/远端SHA核对见本地docs/evidence/XEN-REPORT-CLOSE-VALIDATION-20261011-001/RESULT.md。
+
+最初新增写入错误控制的临时文件断言曾扫描整个测试目录，导致Debug遗留临时文件使后续独立案例清理断言连带失败；已按各案例前缀限定。原六例独立close-only红结果仍有效；连带失败不计作其他writer缺陷。测试locale仅在单线程测试进程作用域内改变并恢复，不加入生产故障开关。该方法覆盖标准关闭错误传播，不宣称磁盘耗尽、断电持久性或所有文件系统故障已验证。

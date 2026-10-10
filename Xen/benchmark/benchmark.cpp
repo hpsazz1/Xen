@@ -429,9 +429,8 @@ public:
                    << ", \"roi_height\": " << geometry.roi_height
                    << "}\n}\n";
             output.flush();
-            const bool write_succeeded = output.good();
             output.close();
-            if (!write_succeeded) {
+            if (!output.good()) {
                 std::error_code ignored;
                 std::filesystem::remove(temporary, ignored);
                 set_error(error, "写入 ready-file 临时文件失败: " + path_);
@@ -517,10 +516,10 @@ bool rewrite_report_samples_dropped(
             }
         }
         output.flush();
-        const bool stream_valid = input.eof() && output.good();
+        const bool input_complete = input.eof();
         input.close();
         output.close();
-        if (!stream_valid || matches != 1) {
+        if (!input_complete || !output.good() || matches != 1) {
             std::error_code ignored;
             std::filesystem::remove(temporary, ignored);
             set_error(error,
@@ -768,6 +767,19 @@ bool start_production_runtime(
 }
 
 } // namespace
+
+bool benchmark::detail::BenchmarkFileTestAccess::ready_lifecycle(
+        const BenchmarkOptions& options, const RuntimeSnapshot& snapshot,
+        const AppConfig& config, std::string& error) noexcept {
+    ReadyFileGuard ready(options.ready_file_path);
+    return ready.publish(snapshot, config, options, error);
+}
+
+bool benchmark::detail::BenchmarkFileTestAccess::rewrite_retention(
+        const std::string& path, ReportFileFormat format,
+        std::uint64_t omitted, std::string& error) noexcept {
+    return rewrite_report_samples_dropped(path, format, omitted, error);
+}
 
 void benchmark::detail::remove_benchmark_outputs(
         const std::string& csv_staging_path,

@@ -939,6 +939,8 @@ bool write_atomically(const std::string& path,
             stream.write(content.data(),
                          static_cast<std::streamsize>(content.size()));
             stream.flush();
+            // flush成功不代表关闭成功；显式关闭也使失败清理不再持有文件。
+            stream.close();
             if (!stream) {
                 std::error_code ignored;
                 std::filesystem::remove(temporary, ignored);

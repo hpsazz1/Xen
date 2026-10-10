@@ -284,6 +284,7 @@ bool write_json(const std::filesystem::path& path,
     }
     output << "  ]\n}\n";
     output.flush();
+    output.close();
     return output.good();
 }
 

@@ -432,6 +432,18 @@ enum class ReportFileFormat {
     JSON,
 };
 
+// 仅访问实际文件写入/生命周期，供故障回归使用；不构造Runtime或启动采集。
+struct BenchmarkFileTestAccess {
+    static bool ready_lifecycle(const BenchmarkOptions& options,
+                                const RuntimeSnapshot& snapshot,
+                                const AppConfig& config,
+                                std::string& error) noexcept;
+    static bool rewrite_retention(const std::string& path,
+                                  ReportFileFormat format,
+                                  std::uint64_t omitted,
+                                  std::string& error) noexcept;
+};
+
 // 主循环和报告回归共用实际磁盘回读，UTF-8 路径在文件系统边界转换。
 bool read_report_samples_dropped(
     const std::string& path,

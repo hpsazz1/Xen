@@ -2445,6 +2445,10 @@ if(BUILD_TESTING)
         xen_deploy_runtime_dlls(benchmark_tests OPENCV ORT NDI)
     endif()
     add_test(NAME benchmark_tests COMMAND benchmark_tests)
+    add_executable(report_close_tests tests/report_close_tests.cpp)
+    target_link_libraries(report_close_tests PRIVATE benchmark sender)
+    xen_deploy_runtime_dlls(report_close_tests OPENCV ORT NDI)
+    add_test(NAME report_close_tests COMMAND report_close_tests)
 
     add_executable(config_tests
         tests/config_tests.cpp)
