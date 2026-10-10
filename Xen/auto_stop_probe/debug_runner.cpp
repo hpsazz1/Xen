@@ -224,6 +224,7 @@ Json run_debug(const DebugRunRequest& request, const DebugRunCallbacks& callback
         if (!resources.mouse || !resources.mouse->output_owner_exclusive()) throw std::runtime_error("需要注入独占设备");
         const auto ready_deadline = Clock::now() + std::chrono::seconds(15);
         std::uint64_t focus_session = 0;
+        std::uint64_t focus_epoch = 0;
         CounterpulseReadinessAccumulator readiness_gate;
         auto next_status = Clock::now();
         progress("READINESS");
@@ -239,7 +240,11 @@ Json run_debug(const DebugRunRequest& request, const DebugRunCallbacks& callback
                 next_status = Clock::now() + std::chrono::milliseconds(250);
             }
             if (readiness["flags"]["cancelled"].get<bool>()) { local_canceled = true; break; }
-            if (readiness["ready"].get<bool>()) { focus_session = focus.session_id; break; }
+            if (readiness["ready"].get<bool>()) {
+                focus_session = focus.session_id;
+                focus_epoch = focus.control_safety_epoch;
+                break;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         if (focus_session == 0 || is_canceled()) {
@@ -263,7 +268,8 @@ Json run_debug(const DebugRunRequest& request, const DebugRunCallbacks& callback
             if (is_canceled()) return "USER_STOP";
             if (!cleanup_finished && training && !training->recording()) return "INPUT_TRAINING_STOPPED";
             const auto focus = resources.focus.snapshot();
-            if (!focus.available || !focus.focused || focus.session_id != focus_session) return "SOURCE_FOCUS";
+            if (!focus.available || !focus.focused || focus.session_id != focus_session ||
+                focus.control_safety_epoch != focus_epoch) return "SOURCE_FOCUS";
             if (!cleanup_finished) {
                 InputSnapshot physical;
                 const bool polled = resources.mouse->poll_input(physical);

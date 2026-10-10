@@ -62,12 +62,13 @@ public:
         if (!started_) { started_ = true; started_ns_ = last_ns_ = now_ns; }
         const bool regressed = now_ns < last_ns_;
         const bool identity_changed = session_ && session_ != focus.session_id;
+        const bool source_epoch_changed = session_ && source_epoch_ != focus.control_safety_epoch;
         const bool sequence_regressed = !identity_changed &&
             ((focus.sequence && focus.sequence < focus_sequence_) || (input.sequence && input.sequence < input_sequence_));
         auto result = evaluate_counterpulse_readiness(focus, input, poll_ok, cancelled || cancelled_);
         cancelled_ = result["flags"]["cancelled"].get<bool>();
         const bool instant = result["instant_ready"].get<bool>();
-        if (!instant || regressed || identity_changed || sequence_regressed) stable_ = false;
+        if (!instant || regressed || identity_changed || source_epoch_changed || sequence_regressed) stable_ = false;
         if (instant && !regressed && !sequence_regressed) {
             if (!stable_) { stable_ = true; stable_since_ns_ = now_ns; }
         }
@@ -81,11 +82,13 @@ public:
         result["flags"]["clock_regression"] = regressed;
         result["flags"]["sequence_regression"] = sequence_regressed;
         result["flags"]["source_session_changed"] = identity_changed;
+        result["flags"]["source_epoch_changed"] = source_epoch_changed;
         result["elapsed_ns"] = now_ns >= started_ns_ ? now_ns - started_ns_ : 0;
         result["continuous_ready_ns"] = continuous;
         result["required_stable_ns"] = required_stable_ns;
         last_ns_ = now_ns;
         session_ = focus.session_id;
+        source_epoch_ = focus.control_safety_epoch;
         focus_sequence_ = focus.sequence;
         input_sequence_ = input.sequence;
         return result;
@@ -93,7 +96,7 @@ public:
 private:
     bool started_ = false, stable_ = false, cancelled_ = false;
     std::int64_t started_ns_ = 0, last_ns_ = 0, stable_since_ns_ = 0;
-    std::uint64_t session_ = 0, focus_sequence_ = 0, input_sequence_ = 0;
+    std::uint64_t session_ = 0, source_epoch_ = 0, focus_sequence_ = 0, input_sequence_ = 0;
 };
 }
 #endif

@@ -1,4 +1,5 @@
 #include "auto_stop_probe/readiness_internal.h"
+#include "source_context/source_context_internal.h"
 #include <iostream>
 #include <stdexcept>
 
@@ -67,9 +68,39 @@ void stability_matrix() {
     input.sequence = 1;
     require(sequence_gate.update(focus, input, true, false, 300000000)["reason"] == "READINESS_SEQUENCE_REGRESSION", "输入序号倒退重置窗口");
 }
+void accepted_source_discontinuity() {
+    using namespace source_context::detail;
+    using namespace std::chrono_literals;
+    for (const bool discontinuity : {false, true}) {
+        Evidence evidence;
+        Message response;
+        response.response = true; response.session = 11; response.process_name = "fixture.exe";
+        const auto start = Clock::time_point{} + 1s;
+        auto accept = [&](Focus focus, int milliseconds, std::uint64_t sequence) {
+            response.focus = focus; response.sequence = sequence; ++response.nonce[0];
+            const auto now = start + std::chrono::milliseconds(milliseconds);
+            evidence.begin(response.nonce, now);
+            require(evidence.accept(response, "fixture.exe", now, 1000), "真实Evidence接受合成事实");
+            return evidence.snapshot(now);
+        };
+        const auto initial = accept(Focus::Foreground, 0, 1);
+        auto input = input_ready();
+        CounterpulseReadinessAccumulator gate;
+        gate.update(initial, input, true, false, 0);
+        if (discontinuity) accept(Focus::Background, 200, 2);
+        const auto recovered = accept(Focus::Foreground, 299, 17);
+        require(discontinuity ? recovered.control_safety_epoch > initial.control_safety_epoch :
+            recovered.control_safety_epoch == initial.control_safety_epoch, "健康跳号不增epoch，实际断点持久增加");
+        const auto result = gate.update(recovered, input, true, false, 300000000);
+        std::cout << "readiness discontinuity=" << discontinuity << " ready=" << result["ready"] << '\n';
+        require(result["ready"].get<bool>() == !discontinuity, "300ms就绪窗口不得跨已接受的来源断点");
+        if (discontinuity)
+            require(gate.update(recovered, input, true, false, 600000000)["ready"], "新epoch重新累计300ms后允许就绪");
+    }
+}
 }
 int main() {
-    try { gate_matrix(); stability_matrix(); }
+    try { gate_matrix(); stability_matrix(); accepted_source_discontinuity(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     std::cout << "就绪纯状态专项通过：首包、焦点、全松、取消、连续许可及诊断白名单\n";
 }
