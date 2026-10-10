@@ -2437,6 +2437,7 @@ if(BUILD_TESTING)
     add_executable(session_archive_tests tests/session_archive_tests.cpp)
     target_link_libraries(session_archive_tests PRIVATE xen_debug log)
     add_test(NAME session_archive_tests COMMAND session_archive_tests)
+    add_test(NAME session_archive_pending_failure_tests COMMAND session_archive_tests --pending-failure-only)
 
     add_executable(benchmark_tests
         tests/benchmark_tests.cpp)

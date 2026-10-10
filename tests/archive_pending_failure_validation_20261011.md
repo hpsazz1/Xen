@@ -1,0 +1,11 @@
+# D20待持久化故障快照
+
+基线2bbad9cb36f319f4985e709f0bc5de5735c7f608，分支fix/archive-pending-failure-20261011。回归直接使用生产SessionArchive及既有before_flush暂停点，不替换队列、worker、DebugReport或文件发布器。唯一临时目录保留原始报告，无Runtime实例、真实采集、设备或系统输入。
+
+原实现八例全部失败：先提交空FAILED及相同重复FAILED，再提交RUNNING、STOPPED、错误变化FAILED、output_armed字段变化FAILED。初始一条合成样本使worker停在实际flush前，保证排队窗口；不插入marker的四例覆盖队列合并，插入marker的四例阻止合并、覆盖worker已接收但未刷新的latest更新。前两种转移原丢失全部故障，后两种只留下最后一个故障。
+
+修复集中复用原八字段故障比较；提交端阻止覆盖已有FAILED边界的合并，后台在修改旧故障的时间、事件和latest之前刷盘。未改变健康合并、公开API或队列容量。不同故障可能产生更多段，这是保留状态证据所需，未宣称吞吐改善。
+
+最终八例均保留预期故障和顺序，重复同一故障不多写；报告字段、零故障样本、总样本1、无丢批与closed/complete清单均验证。四项CTest（session_archive_pending_failure_tests、session_archive_tests、debug_tests、report_close_tests）通过2.73秒，包括既有队列容量、采样/事件守恒、中文路径和磁盘错误回归。文档19文件195链接0错误。正式Release、完整提交、产物身份与远端/CI见本地docs/evidence/XEN-ARCHIVE-PENDING-FAILURE-20261011-001/RESULT.md。
+
+output_armed变化仅是合成快照字段，无实际武装或输入动作。没有更改Provider、禁输出、保持键/End、UNKNOWN和审核边界，也没有操作平台拒绝的候选消费/保存/采用入口。进程崩溃或断电前尚未交给writer的内存状态不在此批持久性承诺内。

@@ -21,6 +21,13 @@ using Json = nlohmann::json;
 using Clock = std::chrono::steady_clock;
 std::int64_t steady_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count(); }
 std::int64_t system_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count(); }
+bool same_failure_snapshot(const RuntimeSnapshot& left, const RuntimeSnapshot& right) noexcept {
+    return left.state == right.state && left.capture_status == right.capture_status &&
+        left.detection_status == right.detection_status && left.last_error == right.last_error &&
+        left.active_model_path == right.active_model_path &&
+        left.detector_generation == right.detector_generation &&
+        left.output_armed == right.output_armed && left.emergency_stopped == right.emergency_stopped;
+}
 void publish(const std::filesystem::path& path, const Json& data) {
     const auto temp = std::filesystem::path(path.string() + ".tmp");
     std::ofstream output(temp, std::ios::binary | std::ios::trunc);
@@ -173,6 +180,11 @@ struct SessionArchive::Impl {
                     batch = std::move(queue.front()); queue.pop_front(); queued_samples -= batch.samples.size();
                 }
                 if (batch.marker) { marker(batch); continue; }
+                // 先保留待写故障，再接收新批次的时间、事件与状态，避免
+                // latest覆盖FAILED或将下一状态的事件归入旧故障段。
+                if (failed_snapshot_pending && !same_failure_snapshot(latest, batch.snapshot)) {
+                    flush();
+                }
                 ended = batch.steady; ended_system = batch.system;
                 for (const auto& event : batch.snapshot.trigger_execution_log.events) {
                     if (event.sequence <= trigger_sequence) continue;
@@ -184,14 +196,7 @@ struct SessionArchive::Impl {
                 batch.snapshot.trigger_execution_log.events.clear();
                 // 重复空FAILED轮询不重复写段；真正的终态变化仍须保留。
                 failed_snapshot_pending = batch.snapshot.state == RuntimeState::FAILED &&
-                    (failed_snapshot_pending || latest.state != batch.snapshot.state ||
-                     latest.capture_status != batch.snapshot.capture_status ||
-                     latest.detection_status != batch.snapshot.detection_status ||
-                     latest.last_error != batch.snapshot.last_error ||
-                     latest.active_model_path != batch.snapshot.active_model_path ||
-                     latest.detector_generation != batch.snapshot.detector_generation ||
-                     latest.output_armed != batch.snapshot.output_armed ||
-                     latest.emergency_stopped != batch.snapshot.emergency_stopped);
+                    (failed_snapshot_pending || !same_failure_snapshot(latest, batch.snapshot));
                 latest = std::move(batch.snapshot);
                 for (const auto& sample : batch.samples) {
                     pending.push_back(sample);
@@ -257,6 +262,8 @@ bool SessionArchive::submit(std::span<const RuntimePipelineSample> samples, cons
         }
         const std::size_t merge_limit=std::min<std::size_t>(1200,impl_->config.segment_samples);
         const bool merge=!impl_->queue.empty() && !impl_->queue.back().marker &&
+            (impl_->queue.back().snapshot.state != RuntimeState::FAILED ||
+             same_failure_snapshot(impl_->queue.back().snapshot, snapshot)) &&
             impl_->queue.back().samples.size()+samples.size()<=merge_limit &&
             impl_->queue.back().snapshot.trigger_execution_log.events.size()+snapshot.trigger_execution_log.events.size()<=2048;
         if (merge) {

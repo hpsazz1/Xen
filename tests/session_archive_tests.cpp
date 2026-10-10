@@ -355,6 +355,79 @@ void changed_failed_snapshot_test(const std::filesystem::path& root) {
               read(std::filesystem::path(config.directory) / "segment-2.json")["final_snapshot"]["last_error"] == snapshot.last_error,
           "故障终态相关字段变化仍须发布新证据");
 }
+void pending_failure_transition_test(const std::filesystem::path& root,
+                                     bool separate_batches, int transition) {
+    const std::string name = std::string(separate_batches ? "worker-" : "queue-") + std::to_string(transition);
+    SessionArchiveConfig config;
+    config.directory = (root / name).string();
+    config.segment_samples = 1;
+    config.segment_interval = std::chrono::seconds(60);
+    SessionArchive archive;
+    std::string error;
+    check(archive.start(config, error), "D20 starts production archive");
+    std::promise<void> entered, release;
+    auto ready = entered.get_future();
+    auto gate = release.get_future().share();
+    std::atomic<bool> first{true};
+    xen::debug::detail::SessionArchiveTestAccess::before_flush(archive, [&] {
+        if (first.exchange(false)) { entered.set_value(); gate.wait(); }
+    });
+    RuntimeSnapshot initial;
+    initial.state = RuntimeState::RUNNING;
+    RuntimePipelineSample sample;
+    sample.sequence = 1;
+    send(archive, std::span(&sample, 1), initial);
+    if (ready.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+        release.set_value(); archive.stop();
+        check(false, "D20 initial actual flush must reach fixture gate");
+    }
+    RuntimeSnapshot failed = initial;
+    failed.state = RuntimeState::FAILED;
+    failed.last_error = "first failure";
+    RuntimeSnapshot next = initial;
+    if (transition == 1) next.state = RuntimeState::STOPPED;
+    if (transition >= 2) {
+        next = failed;
+        if (transition == 2) next.last_error = "second failure";
+        else next.output_armed = true; // 只序列化快照字段，不创建Runtime或设备。
+    }
+    try {
+        send(archive, {}, failed);
+        if (separate_batches) check(archive.mark("separate-1"), "D20 separates queued snapshots");
+        send(archive, {}, failed); // 相同FAILED轮询不得生成重复段。
+        if (separate_batches) check(archive.mark("separate-2"), "D20 separates repeated snapshot");
+        send(archive, {}, next);
+    } catch (...) {
+        release.set_value(); archive.stop(); throw;
+    }
+    release.set_value();
+    archive.stop();
+    const auto status = archive.status();
+    std::vector<Json> faults;
+    for (std::size_t index = 1; index <= status.written_segments; ++index) {
+        const auto base = std::filesystem::path(config.directory) / ("segment-" + std::to_string(index));
+        auto snapshot = read(base.string() + ".json")["final_snapshot"];
+        if (snapshot["runtime_state"] == "FAILED") {
+            check(read(base.string() + ".meta.json")["sample_count"] == 0,
+                  "D20 failure-only evidence must not invent samples");
+            faults.push_back(std::move(snapshot));
+        }
+    }
+    std::cout << "D20 " << name << " persisted failures=" << faults.size()
+              << " segments=" << status.written_segments << '\n';
+    const auto expected_faults = transition >= 2 ? 2U : 1U;
+    check(faults.size() == expected_faults && faults.front()["last_error"] == "first failure",
+          "D20 pending first failure must survive a later snapshot");
+    if (transition == 2) check(faults.back()["last_error"] == "second failure", "D20 changed failure must persist");
+    if (transition == 3) check(faults.front()["output_armed"] == false && faults.back()["output_armed"] == true,
+                               "D20 changed failure output state must persist independently");
+    const auto manifest = read(std::filesystem::path(config.directory) / "manifest.json");
+    check(status.written_samples == 1 && status.accepted_samples == 1 && status.dropped_samples == 0 &&
+          status.dropped_batches == 0 && status.written_segments == expected_faults + 1 &&
+          manifest["closed"] == true && manifest["complete"] == true,
+          "D20 preserves sample accounting, duplicate suppression and completed drain");
+}
+
 int main(int argc, char** argv) {
     try {
         if (argc==3 && std::string(argv[1])=="--benchmark") return benchmark(argv[2]);
@@ -362,6 +435,17 @@ int main(int argc, char** argv) {
         if (argc==3 && std::string(argv[1])=="--queue-pressure") return queue_pressure(argv[2]);
         const auto root=std::filesystem::temp_directory_path()/
             ("xen-session-archive-test-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        if (argc == 2 && std::string(argv[1]) == "--pending-failure-only") {
+            int failures = 0;
+            for (const bool separate : {false, true}) {
+                for (int transition = 0; transition < 4; ++transition) {
+                    try { pending_failure_transition_test(root, separate, transition); }
+                    catch (const std::exception& ex) { ++failures; std::cerr << ex.what() << '\n'; }
+                }
+            }
+            std::cout << "D20 fixture root: " << root << '\n';
+            return failures == 0 ? 0 : 1;
+        }
         failed_snapshot_only_test(root);
         changed_failed_snapshot_test(root);
         SessionArchiveConfig config; config.directory=(root/"first").string();
