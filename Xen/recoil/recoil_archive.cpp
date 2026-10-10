@@ -154,6 +154,7 @@ public:
         try {
             std::optional<std::uint64_t> final_sequence;
             for(;;) {
+                const bool boundary_known_before_read = final_sequence.has_value();
                 const auto slice=reader(cursor,256);
                 {
                     // request_stop 在同一锁内取水位并发布停止；不能越过两者之间的窗口。
@@ -166,9 +167,15 @@ public:
                 for(const auto& event:slice.events)
                     if (!final_sequence || event.sequence <= *final_sequence) consume(event);
                 {std::lock_guard lock(mutex);state.last_sequence=cursor;}
-                if(final_sequence&&(cursor>=*final_sequence||cursor==before)) {
-                    if(cursor<*final_sequence)fail("停止归档时事件尾部无法读取");
-                    break;
+                if(final_sequence) {
+                    if(cursor>=*final_sequence)break;
+                    // 首次看见停止水位时，slice 可能早于关闭前的最后事件。
+                    // 保留已读事件并重新读取；确认水位后的无推进才是真实缺口。
+                    if(cursor==before && boundary_known_before_read) {
+                        fail("停止归档时事件尾部无法读取");
+                        break;
+                    }
+                    continue;
                 }
                 if(cursor<slice.latest_sequence&&cursor!=before)continue;
                 std::unique_lock lock(mutex);wake.wait_for(lock,std::chrono::milliseconds(20),[this]{return stopping.load();});

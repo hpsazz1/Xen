@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <mutex>
 #include <stdexcept>
@@ -58,6 +59,76 @@ struct Fixture {
         });
     }
 };
+
+void check_stop_after_stale_empty_slice(bool include_end, bool unreadable_tail = false) {
+    auto events = batch(1, 1, 2);
+    const auto next = batch(2, 5, 1);
+    events.insert(events.end(), next.begin(), next.end());
+    const std::uint64_t stop_after = include_end ? 4 : 3;
+    std::promise<void> empty_read;
+    auto empty_ready = empty_read.get_future();
+    std::promise<void> stop_published;
+    auto stop_ready = stop_published.get_future();
+    std::atomic<unsigned> reads{0};
+    // 归档先析构并 join，Reader 引用的屏障和事件才能销毁。
+    Fixture f;
+    check(f.archive.start(f.config(), [&](std::uint64_t after, std::size_t maximum) {
+        RecoilEventSlice slice;
+        slice.oldest_available_sequence = 1;
+        if (maximum == 0) {
+            slice.latest_sequence = stop_after;
+            return slice;
+        }
+        const auto read = ++reads;
+        check(read <= 3, "停止水位后的真实空洞必须有界失败，不能无限重试");
+        if (read == 2) {
+            // 先冻结 N=2 的空切片，再让主线程发布 N+1 的停止水位。
+            // 返回时的切片已过时；不用 sleep 或线程调度概率制造竞态。
+            slice.latest_sequence = 2;
+            empty_read.set_value();
+            check(stop_ready.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+                "等待停止水位发布超时");
+            return slice;
+        }
+        slice.latest_sequence = read == 1 ? 2 : events.back().sequence;
+        if (unreadable_tail && read > 2) return slice;
+        for (const auto& event : events)
+            if (event.sequence > after && event.sequence <= slice.latest_sequence && slice.events.size() < maximum)
+                slice.events.push_back(event);
+        return slice;
+    }, [&](const auto&, const std::string& value, std::string&) {
+        f.written.push_back(Json::parse(value));
+        return true;
+    }), "旧空切片关闭回归启动");
+    const bool reached_empty = empty_ready.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    f.archive.request_stop();
+    stop_published.set_value();
+    f.archive.stop();
+    check(reached_empty, "归档线程必须先取得旧空切片");
+    const auto status = f.archive.snapshot();
+    if (unreadable_tail) {
+        check(reads == 3 && !status.available && status.last_sequence == 2 && f.written.empty() &&
+            status.error == "停止归档时事件尾部无法读取",
+            "取得停止水位后的真实不可读尾部仍须报错，不能伪造完整归档");
+        return;
+    }
+    check(status.available && status.error.empty() && status.last_sequence == stop_after &&
+        status.files_written == 1 && f.written.size() == 1,
+        "旧空切片不能令停止前尾部误报丢失或跳过当前批次");
+    const auto& execution = f.written.front()["recoil"]["execution"];
+    check(execution["records"].size() == 2 && execution["batch"]["firing_id"] == 1,
+        "关闭前的最后命令必须保留，关闭水位后的新批次不能追补");
+    if (include_end) {
+        check(status.complete_batches == 1 && execution["batch"]["end_sequence"] == 4 &&
+            execution["batch"]["coverage_complete"] == true,
+            "关闭前已产生的 END 必须形成完整批次");
+    } else {
+        check(status.incomplete_batches == 1 && execution["batch"]["end_sequence"].is_null() &&
+            execution["batch"]["coverage_complete"] == false &&
+            execution["batch"]["incomplete_reason"] == "RECORDING_STOPPED_WITHOUT_END",
+            "关闭中途保留未完整批次，不能补入水位后的 END");
+    }
+}
 }
 int main(int argc,char** argv) {
     try {
@@ -170,6 +241,9 @@ int main(int argc,char** argv) {
             check(f.archive.snapshot().last_sequence<events.size() && f.archive.snapshot().incomplete_batches==1,
                 "停止固定高水位，不追赶持续增长的生产者，未结束批次保持不完整");
         }
+        check_stop_after_stale_empty_slice(false);
+        check_stop_after_stale_empty_slice(true);
+        check_stop_after_stale_empty_slice(false, true);
         std::cout<<"recoil_archive_tests passed\n";return 0;
     }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

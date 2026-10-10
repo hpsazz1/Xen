@@ -90,7 +90,7 @@ KMBOX，Runtime停止时也可使用，不会启动检测或武装输出。回�
 自动移动、反向轻点和开枪测试使用正式 `auto_stop_counterpulse` 目标及
 [`scripts/invoke_auto_stop_counterpulse.ps1`](../../scripts/invoke_auto_stop_counterpulse.ps1)。
 Prepare 直接绑定已构建程序和配置路径，不复制程序、模型或 DLL；加 `-Repeatable` 后，日常只编辑
-同目录 `plan.json` 并由用户重复启动 TASK.md 中的 Launch 命令，无需重新打包。
+同目录 `plan.json`，再按用户明确授权手动或自动执行 TASK.md 中的 Launch 命令，无需重新打包。
 Prepare 同时生成 `start-test.bat`、`edit-config.bat` 和 `PARAMETERS.md`；参数文件带中文说明，双击编辑、保存后双击启动即可。
 程序或脚本更新后重新 Prepare 绑定身份；旧 Run 不能直接用新入口 Launch。
 
@@ -187,9 +187,10 @@ HUD急停面板显示最近偏差、平均快慢、优秀率、波动、最快/�
 参考来源、MIT 许可、参数和完整用法见 [独立工具说明](../../assets/reference_assessment/GUIDE.md)。
 
 ```powershell
-cmake --build build/reference --config Release --target xen_reference_compare reference_assessment_tests
-ctest --test-dir build/reference -C Release -R '^(reference_assessment_tests|reference_compare_cli_tests)$' --output-on-failure
-.\build\reference\Release\XenReferenceCompare.exe --events .\assets\reference_assessment\example.json --output .\cache\reference-report-1
+$buildDirectory = "build/nvidia" # 与已配置后端一致，也可为 build/directml 或 build/openvino
+cmake --build $buildDirectory --config Release --target xen_reference_compare reference_assessment_tests
+ctest --test-dir $buildDirectory -C Release -R '^(reference_assessment_tests|reference_compare_cli_tests)$' --output-on-failure
+& "$buildDirectory/Release/XenReferenceCompare.exe" --events .\assets\reference_assessment\example.json --output .\cache\reference-report-1
 ```
 
 构建目录须先按项目依赖完成 CMake 配置。独立打包使用 `scripts/package_reference_compare.ps1`，只创建新目录，保留原发布入口。
@@ -227,8 +228,8 @@ W/A/S/D 对应位值 1/2/4/8。`--plan <计划> --output <新报告> --dry-run` 
 
 长稳使用 `invoke_hud_stop_acceptance.ps1 -Profile Soak` 的 Prepare、Validate、Launch、Recover
 四阶段入口。Prepare 冻结包身份和连续 Runtime 目标时长，默认60分钟；如需不同目标，应在 Prepare
-时指定 `-RuntimeDurationSeconds`，后续阶段不能改写计划。由用户在前台执行该 Run 的 `TASK.md`
-中唯一 Launch 命令，保留 `-AllowPhysicalOutput` 和专用确认串。看到资源采集就绪后再启动 Runtime，
+时指定 `-RuntimeDurationSeconds`，后续阶段不能改写计划。按用户明确授权手动或自动执行该 Run 的 `TASK.md`
+中唯一 Launch 命令，保留 `-AllowPhysicalOutput` 和专用确认串。确认资源采集就绪后再启动 Runtime，
 完成连续运行后先停止 Runtime，再退出 Worker 界面；计时提示只按资源就绪时间计算。
 Recover 收集证据，连续 Runtime 时长、全程统计、资源趋势与人工体验仍需分别复核，不自动判定长稳通过。
 

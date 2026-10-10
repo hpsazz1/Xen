@@ -1672,7 +1672,7 @@ struct Overlay::Impl {
                 {RuntimeIntentType::EMERGENCY_STOP, true});
         }
         show_help_tooltip(
-            "立即锁存物理输出急停并解除武装；不会停止截图和检测，释放急停键后仍需在输入页手动复位。");
+            "立即锁存物理输出急停并解除武装；不会停止截图和检测，释放急停键后仍需在设置页手动复位。");
         pop_colored_button();
 
         ImGui::EndChild();

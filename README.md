@@ -227,15 +227,16 @@ flowchart LR
 ```powershell
 $env:ONNXRUNTIME_ROOT = "C:\path\to\onnxruntime"
 $env:OpenCV_DIR = "C:\path\to\opencv\build\x64\vc16\lib"
+$buildDirectory = "build/nvidia" # 按所选 ORT 后端改为 build/directml 或 build/openvino
 
-cmake -S . -B build -G "Visual Studio 18 2026" -A x64 `
+cmake -S . -B $buildDirectory -G "Visual Studio 18 2026" -A x64 `
   -DOpenCV_DIR="$env:OpenCV_DIR" `
   -DBUILD_TESTING=ON
 
-cmake --build build --config Release --target xen_app --parallel
+cmake --build $buildDirectory --config Release --target xen_app --parallel
 ```
 
-输出为 `build/Release/Xen.exe`。CUDA、TensorRT、DirectML、OpenVINO 和 NDI 需使用匹配 SDK；各推理发行包使用独立构建目录。完整构建、运行库核验与发布参见[开发指南](assets/guide/development.md)。
+输出为所选构建目录下的 `Release/Xen.exe`。CUDA、TensorRT、DirectML、OpenVINO 和 NDI 需使用匹配 SDK；各推理发行包使用独立构建目录。完整构建、运行库核验与发布参见[开发指南](assets/guide/development.md)。
 
 ## 仓库结构
 

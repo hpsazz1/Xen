@@ -148,7 +148,8 @@ X轴先追上当前目标的横向安全内窗（沿用身体瞄点范围比例�
 这部分自动控制是Xen适配，原HUD只有输入评估；模型完成不代表游戏实际停稳。
 来源与适配区别见 [实机实验说明](../../assets/reference_assessment/HUD-EXPERIMENT.md)。
 发布脚本 `scripts/publish_hud_experiment.ps1` 创建独立目录并保留当前配置和曲线；
-`scripts/invoke_hud_stop_acceptance.ps1 -Mode Prepare` 生成前台任务，Launch必须用户亲自执行并提供物理确认参数。
+`scripts/invoke_hud_stop_acceptance.ps1 -Mode Prepare` 生成独立任务；按用户明确授权手动或自动执行该 Run 的 Launch，
+保留入口要求的物理确认参数，并按[安全与操作入口](#安全与操作入口)记录有界任务的停止与释放结果。
 
 ## 自动急停
 

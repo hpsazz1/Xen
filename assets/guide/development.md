@@ -173,8 +173,9 @@ mapping age、sample count 和 source session；映射未就绪、过期或回�
 观测能力，因此不能由 API 返回或 ACK 推导真实鼠标已经移动。Mouse Benchmark schema 2 另行绑定
 run UUID、completion semantic 与 peer/test boundary；正式脚本只在完整聚合键一致时复制 timing，
 loopback/in-memory fake 不与真实设备报告合并，并始终显式记录 `physical_effect_observed=false`。
-Runtime 报告 schema 18 将原始 source sequence/timecode/timestamp、映射后的 source、capture、
+Runtime 报告将原始 source sequence/timecode/timestamp、映射后的 source、capture、
 Aim observation 和 control 时刻及各自有效性绑定到实际处理帧；缺失值保持无效，不用本地序号补齐。
+当前 schema 与字段定义以 [Debug 报告实现](../../Xen/debug/debug.cpp) 为准，分析旧报告时按其实际 schema 解释。
 报告的原始逐帧表和原有时延摘要仍是有界尾窗。JSON 的 `session_aggregate` 另保存全部已摄入样本的
 成功/失败计数，以及处理、采集到后端完成、控制到后端完成三项时延；成功口径包含实际发送时的鼠标
 后端状态。`minute_trend` 保存最多1440个分钟摘要，窗口省略、无效时间和采集异常分别标记。
@@ -314,17 +315,25 @@ $run = 'C:\XenLab\runs\my-debug-run'
 
 ## 无设备界面预览
 
-仅检查界面时可构建 `auxiliary_ui_preview` 目标，运行
-`build/Release/auxiliary_ui_preview.exe`（可加 `--minimum`、`--dark`）。该入口只创建窗口，
-不创建 Runtime 或设备，保存仅保留在内存中。
+预览沿用已完成 CMake 配置的后端构建目录。仅检查辅助界面时构建并运行 `auxiliary_ui_preview`：
+
+```powershell
+$buildDirectory = "build/nvidia" # 与已配置后端一致，也可为 build/directml 或 build/openvino
+cmake --build $buildDirectory --config Release --target auxiliary_ui_preview --parallel
+& "$buildDirectory/Release/auxiliary_ui_preview.exe"
+```
+
+可加 `--minimum`、`--dark`。该入口只创建窗口，不创建 Runtime 或设备，保存仅保留在内存中。
 
 模型工作区完整截图使用目标 `model_workspace_ui_preview`：
 
 ```powershell
-.\build\Release\model_workspace_ui_preview.exe <新截图目录>
-.\build\Release\model_workspace_ui_preview.exe <新截图目录> --minimum --dark
+$buildDirectory = "build/nvidia" # 与已配置后端一致，也可为 build/directml 或 build/openvino
+cmake --build $buildDirectory --config Release --target model_workspace_ui_preview --parallel
+& "$buildDirectory/Release/model_workspace_ui_preview.exe" "C:\path\to\new-preview"
+& "$buildDirectory/Release/model_workspace_ui_preview.exe" "C:\path\to\new-dark-preview" --minimum --dark
 ```
 
-该程序以合成快照渲染生产Overlay，不构造Runtime或输入设备，不执行界面业务动作；截图是界面预览，不是实战证据。
+将示例截图路径替换为本次新目录。该程序以合成快照渲染生产Overlay，不构造Runtime或输入设备，不执行界面业务动作；截图是界面预览，不是实战证据。
 
 技术栈：C++20、CMake、ONNX Runtime、OpenCV、spdlog、SimpleIni、Dear ImGui、nlohmann/json。
