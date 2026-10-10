@@ -18,6 +18,7 @@ if ($packet.PSObject.Properties.Name -contains 'model_data_review_only') {
     $reviewOnly = $packet.model_data_review_only
 }
 $recoilTools = @("runtimes/$($packet.runtime)/xen_recoil_calibration.exe", "runtimes/$($packet.runtime)/xen_recoil_tuner.exe")
+$captureTools = @('tools/source/XenSender.exe', 'tools/source/XenCaptureEvidence.exe', 'tools/source/XenAutoStopCapture.exe')
 $allowed = @($workerRelative, 'tools/acceptance/WORKER-UPDATE.json',
     'tools/model-data/model_data_pipeline.py', 'tools/model-data/model_data_review.html',
     'tools/acceptance/PACKAGE-NOTES.md', 'tools/acceptance/MANUAL-ACCEPTANCE.md',
@@ -25,7 +26,7 @@ $allowed = @($workerRelative, 'tools/acceptance/WORKER-UPDATE.json',
     'tools/acceptance/measure_process_resources.ps1', 'tools/acceptance/soak_acceptance_support.ps1',
     'tools/source/xen_source_context.exe', 'tools/source/start_source_context_session.ps1', 'XenLauncher.exe', 'manifest.json',
     'tools/recoil/import_recoil_profiles.py', 'tools/recoil/migrate_legacy_recoil_profiles.py',
-    'tools/recoil/invoke_recoil_legacy_acceptance.ps1') + $recoilTools
+    'tools/recoil/invoke_recoil_legacy_acceptance.ps1') + $recoilTools + $captureTools
 if ($reviewOnly) { $allowed = @('tools/model-data/model_data_pipeline.py', 'tools/model-data/model_data_review.html', 'manifest.json') }
 function Resolve-DeltaFile([string]$Base, [string]$Relative) {
     if ($Relative -cnotin $allowed -and $Relative -cnotin @('config.ini', 'cache/model-workspace/settings.json')) {
@@ -45,8 +46,8 @@ function Assert-WorkerStopped {
     if (@($packet.files | Where-Object { $_.path -ceq 'tools/source/xen_source_context.exe' }).Count -gt 0) {
         $names += 'xen_source_context'
     }
-    $selectedRecoilTools = @($recoilTools | Where-Object { $relative = $_; @($packet.files | Where-Object { $_.path -ceq $relative }).Count -gt 0 })
-    foreach ($relative in $selectedRecoilTools) { $names += [IO.Path]::GetFileNameWithoutExtension($relative) }
+    $selectedTools = @(($recoilTools + $captureTools) | Where-Object { $relative = $_; @($packet.files | Where-Object { $_.path -ceq $relative }).Count -gt 0 })
+    foreach ($relative in $selectedTools) { $names += [IO.Path]::GetFileNameWithoutExtension($relative) }
     foreach ($process in @(Get-Process -Name $names -ErrorAction SilentlyContinue)) {
         $processPath = $process.Path
         if (-not $processPath -or $processPath.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) {
@@ -63,7 +64,7 @@ function Assert-WorkerStopped {
         $handle = [IO.File]::Open($tool, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
         $handle.Dispose()
     }
-    foreach ($relative in $selectedRecoilTools) {
+    foreach ($relative in $selectedTools) {
         $tool = Resolve-DeltaFile $root $relative
         $handle = [IO.File]::Open($tool, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
         $handle.Dispose()

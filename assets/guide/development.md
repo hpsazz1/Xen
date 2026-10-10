@@ -159,6 +159,11 @@ Xen-unified-<版本>/
 
 配置校验变更的差量发布应使用 `publish_worker_delta.ps1 -IncludeLauncher`，同时更新主程序与启动器，避免启动器保留旧配置规则。
 
+Capture 共享实现变化且日常包包含采集工具时，使用 `publish_worker_delta.ps1 -IncludeCaptureTools`，
+从同一 Release 构建同步 `XenSender.exe`、`XenCaptureEvidence.exe`、`XenAutoStopCapture.exe`。
+该开关仅更新基包已有的三个固定工具，检查工具未运行、文件可独占打开，并沿用变化文件校验、
+备份恢复和最后更新 manifest 的顺序；用户配置保持原字节。它不能与 `-ModelDataReviewOnly` 混用。
+
 ## 报告语义与时间边界
 
 Runtime 启动阶段的采集故障保留 FAILED 和原始错误，不会被启动末尾的 RUNNING 覆盖；

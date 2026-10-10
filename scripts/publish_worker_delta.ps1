@@ -10,6 +10,7 @@
     [string]$ManualAcceptancePath = '',
     [switch]$IncludeLauncher,
     [switch]$IncludeRecoilTools,
+    [switch]$IncludeCaptureTools,
     [switch]$IncludeRecoilMigrationScripts,
     [switch]$IncludeSourceSessionScript,
     [switch]$IncludeHudAcceptanceScript,
@@ -24,6 +25,7 @@
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if ($ModelDataReviewOnly -and $IncludeCaptureTools) { throw '仅审核资源模式不能更新采集工具。' }
 if ($ModelDataReviewOnly) { $IncludeModelDataReview = $true }
 if ($IncludeSoakAcceptanceTools) {
     $IncludeHudAcceptanceScript = $true
@@ -89,6 +91,7 @@ try {
         -RepositoryRoot $RepositoryRoot -GitExecutable $GitExecutable -ChangesOnly `
         -PackageNotesPath $PackageNotesPath -ManualAcceptancePath $ManualAcceptancePath `
         -SourceContextExecutable $SourceContextExecutable -IncludeLauncher:$IncludeLauncher -IncludeRecoilTools:$IncludeRecoilTools `
+        -IncludeCaptureTools:$IncludeCaptureTools `
         -IncludeRecoilMigrationScripts:$IncludeRecoilMigrationScripts `
         -IncludeSourceSessionScript:$IncludeSourceSessionScript `
         -IncludeHudAcceptanceScript:$IncludeHudAcceptanceScript `
@@ -103,6 +106,9 @@ try {
     if ($IncludeLauncher) { $relativeFiles += 'XenLauncher.exe' }
     if ($IncludeRecoilTools) {
         $relativeFiles += @("runtimes/$Runtime/xen_recoil_calibration.exe", "runtimes/$Runtime/xen_recoil_tuner.exe")
+    }
+    if ($IncludeCaptureTools) {
+        $relativeFiles += @('tools/source/XenSender.exe', 'tools/source/XenCaptureEvidence.exe', 'tools/source/XenAutoStopCapture.exe')
     }
     if ($IncludeRecoilMigrationScripts) {
         $relativeFiles += @('tools/recoil/import_recoil_profiles.py', 'tools/recoil/migrate_legacy_recoil_profiles.py',
