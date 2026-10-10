@@ -734,10 +734,19 @@ FetchContent_MakeAvailable(nlohmann_json)
 
 # Dear ImGui 上游不提供正式 CMake target，由 Xen 明确列出 Win32/D3D11 后端
 # 与 std::string 适配源码，避免隐式编译无关示例和平台后端。
+set(XEN_IMGUI_VERSION "1.92.9b")
 FetchContent_Declare(imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG        v1.92.9)
+    GIT_TAG        v${XEN_IMGUI_VERSION})
 FetchContent_MakeAvailable(imgui)
+# 本地 SOURCE_DIR 覆盖不会跟随 GIT_TAG 更新，必须核对实际参与编译的头文件。
+file(STRINGS "${imgui_SOURCE_DIR}/imgui.h" XEN_IMGUI_VERSION_LINE
+    REGEX "^#define IMGUI_VERSION[ \t]+\"")
+string(REGEX REPLACE "^[^\"]*\"([^\"]+)\".*$" "\\1"
+    XEN_CONFIGURED_IMGUI_VERSION "${XEN_IMGUI_VERSION_LINE}")
+if(NOT XEN_CONFIGURED_IMGUI_VERSION STREQUAL XEN_IMGUI_VERSION)
+    message(FATAL_ERROR "ImGui source version ${XEN_CONFIGURED_IMGUI_VERSION} does not match required ${XEN_IMGUI_VERSION}; update FETCHCONTENT_SOURCE_DIR_IMGUI")
+endif()
 
 add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -1769,6 +1778,9 @@ if(BUILD_TESTING)
         XEN_TRIGGER_WORKER_SOURCE="${PROJECT_SOURCE_DIR}/Xen/trigger/trigger_worker.cpp")
     add_test(NAME trigger_observation_clock_tests COMMAND trigger_observation_clock_tests)
     set_tests_properties(trigger_observation_clock_tests PROPERTIES TIMEOUT 15)
+    add_executable(imgui_hotfix_tests tests/imgui_hotfix_tests.cpp)
+    target_link_libraries(imgui_hotfix_tests PRIVATE imgui)
+    add_test(NAME imgui_hotfix_tests COMMAND imgui_hotfix_tests)
     add_executable(kmbox_button_tests tests/kmbox_button_tests.cpp)
     target_link_libraries(kmbox_button_tests PRIVATE mouse ws2_32)
     add_test(NAME kmbox_button_tests COMMAND kmbox_button_tests)
