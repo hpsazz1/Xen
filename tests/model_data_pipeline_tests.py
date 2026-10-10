@@ -793,7 +793,9 @@ class PipelineTests(unittest.TestCase):
             metadata = types.SimpleNamespace(custom_metadata_map={"names": encoded})
             session = types.SimpleNamespace(get_modelmeta=lambda: metadata, get_inputs=lambda: [], get_outputs=lambda: [])
             ort = types.SimpleNamespace(InferenceSession=lambda *args, **kwargs: session)
-            with patch.dict(sys.modules, {"onnxruntime": ort}):
+            # This unit isolates names parsing; actual protobuf/ORT coverage is
+            # in model_inspection_snapshot_tests.py under the training environment.
+            with patch.dict(sys.modules, {"onnxruntime": ort}), patch.object(pipeline, "load_embedded_onnx"):
                 result = pipeline.inspect(pipeline.Context(dict(operation="inspect", model=str(model))))
             self.assertEqual(result["model_class_names"], expected)
 

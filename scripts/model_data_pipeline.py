@@ -814,13 +814,14 @@ def versions():
     return result
 
 
-def load_embedded_onnx(path):
+def load_embedded_onnx(path, *, contents=None):
     try:
         import onnx
     except ImportError as exc:
-        raise PipelineError("DEPENDENCY_MISSING：缺少 onnx，无法核验导出合同") from exc
+        raise PipelineError("DEPENDENCY_MISSING：缺少 onnx，无法核验单文件模型身份") from exc
     # 单文件候选不能从快照目录之外补读权重；先只读取 protobuf，再检查所有嵌套张量。
-    graph = onnx.load(str(path), load_external_data=False)
+    graph = (onnx.load(str(path), load_external_data=False) if contents is None
+             else onnx.load_model_from_string(contents))
     def require_embedded_tensors(message):
         if message.DESCRIPTOR.full_name == "onnx.TensorProto" and (message.data_location == onnx.TensorProto.EXTERNAL or message.external_data):
             raise PipelineError("ONNX 外部权重不属于单文件冻结身份，请先导出内嵌权重模型")
@@ -1159,8 +1160,10 @@ def inspect(ctx):
             import onnxruntime as ort
         except ImportError as exc:
             raise PipelineError("DEPENDENCY_MISSING：元数据检查需要 onnxruntime") from exc
-        session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
-        result.update(model=str(path), model_sha256=sha256(path), metadata=session.get_modelmeta().custom_metadata_map, inputs=[dict(name=i.name, shape=i.shape, type=i.type) for i in session.get_inputs()], outputs=[dict(name=i.name, shape=i.shape, type=i.type) for i in session.get_outputs()])
+        contents = path.read_bytes()
+        load_embedded_onnx(path, contents=contents)
+        session = ort.InferenceSession(contents, providers=["CPUExecutionProvider"])
+        result.update(model=str(path), model_sha256=hashlib.sha256(contents).hexdigest(), metadata=session.get_modelmeta().custom_metadata_map, inputs=[dict(name=i.name, shape=i.shape, type=i.type) for i in session.get_inputs()], outputs=[dict(name=i.name, shape=i.shape, type=i.type) for i in session.get_outputs()])
         encoded_names = result["metadata"].get("names")
         if encoded_names:
             try:
