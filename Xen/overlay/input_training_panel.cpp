@@ -64,7 +64,8 @@ void timing_summary(const input_training::Snapshot& snapshot) {
     const auto total = snapshot.timings.size();
     const auto classified = total - counts[4];
     ImGui::SeparatorText("换键接收时序");
-    ImGui::TextWrapped("参考分级：|时差| ≤ 2 ms 完美，≤ 10 ms 优秀；其余负值偏早、正值偏晚。负值为重叠，正值为空隙。评分不代表角色停稳。");
+    ImGui::TextWrapped("评分为输入时差，不代表角色实际停稳。");
+    help("参考分级：|时差| ≤ 2 ms 完美，≤ 10 ms 优秀；其余负值偏早、正值偏晚。负值为重叠，正值为空隙。评分不代表角色停稳。");
     ImGui::Text("近期可分类 %llu / %llu，未分类 %llu；Run 配对总数 %llu，未配对边沿 %llu",
         static_cast<unsigned long long>(classified), static_cast<unsigned long long>(total),
         static_cast<unsigned long long>(counts[4]), static_cast<unsigned long long>(snapshot.total_timings),
@@ -117,7 +118,8 @@ void timing_summary(const input_training::Snapshot& snapshot) {
 
 void trajectory(const input_training::Hold& hold, int selected) {
     if (!hold.motion_available) {
-        ImGui::TextWrapped("轨迹不可用：来源位移的增量语义尚未验证。KMBOX monitor 原始报告已保留；不能用 raw_x/raw_y 猜出物理路径，也不绘制伪零轨迹。");
+        ImGui::TextWrapped("轨迹不可用：位移语义未验证，原始报告已保留。");
+        help("轨迹不可用：来源位移的增量语义尚未验证。KMBOX monitor 原始报告已保留；不能用 raw_x/raw_y 猜出物理路径，也不绘制伪零轨迹。");
         return;
     }
     if (hold.points.empty()) return;
@@ -191,7 +193,8 @@ struct InputTrainingPanel::Impl {
         }
         help("评估输入接收时序和完整按住记录；与模型训练无关。按需记录，UI 不读取设备或磁盘。");
         IdScope id_scope("input_training_panel");
-        ImGui::TextWrapped("来源：已有 KMBOX monitor 或离线 Run。记录不会武装输出。接收时间不是物理按下、游戏开枪或停稳时间；设备源丢包目前不可验证。");
+        ImGui::TextWrapped("仅记录输入，不武装输出。接收时间不等于游戏动作；源丢包未知。");
+        help("来源：已有 KMBOX monitor 或离线 Run。记录不会武装输出。接收时间不是物理按下、游戏开枪或停稳时间；设备源丢包目前不可验证。");
         const bool busy = snapshot && input_training::is_busy(snapshot->status);
         {
         DisabledScope disabled(busy);
@@ -274,7 +277,8 @@ struct InputTrainingPanel::Impl {
             } else ImGui::TextUnformatted("暂无按住记录；录制开始时已按住或缺失边沿的片段会标记不完整。");
         } else ImGui::TextUnformatted("尚未记录。开始前需要已有可用 KMBOX 输入；也可直接读取离线 Run。");
         ImGui::SeparatorText("后续评估");
-        ImGui::TextWrapped("开枪稳定：缺少游戏实际逐发和移动误差来源，当前不可评估，不生成稳定占比。身法：后续先核实转向和空中状态；跳键窗口不等于空中加速。");
+        ImGui::TextWrapped("实际开枪稳定性与空中加速：证据不足，不可评估。");
+        help("开枪稳定：缺少游戏实际逐发和移动误差来源，当前不可评估，不生成稳定占比。身法：后续先核实转向和空中状态；跳键窗口不等于空中加速。");
     }
 };
 

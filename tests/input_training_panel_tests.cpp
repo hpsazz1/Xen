@@ -13,10 +13,11 @@ void expect(bool value, const char* message) {
     if (!value) { ++failures; std::cerr << "[失败] " << message << '\n'; }
 }
 
-int draw(InputTrainingPanel& panel, const std::shared_ptr<const input_training::Snapshot>& snapshot) {
+int draw(InputTrainingPanel& panel, const std::shared_ptr<const input_training::Snapshot>& snapshot,
+         ImVec2 size = {900, 3000}) {
     ImGui::NewFrame();
     ImGui::SetNextWindowPos({0, 0});
-    ImGui::SetNextWindowSize({900, 3000});
+    ImGui::SetNextWindowSize(size);
     ImGui::Begin("input_training_test", nullptr, ImGuiWindowFlags_NoSavedSettings);
     OverlayActions actions;
     panel.render(snapshot, actions);
@@ -86,6 +87,15 @@ int main() {
         zero->points.resize(1);
         snapshot->holds.clear(); snapshot->active_hold = zero;
         draw(panel, snapshot);
+    }
+    for (const ImVec2 size : {ImVec2{620, 480}, ImVec2{820, 600}, ImVec2{1000, 820}}) {
+        io.DisplaySize = size;
+        InputTrainingPanel panel;
+        auto snapshot = std::make_shared<input_training::Snapshot>();
+        snapshot->status = input_training::Status::STOPPED;
+        snapshot->error = "离线记录读取失败；原始文件保持，可重新选择。";
+        draw(panel, snapshot, size);
+        draw(panel, snapshot, size);
     }
     ImGui::DestroyContext();
     return failures == 0 ? 0 : 1;

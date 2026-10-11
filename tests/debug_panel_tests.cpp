@@ -10,9 +10,9 @@ int failures = 0;
 void expect(bool result, const char* message) {
     if (!result) { ++failures; std::cerr << message << '\n'; }
 }
-int draw(DebugPanel& panel, const debug_session::Snapshot* snapshot, int page) {
+int draw(DebugPanel& panel, const debug_session::Snapshot* snapshot, int page, ImVec2 size = {1000, 2000}) {
     ImGui::NewFrame();
-    ImGui::SetNextWindowPos({0, 0}); ImGui::SetNextWindowSize({1000, 2000});
+    ImGui::SetNextWindowPos({0, 0}); ImGui::SetNextWindowSize(size);
     ImGui::Begin("调试面板无设备回归", nullptr, ImGuiWindowFlags_NoSavedSettings);
     OverlayActions actions; AppConfig config;
     panel.render_status(snapshot, actions);
@@ -233,6 +233,20 @@ int main() {
         s.busy = true; s.state = debug_session::State::CLEANUP_UNKNOWN;
         for (int p = 0; p < 3; ++p) draw(panel, &s, p);
     }
+    // 仅CPU ImGui绘制：覆盖窄内容区，缺测/错误文字不得产生非法坐标或自动动作。
+    for (const ImVec2 size : {ImVec2{620, 480}, ImVec2{820, 600}, ImVec2{1000, 820}}) {
+        io.DisplaySize = size;
+        DebugPanel panel;
+        debug_session::Snapshot snapshot;
+        snapshot.state = debug_session::State::CLEANUP_UNKNOWN;
+        snapshot.busy = true;
+        snapshot.message = "释放未确认：保留错误反馈，不能自动重试或启动任务。";
+        for (int page = 0; page < 4; ++page) {
+            draw(panel, &snapshot, page, size);
+            draw(panel, &snapshot, page, size);
+        }
+    }
+    io.DisplaySize = {1100, 2100};
     check_foreground_start();
     check_weapon_draft_isolation();
     ImGui::DestroyContext(); return failures ? 1 : 0;

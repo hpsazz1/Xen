@@ -2969,8 +2969,10 @@ struct Overlay::Impl {
             static_cast<unsigned long long>(snapshot.movement.canceled), snapshot.movement.sent_dx);
         if (!snapshot.movement.error.empty())
             ImGui::TextWrapped("%s", snapshot.movement.error.c_str());
-        ImGui::TextWrapped("两项可同时启用，须使用不同触发。触发键或滚轮方向须在游戏中绑定跳跃；这里不会修改游戏绑定。旋转跳由物理 A/D 选侧并锁定；动作期间临时屏蔽 W/A/D，结束后归还。");
-        ImGui::TextWrapped("运行中可调整，动作参数从下一次触发生效；关闭会结束当前动作并释放接管。");
+        ImGui::TextWrapped("触发须与游戏跳跃绑定；旋转跳期间接管 W/A/D。");
+        show_help_tooltip("两项可同时启用，须使用不同触发。触发键或滚轮方向须在游戏中绑定跳跃；这里不会修改游戏绑定。旋转跳由物理 A/D 选侧并锁定；动作期间临时屏蔽 W/A/D，结束后归还。");
+        ImGui::TextWrapped("参数下次触发生效；关闭即结束动作并释放接管。");
+        show_help_tooltip("运行中可调整，动作参数从下一次触发生效；关闭会结束当前动作并释放接管。");
         if (begin_form("movement_form", 126.0f)) {
             form_row("启用身法", "总开关默认关闭；两项分别启用和绑定。忙碌期间不重复排队；关闭时释放软件方向键并恢复 W/A/D 物理直通。");
             toggle_switch("##movement_enabled", &move.enabled);
@@ -3137,7 +3139,8 @@ struct Overlay::Impl {
             bool can_edit, const std::array<bool, 256>& key_active) {
         auto& trigger = app_config.trigger;
         begin_config_panel("trigger_panel", "自动扳机");
-        ImGui::TextWrapped("准星进入有效头部或人体检测框的设定范围即判断开火；100%%覆盖完整目标框，按共享GSI武器资料点射。检测框不保证弹道命中。");
+        ImGui::TextWrapped("按目标范围与 GSI 武器资料点射；检测框不保证命中。");
+        show_help_tooltip("准星进入有效头部或人体检测框的设定范围即判断开火；100%覆盖完整目标框，按共享GSI武器资料点射。检测框不保证弹道命中。");
         ImGui::BeginDisabled(!can_edit);
         if (begin_form("trigger_form", 150.0f)) {
             form_row("启用自动扳机", "默认关闭；启用后仍需全局武装、按住绑定键、健康输入、源端焦点与有效图像。启用GSI时还需有效武器上下文；正常切枪、换弹和空弹暂停旧会话，持键可在重新核验后恢复；失焦、输入异常或GSI信任中断仍须松键再按下。仅支持 KMBOX NET。");
@@ -3213,8 +3216,10 @@ struct Overlay::Impl {
 
     void render_trigger_debug(AppConfig& app_config, bool can_edit) {
         auto& trigger = app_config.trigger;
-        ImGui::TextWrapped("生产扳机的启用、许可键、触发范围与移动急停联动在辅助页设置；此处调整诊断开关和筛选条件，停止 Runtime 后修改并保存，下次启动生效。");
-        ImGui::TextWrapped("定位顺序：查看辅助页实时阻断原因 → 检查源端焦点、GSI 武器状态与目标范围 → 必要时关闭“允许开枪”观察检测及急停联动。关闭开枪仍可能执行已启用的急停。");
+        ImGui::TextWrapped("扳机功能在辅助页配置；此处停止运行后修改诊断设置。");
+        show_help_tooltip("生产扳机的启用、许可键、触发范围与移动急停联动在辅助页设置；此处调整诊断开关和筛选条件，停止 Runtime 后修改并保存，下次启动生效。");
+        ImGui::TextWrapped("先查看实时阻断原因。关闭开枪仍可能执行已启用的急停。");
+        show_help_tooltip("定位顺序：查看辅助页实时阻断原因 → 检查源端焦点、GSI 武器状态与目标范围 → 必要时关闭“允许开枪”观察检测及急停联动。关闭开枪仍可能执行已启用的急停。");
         ImGui::BeginDisabled(!can_edit);
         if (begin_form("trigger_debug_form", 150.0f)) {
             form_row("允许开枪", "关闭后保留目标检测、资格判断和急停联动调试，不发送自动扳机左键按下；不会阻止你手动开枪。停止运行后修改，下次启动生效。");
@@ -3250,6 +3255,7 @@ struct Overlay::Impl {
     void render_debug(const RuntimeSnapshot& snapshot, AppConfig& app_config,
                       bool can_edit, OverlayActions& actions,
                       const debug_session::Snapshot* debug_snapshot) {
+        debug_panel.render_status(debug_snapshot, actions);
         ImGui::BeginDisabled(!can_edit || (debug_snapshot && debug_snapshot->busy));
         const auto key_active = current_virtual_key_state();
         if (can_edit) process_hotkey_capture(app_config,actions,key_active);
@@ -3266,7 +3272,6 @@ struct Overlay::Impl {
         ImGui::TextDisabled("准备与重复测试说明");
         show_help_tooltip("标定与采集新弹道每组都需重新准备；已有弹道验证、急停和射击节奏可按模板重复，无自动循环。离开本页保留模板；编辑实验、切换类型或设备、启动 Runtime 或急停后需重新准备。生产组合效果在辅助页配置后单独验收。");
         if (!hotkey_capture_message.empty()) ImGui::TextWrapped("%s",hotkey_capture_message.c_str());
-        debug_panel.render_status(debug_snapshot, actions);
         if (!ImGui::BeginTabBar("debug_tabs")) return;
         if (ImGui::BeginTabItem("急停测试")) {
             debug_panel.render_counterpulse(app_config, debug_snapshot, actions);
@@ -3290,7 +3295,8 @@ struct Overlay::Impl {
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("运行诊断")) {
-            ImGui::TextWrapped("以下急停与压枪状态来自当前 Runtime；最近调试任务报告另列。先核对实际运行策略和阻断原因，再结合本次报告及人工观察判断。");
+            ImGui::TextWrapped("当前 Runtime 状态；调试任务报告另列。");
+        show_help_tooltip("以下急停与压枪状态来自当前 Runtime；最近调试任务报告另列。先核对实际运行策略和阻断原因，再结合本次报告及人工观察判断。");
             ImGui::Text("Runtime 急停策略：%s", snapshot.state == RuntimeState::RUNNING ?
                 (snapshot.auto_stop.experimental_hud_model ? "HUD 动态制动（输入模型估计）" : "固定时长制动（时序估计）") : "Runtime 未运行");
             ImGui::TextWrapped("预计完成和释放回执只表示软件执行状态；HUD 模型阈内也不等于游戏实际停稳。");
@@ -3318,7 +3324,8 @@ struct Overlay::Impl {
 
     void render_source_context_config(const RuntimeSnapshot& snapshot, AppConfig& app_config, bool can_edit) {
         begin_config_panel("source_context_panel", "源端焦点");
-        ImGui::TextWrapped("源状态桥接把游戏主机的前台状态传给辅机；切到其他程序时撤销急停接管，恢复后先松开快捷键再按下。");
+        ImGui::TextWrapped("源端失焦会撤销接管；恢复后松开快捷键再按。");
+        show_help_tooltip("源状态桥接把游戏主机的前台状态传给辅机；切到其他程序时撤销急停接管，恢复后先松开快捷键再按下。");
         ImGui::BeginDisabled(!can_edit);
         auto& context = app_config.source_context;
         if (begin_form("source_context_form", 150.0f)) {
@@ -3336,7 +3343,8 @@ struct Overlay::Impl {
             ImGui::EndTable();
         }
         ImGui::EndDisabled();
-        ImGui::TextWrapped("认证由环境变量 XEN_SOURCE_CONTEXT_TOKEN 提供；界面和配置文件不显示认证值。");
+        ImGui::TextWrapped("认证：环境变量 XEN_SOURCE_CONTEXT_TOKEN。");
+        show_help_tooltip("认证由环境变量 XEN_SOURCE_CONTEXT_TOKEN 提供；界面和配置文件不显示认证值。");
         ImGui::TextWrapped("源端状态：%s", !snapshot.source_context.available ? "未就绪或已过期" :
             snapshot.source_context.focused ? "目标进程在前台" : "目标进程不在前台");
         if (snapshot.source_context.age_ms >= 0) ImGui::Text("状态年龄：%d ms", snapshot.source_context.age_ms);
@@ -3356,7 +3364,8 @@ struct Overlay::Impl {
             if (gsi_current && player.game_phase == weapon::GamePhase::PREPARATION) phase = "准备：原已选全部类别";
             if (gsi_current && player.game_phase == weapon::GamePhase::ACTIVE) phase = "正式 / 回合结束：仅敌方";
             ImGui::TextWrapped("GSI 比赛阶段：%s", phase);
-            ImGui::TextWrapped("开启后，热身与回合冻结阶段允许原已选全部类别；正式及回合结束仅敌方，换边跟随 GSI。阶段未知或过期、正式阶段阵营未知时暂停目标输出。");
+            ImGui::TextWrapped("热身/冻结：已选类别；正式/回合结束：仅敌方。阶段失效或正式阶段阵营未知时暂停输出。");
+            show_help_tooltip("开启后，热身与回合冻结阶段允许原已选全部类别；正式及回合结束仅敌方，换边跟随 GSI。阶段未知或过期、正式阶段阵营未知时暂停目标输出。");
             ImGui::BeginDisabled(!can_edit);
             if (begin_form("team_filter_form", 170.0f)) {
                 form_row("自动排除友军", "依据本机玩家 GSI 阵营和比赛阶段筛选 Aim 与扳机候选；准备阶段保留原已选类别，正式开始及回合结束仅敌方。开启同时启用 GSI，不启动物理输出。停止后修改，下次启动生效。");
@@ -4022,6 +4031,9 @@ struct Overlay::Impl {
         workspace_button("取消后台作业", "请求终止当前后台作业；保留已有产物和记录用于排查，不把取消结果视为成功。", model_workspace::Action::CANCEL_JOB, workspace.job_running, actions);
         ImGui::SameLine();
         workspace_button("打开当前作业", "打开当前作业目录，查看 process.log、status.json 和本次产物；失败或取消后仍可排查。", model_workspace::Action::OPEN_JOB_DIRECTORY, !workspace.job_directory.empty(), actions);
+        ImGui::SameLine();
+        workspace_button("保存采集与训练设置", "保存独立模型工作区设置，不写入 Runtime 的 config.ini。", model_workspace::Action::SAVE_SETTINGS,
+            !workspace.job_running && !workspace.collection.active && !workspace.collection.draining, actions);
         render_notice("job_message", workspace.job_message,
             workspace.job_state == "FAILED" ? kDanger : kMutedInk,
             workspace.job_state == "FAILED" ? kDangerSoft : kFieldSurface);
@@ -4045,7 +4057,21 @@ struct Overlay::Impl {
             !runtime.d3d11_cuda_interop && !runtime.d3d11_directml_interop;
         const bool idle = !collection.active && !collection.draining && !workspace.job_running;
         workspace_status(workspace, actions);
-        ImGui::TextWrapped("只在需要时保存原图。先在检测页配置 CPU 画面来源并启动 Runtime，再核对类别语义。未检测到人物的图片仍需审核，不能直接作为负样本。");
+        ImGui::BeginDisabled(!idle);
+        if (begin_form("collection_settings", 160.0f)) {
+            form_row("数据根目录", "本地素材和作业目录；结束采集及后台作业后可修改。路径可含中文和空格。");
+            ImGui::InputText("##collection_root", &settings.root_directory);
+            form_row("类别名称 / ID 顺序", "按原模型 class_id 从 0 开始填写，用英文逗号分隔。必须保留全部类别语义与顺序；不要将现有多类模型改成单类。");
+            if (ImGui::InputText("##collection_classes", &settings.class_names)) settings.class_schema_confirmed = false;
+            form_row("类别语义已核对", "对照原训练配置或模型说明确认每个 ID 的名称后勾选。只知道 person/head 的分组不足以确认全部类别语义。");
+            ImGui::BeginDisabled(settings.schema_model_sha256.empty());
+            ImGui::Checkbox("##collection_schema_confirmed", &settings.class_schema_confirmed);
+            ImGui::EndDisabled();
+            ImGui::EndTable();
+        }
+        ImGui::EndDisabled();
+        ImGui::TextWrapped("先启动 CPU 画面 Runtime 并核对类别。空检测不等于负样本。");
+        show_help_tooltip("只在需要时保存原图。先在检测页配置 CPU 画面来源并启动 Runtime，再核对类别语义。未检测到人物的图片仍需审核，不能直接作为负样本。");
         ImGui::Spacing();
         workspace_button("开始采集", "开始新的素材会话。必须已运行 CPU 画面 Runtime、模型未在重载、核对类别且没有后台作业；不会启动 Runtime。采集期间保持类别与模型代一致。", Action::START_COLLECTION,
             idle && cpu_running && settings.class_schema_confirmed, actions);
@@ -4058,7 +4084,8 @@ struct Overlay::Impl {
             collection.active && !collection.paused && cpu_running, actions);
         ImGui::SameLine();
         workspace_button("打开数据目录", "打开配置的原始素材根目录，查看采集会话与图片。后台作业和导出结果请使用本页顶部的打开当前作业。", Action::OPEN_DATA_DIRECTORY, !settings.root_directory.empty(), actions);
-        ImGui::TextWrapped("持续采集不设数量或累计磁盘配额；结束采集前持续保存候选，实际写盘失败会暂停并显示错误。");
+        ImGui::TextWrapped("持续采集无总量上限；写盘失败会暂停并报错。");
+        show_help_tooltip("持续采集不设数量或累计磁盘配额；结束采集前持续保存候选，实际写盘失败会暂停并显示错误。");
         ImGui::TextWrapped("状态：%s%s", collection.draining ? "正在完成写入" : collection.active ? "采集中" : "未采集",
             collection.active && collection.paused ? "（已暂停）" : "");
         ImGui::Text("保存 %llu   排队 %llu   丢弃 %llu   去重 %llu",
@@ -4070,9 +4097,21 @@ struct Overlay::Impl {
         const auto session_utf8 = collection.session_directory.u8string();
         ImGui::TextWrapped("当前会话：%s", reinterpret_cast<const char*>(session_utf8.c_str()));
         ImGui::Separator();
+        if (ImGui::CollapsingHeader("采集策略")) {
+            ImGui::BeginDisabled(!idle);
+            if (begin_form("collection_strategy", 160.0f)) {
+                form_row("候选间隔 / ms", "按需检查候选画面的最小时间间隔；近重复画面仍会被过滤，不代表定时必存。");
+                ImGui::InputInt("##collection_interval", &settings.interval_ms);
+                form_row("探索间隔 / ms", "为模型完全漏检的画面保留有限探索机会；无框图片仍是待审核样本，不能自动确认负样本。");
+                ImGui::InputInt("##collection_exploration", &settings.exploration_interval_ms);
+                ImGui::EndTable();
+            }
+            ImGui::EndDisabled();
+        }
         if (ImGui::CollapsingHeader("自动整理与批量审核", ImGuiTreeNodeFlags_DefaultOpen)) {
             const bool review_idle = idle && runtime.state == RuntimeState::STOPPED;
-            ImGui::TextWrapped("先自动整理重复图与疑难图，再批量看图确认；只有少量问题图需要调整框。停止 Runtime 后操作，不影响原始图片和自动标注。");
+            ImGui::TextWrapped("停止 Runtime 后整理、审核、导入；原图与原始标注不变。");
+            show_help_tooltip("先自动整理重复图与疑难图，再批量看图确认；只有少量问题图需要调整框。停止 Runtime 后操作，不影响原始图片和自动标注。");
             workspace_button("自动整理并生成预览", "离线检查完整性、归组重复图并排列疑难样本，生成本地带框预览；不自动判定负样本、不启动训练。可使用训练页指定的离线预标注作对比。", Action::CURATE_REVIEW,
                 review_idle && settings.class_schema_confirmed, actions);
             ImGui::SameLine();
@@ -4088,24 +4127,6 @@ struct Overlay::Impl {
                 workspace.job_running, actions);
         }
         ImGui::Separator();
-        ImGui::BeginDisabled(!idle);
-        if (begin_form("collection_settings", 160.0f)) {
-            form_row("数据根目录", "本地素材和作业目录；结束采集及后台作业后可修改。路径可含中文和空格。");
-            ImGui::InputText("##collection_root", &settings.root_directory);
-            form_row("类别名称 / ID 顺序", "按原模型 class_id 从 0 开始填写，用英文逗号分隔。必须保留全部类别语义与顺序；不要将现有多类模型改成单类。");
-            if (ImGui::InputText("##collection_classes", &settings.class_names)) settings.class_schema_confirmed = false;
-            form_row("类别语义已核对", "对照原训练配置或模型说明确认每个 ID 的名称后勾选。只知道 person/head 的分组不足以确认全部类别语义。");
-            ImGui::BeginDisabled(settings.schema_model_sha256.empty());
-            ImGui::Checkbox("##collection_schema_confirmed", &settings.class_schema_confirmed);
-            ImGui::EndDisabled();
-            form_row("候选间隔 / ms", "按需检查候选画面的最小时间间隔；近重复画面仍会被过滤，不代表定时必存。");
-            ImGui::InputInt("##collection_interval", &settings.interval_ms);
-            form_row("探索间隔 / ms", "为模型完全漏检的画面保留有限探索机会；无框图片仍是待审核样本，不能自动确认负样本。");
-            ImGui::InputInt("##collection_exploration", &settings.exploration_interval_ms);
-            ImGui::EndTable();
-        }
-        ImGui::EndDisabled();
-        workspace_button("保存采集与训练设置", "将本页及训练页设置单独保存到模型工作区配置，不写入 Runtime 的 config.ini。", Action::SAVE_SETTINGS, idle, actions);
     }
 
     void render_training(const RuntimeSnapshot& runtime,
@@ -4118,8 +4139,14 @@ struct Overlay::Impl {
         workspace_status(workspace, actions);
         if (workspace.collection.draining)
             ImGui::TextWrapped("素材正在完成写入，请等待采集收尾后再运行数据或训练作业。");
-        ImGui::TextWrapped("流程：检查素材 → 自动预标注 → 采集页批量审核 / CVAT → 导入标签 → 导出数据集 → 训练 → 评估候选。未审核、失败、未知样本不能作为空标签训练。");
-        if (ImGui::CollapsingHeader("训练环境", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::TextWrapped("审核 → 导出数据集 → 训练 → 评估。未审核、失败、未知样本不能当负样本。");
+        show_help_tooltip("流程：检查素材 → 自动预标注 → 采集页批量审核 / CVAT → 导入标签 → 导出数据集 → 训练 → 评估候选。未审核、失败、未知样本不能作为空标签训练。");
+        ImGui::TextWrapped("环境检查：%s", workspace.environment_ready ? "已通过检查" : "未就绪 / 待检查");
+        ImGui::TextWrapped("%s", workspace.environment_message.c_str());
+        ImGui::TextWrapped("PT 检查：%s", workspace.weights_ready ? "已通过检查" : "未就绪 / 待检查");
+        ImGui::TextWrapped("%s", workspace.weights_message.c_str());
+        if (ImGui::CollapsingHeader("训练环境", workspace.environment_ready && workspace.weights_ready
+                ? ImGuiTreeNodeFlags_None : ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::BeginDisabled(!idle);
             if (begin_form("training_environment", 156.0f)) {
                 form_row("基础 Python", "填写用于创建独立训练环境的 Python 可执行文件完整路径；安装流程不会修改该基础环境。");
@@ -4147,10 +4174,6 @@ struct Overlay::Impl {
                 (weights.back() == 't' || weights.back() == 'T');
             workspace_button("检查 PT", "加载可训练权重字段中已确认来源的 .pt，检查可加载性与模型信息；不要求采集类别已确认，不启动真实训练或设备。", Action::PT_CHECK,
                 idle && stopped && settings.trusted_weights && pt_selected, actions);
-            ImGui::TextWrapped("环境检查：%s", workspace.environment_ready ? "已通过检查" : "未就绪 / 待检查");
-            ImGui::TextWrapped("%s", workspace.environment_message.c_str());
-            ImGui::TextWrapped("PT 检查：%s", workspace.weights_ready ? "已通过检查" : "未就绪 / 待检查");
-            ImGui::TextWrapped("%s", workspace.weights_message.c_str());
         }
         ImGui::BeginDisabled(!idle);
         if (begin_form("training_tools", 156.0f)) {
@@ -4207,7 +4230,6 @@ struct Overlay::Impl {
                 idle && stopped && workspace.job_operation == "evaluate" && workspace.job_state == "SUCCEEDED", actions);
             workspace_button("打开数据目录", "打开原始素材根目录查看采集会话和图片；此目录与后台作业目录不同。", Action::OPEN_DATA_DIRECTORY, !settings.root_directory.empty(), actions);
         }
-        workspace_button("保存采集与训练设置", "将采集和训练输入保存到独立工作区配置；与页面顶部保存 Runtime INI 的按钮相互独立。", Action::SAVE_SETTINGS, idle, actions);
     }
 
     void render_workspace(

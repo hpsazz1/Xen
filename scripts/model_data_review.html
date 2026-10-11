@@ -11,8 +11,8 @@
 </head>
 <body>
 <h1>素材审核</h1>
-<p>① 按原因筛选并查看框；② 勾选本页样本批量确认，疑难图点击放大调整；③ 导出结果，回 Xen「采集」页选择并导入决策文件。<br>自动建议不是已审核标签；空框可能漏检。页面不联网、不改原图，关闭前请导出草稿。导入决策文件可恢复进度。</p>
-<details><summary>标注规则：活体、负样本与倒地</summary><p>所有可见活体按原四类标注；遮挡、蹲低不等于死亡。确认已死亡的尸体不标为目标：整图无活体时可确认困难负样本，同框有活体时只标活体。倒地过渡或生死不明请参考前后图片；无法确定时排除并保留原图待复核。UI、菜单、损坏或域外图片应排除，不能当游戏负样本。页面不会根据姿态自动判死，也不会新增类别。预测一致也不等于正确；同一模型的 PT 与 ONNX 不构成独立验证。头框与身体框可合法包含，不按重叠直接删除。</p></details>
+<p>筛选看图 → 明确确认 → 导出并回 Xen 导入。空框不等于负样本；关闭前先导出草稿。</p>
+<details><summary>操作与标注说明</summary><p>① 按原因筛选并查看框；② 勾选本页样本批量确认，疑难图点击放大调整；③ 导出结果，回 Xen「采集」页选择并导入决策文件。<br>自动建议不是已审核标签；空框可能漏检。页面不联网、不改原图，关闭前请导出草稿。导入决策文件可恢复进度。</p><p>所有可见活体按原四类标注；遮挡、蹲低不等于死亡。确认已死亡的尸体不标为目标：整图无活体时可确认困难负样本，同框有活体时只标活体。倒地过渡或生死不明请参考前后图片；无法确定时排除并保留原图待复核。UI、菜单、损坏或域外图片应排除，不能当游戏负样本。页面不会根据姿态自动判死，也不会新增类别。预测一致也不等于正确；同一模型的 PT 与 ONNX 不构成独立验证。头框与身体框可合法包含，不按重叠直接删除。</p></details>
 <div id="message" class="notice" role="status">正在读取报告…</div>
 <div class="bar">
 <button id="export">导出决策 / 草稿</button><label>恢复草稿 <input id="import" type="file" accept=".json,application/json"></label>
@@ -36,7 +36,7 @@
 <dialog id="detail">
 <h2 id="detail-title">样本</h2><p id="detail-reasons"></p>
 <p id="detail-image-status" class="notice" role="status"></p>
-<div class="detail"><div><canvas id="canvas"></canvas><p><small>选择模式：点击框。新增模式：在图上拖出矩形；坐标可在右侧精确调整。当前修改只有点击确认才进入决策。</small></p></div>
+<div class="detail"><div><canvas id="canvas"></canvas><p><small title="选择模式：点击框。新增模式：拖出矩形；右侧可精调坐标。点击确认后才进入决策。">点击选框，拖动新增；点击确认后生效。</small></p></div>
 <div><div class="bar"><label>操作 <select id="mode"><option value="select">选择框</option><option value="draw">新增框</option></select></label></div>
 <select id="boxes" size="6" aria-label="框列表"></select>
 <div class="bar"><label>类别 <select id="class"></select></label></div>

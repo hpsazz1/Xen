@@ -298,13 +298,15 @@ void DebugPanel::render_counterpulse(const AppConfig& config, const Snapshot* s,
     Impl::PublishDraftChange publish{*impl_,actions};
     try {
         auto& d = *impl_; d.mode(Mode::COUNTERPULSE);
-        ImGui::TextWrapped("此页测试固定反向时长的动作计划，用于节奏对照；生产急停在辅助页配置。此处的模型评价不会启用生产 HUD 动态制动。");
+        ImGui::TextWrapped("固定时长动作测试；生产急停在辅助页配置。");
+        tip("此页测试固定反向时长的动作计划，用于节奏对照；生产急停在辅助页配置。此处的模型评价不会启用生产 HUD 动态制动。");
         ImGui::TextWrapped(config.auto_stop.experimental_hud_model ?
             "当前配置选择：HUD 动态制动。生产按输入模型逐轴计算制动时长，本页仍执行草稿中的固定时长。" :
             "当前配置选择：H40固定时长对照。生产默认使用HUD动态制动；本页测试不改变已保存的策略。");
         ImGui::TextWrapped("选择动作与武器参数，准备后启动并查看报告。");
         tip("反向制动顺序：移动、释放、反向、释放后等待，再按住左键。");
-        ImGui::TextWrapped("首发为基准射击，后续执行移动和所选制动动作；DOWN提交间隔只是下限，不是移动保持时长。");
+        ImGui::TextWrapped("首发为基准；DOWN 间隔是下限，不是移动时长。");
+        tip("首发为基准射击，后续执行移动和所选制动动作；DOWN提交间隔只是下限，不是移动保持时长。");
         ImGui::BeginDisabled(s && s->busy);
         Json edits = Json::object();
         if (ImGui::Combo("基准动作", &d.baseline, "反向制动\0无反向对照\0原地\0")) {
@@ -364,7 +366,8 @@ void DebugPanel::render_fire(const AppConfig& config, const Snapshot* s, Overlay
     Impl::PublishDraftChange publish{*impl_,actions};
     try {
         auto& d = *impl_; d.mode(Mode::FIRE_TEST);
-        ImGui::TextWrapped("独立原地测试，每组固定15次按住；不包含反向急停或模型停稳结论。实际子弹数未知。");
+        ImGui::TextWrapped("原地测试：每组15次按住；子弹数未知，不评价停稳。");
+        tip("独立原地测试，每组固定15次按住；不包含反向急停或模型停稳结论。实际子弹数未知。");
         ImGui::BeginDisabled(s && s->busy);
         if (integer("点射按住 / ms", d.request.shot_hold_ms, 1, 2000, "测试范围1至2000ms；从DOWN协议ACK起算至UP提交。")) d.changed();
         if (integer("射击提交间隔 / ms", d.request.fire_interval_ms, 1, 5000, "测试范围1至5000ms且大于按住；生产表另按较窄范围校验。")) d.changed();
@@ -386,8 +389,10 @@ void DebugPanel::render_manual(const Snapshot* s, OverlayActions& actions) noexc
     try {
         auto& d = *impl_;
         ImGui::SeparatorText("高级：人工输入模型录制与离线重评");
-        ImGui::TextWrapped("日常输入记录使用上方“开始输入记录”和“读取离线记录”；下方用于独立模型记录、重评及实验计划派生，不能代替生产组合验收。");
-        ImGui::TextWrapped("上方输入记录保留原始接收域评分；此处录制与模型评价独立标注，均不代表实测停稳。");
+        ImGui::TextWrapped("以下为独立模型录制与重评，不代替生产组合验收。");
+        tip("日常输入记录使用上方“开始输入记录”和“读取离线记录”；下方用于独立模型记录、重评及实验计划派生，不能代替生产组合验收。");
+        ImGui::TextWrapped("输入评分与模型评价均不代表实测停稳。");
+        tip("上方输入记录保留原始接收域评分；此处录制与模型评价独立标注，均不代表实测停稳。");
         ImGui::BeginDisabled(s && s->busy);
         if (input("原始记录 / 报告路径", d.request.input_path, "离线分析不连接设备；重评使用新目录，保留原始证据。")) d.changed();
         if (input("派生结果根目录", d.request.output_root, "每次分析或派生创建新产物，不覆盖原始Run。")) d.changed();
