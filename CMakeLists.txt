@@ -1247,6 +1247,14 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(aim_image_prediction_tests OPENCV)
     add_test(NAME aim_image_prediction_tests COMMAND aim_image_prediction_tests)
 
+    add_executable(aim_pixel_feedback_tests
+        tests/aim_pixel_feedback_tests.cpp Xen/runtime/camera_motion.cpp Xen/runtime/runtime_queue.cpp)
+    target_include_directories(aim_pixel_feedback_tests PRIVATE ${PROJECT_SOURCE_DIR}/Xen ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(aim_pixel_feedback_tests PRIVATE aim weapon auto_stop_worker ${OpenCV_LIBS})
+    xen_deploy_runtime_dlls(aim_pixel_feedback_tests OPENCV)
+    add_test(NAME aim_pixel_feedback_tests COMMAND aim_pixel_feedback_tests)
+    set_tests_properties(aim_pixel_feedback_tests PROPERTIES TIMEOUT 30)
+
     add_executable(mouse_tests
         tests/mouse_tests.cpp)
     target_link_libraries(mouse_tests PRIVATE mouse log ws2_32)
