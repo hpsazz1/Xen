@@ -1,0 +1,9 @@
+# 源变化与LEFT UP回执组合
+
+在现有weapon_stop_integration_tests加入三组真实AutoStopWorker/TriggerWorker交错：同session安全epoch变化+ACK、新session及epoch变化+ACK、同session变化+APPLICATION_UNKNOWN。触发顺序固定为已完成制动和DOWN→目标变化决定UP→记录式后端UP返回屏障→源换代→回执返回。屏障超时不得计通过。
+
+同一仲裁器、生产SourceContextSnapshot适配入口和最终恢复回调参与；不通过手工调用controller代替worker。UP在途旧估计资格立即失效，ACK前不归还WASD；无旧resume回调。已知ACK后Trigger保持许可需重新松按，生成新非零急停编号和第二次确认DOWN；UNKNOWN仍保留按钮债务、禁止共享输出，停止/重启不得消掉故障。UNKNOWN情况下AutoStop可做故障清理，不能把键盘清理成功等同按钮释放已知。
+
+首次测试错误地要求AutoStop一直recovery_pending，代码核对发现现行契约允许清债后依据连续输入自动重核新请求；真正不能自动恢复的是Trigger旧开火许可。保留首次与诊断失败日志，修正为检查Trigger WAIT_RELEASE和零旧resume，不计新生产缺陷。
+
+专项可运行weapon_stop_integration_tests --source-up-receipt，也接入原完整测试main。只新增测试和说明，生产逻辑未改。源为合成快照而非真实来源网络，设备为记录式替身，不证明vendor时延、物理释放或全组合覆盖；不启动采集、游戏、原生UI或GPU。Runtime真实SourceContextClient及CPU非零内存链另见runtime_cpu_plant_validation_20261011.md，不把两批冒称同SHA全链。

@@ -44,7 +44,7 @@ public:
     bool output_owner_exclusive() const noexcept override { return true; }
     bool supports_wasd_keyboard() const noexcept override { return true; }
     bool supports_left_button() const noexcept override { return true; }
-    bool left_button_faulted() const noexcept override { return false; }
+    bool left_button_faulted() const noexcept override { return button_fault.load(); }
     bool left_button_cleanup_required() const noexcept override { return left_down.load(); }
     bool poll_input(InputSnapshot& input) noexcept override {
         std::lock_guard lock(mutex);
@@ -103,13 +103,22 @@ public:
             up_waiting.store(true);
             const auto deadline = Clock::now() + 500ms;
             while (hold_up_ack.load() && Clock::now() < deadline) std::this_thread::sleep_for(1ms);
+            if (hold_up_ack.load()) up_wait_expired = true;
         }
         ButtonReceipt result;
         result.datagram_sent = true; result.disposition = ButtonDisposition::ACKNOWLEDGED;
         result.protocol_ack_received_at = Clock::now();
         std::this_thread::sleep_for(2ms);
         result.backend_completed_at = Clock::now(); result.cleanup_required = down;
-        left_down.store(down);
+        if (!down && unknown_up.load()) {
+            result.disposition = ButtonDisposition::APPLICATION_UNKNOWN;
+            result.protocol_ack_received_at = {};
+            result.cleanup_required = true;
+            button_fault = true;
+        } else {
+            left_down.store(down);
+            if (!down) button_fault = false;
+        }
         if (down) ++downs; else ++ups;
         return result;
     }
@@ -126,6 +135,7 @@ public:
     std::string last_error() const override { return {}; }
     std::atomic<unsigned> downs{0}, ups{0}, moves{0}, cleanups{0};
     std::atomic<bool> hold_up_ack{false}, up_waiting{false};
+    std::atomic<bool> unknown_up{false}, button_fault{false}, up_wait_expired{false};
     std::atomic<bool> cleanup_during_shot{false};
     bool same_key_cleanup_report = false;
 private:
@@ -1002,9 +1012,109 @@ void source_session_interleaving(bool same_session_break = false) {
     require(!gate_timed_out, "来源交错必须在屏障仍持有时完成验证，超时释放不能作为通过证据");
     require(mouse->downs == 0 && mouse->released(), "纯记录设备最终归还且无按钮输出");
 }
+// 实际双worker：换目标已决定UP，来源在UP后端返回之前换代。
+void source_change_during_up(bool new_session, bool unknown_receipt) {
+    auto mouse = std::make_shared<FakeMouse>();
+    auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+    std::atomic<std::uint64_t> next_id{0}, session{1}, source_epoch{0};
+    std::atomic<unsigned> resume_calls{0};
+    auto source = runtime::detail::auto_stop_source_reader([&] {
+        source_context::SourceContextSnapshot value{true, true, session.load(), 1, 0};
+        value.control_safety_epoch = source_epoch.load();
+        return value;
+    });
+    AutoStopWorker stop(mouse, arbiter, [] { return true; }, [&] { return ++next_id; }, source,
+        [] { return AutoStopWeaponContext{}; });
+    TriggerWorker trigger(mouse, arbiter, [] { return true; }, [] { return true; }, [&] { return ++next_id; },
+        [&](std::uint64_t id) { return stop.request(id); }, [&](std::uint64_t id) { stop.cancel(id); },
+        [&] { TriggerContext value; value.source_context_epoch = source_epoch.load(); return value; },
+        [&] { return stop.estimated_completion_id(); },
+        [&](std::uint64_t id, TriggerTime deadline) {
+            ++resume_calls;
+            if (!stop.resume_movement(id, deadline - 58ms)) stop.cancel(id);
+        });
+    AutoStopConfig sc{true, 5}; sc.cycle_enabled = true;
+    TriggerConfig tc; tc.enabled = tc.require_stop = tc.allow_estimated_stop = true;
+    tc.hold_virtual_key = 5; tc.fire_delay_ms = 0;
+    tc.press_duration_ms = 200; tc.shot_interval_ms = 500; tc.max_observation_age_ms = 300;
+    mouse->physical(0, false);
+    require(stop.start(sc) && trigger.start(tc), "源变化UP组合启动");
+    until([&] { return mouse->drained() && trigger.snapshot().reason == TriggerReason::RELEASED; });
+    mouse->physical(2, true);
+    std::uint64_t sequence = 0;
+    auto publish = [&](bool changed) {
+        stop.publish_tracking_target(Clock::now() + 300ms);
+        stop.publish_target(Clock::now() + 300ms);
+        auto observation = fresh_observation(++sequence);
+        if (changed) observation->detections[0] = {40, 40, 60, 60, .9f, 0};
+        trigger.publish(std::move(observation));
+    };
+    until([&] { publish(false); return trigger.firing_signal().confirmed_down; });
+    const auto old_id = stop.estimated_completion_id();
+    require(old_id != 0, "首次DOWN须有本轮急停资格");
+    const auto cleanups = mouse->cleanups.load();
+    mouse->hold_up_ack = true;
+    until([&] { publish(true); return mouse->up_waiting.load(); });
+    source_epoch = 1;
+    if (new_session) session = 2;
+    require(stop.estimated_completion_id() == 0, "UP在途来源换代须立即撤销旧资格");
+    require(mouse->cleanups == cleanups && resume_calls == 0 && !mouse->released(),
+        "UP尚未返回不得提前归还方向");
+    mouse->unknown_up = unknown_receipt;
+    mouse->hold_up_ack = false;
+    until([&] {
+        return unknown_receipt ? trigger.snapshot().faulted && mouse->ups >= 3
+            : mouse->released() && !trigger.snapshot().button_may_be_down;
+    });
+    require(!mouse->up_wait_expired, "屏障超时释放不能作为组合通过证据");
+    const auto events = trigger.execution_log();
+    const auto up = std::find_if(events.events.begin(), events.events.end(), [](const auto& e) {
+        return e.backend_called && e.button_action == TriggerButtonAction::UP;
+    });
+    require(up != events.events.end() && up->snapshot.reason == TriggerReason::TARGET_CHANGED,
+        "必须由换目标触发UP，不能靠点射自然到期通过");
+    require(up->receipt_status == (unknown_receipt ? TriggerReceiptStatus::UNKNOWN : TriggerReceiptStatus::ACKNOWLEDGED),
+        "UP实际回执分类丢失");
+    require(resume_calls == 0 && mouse->downs == 1 && stop.estimated_completion_id() == 0,
+        "旧源UP结果不得恢复方向或产生第二发");
+    if (unknown_receipt) {
+        require(trigger.snapshot().button_may_be_down && mouse->button_fault &&
+            !arbiter->try_enter_aim().owns_lock(), "未知UP必须保留按钮债务并阻断共享输出");
+        trigger.stop(); stop.stop();
+        require(trigger.snapshot().button_may_be_down && mouse->button_fault &&
+            !trigger.start(tc) && !stop.start(sc), "未知债务不能被停止重启洗掉");
+        // 仅释放内存替身；不把测试收尾写成worker已经清债。
+        mouse->unknown_up = false; mouse->set_left_button(false);
+    } else {
+        const auto stopped_state = stop.snapshot();
+        std::cout << "源UP后状态=" << static_cast<int>(stopped_state.status)
+            << " recovery=" << stopped_state.recovery_pending << " canceled=" << stopped_state.canceled
+            << " focus=" << stopped_state.source_focused << " target=" << stopped_state.target_available << '\n';
+        // AutoStop清债后允许自动重核新请求；Trigger的开火保持许可仍须重新松按。
+        until([&] { return trigger.snapshot().reason == TriggerReason::WAIT_RELEASE; });
+        require(mouse->downs == 1 && resume_calls == 0, "旧开火保持许可不得自动恢复");
+        mouse->physical(0, false);
+        until([&] { return !stop.snapshot().recovery_pending && trigger.snapshot().reason == TriggerReason::RELEASED; });
+        mouse->physical(2, true);
+        until([&] { publish(false); return mouse->downs == 2 && trigger.firing_signal().confirmed_down; });
+        const auto new_id = stop.estimated_completion_id();
+        require(new_id != 0 && new_id != old_id, "新松按须使用新的非零急停编号");
+        mouse->allow(false); trigger.stop(); stop.stop();
+        require(mouse->released() && !mouse->cleanup_during_shot, "已知UP恢复结束须有序归还");
+    }
+    require(mouse->moves == 0, "组合测试不得发鼠标位移");
+    std::cout << "源变化UP new_session=" << new_session << " unknown=" << unknown_receipt
+        << " old_id=" << old_id << " resume_calls=" << resume_calls.load() << '\n';
+}
 } // namespace
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--source-up-receipt") {
+            source_change_during_up(false, false);
+            source_change_during_up(true, false);
+            source_change_during_up(false, true);
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--stationary-owner") {
             stationary_owner_does_not_interrupt_shot();
             return 0;
@@ -1041,6 +1151,9 @@ int main(int argc, char** argv) {
             return 0;
         }
         weapon_change_during_admission(false);
+        source_change_during_up(false, false);
+        source_change_during_up(true, false);
+        source_change_during_up(false, true);
         source_session_interleaving();
         source_session_interleaving(true);
         target_change_returns_before_next_brake();
