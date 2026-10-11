@@ -42,7 +42,7 @@ try {
         [IO.File]::WriteAllText($stampPath, ($invalid | ConvertTo-Json))
         $output = Join-Path $owned.RootPath ('invalid-' + $mutation.field)
         $rejected = $false
-        try { & $publisher -BuildDirectory $build -OutputDirectory $output | Out-Null }
+        try { & $publisher -BuildDirectory $build -OutputDirectory $output -GitExecutable $GitExecutable | Out-Null }
         catch { $rejected = $_.Exception.Message -like '*Linked artifact identity*' }
         if (-not $rejected -or (Test-Path $output)) { throw "F04 reference package accepted invalid linked $($mutation.field)" }
     }
@@ -50,18 +50,18 @@ try {
     Remove-Item -LiteralPath $stampPath
     $output = Join-Path $owned.RootPath 'missing-stamp'
     $rejected = $false
-    try { & $publisher -BuildDirectory $build -OutputDirectory $output | Out-Null } catch { $rejected = $true }
+    try { & $publisher -BuildDirectory $build -OutputDirectory $output -GitExecutable $GitExecutable | Out-Null } catch { $rejected = $true }
     if (-not $rejected -or (Test-Path $output)) { throw 'F04 reference package accepted missing linked stamp' }
     [IO.File]::WriteAllText($stampPath, $validStamp)
     $original = [IO.File]::ReadAllText($artifact)
     [IO.File]::WriteAllText($artifact, 'replaced-after-link')
     $output = Join-Path $owned.RootPath 'changed-payload'
     $rejected = $false
-    try { & $publisher -BuildDirectory $build -OutputDirectory $output | Out-Null } catch { $rejected = $true }
+    try { & $publisher -BuildDirectory $build -OutputDirectory $output -GitExecutable $GitExecutable | Out-Null } catch { $rejected = $true }
     if (-not $rejected -or (Test-Path $output)) { throw 'F04 reference package accepted changed EXE' }
     [IO.File]::WriteAllText($artifact, $original)
     $output = Join-Path $owned.RootPath 'valid-package'
-    & $publisher -BuildDirectory $build -OutputDirectory $output | Out-Null
+    & $publisher -BuildDirectory $build -OutputDirectory $output -GitExecutable $GitExecutable | Out-Null
     $manifest = Get-Content (Join-Path $output 'manifest.json') -Raw | ConvertFrom-Json
     if ($manifest.git_commit -cne $commit -or $manifest.physical_output -ne $false) { throw 'Reference package evidence changed' }
     foreach ($file in $manifest.files) {

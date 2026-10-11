@@ -69,6 +69,9 @@ cmake --build $buildDirectory --config Release --target xen_app --parallel
 
 GPU 或 NDI 构建再按脚本参数传入对应 SDK 根目录。正式脚本按 ORT 发行包默认使用
 `build/nvidia`、`build/directml`、`build/openvino`，也可通过 `-BuildDirectory` 指定独立目录。
+clean `PATH` 测试使用配置阶段解析的工具绝对路径，并向子进程透传；独立对照打包入口
+`package_reference_compare.ps1` 与 Runtime/网络接收基准脚本均可用 `-GitExecutable` 指定 Git，标注 ROI 测试可用
+`--powershell-executable` 指定 PowerShell，无需将工具或 SDK 目录加入测试 PATH。
 VC CRT 从所用 Visual Studio 的官方 Redist 目录解析；可用 `-MsvcRedistRoot` 明确指定，
 不从系统目录补拷 DLL。
 依赖 NDI 图像见证的 Prepare 只接受启用 NDI 且运行库完整的工具目录；未启用时明确拒绝，

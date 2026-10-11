@@ -1605,10 +1605,12 @@ if(BUILD_TESTING)
         -File "${PROJECT_SOURCE_DIR}/tests/publication_script_tests.ps1")
     add_test(NAME reference_compare_package_tests
         COMMAND "${XEN_POWERSHELL7_EXECUTABLE}" -NoProfile -ExecutionPolicy Bypass
-        -File "${PROJECT_SOURCE_DIR}/tests/reference_compare_package_tests.ps1")
+        -File "${PROJECT_SOURCE_DIR}/tests/reference_compare_package_tests.ps1"
+        -GitExecutable "${GIT_EXECUTABLE}")
     add_test(NAME annotation_roi_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
-        "${PROJECT_SOURCE_DIR}/tests/annotation_roi_tests.py")
+        "${PROJECT_SOURCE_DIR}/tests/annotation_roi_tests.py"
+        --powershell-executable "${XEN_POWERSHELL7_EXECUTABLE}")
     add_test(NAME model_reference_compare_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
         "${PROJECT_SOURCE_DIR}/tests/model_reference_compare_tests.py")
@@ -2136,7 +2138,8 @@ if(BUILD_TESTING)
             "${PROJECT_SOURCE_DIR}/scripts/test_release_transfer_and_aim_manual.ps1")
 
     xen_add_windows_powershell_test(auxiliary_powershell_tests
-        "${PROJECT_SOURCE_DIR}/scripts/test_auxiliary_powershell.ps1")
+        "${PROJECT_SOURCE_DIR}/scripts/test_auxiliary_powershell.ps1"
+        -PowerShellExecutable "${XEN_WINDOWS_POWERSHELL}")
 
     add_executable(debug_tests
         tests/debug_tests.cpp)
@@ -2151,10 +2154,12 @@ if(BUILD_TESTING)
     target_link_libraries(benchmark_report_fixture PRIVATE xen_debug log)
     xen_add_windows_powershell_test(benchmark_evidence_snapshot_tests
         "${PROJECT_SOURCE_DIR}/tests/benchmark_evidence_snapshot_tests.ps1"
-        -FixtureExecutable "$<TARGET_FILE:benchmark_report_fixture>")
+        -FixtureExecutable "$<TARGET_FILE:benchmark_report_fixture>"
+        -GitExecutable "${GIT_EXECUTABLE}")
     xen_add_windows_powershell_test(network_evidence_binding_tests
         "${PROJECT_SOURCE_DIR}/tests/benchmark_evidence_snapshot_tests.ps1"
-        -FixtureExecutable "$<TARGET_FILE:benchmark_report_fixture>" -NetworkOnly)
+        -FixtureExecutable "$<TARGET_FILE:benchmark_report_fixture>" -NetworkOnly
+        -GitExecutable "${GIT_EXECUTABLE}")
     add_executable(session_archive_tests tests/session_archive_tests.cpp)
     target_link_libraries(session_archive_tests PRIVATE xen_debug log)
     add_test(NAME session_archive_tests COMMAND session_archive_tests)

@@ -44,15 +44,30 @@ public:
     RecoilTime physical_started{};
     std::uint64_t observed_device_epoch = 0, observed_trust_generation = 0, observed_source_context_epoch = 0;
     bool input_seen = false;
-    RecoilInput input() {
+    RecoilInput input(bool output_locked, bool* provisional = nullptr) {
         auto result = context();
         InputSnapshot raw;
         result.healthy = mouse->poll_input(raw) && raw.state_valid && raw.status == InputMonitorStatus::READY &&
             !mouse->left_button_faulted();
         const bool physical = result.healthy && raw.virtual_keys[1];
-        const auto synthetic = firing();
-        if ((mouse->left_button_cleanup_required() && !synthetic.confirmed_down && !automated_debug_firing) ||
-            (synthetic.confirmed_down && (!synthetic.id || synthetic.started_at==RecoilTime{}))) result.healthy=false;
+        auto synthetic = firing();
+        bool source_provisional = false;
+        if (mouse->left_button_cleanup_required() && !synthetic.confirmed_down && !automated_debug_firing) {
+            if (output_locked) result.healthy = false;
+            else {
+                // DOWN责任与确认信号分别发布；只有同一输出门内才能判定是否真缺owner。
+                OutputArbiterRejection rejection{};
+                auto stable = arbiter->try_enter_aim(OutputArbiterSource::RECOIL, &rejection);
+                if (stable.owns_lock()) {
+                    synthetic = firing();
+                    result.healthy = result.healthy && !mouse->left_button_faulted();
+                    if (mouse->left_button_cleanup_required() && !synthetic.confirmed_down) result.healthy = false;
+                } else if (rejection == OutputArbiterRejection::OUTPUT_FAULT) result.healthy = false;
+                else source_provisional = true;
+            }
+        }
+        if (synthetic.confirmed_down && (!synthetic.id || synthetic.started_at==RecoilTime{})) result.healthy=false;
+        if (provisional) *provisional = source_provisional;
         if (!result.permission || !result.focused ||
             (!result.profile_conditions_match && result.weapon_block != RecoilWeaponBlock::ORDINARY_UNAVAILABLE) ||
             result.weapon_block == RecoilWeaponBlock::UNTRUSTED ||
@@ -62,37 +77,42 @@ public:
         observed_device_epoch = result.device_epoch; observed_trust_generation = result.weapon_trust_generation;
         observed_source_context_epoch = result.source_context_epoch;
         input_seen = true;
-        if (result.healthy && synthetic.confirmed_down && !physical) automatic_firing_seen = true;
-        if (result.healthy && physical && !physical_previous) {
-            physical_started = RecoilClock::now();
-            // 人工上升沿优先于软件点射；一次接管只请求一次从头起压。
-            if (!source_blocked && !calibration_budget && !canceled.load() && !stopping.load() &&
-                (last_source == 2 || synthetic.confirmed_down || automatic_firing_seen)) {
-                manual_restart_pending = true;
-                manual_takeover = true;
+        if (!result.healthy) source_blocked = true;
+        // 未定组合既不能建立来源，也不能伪造完整释放清掉此前撤销；真实上下文撤销仍已锁存。
+        if (!source_provisional) {
+            if (result.healthy && synthetic.confirmed_down && !physical) automatic_firing_seen = true;
+            if (result.healthy && physical && !physical_previous) {
+                physical_started = RecoilClock::now();
+                // 人工上升沿优先于软件点射；一次接管只请求一次从头起压。
+                if (!source_blocked && !calibration_budget && !canceled.load() && !stopping.load() &&
+                    (last_source == 2 || synthetic.confirmed_down || automatic_firing_seen)) {
+                    manual_restart_pending = true;
+                    manual_takeover = true;
+                }
+                automatic_firing_seen = false;
             }
-            automatic_firing_seen = false;
-        }
-        // 不可信输入不能伪造释放或新按下；下一次健康快照需完整释放再建立来源。
-        if (result.healthy) physical_previous = physical;
-        else source_blocked = true;
-        const int source = physical ? 1 : synthetic.confirmed_down ? 2 : 0;
-        sampled_firing_id = source == 2 ? synthetic.id : 0;
-        sampled_firing_uncertainty_ns.reset();
-        if (source == 2 && synthetic.call_started_at != RecoilTime{} &&
-            synthetic.backend_completed_at >= synthetic.call_started_at &&
-            synthetic.uncertainty.count() >= 0 && synthetic.uncertainty ==
-                synthetic.backend_completed_at - synthetic.call_started_at)
-            sampled_firing_uncertainty_ns = synthetic.uncertainty.count();
-        if ((source == 2 && last_source == 1) ||
-            (source==2 && last_source==2 && synthetic.id!=last_synthetic_id)) source_blocked = true;
-        if (result.healthy && result.permission && result.focused && result.profile_conditions_match &&
-            !physical && !synthetic.confirmed_down) {
-            source_blocked = false; last_source = 0; last_synthetic_id = 0;
-            manual_takeover = false; manual_restart_pending = false;
-        } else if (source) { last_source = source; if(source==2) last_synthetic_id=synthetic.id; }
+            // 不可信输入不能伪造释放或新按下；下一次健康快照需完整释放再建立来源。
+            if (result.healthy) physical_previous = physical;
+            const int source = physical ? 1 : synthetic.confirmed_down ? 2 : 0;
+            sampled_firing_id = source == 2 ? synthetic.id : 0;
+            sampled_firing_uncertainty_ns.reset();
+            if (source == 2 && synthetic.call_started_at != RecoilTime{} &&
+                synthetic.backend_completed_at >= synthetic.call_started_at &&
+                synthetic.uncertainty.count() >= 0 && synthetic.uncertainty ==
+                    synthetic.backend_completed_at - synthetic.call_started_at)
+                sampled_firing_uncertainty_ns = synthetic.uncertainty.count();
+            if ((source == 2 && last_source == 1) ||
+                (source==2 && last_source==2 && synthetic.id!=last_synthetic_id)) source_blocked = true;
+            if (result.healthy && result.permission && result.focused && result.profile_conditions_match &&
+                !physical && !synthetic.confirmed_down) {
+                source_blocked = false; last_source = 0; last_synthetic_id = 0;
+                manual_takeover = false; manual_restart_pending = false;
+            } else if (source) { last_source = source; if(source==2) last_synthetic_id=synthetic.id; }
+        } else if (result.healthy && !physical) physical_previous = false;
         result.enabled = config.enabled && !stopping.load();
-        result.held = physical || synthetic.confirmed_down;
+        // 未定状态只允许同一已知命令的明确撤销减权，不据此建立新来源或清除锁存。
+        const bool prior_command_unreleased = last_source == 2 && synthetic.id != last_synthetic_id;
+        result.held = physical || (source_provisional ? prior_command_unreleased : synthetic.confirmed_down);
         result.firing_started_at = physical ? physical_started : synthetic.started_at;
         result.permission = result.permission && !source_blocked && !stopping.load() && !canceled.load();
         if(calibration_budget) {
@@ -189,26 +209,29 @@ public:
                     controller.cancel(RecoilReason::CANCELED, RecoilClock::now());finish_if_ended();
                 }
                 const auto sampled_at = RecoilClock::now();
-                const auto before = input();
+                bool provisional = false;
+                auto before = input(false, &provisional);
                 // 停机可能在采样期间到达；不要把它折成普通DISABLED并提前关闭批次。
                 if (stopping.load()) break;
-                if (manual_restart_pending) {
+                // 同一输出锁覆盖FIRING交接、规划和提交，Aim不会带着交接前的Y穿过此边界。
+                const auto arbitration_at = RecoilClock::now();
+                OutputArbiterRejection arbitration_rejection{};
+                auto lock = arbiter->try_enter_aim(OutputArbiterSource::RECOIL, &arbitration_rejection);
+                if (lock.owns_lock() && provisional) {
+                    before = input(true);
+                    provisional = false;
+                }
+                if (manual_restart_pending && !provisional) {
                     // 二次复核时遇到接管，旧意图先按NOT_SENT结算，再在此处重启。
                     if (before.healthy && before.permission && !source_blocked)
                         controller.restart_for_manual(RecoilClock::now());
                     manual_restart_pending = false;
                     finish_if_ended();
                 }
-                const auto before_source = last_source;
-                const auto before_firing_id = sampled_firing_id;
-                const auto before_firing_uncertainty_ns = sampled_firing_uncertainty_ns;
-                // 同一输出锁覆盖FIRING交接、规划和提交，Aim不会带着交接前的Y穿过此边界。
-                const auto arbitration_at = RecoilClock::now();
-                OutputArbiterRejection arbitration_rejection{};
-                auto lock = arbiter->try_enter_aim(OutputArbiterSource::RECOIL, &arbitration_rejection);
                 if (!lock.owns_lock()) {
                     // 正常争用尚未调用后端：保留事件索引，每轮重新检查松键和安全状态。
-                    if (!before.enabled || !before.held || !before.healthy || !before.focused ||
+                    const bool released = !before.held && (!provisional || last_source != 0);
+                    if (!before.enabled || released || !before.healthy || !before.focused ||
                         !before.permission || !before.profile_conditions_match ||
                         arbitration_rejection == OutputArbiterRejection::OUTPUT_FAULT) {
                         if (arbitration_rejection == OutputArbiterRejection::OUTPUT_FAULT)
@@ -221,6 +244,9 @@ public:
                     wake.wait_for(state_lock, std::chrono::milliseconds(1), [&] { return stopping.load() || canceled.load(); });
                     continue;
                 }
+                const auto before_source = last_source;
+                const auto before_firing_id = sampled_firing_id;
+                const auto before_firing_uncertainty_ns = sampled_firing_uncertainty_ns;
                 auto decision = controller.advance(before, RecoilClock::now());
                 arbiter->set_recoil_y_owned(!calibration_budget &&
                     (decision.snapshot.phase == RecoilPhase::FIRING || decision.snapshot.phase == RecoilPhase::PENDING));
@@ -240,7 +266,7 @@ public:
                     default: break;
                     }
                     if (lock.owns_lock()) {
-                        const auto current = input();
+                        const auto current = input(true);
                         if (current.weapon_block == RecoilWeaponBlock::ORDINARY_UNAVAILABLE && !current.profile_conditions_match)
                             ordinary_block = current;
                         const auto now = RecoilClock::now();

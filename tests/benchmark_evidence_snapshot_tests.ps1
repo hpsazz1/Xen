@@ -1,4 +1,8 @@
-﻿param([Parameter(Mandatory = $true)][string]$FixtureExecutable, [switch]$NetworkOnly)
+﻿param(
+    [Parameter(Mandatory = $true)][string]$FixtureExecutable,
+    [switch]$NetworkOnly,
+    [string]$GitExecutable = 'git'
+)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $repository = Split-Path -Parent $PSScriptRoot
@@ -98,7 +102,7 @@ if ($NetworkOnly) {
             }
             $rejection = ''
             try {
-                & $entry -ModelPath $model -ReportPrefix $prefix -BuildDirectory (Join-Path $root 'build') -Backend $backend -WarmupSamples 0 -MinimumSamples 1 -MinimumSeconds 0 -MaximumSeconds 1 -EnableFp16 off -EnableCudaGraph off -EnableGpuPreprocess off
+                & $entry -ModelPath $model -ReportPrefix $prefix -BuildDirectory (Join-Path $root 'build') -Backend $backend -WarmupSamples 0 -MinimumSamples 1 -MinimumSeconds 0 -MaximumSeconds 1 -EnableFp16 off -EnableCudaGraph off -EnableGpuPreprocess off -GitExecutable $GitExecutable
             } catch { $rejection = $_.Exception.Message }
             finally { if ($null -ne $breakpoint) { Remove-PSBreakpoint -Breakpoint $breakpoint } }
             try {
@@ -165,7 +169,7 @@ try {
             }
         }
         try {
-            & $entry -ModelPath $model -ReportPrefix $prefix -BuildDirectory (Join-Path $root 'build') -Backend cuda -WarmupSamples 0 -MinimumSamples 1 -MinimumSeconds 0 -MaximumSeconds 1 -ExpectedCaptureBackend xudp_jpeg -ExpectedEncodedWidth 320 -ExpectedEncodedHeight 320 -EnableFp16 off -EnableCudaGraph off -EnableGpuPreprocess off
+            & $entry -ModelPath $model -ReportPrefix $prefix -BuildDirectory (Join-Path $root 'build') -Backend cuda -WarmupSamples 0 -MinimumSamples 1 -MinimumSeconds 0 -MaximumSeconds 1 -ExpectedCaptureBackend xudp_jpeg -ExpectedEncodedWidth 320 -ExpectedEncodedHeight 320 -EnableFp16 off -EnableCudaGraph off -EnableGpuPreprocess off -GitExecutable $GitExecutable
             $environment = [IO.File]::ReadAllText("$prefix.environment.json") | ConvertFrom-Json
             foreach ($kind in @('csv', 'json', 'profile')) {
                 $inputPath = if ($kind -eq 'profile') { "$template.profile.json" } else { "$template.$kind" }
@@ -208,7 +212,7 @@ try {
         }
         $rejected = $false
         try {
-            & $entry -ModelPath $model -ReportPrefix $prefix -BuildDirectory (Join-Path $root 'build') -Backend cuda -WarmupSamples 0 -MinimumSamples 1 -MinimumSeconds 0 -MaximumSeconds 1 -ExpectedCaptureBackend xudp_jpeg -ExpectedEncodedWidth 320 -ExpectedEncodedHeight 320 -EnableFp16 off -EnableCudaGraph off -EnableGpuPreprocess off
+            & $entry -ModelPath $model -ReportPrefix $prefix -BuildDirectory (Join-Path $root 'build') -Backend cuda -WarmupSamples 0 -MinimumSamples 1 -MinimumSeconds 0 -MaximumSeconds 1 -ExpectedCaptureBackend xudp_jpeg -ExpectedEncodedWidth 320 -ExpectedEncodedHeight 320 -EnableFp16 off -EnableCudaGraph off -EnableGpuPreprocess off -GitExecutable $GitExecutable
         } catch { $rejected = $true }
         finally { Remove-PSBreakpoint -Breakpoint $breakpoint }
         try {

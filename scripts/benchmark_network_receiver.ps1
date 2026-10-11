@@ -67,7 +67,8 @@
     [ValidateRange(0, 1000000000)]
     [uint64]$MinimumAimPrecomputedCommandFrames = 0,
     [string]$ReadyFilePath = "",
-    [switch]$PrepareOnly
+    [switch]$PrepareOnly,
+    [string]$GitExecutable = "git"
 )
 
 $ErrorActionPreference = "Stop"
@@ -320,7 +321,8 @@ try {
             $AimMaxPredictionLeadPercent `
         -MinimumAimPrecomputedCommandFrames `
             $MinimumAimPrecomputedCommandFrames `
-        -ReadyFilePath $ReadyFilePath
+        -ReadyFilePath $ReadyFilePath `
+        -GitExecutable $GitExecutable
 
     $reportPath = "$ReportPrefix.json"
     $environmentPath = "$ReportPrefix.environment.json"

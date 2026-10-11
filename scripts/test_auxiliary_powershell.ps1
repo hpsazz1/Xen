@@ -1,6 +1,7 @@
 ﻿param(
     [string]$ScriptPath = (Join-Path $PSScriptRoot 'invoke_auxiliary_powershell.ps1'),
-    [string]$TemporaryRoot = (Join-Path $PSScriptRoot '../temp/XEN-DEEP-FIX-20261010-001')
+    [string]$TemporaryRoot = (Join-Path $PSScriptRoot '../temp/XEN-DEEP-FIX-20261010-001'),
+    [string]$PowerShellExecutable = (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe')
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -39,7 +40,7 @@ try {
     $again = Invoke-XenAuxiliaryTask $request | ConvertFrom-Json
     Assert-True ($again.task_name -eq $first.task_name -and $script:starts -eq 1) '响应丢失后再次 Start 不得重复执行'
     $runner = Join-Path $run '.auxiliary/run.ps1'
-    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $runner
+    & $PowerShellExecutable -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $runner
     Assert-True ($LASTEXITCODE -eq 0) '无设备脚本应成功'
     $script:registered.State='Ready'
     $request.mode='Status'
@@ -58,15 +59,15 @@ try {
     # 外层PowerShell不能在payload抛错后拿默认LASTEXITCODE=0冒充成功。
     Remove-Item -LiteralPath (Join-Path $run '.auxiliary/STOP')
     [IO.File]::WriteAllText((Join-Path $run '.auxiliary/payload.ps1'), 'throw "fixture failure"')
-    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $runner
+    & $PowerShellExecutable -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $runner
     Assert-True ($LASTEXITCODE -ne 0) '子脚本抛错必须回传失败'
     [IO.File]::WriteAllText((Join-Path $run '.auxiliary/payload.ps1'), 'exit 7')
-    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $runner
+    & $PowerShellExecutable -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $runner
     Assert-True ($LASTEXITCODE -eq 7) '子脚本退出码不得被默认成功覆盖'
     # 在启动前收到停止请求时，生成的生产 runner 不能执行 payload。
     [IO.File]::WriteAllText((Join-Path $run '.auxiliary/STOP'), 'STOP_REQUESTED')
     Remove-Item -LiteralPath (Join-Path $run 'once.txt')
-    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $runner
+    & $PowerShellExecutable -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $runner
     Assert-True ($LASTEXITCODE -ne 0 -and -not (Test-Path -LiteralPath (Join-Path $run 'once.txt'))) '启动前取消必须阻止 payload'
     $failed = Get-Content -LiteralPath (Join-Path $run '.auxiliary/result.json') -Raw | ConvertFrom-Json
     Assert-True ($failed.status -eq 'failed' -and $failed.ended_utc) '异常也必须写终态'
@@ -130,7 +131,7 @@ exit $LASTEXITCODE
                 [IO.File]::WriteAllText($bindingPath, ($binding | ConvertTo-Json))
             }
             [IO.File]::WriteAllText((Join-Path $run 'task.json'), $(if ($scenario -eq 'timeout_error') { '{invalid json' } else { '{}' }))
-            & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $fixturePath -Scenario $scenario
+            & $PowerShellExecutable -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $fixturePath -Scenario $scenario
             $result = Get-Content -LiteralPath (Join-Path $run '.auxiliary/result.json') -Raw | ConvertFrom-Json
             $expectedExit = $scenario -in @('binding_exits', 'timeout_exits', 'stop_exits', 'handle_exits')
             Assert-True (([bool]$result.ended_utc) -eq $expectedExit) "$scenario 仅确认子进程退出后才写任务结束时间"

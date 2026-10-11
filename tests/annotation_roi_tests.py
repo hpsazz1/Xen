@@ -1,13 +1,16 @@
 """通过实际标注生成脚本核对中心 ROI 与 C++ 非负整数除法一致。"""
+import argparse
 import csv
 import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+POWERSHELL_EXECUTABLE = shutil.which('pwsh') or shutil.which('powershell')
 class RoiTemplateTests(unittest.TestCase):
     def test_center_roi_all_remainders(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -24,11 +27,17 @@ class RoiTemplateTests(unittest.TestCase):
                         writer.writerow(dict(scene='scene',status='SUCCESS',failed_frames=0,frames=1,source_width=1920+dx,source_height=1080+dy,evaluated_width=640,evaluated_height=640,model_input_width=640,model_input_height=640))
                     for script, suffix in [('new_aim_ground_truth_annotations.ps1','aim'),('new_video_visibility_annotations.ps1','visibility')]:
                         output = root / f'{suffix}-{dx}-{dy}'
-                        result = subprocess.run([shutil.which('pwsh') or shutil.which('powershell'), '-NoProfile','-ExecutionPolicy','Bypass','-File',str(ROOT/'scripts'/script),'-VideoDirectory',str(root),'-BenchmarkReport',str(report),'-OutputDirectory',str(output)],capture_output=True,timeout=30)
+                        result = subprocess.run([POWERSHELL_EXECUTABLE, '-NoProfile','-ExecutionPolicy','Bypass','-File',str(ROOT/'scripts'/script),'-VideoDirectory',str(root),'-BenchmarkReport',str(report),'-OutputDirectory',str(output)],capture_output=True,timeout=30)
                         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
                         data = json.loads((output / f'scene.mp4.{suffix}.json').read_text(encoding='utf-8-sig'))
                         with self.subTest(script=script,dx=dx,dy=dy):
                             self.assertEqual(data['roi_x'], (1920+dx-640)//2)
                             self.assertEqual(data['roi_y'], (1080+dy-640)//2)
 if __name__ == '__main__':
-    unittest.main()
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--powershell-executable', default=POWERSHELL_EXECUTABLE)
+    args, unittest_args = parser.parse_known_args()
+    if not args.powershell_executable:
+        parser.error('找不到 PowerShell，请通过 --powershell-executable 显式指定。')
+    POWERSHELL_EXECUTABLE = args.powershell_executable
+    unittest.main(argv=[sys.argv[0], *unittest_args])

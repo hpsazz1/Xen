@@ -62,7 +62,8 @@
     [double]$ExpectedAimMaxPredictionLeadPercent = 35.0,
     [ValidateRange(0, 1000000000)]
     [uint64]$MinimumAimPrecomputedCommandFrames = 0,
-    [string]$ReadyFilePath = ""
+    [string]$ReadyFilePath = "",
+    [string]$GitExecutable = "git"
 )
 
 $ErrorActionPreference = "Stop"
@@ -1188,7 +1189,7 @@ if (-not $probeSummaryValid) {
 $gitCommit = if ($portablePackage) {
     $packageAfter.git_commit
 } else {
-    (& git -C $repositoryRoot rev-parse HEAD).Trim()
+    (& $GitExecutable -C $repositoryRoot rev-parse HEAD).Trim()
 }
 if (-not $portablePackage -and $LASTEXITCODE -ne 0) {
     throw "读取 Git commit 失败。"
@@ -1196,7 +1197,7 @@ if (-not $portablePackage -and $LASTEXITCODE -ne 0) {
 $gitStatus = if ($portablePackage) {
     @()
 } else {
-    @(& git -C $repositoryRoot status --porcelain)
+    @(& $GitExecutable -C $repositoryRoot status --porcelain)
 }
 if (-not $portablePackage -and $LASTEXITCODE -ne 0) {
     throw "读取 Git 工作树状态失败。"

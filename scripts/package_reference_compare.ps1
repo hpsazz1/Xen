@@ -1,6 +1,7 @@
 ﻿param(
     [Parameter(Mandatory=$true)][string]$BuildDirectory,
-    [Parameter(Mandatory=$true)][string]$OutputDirectory
+    [Parameter(Mandatory=$true)][string]$OutputDirectory,
+    [string]$GitExecutable = 'git'
 )
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'build_artifact_identity.psm1') -Force
@@ -8,9 +9,9 @@ $repo = Split-Path -Parent $PSScriptRoot
 $buildRoot = (Resolve-Path -LiteralPath $BuildDirectory).Path
 $outputRoot = [IO.Path]::GetFullPath($OutputDirectory)
 if (Test-Path -LiteralPath $outputRoot) { throw '独立包目录必须不存在，拒绝覆盖。' }
-$status = & git -C $repo status --porcelain
+$status = & $GitExecutable -C $repo status --porcelain
 if ($LASTEXITCODE -ne 0 -or $status) { throw '必须先提交本任务源码，再从干净工作树打包。' }
-$commit = (& git -C $repo rev-parse HEAD).Trim()
+$commit = (& $GitExecutable -C $repo rev-parse HEAD).Trim()
 $identity = Get-Content -LiteralPath (Join-Path $buildRoot 'xen-build-identity.json') -Raw | ConvertFrom-Json
 if ($identity.git_commit -ne $commit -or $identity.git_dirty) { throw '构建身份未绑定当前干净提交，请重新配置并构建。' }
 $binaryRoot = Join-Path $buildRoot 'Release'

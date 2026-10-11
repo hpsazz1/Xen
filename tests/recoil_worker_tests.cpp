@@ -21,12 +21,15 @@ public:
     std::atomic<bool> cancel_key{false};
     std::atomic<bool> calibration_key{true};
     std::atomic<bool> trigger_key{false}, block_up{false}, up_entered{false}, release_up{false};
+    std::atomic<bool> block_down{false}, release_down{false}, unknown_down{false};
+    mutable std::atomic<std::uint64_t> pending_down_debt_reads{0};
     std::atomic<bool> block_poll{false}, poll_entered{false}, release_poll{false};
     std::atomic<int> downs{0}, ups{0};
     std::atomic<bool> pre_call_receipt{false};
     std::atomic<RecoilTime> last_poll_at{RecoilTime{}};
     std::function<void()> on_poll;
     std::atomic<int> moves{0};
+    std::atomic<int> block_on_move{0};
     struct Call { MouseMoveCommand command; RecoilTime called_at; };
     std::mutex calls_mutex;
     std::vector<Call> calls;
@@ -35,7 +38,7 @@ public:
     bool open() noexcept override { return true; }
     MouseMoveReceipt move(const MouseMoveCommand& command) noexcept override {
         { std::lock_guard lock(calls_mutex); calls.push_back({command,RecoilClock::now()}); }
-        ++moves;entered=true;while(block&&!proceed)std::this_thread::sleep_for(1ms);
+        const auto count=++moves;entered=true;while((block||count==block_on_move)&&!proceed)std::this_thread::sleep_for(1ms);
         MouseMoveReceipt result; result.succeeded = !unknown; result.backend_completed_at = missing_time?RecoilTime{}:
             pre_call_receipt?last_poll_at.load():RecoilClock::now(); return result;
     }
@@ -50,12 +53,16 @@ public:
         out.virtual_keys[1] = held;out.virtual_keys[5]=trigger_key;out.virtual_keys[18]=calibration_key;out.virtual_keys[27]=cancel_key; out.sequence = ++sequence; return true;
     }
     void close() noexcept override {}
-    bool left_button_cleanup_required() const noexcept override {return dirty;}
+    bool left_button_cleanup_required() const noexcept override {
+        const bool debt=dirty;
+        if(debt&&block_down&&!release_down)++pending_down_debt_reads;
+        return debt;
+    }
     bool supports_left_button() const noexcept override {return true;}
     ButtonReceipt set_left_button(bool down) noexcept override {
-        if(down){++downs;dirty=true;}
+        if(down){++downs;dirty=true;while(block_down&&!release_down)std::this_thread::sleep_for(1ms);}
         else {++ups;up_entered=true;while(block_up&&!release_up)std::this_thread::sleep_for(1ms);dirty=false;}
-        ButtonReceipt receipt;receipt.disposition=ButtonDisposition::ACKNOWLEDGED;
+        ButtonReceipt receipt;receipt.disposition=down&&unknown_down?ButtonDisposition::APPLICATION_UNKNOWN:ButtonDisposition::ACKNOWLEDGED;
         receipt.backend_completed_at=receipt.protocol_ack_received_at=RecoilClock::now();
         receipt.cleanup_required=dirty;receipt.datagram_sent=true;return receipt;
     }
@@ -137,6 +144,12 @@ struct Fixture {
             config.conditions="synthetic";config.sensitivity=1.0;
             check(worker->start_calibration(config,permit,automated_debug_firing),"独立校准worker启动");
         } else check(worker->start(config), "worker启动");
+    }
+    ~Fixture() {
+        // 断言抛异常时也先解开fake屏障，再在回调依赖的成员销毁前回收线程。
+        mouse->proceed=true;mouse->release_up=true;mouse->release_down=true;
+        mouse->release_poll=true;mouse->release_poll.notify_all();
+        worker->stop();
     }
     void ready() {
         if(!until([&]{return worker->snapshot().phase == RecoilPhase::READY;})) {
@@ -277,9 +290,107 @@ void discrete_worker_recovery_and_safety() {
     }
 }
 
+void trigger_worker_replay(bool revoke_in_flight=false,bool unknown_down=false) {
+    Fixture f(true,false,false,false,0,20,false,true);f.ready();
+    auto trigger=std::make_shared<TriggerWorker>(f.mouse,f.arbiter,[]{return true;},[]{return true;},
+        []{return std::uint64_t{1};},[](std::uint64_t){return true;},[](std::uint64_t){});
+    TriggerConfig cfg;cfg.enabled=true;cfg.require_stop=false;cfg.hold_virtual_key=5;
+    cfg.fire_delay_ms=0;cfg.press_duration_ms=40;cfg.shot_interval_ms=80;cfg.max_observation_age_ms=1000;
+    check(trigger->start(cfg),"人工确认双worker重放启动扳机");f.live_trigger.store(trigger);
+    check(until([&]{return trigger->snapshot().reason==TriggerReason::RELEASED;}),"扳机先观察释放");
+    f.mouse->block_down=true;f.mouse->unknown_down=unknown_down;
+    for(int run=1;run<=2;++run) {
+        auto observation=std::make_shared<TriggerObservation>();
+        observation->detections.push_back({30,30,70,70,0.9f,0});observation->center_x=observation->center_y=50;
+        observation->roi_width=observation->roi_height=100;observation->epoch=1;observation->sequence=run;
+        observation->valid=observation->timing_valid=true;observation->observed_at=TriggerClock::now();
+        f.mouse->release_down=false;
+        const auto debt_reads=f.mouse->pending_down_debt_reads.load();
+        f.mouse->trigger_key=true;trigger->publish(observation);
+        check(until([&]{return f.mouse->pending_down_debt_reads>debt_reads;}),"真实DOWN事务内确实采到未发布的按钮责任");
+        if(revoke_in_flight&&run==1) {
+            f.focused=false;
+            check(until([&]{return f.worker->snapshot().reason==RecoilReason::CONTEXT;}),"DOWN在途仍观察真实焦点撤销");
+            f.focused=true;
+            const auto restored_reads=f.mouse->pending_down_debt_reads.load();
+            check(until([&]{return f.mouse->pending_down_debt_reads>=restored_reads+2;}),"恢复焦点后继续消费未定采样");
+        }
+        f.mouse->release_down=true;
+        if(unknown_down) {
+            check(until([&]{return trigger->snapshot().faulted&&f.worker->snapshot().reason==RecoilReason::CONTEXT;}),
+                "未定DOWN返回UNKNOWN仍锁存输出故障");
+            check(f.mouse->moves==0&&f.worker->snapshot().session_id==0,"UNKNOWN不得借同步复核取得执行资格");
+            trigger->stop();f.worker->stop();
+            check(f.mouse->ups==1&&!f.mouse->dirty,"UNKNOWN仍由原owner确认UP消债");
+            return;
+        }
+        if(revoke_in_flight&&run==1) {
+            check(until([&]{return f.mouse->ups==1&&!trigger->firing_signal().confirmed_down;}),"撤销的旧DOWN仍按合同完成UP");
+            check(f.mouse->moves==0&&f.worker->snapshot().session_id==0,"未定快照不能伪造释放清除焦点撤销");
+        } else {
+            const auto session=run-(revoke_in_flight?1:0);
+            check(until([&]{const auto state=f.worker->snapshot();return state.session_id==session&&state.phase==RecoilPhase::EXHAUSTED;}),
+                "两次独立真实TriggerWorker命令均重放人工确认曲线");
+        }
+        f.mouse->trigger_key=false;
+        check(until([&]{return !trigger->firing_signal().confirmed_down&&trigger->snapshot().reason==TriggerReason::RELEASED;}),
+            "每次命令确认UP并释放扳机保持键");
+        f.ready();
+    }
+    check(f.mouse->downs==2&&f.mouse->ups==2&&f.worker->snapshot().session_id==(revoke_in_flight?1:2),
+        "两个独立扳机弹序仅在真实释放后恢复，不伪造恢复毫秒");
+    trigger->stop();f.worker->stop();
+}
+void provisional_source_edges() {
+    {
+        Fixture f(true,false,false,false,0,20,false,true);f.ready();f.mouse->held=true;
+        check(until([&]{return f.worker->snapshot().phase==RecoilPhase::EXHAUSTED;}),"未定松键前先完成真实人工弹序");
+        const auto old_start=f.worker->snapshot().firing_started_at;
+        auto owner=f.arbiter->enter_aim_until(RecoilClock::now()+500ms);
+        check(owner.owns_lock(),"人工来源边沿测试取得输出门");
+        f.mouse->block_down=true;f.mouse->dirty=true;f.mouse->held=false;
+        check(until([&]{return f.worker->snapshot().phase==RecoilPhase::READY;}),"未定按钮事务仍观察既有人工来源松键");
+        f.mouse->held=true;
+        const auto debt_reads=f.mouse->pending_down_debt_reads.load();
+        check(until([&]{return f.mouse->pending_down_debt_reads>=debt_reads+2&&RecoilClock::now()-old_start>=40ms;}),
+            "新人工按下确实发生在未定窗口且旧起点已超相位预算");
+        f.mouse->dirty=false;owner.unlock();
+        check(until([&]{const auto state=f.worker->snapshot();return state.session_id==2&&state.phase==RecoilPhase::EXHAUSTED;}),
+            "未定窗口的真实松键保留边沿，重新按下以新起点重放");
+        check(f.worker->snapshot().firing_started_at>old_start,"重新按下不沿用未定之前的人工起点");
+    }
+    {
+        Fixture f(false,false);f.ready();f.synthetic_start=RecoilClock::now();f.synthetic_down=true;
+        check(until([&]{return f.mouse->moves>0;}),"未定撤销前建立已确认软件来源");
+        auto owner=f.arbiter->enter_aim_until(RecoilClock::now()+500ms);
+        check(owner.owns_lock(),"软件来源撤销测试取得输出门");
+        const auto moves=f.mouse->moves.load();
+        f.mouse->block_down=true;f.mouse->dirty=true;f.synthetic_down=false;
+        check(until([&]{return f.worker->snapshot().phase==RecoilPhase::READY;}),"同命令明确撤销在输出门忙时仍结束软件弹序");
+        const auto events=f.worker->read_execution_events(0);
+        check(!events.events.empty()&&events.events.back().kind==RecoilExecutionEventKind::END&&
+            events.events.back().end_reason==RecoilBatchEndReason::RELEASED&&f.mouse->moves==moves,
+            "同命令撤销只减权，不补发或等待未定事务完成");
+        owner.unlock();
+        check(until([&]{return f.worker->snapshot().reason==RecoilReason::CONTEXT;}),"明确撤销不豁免稳定门内的孤立按钮责任");
+        check(f.mouse->moves==moves,"未确认按钮责任不借既有软件来源获得输出");
+        f.mouse->dirty=false;
+    }
+}
 }
 int main() {
     try {
+        {
+            bool original_error_retained=false;
+            try {
+                Fixture f;f.ready();f.mouse->block_on_move=2;f.mouse->held=true;
+                check(until([&]{return f.mouse->moves==2;}),"异常清理测试必须到达第2次move屏障");
+                throw std::runtime_error("夹具屏障中的原始异常");
+            } catch(const std::runtime_error& error) {
+                original_error_retained=std::string(error.what())=="夹具屏障中的原始异常";
+            }
+            check(original_error_retained,"假后端在途异常可退出且保留原错误");
+        }
         discrete_worker_full_sequence();
         discrete_worker_recovery_and_safety();
         {
@@ -293,31 +404,10 @@ int main() {
                 f.mouse->held=false;f.ready();
             }
         }
-        {
-            Fixture f(true,false,false,false,0,20,false,true);f.ready();
-            auto trigger=std::make_shared<TriggerWorker>(f.mouse,f.arbiter,[]{return true;},[]{return true;},
-                []{return std::uint64_t{1};},[](std::uint64_t){return true;},[](std::uint64_t){});
-            TriggerConfig cfg;cfg.enabled=true;cfg.require_stop=false;cfg.hold_virtual_key=5;
-            cfg.fire_delay_ms=0;cfg.press_duration_ms=40;cfg.shot_interval_ms=80;cfg.max_observation_age_ms=1000;
-            check(trigger->start(cfg),"人工确认双worker重放启动扳机");f.live_trigger.store(trigger);
-            check(until([&]{return trigger->snapshot().reason==TriggerReason::RELEASED;}),"扳机先观察释放");
-            for(int run=1;run<=2;++run) {
-                auto observation=std::make_shared<TriggerObservation>();
-                observation->detections.push_back({30,30,70,70,0.9f,0});observation->center_x=observation->center_y=50;
-                observation->roi_width=observation->roi_height=100;observation->epoch=1;observation->sequence=run;
-                observation->valid=observation->timing_valid=true;observation->observed_at=TriggerClock::now();
-                f.mouse->trigger_key=true;trigger->publish(observation);
-                check(until([&]{return f.worker->snapshot().session_id==run&&f.worker->snapshot().phase==RecoilPhase::EXHAUSTED;}),
-                    "两次独立真实TriggerWorker命令均重放人工确认曲线");
-                f.mouse->trigger_key=false;
-                check(until([&]{return !trigger->firing_signal().confirmed_down&&trigger->snapshot().reason==TriggerReason::RELEASED;}),
-                    "每次命令确认UP并释放扳机保持键");
-                f.ready();
-            }
-            check(f.mouse->downs==2&&f.mouse->ups==2&&f.worker->snapshot().session_id==2,
-                "两个独立扳机弹序各执行一次，不伪造恢复毫秒");
-            trigger->stop();f.worker->stop();
-        }
+        trigger_worker_replay();
+        trigger_worker_replay(true);
+        trigger_worker_replay(false,true);
+        provisional_source_edges();
         {
             Fixture f(false,false,false,true,0,20,true);f.mouse->calibration_key=false;f.ready();
             f.synthetic_uncertainty_ns=1000;f.synthetic_start=RecoilClock::now();f.synthetic_down=true;
@@ -421,29 +511,55 @@ int main() {
                 f.worker->calibration_snapshot().end==RecoilCalibrationEnd::UNKNOWN_RECEIPT,
                 "校准UNKNOWN保留消耗且不重试");
         }
-        {
-            Fixture f; f.ready(); f.mouse->held = true;
+        for(const bool cancel_before_dispatch : {false,true}) {
+            Fixture f; f.ready(); f.mouse->block_on_move=2; f.mouse->held = true;
             check(until([&]{return f.mouse->moves.load() > 1;}), "无检测帧也可按独立轨迹推进");
-            f.focused = false;
+            if(cancel_before_dispatch) {
+                // 第二次ACK之后的首采样已复制旧上下文，暂停到下一份意图到期再令复核失焦。
+                f.mouse->block_poll=true;f.mouse->proceed=true;
+                const bool sampled=until([&]{return f.mouse->poll_entered.load();});
+                std::this_thread::sleep_for(20ms);
+                f.focused=false;f.mouse->release_poll=true;f.mouse->release_poll.notify_all();
+                check(sampled,"首采样屏障实际到达后才模拟提交前失焦");
+            } else {
+                // 失焦先于下一轮首采样，第二次ACK仍须结算完成。
+                f.focused=false;f.mouse->proceed=true;
+            }
             check(until([&]{return f.worker->snapshot().reason == RecoilReason::CONTEXT;}), "失焦取消");
             const auto count = f.mouse->moves.load(); f.focused = true; std::this_thread::sleep_for(30ms);
             check(f.mouse->moves == count, "按住失焦恢复不能重放");
             f.worker->stop(); check(f.ledger->snapshot(RecoilClock::now()).events.size() == count, "每个确认恰好一次入账");
-            const auto log=f.worker->execution_log();check(log.records.size()==static_cast<std::size_t>(count)&&log.dropped_count==0,"执行证据与确认次数一致");
-            for(const auto& record:log.records)check(record.profile==f.profile&&record.backend_called&&record.receipt.status==RecoilReceiptStatus::ACKNOWLEDGED&&
-                record.firing_started_at!=RecoilTime{}&&record.firing_started_at<=record.intent.planned_at&&
-                record.firing_source==RecoilFiringSource::INPUT_ESTIMATED,"日志保留确切profile、起点与输入估计来源");
-            for(const auto& record:log.records)check(record.dispatch_rejection==RecoilDispatchRejection::NONE&&
-                record.sampled_at!=RecoilTime{}&&record.sampled_at<=record.arbitration_at&&
-                record.arbitration_at<=record.intent.planned_at&&record.intent.planned_at<=record.context_checked_at&&
-                record.context_checked_at<=record.backend_called_at&&record.backend_called_at<=record.receipt.completed_at&&
-                record.receipt.completed_at<=record.backend_returned_at,"派发时点与真实回执有序且成功不伪造拒绝");
+            const auto log=f.worker->execution_log();
+            std::size_t acknowledged=0,rejected=0;
+            for(const auto& record:log.records) {
+                check(record.profile==f.profile&&record.firing_started_at!=RecoilTime{}&&
+                    record.firing_started_at<=record.intent.planned_at&&
+                    record.firing_source==RecoilFiringSource::INPUT_ESTIMATED,"日志保留确切profile、起点与输入估计来源");
+                if(record.backend_called) {
+                    ++acknowledged;
+                    check(record.receipt.status==RecoilReceiptStatus::ACKNOWLEDGED&&
+                        record.dispatch_rejection==RecoilDispatchRejection::NONE&&
+                        record.sampled_at!=RecoilTime{}&&record.sampled_at<=record.arbitration_at&&
+                        record.arbitration_at<=record.intent.planned_at&&record.intent.planned_at<=record.context_checked_at&&
+                        record.context_checked_at<=record.backend_called_at&&record.backend_called_at<=record.receipt.completed_at&&
+                        record.receipt.completed_at<=record.backend_returned_at,"派发时点与真实回执有序且成功不伪造拒绝");
+                } else {
+                    ++rejected;
+                    check(cancel_before_dispatch&&record.receipt.status==RecoilReceiptStatus::NOT_SENT&&
+                        record.dispatch_rejection==RecoilDispatchRejection::PERMISSION_DENIED&&
+                        record.backend_called_at==RecoilTime{}&&record.backend_returned_at==RecoilTime{},
+                        "提交前失焦保留NOT_SENT证据且不伪造后端调用");
+                }
+            }
+            check(acknowledged==static_cast<std::size_t>(count)&&rejected==(cancel_before_dispatch?1u:0u)&&
+                log.dropped_count==0,"每个确认和提交前拒绝分别对应唯一执行证据");
             for(const auto& record:log.records)check(record.source_firing_id==0&&!record.firing_uncertainty_ns,
                 "实体输入没有软件命令id和软件调用区间");
             const auto events=f.worker->read_execution_events(0);
             check(events.events.size()==log.records.size()+2&&events.events.front().kind==RecoilExecutionEventKind::BEGIN&&
-                events.events.back().kind==RecoilExecutionEventKind::END&&events.events.back().end_reason==RecoilBatchEndReason::CONTEXT,
-                "首命令前BEGIN、失焦唯一END与命令共用序号");
+                events.events.back().kind==RecoilExecutionEventKind::END&&events.events.back().end_reason==
+                    (cancel_before_dispatch?RecoilBatchEndReason::NOT_SENT:RecoilBatchEndReason::CONTEXT),
+                "首命令前BEGIN、失焦唯一END保留实际终结原因");
             const auto again=f.worker->read_execution_events(0);
             check(again.events.size()==events.events.size()&&again.latest_sequence==events.latest_sequence,
                 "事件读取非破坏性，两个消费者可独立读取");
@@ -466,13 +582,31 @@ int main() {
         }
         {
             Fixture f;f.ready();std::unique_lock<std::timed_mutex> owner;
+            // 前置建场本身可以发生Aim争用，不能把该计数归到之后的Recoil观察区间。
+            std::promise<bool> setup_locked;
+            std::promise<void> release_setup;
+            auto release_future=release_setup.get_future();
+            auto setup=std::async(std::launch::async,[&] {
+                std::unique_lock<std::timed_mutex> lock;
+                const bool acquired=until([&]{lock=f.arbiter->try_enter_cleanup();return lock.owns_lock();});
+                setup_locked.set_value(acquired);
+                if(acquired)release_future.wait();
+            });
+            const bool setup_owns_lock=setup_locked.get_future().get();
+            auto setup_attempt=f.arbiter->try_enter_aim();
+            const bool setup_rejected=!setup_attempt.owns_lock();
+            if(setup_attempt.owns_lock())setup_attempt.unlock();
+            release_setup.set_value();setup.get();
+            check(setup_owns_lock&&setup_rejected&&f.arbiter->aim_skips()>0,"夹具确定制造前置Aim争用");
             check(until([&]{owner=f.arbiter->try_enter_aim();return owner.owns_lock();}), "争用测试实际取得共享锁");
+            const auto aim_skips_before=f.arbiter->aim_skips();
+            const auto recoil_busy_before=f.arbiter->snapshot().sources[2].lock_busy;
             f.mouse->held=true;
-            check(until([&]{return f.arbiter->snapshot().sources[2].lock_busy>0;}),"争用计数可观测");
+            check(until([&]{return f.arbiter->snapshot().sources[2].lock_busy>recoil_busy_before;}),"观察区间内Recoil争用计数增长");
             check(f.mouse->moves==0 && f.worker->execution_log().records.empty(),"未取得锁不规划或伪造后端回执");
             owner.unlock();
             check(until([&]{return f.mouse->moves>0;}),"短事务完成后继续当前合法弹序");
-            check(f.arbiter->aim_skips()==0,"Recoil争用不污染Aim统计");
+            check(f.arbiter->aim_skips()==aim_skips_before,"Recoil争用不污染Aim统计");
         }
         {
             Fixture f(true);f.ready();f.mouse->held=true;
