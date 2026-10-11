@@ -1,5 +1,6 @@
 #include "app/model_catalog_internal.h"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -140,6 +141,59 @@ void test_release_root_model_directory() {
            "隔离 Worker 必须共享发布根 models，而不是自身运行时目录: " + error);
 }
 
+void test_literal_names_and_directory_identity() {
+    TemporaryDirectory temporary;
+    std::filesystem::path first, second;
+    std::string error;
+    const bool first_ready=app::detail::prepare_model_directory_at_root(temporary.path()/"A",first,error);
+    const bool second_ready=app::detail::prepare_model_directory_at_root(temporary.path()/"B",second,error);
+    expect(first_ready && second_ready,"两个自有发布根应可准备");
+    if (!first_ready || !second_ready) return;
+    const bool roots_owned=first==std::filesystem::canonical(temporary.path()/"A"/"models") &&
+        second==std::filesystem::canonical(temporary.path()/"B"/"models");
+    expect(roots_owned,"只在fixture自有根下创建虚拟模型文件");
+    if (!roots_owned) return;
+    const std::vector<std::string> names{
+        "plain.onnx","model##v2.onnx","alpha###same.onnx","beta###same.onnx","模型##版本.onnx"};
+    for (const auto& name:names) {
+        write_file(first/std::filesystem::u8path(name));
+        write_file(second/std::filesystem::u8path(name));
+    }
+    std::filesystem::create_directories(first/"nested");
+    write_file(first/"nested"/"plain.onnx");
+    write_file(second/"only-in-B.onnx");
+    std::vector<std::string> listed;
+    expect(app::detail::list_models(first,listed,error) && listed.size()==names.size(),
+        "只列当前根，不混入嵌套或另一目录的同名文件");
+    for (const auto& name:names) {
+        expect(std::find(listed.begin(),listed.end(),name)!=listed.end(),
+            "合法##/###及Unicode文件名必须按原字节保留");
+        std::string path_a,path_b;
+        expect(app::detail::resolve_model_selection(first,name,path_a,error) &&
+            app::detail::resolve_model_selection(second,name,path_b,error) && path_a!=path_b,
+            "相同文件名必须解析到各自明确目录，不能复用另一目录的目标");
+        expect(std::filesystem::u8path(path_a)==std::filesystem::canonical(first/std::filesystem::u8path(name)),
+            "选择结果必须是当前目录的准确文件");
+    }
+    std::string resolved;
+    expect(!app::detail::resolve_model_selection(first,"../B/models/plain.onnx",resolved,error),
+        "字面标签支持不能放宽跨目录选择");
+    const auto old_path=first/"beta###same.onnx", new_path=first/"renamed###same.onnx";
+    const auto expected_root=std::filesystem::canonical(temporary.path()/"A"/"models");
+    const bool owned=std::filesystem::canonical(old_path.parent_path())==expected_root &&
+        std::filesystem::canonical(new_path.parent_path())==expected_root && !std::filesystem::exists(new_path);
+    expect(owned,"仅允许重命名本fixture明确拥有且目标不存在的文件");
+    if (owned) std::filesystem::rename(old_path,new_path);
+    expect(app::detail::list_models(first,listed,error) &&
+        std::find(listed.begin(),listed.end(),"beta###same.onnx")==listed.end() &&
+        std::find(listed.begin(),listed.end(),"renamed###same.onnx")!=listed.end(),
+        "刷新必须反映重命名，不保留旧名称别名");
+    expect(!app::detail::resolve_model_selection(first,"beta###same.onnx",resolved,error),
+        "重命名后的旧选择必须拒绝，不回退到另一目录同名文件");
+    expect(app::detail::resolve_model_selection(second,"beta###same.onnx",resolved,error),
+        "第一目录重命名不得影响另一目录的同名文件");
+}
+
 } // namespace
 
 int main() {
@@ -147,6 +201,7 @@ int main() {
     test_normalize_and_resolve_selection();
     test_reject_non_directory_models_path();
     test_release_root_model_directory();
+    test_literal_names_and_directory_identity();
     if (failures != 0) {
         std::cerr << "模型目录测试失败数: " << failures << '\n';
         return 1;

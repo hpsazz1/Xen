@@ -6,6 +6,7 @@
 #include "config/ui_palette.h"
 #include "overlay/overlay_internal.h"
 #include "overlay/log_panel_internal.h"
+#include "overlay/model_selector_internal.h"
 #include "overlay/recoil_panel.h"
 #include "overlay/input_training_panel.h"
 #include "overlay/debug_panel.h"
@@ -2601,40 +2602,13 @@ struct Overlay::Impl {
             form_row(
                 "模型",
                 "从发布根 models 目录选择 ONNX 模型；保存配置或运行时重载前会再次校验规范路径和文件存在性。");
-            const auto selected = std::find(
-                model_catalog.model_names.begin(),
-                model_catalog.model_names.end(),
-                app_config.detector.model_path);
-            const bool model_available =
-                selected != model_catalog.model_names.end();
-            std::string preview = app_config.detector.model_path.empty()
-                ? "未选择"
-                : app_config.detector.model_path;
-            if (!app_config.detector.model_path.empty() &&
-                !model_available) {
-                preview += "（不可用）";
-            }
-
             constexpr float kRefreshWidth = 56.0f;
             const float model_combo_width = std::max(
                 96.0f,
                 ImGui::GetContentRegionAvail().x - kRefreshWidth - 8.0f);
             ImGui::SetNextItemWidth(model_combo_width);
-            ImGui::BeginDisabled(model_catalog.model_names.empty());
-            if (ImGui::BeginCombo("##model_name", preview.c_str())) {
-                for (const std::string& model_name :
-                     model_catalog.model_names) {
-                    const bool is_selected =
-                        model_name == app_config.detector.model_path;
-                    if (ImGui::Selectable(
-                            model_name.c_str(), is_selected)) {
-                        app_config.detector.model_path = model_name;
-                    }
-                    if (is_selected) ImGui::SetItemDefaultFocus();
-                }
-                ImGui::EndCombo();
-            }
-            ImGui::EndDisabled();
+            overlay::detail::render_model_combo(model_catalog.model_names,
+                model_catalog.directory, app_config.detector.model_path);
             if (ImGui::IsItemHovered() &&
                 !model_catalog.directory.empty()) {
                 ImGui::SetTooltip("%s", model_catalog.directory.c_str());

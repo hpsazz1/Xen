@@ -1586,6 +1586,11 @@ if(BUILD_TESTING)
         model_catalog_tests PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
     add_test(NAME model_catalog_tests COMMAND model_catalog_tests)
 
+    add_executable(model_selector_tests tests/model_selector_tests.cpp)
+    target_include_directories(model_selector_tests PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
+    target_link_libraries(model_selector_tests PRIVATE imgui)
+    add_test(NAME model_selector_tests COMMAND model_selector_tests)
+
     add_executable(release_contract_tests
         tests/release_contract_tests.cpp)
     target_link_libraries(release_contract_tests PRIVATE app_release)
