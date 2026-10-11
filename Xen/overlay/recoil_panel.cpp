@@ -82,19 +82,25 @@ struct PickerCancellation {
     IFileDialog* dialog;
     const std::atomic<bool>* canceled;
     UINT_PTR timer = 0;
-    bool close_posted = false;
 };
 thread_local PickerCancellation* active_picker = nullptr;
 void CALLBACK cancel_picker_timer(HWND, UINT, UINT_PTR timer, DWORD) noexcept {
     // 定时器在同一 STA 运行，但不是 IFileDialogEvents 回调；直接 Close 可能不退出 Show。
-    // 只向此 COM 对象的窗口投递关闭；窗口尚未建立或投递失败时，保留取消并在下一次重试。
-    if (!active_picker || active_picker->timer != timer || active_picker->close_posted ||
+    // 文件不存在等模态提示会禁用选择器，必须先关闭其提示，再在后续 tick 关闭选择器。
+    // 投递成功不是退出：每次重新取窗口，直到 Show 返回后由 TimerScope 停止定时器。
+    if (!active_picker || active_picker->timer != timer ||
         !active_picker->canceled->load()) return;
     Microsoft::WRL::ComPtr<IOleWindow> window_interface;
     HWND window=nullptr;
-    if (SUCCEEDED(active_picker->dialog->QueryInterface(IID_PPV_ARGS(&window_interface))) &&
-        SUCCEEDED(window_interface->GetWindow(&window)) && window && PostMessageW(window,WM_CLOSE,0,0))
-        active_picker->close_posted=true;
+    if (FAILED(active_picker->dialog->QueryInterface(IID_PPV_ARGS(&window_interface))) ||
+        FAILED(window_interface->GetWindow(&window)) || !window) return;
+    HWND target=window;
+    if (!IsWindowEnabled(window)) {
+        target=GetWindow(window,GW_ENABLEDPOPUP);
+        if (!target || target==window || GetWindow(target,GW_OWNER)!=window) return;
+    }
+    if (GetWindowThreadProcessId(target,nullptr)!=GetCurrentThreadId()) return;
+    PostMessageW(target,WM_CLOSE,0,0);
 }
 std::string choose_recoil_profile(HWND owner, const std::shared_ptr<std::atomic<bool>>& canceled) {
     if(canceled->load())return {};

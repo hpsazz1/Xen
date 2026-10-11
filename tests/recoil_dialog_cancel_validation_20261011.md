@@ -3,6 +3,8 @@
 任务 `XEN-RECOIL-DIALOG-001`，基线 `bd7fee98757c3d443ad19fedbf4da4e8d444c10d`，独立分支 `codex/recoil-dialog-cancel-20261011`。
 在 Windows、MSVC 19.51、Release、既有 NVIDIA 配置执行；源码与构建复用隔离目录，未修改或合并 main。
 
+本文保留首轮结果；后续复核发现并修复内嵌提示期间取消失败，新增真实宿主与线程/对象回收证据，见 [R2 生命周期复核](recoil_dialog_lifecycle_validation_20261011.md)。首轮的一次投递锁存已被 R2 移除。
+
 ## 原始失败与归因
 
 基线完整 `--recoil-flow` 返回 1：全局取消后 2 秒窗口仍存在，测试必须再次发送原生取消才能退出。
