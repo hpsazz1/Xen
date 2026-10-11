@@ -139,6 +139,9 @@ class EnvironmentTests(unittest.TestCase):
         result = environment.read_json(self.status)["result"]
         self.assertEqual(result["python_executable"], str(Path(sys.executable).resolve()))
         self.assertTrue(result["ready"])
+        # C++工作区据这两个现有字段绑定本次检查，不能退回调用时的当前选择。
+        self.assertEqual(result["device_requested"], "0")
+        self.assertEqual(result["output"], str(self.output.resolve()))
 
     def test_untrusted_or_changed_pt_never_starts_worker(self):
         for kwargs in (dict(weights=str(self.weights)), dict(weights=str(self.weights), trusted_weights=True, expected_sha256="0"*64)):

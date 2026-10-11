@@ -24,6 +24,7 @@
 #include <sstream>
 #include <string_view>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 namespace model_workspace {
@@ -226,6 +227,7 @@ struct Workspace::Impl {
     Handle process;
     Handle job;
     Json last_result;
+    Json environment_check_request; // 复用本次已提交作业字段，不从可替换的状态文件反推请求。
     std::chrono::steady_clock::time_point last_poll{};
     std::uint64_t sequence = 0;
     bool cancellation_requested = false;
@@ -259,6 +261,7 @@ struct Workspace::Impl {
         check(fs::create_directory(job_directory), "无法创建独立训练作业目录");
         Json spec = specification;
         spec["output"] = utf8(job_directory / "result");
+        environment_check_request = spec.at("operation") == "env_check" ? spec : Json();
         write_json(job_directory / "job.json", spec);
 
         SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
@@ -323,6 +326,39 @@ struct Workspace::Impl {
         last_poll = {};
     }
 
+    void apply_environment_check(Settings& settings, const Json& result) {
+        check(result.is_object(), "环境检查结果必须是对象");
+        check(result.at("ready").get<bool>(), "环境作业未通过GPU自检");
+        const auto python = checked_path(path_from(result.at("python_executable").get<std::string>()));
+        check(fs::is_regular_file(python), "自检解释器已不存在");
+        auto device = result.at("device_requested").get<std::string>();
+        const auto output = checked_path(path_from(result.at("output").get<std::string>()));
+        check(same_path(output, job_directory / "result"), "环境检查结果不属于当前作业");
+        const auto requested_python = environment_check_request.at("python_executable").get<std::string>();
+        const auto requested_device = environment_check_request.at("device").get<std::string>();
+        check(settings.python_executable == requested_python && settings.device == requested_device,
+              "检查期间解释器或GPU选择已修改，请重新检查");
+        check(fs::equivalent(python, checked_path(path_from(requested_python))) && device == requested_device,
+              "环境检查结果与本次解释器或GPU请求不一致");
+
+        // ENV_CHECK只提交解释器规范化和就绪状态，不消费其它作业的数据/模型字段。
+        // 所有可能分配的准备与原子保存先完成，再以不抛异常的移动提交内存状态。
+        Settings next = settings;
+        auto checked = utf8(python);
+        next.python_executable = checked;
+        std::string environment_message = "GPU环境自检通过；结果与依赖记录见当前作业目录。";
+        std::string weights_message = "环境已检查，请重新检查PT兼容性。";
+        write_json(workspace_root / "settings.json", settings_json(next, data_root));
+        static_assert(std::is_nothrow_move_assignable_v<Settings>);
+        settings = std::move(next);
+        checked_python = std::move(checked);
+        checked_environment_device = std::move(device);
+        view.environment_message = std::move(environment_message);
+        view.weights_message = std::move(weights_message);
+        view.environment_ready = true;
+        view.weights_ready = false;
+    }
+
     void reject_result(const char* reason) {
         // 子进程成功不代表结果仍可应用；保留作业身份供排查，不每帧重复应用坏结果。
         result_applied = true;
@@ -357,9 +393,11 @@ struct Workspace::Impl {
                 view.job_state = status.value("state", "RUNNING");
                 view.job_message = status.value("message", "");
                 last_result = status.value("result", Json::object());
+            } catch (const std::exception& exception) {
+                // 原子替换瞬间保留上一份状态；完成后明确保留解析/身份失败原因。
+                if (finished) reject_result(exception.what());
             } catch (...) {
-                // 原子替换瞬间或中断时保留上一份有效状态；进程退出后不允许冒充成功。
-                if (finished) view.job_state = "FAILED";
+                if (finished) reject_result("无法读取作业状态");
             }
         }
         if (!finished) {
@@ -377,7 +415,7 @@ struct Workspace::Impl {
             view.job_state = "FAILED";
             if (view.job_message.empty())
                 view.job_message = "后台作业未成功完成，请查看process.log。";
-        } else if (last_result.is_object()) {
+        } else if (view.job_operation != "env_check" && last_result.is_object()) {
             view.candidate_path = last_result.value("candidate", view.candidate_path);
         }
         if (view.job_state != "SUCCEEDED") {
@@ -464,68 +502,72 @@ Snapshot Workspace::poll(Settings* settings) noexcept {
     try {
         impl_->refresh_job();
         if (settings && !impl_->result_applied && !impl_->view.job_running &&
-            impl_->view.job_state == "SUCCEEDED" && impl_->last_result.is_object()) {
+            impl_->view.job_state == "SUCCEEDED") {
             try {
                 const auto& result = impl_->last_result;
-                if (impl_->view.job_operation == "env_install" || impl_->view.job_operation == "env_check") {
-                    check(result.value("ready", false), "环境作业未通过GPU自检");
-                    const auto python = checked_path(path_from(result.at("python_executable").get<std::string>()));
-                    check(fs::is_regular_file(python), "自检解释器已不存在");
-                    settings->python_executable = utf8(python);
-                    impl_->checked_python = settings->python_executable;
-                    impl_->checked_environment_device = result.value("device_requested", settings->device);
-                    impl_->view.environment_ready = true;
-                    impl_->view.environment_message = "GPU环境自检通过；结果与依赖记录见当前作业目录。";
-                    impl_->view.weights_ready = false;
-                    impl_->view.weights_message = "环境已检查，请重新检查PT兼容性。";
-                    write_json(impl_->workspace_root / "settings.json", settings_json(*settings, impl_->data_root));
-                }
-                if (impl_->view.job_operation == "pt_check") {
-                    check(result.value("ready", false) && result.value("synthetic_compatibility_only", false),
-                          "PT作业未完成合成输入兼容检查");
-                    check(fs::equivalent(path_from(result.value("weights", settings->weights_path)),
-                                         path_from(settings->weights_path)), "权重路径已变化，请重新检查");
-                    impl_->checked_weights = settings->weights_path;
-                    impl_->checked_python = settings->python_executable;
-                    impl_->checked_weights_device = result.value("device_requested", settings->device);
-                    impl_->checked_image_size = result.value("input_size", settings->image_size);
-                    impl_->view.weights_ready = true;
-                    impl_->view.weights_message = "PT加载与合成输入反向传播通过；仍需真实审核数据训练和评价。";
-                }
-                settings->dataset_path = result.value("dataset", settings->dataset_path);
-                settings->review_manifest = result.value("review_manifest", settings->review_manifest);
-                settings->prelabels_path = result.value("prelabels", settings->prelabels_path);
-                if (impl_->view.job_operation == "review_curate") {
-                    const auto preview = checked_path(path_from(result.at("review_preview").get<std::string>()));
-                    const auto within = preview.lexically_relative(impl_->job_directory);
-                    check(!within.empty() && *within.begin() != L".." &&
-                        preview.filename() == L"review.html" && fs::is_regular_file(preview),
-                        "批量预览结果不属于当前作业");
-                    settings->review_preview_path = utf8(preview);
-                    impl_->view.message = "自动整理完成，点击打开批量预览；自动提示不等于审核通过。";
-                    write_json(impl_->workspace_root / "settings.json", settings_json(*settings, impl_->data_root));
-                }
-                settings->model_path = result.value("candidate", settings->model_path);
-                if (impl_->view.job_operation == "inspect" && result.contains("model_sha256")) {
-                    const auto inspected_hash = result.at("model_sha256").get<std::string>();
-                    if (inspected_hash != settings->schema_model_sha256)
-                        settings->class_schema_confirmed = false;
-                    settings->schema_model_path = result.at("model").get<std::string>();
-                    settings->schema_model_sha256 = inspected_hash;
-                }
-                if ((impl_->view.job_operation == "inspect" || impl_->view.job_operation == "pt_check") &&
-                    result.contains("model_class_names") && result["model_class_names"].is_array() &&
-                    !result["model_class_names"].empty()) {
-                    std::string names;
-                    for (const auto& name : result["model_class_names"]) {
-                        if (!names.empty()) names += ',';
-                        names += name.get<std::string>();
+                if (impl_->view.job_operation == "env_check") {
+                    impl_->apply_environment_check(*settings, result);
+                } else {
+                    if (impl_->view.job_operation == "env_install") {
+                        check(result.value("ready", false), "环境作业未通过GPU自检");
+                        const auto python = checked_path(path_from(result.at("python_executable").get<std::string>()));
+                        check(fs::is_regular_file(python), "自检解释器已不存在");
+                        settings->python_executable = utf8(python);
+                        impl_->checked_python = settings->python_executable;
+                        impl_->checked_environment_device = result.value("device_requested", settings->device);
+                        impl_->view.environment_ready = true;
+                        impl_->view.environment_message = "GPU环境自检通过；结果与依赖记录见当前作业目录。";
+                        impl_->view.weights_ready = false;
+                        impl_->view.weights_message = "环境已检查，请重新检查PT兼容性。";
+                        write_json(impl_->workspace_root / "settings.json", settings_json(*settings, impl_->data_root));
                     }
-                    if (names != settings->class_names) {
-                        settings->class_names = std::move(names);
-                        settings->class_schema_confirmed = false;
+                    if (impl_->view.job_operation == "pt_check") {
+                        check(result.value("ready", false) && result.value("synthetic_compatibility_only", false),
+                              "PT作业未完成合成输入兼容检查");
+                        check(fs::equivalent(path_from(result.value("weights", settings->weights_path)),
+                                             path_from(settings->weights_path)), "权重路径已变化，请重新检查");
+                        impl_->checked_weights = settings->weights_path;
+                        impl_->checked_python = settings->python_executable;
+                        impl_->checked_weights_device = result.value("device_requested", settings->device);
+                        impl_->checked_image_size = result.value("input_size", settings->image_size);
+                        impl_->view.weights_ready = true;
+                        impl_->view.weights_message = "PT加载与合成输入反向传播通过；仍需真实审核数据训练和评价。";
                     }
-                    impl_->view.message = "已读取模型类别，请到采集页核对名称与ID顺序并确认。";
+                    settings->dataset_path = result.value("dataset", settings->dataset_path);
+                    settings->review_manifest = result.value("review_manifest", settings->review_manifest);
+                    settings->prelabels_path = result.value("prelabels", settings->prelabels_path);
+                    if (impl_->view.job_operation == "review_curate") {
+                        const auto preview = checked_path(path_from(result.at("review_preview").get<std::string>()));
+                        const auto within = preview.lexically_relative(impl_->job_directory);
+                        check(!within.empty() && *within.begin() != L".." &&
+                            preview.filename() == L"review.html" && fs::is_regular_file(preview),
+                            "批量预览结果不属于当前作业");
+                        settings->review_preview_path = utf8(preview);
+                        impl_->view.message = "自动整理完成，点击打开批量预览；自动提示不等于审核通过。";
+                        write_json(impl_->workspace_root / "settings.json", settings_json(*settings, impl_->data_root));
+                    }
+                    settings->model_path = result.value("candidate", settings->model_path);
+                    if (impl_->view.job_operation == "inspect" && result.contains("model_sha256")) {
+                        const auto inspected_hash = result.at("model_sha256").get<std::string>();
+                        if (inspected_hash != settings->schema_model_sha256)
+                            settings->class_schema_confirmed = false;
+                        settings->schema_model_path = result.at("model").get<std::string>();
+                        settings->schema_model_sha256 = inspected_hash;
+                    }
+                    if ((impl_->view.job_operation == "inspect" || impl_->view.job_operation == "pt_check") &&
+                        result.contains("model_class_names") && result["model_class_names"].is_array() &&
+                        !result["model_class_names"].empty()) {
+                        std::string names;
+                        for (const auto& name : result["model_class_names"]) {
+                            if (!names.empty()) names += ',';
+                            names += name.get<std::string>();
+                        }
+                        if (names != settings->class_names) {
+                            settings->class_names = std::move(names);
+                            settings->class_schema_confirmed = false;
+                        }
+                        impl_->view.message = "已读取模型类别，请到采集页核对名称与ID顺序并确认。";
+                    }
                 }
                 impl_->result_applied = true;
             } catch (const std::exception& exception) {

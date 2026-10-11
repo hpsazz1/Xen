@@ -35,7 +35,8 @@ if spec['operation'] == 'review_curate':
     (output / 'review.html').write_text('<!doctype html><title>审核夹具</title>', encoding='utf-8')
     result.update(review_preview=str(output / 'review.html'), prelabels_received=spec.get('prelabels', ''))
 if spec['operation'] in {'env_check', 'env_install'}:
-    result.update(ready=True, python_executable=spec['python_executable'], environment_report='fixture-only')
+    result.update(ready=True, python_executable=spec['python_executable'], environment_report='fixture-only',
+                  output=spec['output'], device_requested=spec['device'])
 if spec['operation'] == 'pt_check':
     assert spec['trusted_weights'] is True
     assert spec['expected_sha256'] == hashlib.sha256(Path(spec['weights']).read_bytes()).hexdigest()
