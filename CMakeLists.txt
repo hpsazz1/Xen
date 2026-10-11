@@ -1660,6 +1660,12 @@ if(BUILD_TESTING)
 
     # Overlay Present 系统 seam 与标量 helper 均不创建 Win32/D3D11 窗口，
     # 测试只注入 HRESULT，也不链接 ImGui。
+    add_executable(overlay_imgui_lifecycle_tests tests/overlay_imgui_lifecycle_tests.cpp)
+    target_include_directories(overlay_imgui_lifecycle_tests PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
+    target_link_libraries(overlay_imgui_lifecycle_tests PRIVATE imgui)
+    add_test(NAME overlay_imgui_lifecycle_tests COMMAND overlay_imgui_lifecycle_tests)
+    set_tests_properties(overlay_imgui_lifecycle_tests PROPERTIES TIMEOUT 30)
+
     add_executable(overlay_tests
         tests/overlay_tests.cpp)
     target_include_directories(overlay_tests PRIVATE ${PROJECT_SOURCE_DIR}/Xen)

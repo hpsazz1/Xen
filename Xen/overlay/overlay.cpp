@@ -5,6 +5,7 @@
 #include "config/hotkey_config_internal.h"
 #include "config/ui_palette.h"
 #include "overlay/overlay_internal.h"
+#include "overlay/imgui_lifecycle_internal.h"
 #include "overlay/log_panel_internal.h"
 #include "overlay/model_selector_internal.h"
 #include "overlay/recoil_panel.h"
@@ -664,6 +665,7 @@ struct Overlay::Impl {
     UiTheme applied_theme = UiTheme::LIGHT;
     WorkspacePage active_page = WorkspacePage::OVERVIEW;
     bool initialized = false;
+    ImGuiContext* imgui_context = nullptr;
     bool close_requested = false;
     bool programmatic_shutdown = false;
     bool show_log_panel = false;
@@ -4409,7 +4411,8 @@ bool Overlay::init(const UiConfig& config) noexcept {
         if (!impl_->create_device()) return false;
 
         IMGUI_CHECKVERSION();
-        ImGui::CreateContext();
+        impl_->imgui_context = ImGui::CreateContext();
+        ImGui::SetCurrentContext(impl_->imgui_context);
         ImGuiIO& io = ImGui::GetIO();
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         io.IniFilename = nullptr;
@@ -4593,11 +4596,7 @@ void Overlay::shutdown() noexcept {
         impl_->detached_preview_window = nullptr;
     }
     impl_->release_detached_paint_buffer();
-    if (impl_->initialized) {
-        ImGui_ImplDX11_Shutdown();
-        ImGui_ImplWin32_Shutdown();
-        ImGui::DestroyContext();
-    }
+    overlay::detail::shutdown_imgui_context(impl_->imgui_context);
     impl_->initialized = false;
     impl_->destroy_render_target();
     impl_->swap_chain.Reset();
