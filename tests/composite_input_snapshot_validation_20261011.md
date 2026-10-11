@@ -25,3 +25,7 @@ binder 对三个输入同样绑定原始 bytes。语义摘要与文件摘要仍�
 固定提交 Release、七项相关 CTest、源码/二进制身份、普通推送、远端和实际CI元数据
 见本地 `docs/evidence/XEN-ROUND1-CLOSEOUT-20261011-001/COMPOSITE_SNAPSHOT_RESULT.md`。
 未运行真实设备、采集、原生 UI 或任何输出执行器。
+
+首次固定 `281e05f` 为6/7通过；新测试在默认 TEMP 的 ADMINI~1 短路径下
+未命中生产 resolve 后的路径，屏障断言正确报错。修正测试先规范化同一目标，
+并要求准确一次读取；保留失败日志，不把夹具问题计为生产缺陷。

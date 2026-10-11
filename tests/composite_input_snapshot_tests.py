@@ -46,6 +46,8 @@ def main():
         results = []
 
         def replaced_entry(module, arguments, target):
+            # TEMP 可使用 ADMINI~1；生产入口 resolve 后必须仍命中同一测试文件。
+            target = target.resolve()
             original_bytes = target.read_bytes()
             replacement = b'{"replaced_after_original_read":true}\n'
             assert original_bytes != replacement
@@ -74,7 +76,7 @@ def main():
                      patch.object(sys, 'argv', arguments), \
                      contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
                     code = module.main()
-                fixture.expect(calls >= 1 and target.read_bytes() == replacement,
+                fixture.expect(calls == 1 and target.read_bytes() == replacement,
                                'replacement barrier must run against the actual input')
                 return code, captured.getvalue(), hashlib.sha256(original_bytes).hexdigest(), calls
             finally:
