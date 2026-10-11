@@ -1,17 +1,20 @@
 #define NOMINMAX
 
 #include "detector/session.h"
+#include "detector/model_file_snapshot_internal.h"
 
 #include "log/log.h"
 #include <onnxruntime_session_options_config_keys.h>
 
 #include <algorithm>
 #include <chrono>
+#include <clocale>
 #include <filesystem>
 #include <exception>
 #include <limits>
 #include <memory>
 #include <string>
+#include <stdexcept>
 #include <unordered_map>
 
 #ifndef XEN_HAS_CUDA_RUNTIME
@@ -43,6 +46,35 @@
 namespace detector::detail {
 namespace {
 
+// ORT Windows错误路径会使用CRT宽字符转换；仅在加载线程临时使用UTF-8，
+// 避免非BMP路径的错误消息触发CRT终止。成功/失败均恢复调用方LC_CTYPE与模式。
+class ScopedModelLoadLocale final {
+public:
+    ScopedModelLoadLocale() {
+        previous_mode_ = _configthreadlocale(_ENABLE_PER_THREAD_LOCALE);
+        if (previous_mode_ == -1) throw std::runtime_error("无法设置模型加载线程字符环境");
+        try {
+            const auto* current = std::setlocale(LC_CTYPE, nullptr);
+            if (!current) throw std::runtime_error("无法读取模型加载线程字符环境");
+            previous_locale_ = current;
+            if (!std::setlocale(LC_CTYPE, ".UTF8"))
+                throw std::runtime_error("无法启用模型加载线程UTF-8字符环境");
+        } catch (...) {
+            _configthreadlocale(previous_mode_);
+            throw;
+        }
+    }
+    ~ScopedModelLoadLocale() {
+        std::setlocale(LC_CTYPE, previous_locale_.c_str());
+        _configthreadlocale(previous_mode_);
+    }
+    ScopedModelLoadLocale(const ScopedModelLoadLocale&) = delete;
+    ScopedModelLoadLocale& operator=(const ScopedModelLoadLocale&) = delete;
+private:
+    int previous_mode_ = 0;
+    std::string previous_locale_;
+};
+
 bool provider_available(const std::vector<std::string>& providers,
                         const char* name) {
     for (const auto& provider : providers) {
@@ -70,6 +102,7 @@ struct Session::Impl {
     // 保持空状态，同时彻底移除手写 new/delete 与重复 load 时的泄漏风险。
     std::unique_ptr<Ort::Env> env;
     std::unique_ptr<Ort::Session> session;
+    std::string model_sha256;
     std::unique_ptr<Ort::MemoryInfo> memory;
     Ort::SessionOptions opts;
     Ort::RunOptions run_opts;
@@ -525,21 +558,33 @@ bool Session::setup_options(const DetectorConfig& cfg) {
     }
 }
 
+const std::string& Session::model_sha256() const noexcept {
+    return impl_->model_sha256;
+}
+
 bool Session::load(const std::string& path) {
     if (!impl_->env || path.empty()) return false;
 
     try {
         impl_->clear_execution_buffers();
         impl_->session.reset();
-        const std::filesystem::path model_path =
-            std::filesystem::u8path(path);
+        impl_->model_sha256.clear();
+        const auto model_path = std::filesystem::absolute(std::filesystem::u8path(path));
         if (!std::filesystem::is_regular_file(model_path)) {
             LOG_ERROR("detector", "模型文件不存在: {}", path);
             return false;
         }
 
-        impl_->session = std::make_unique<Ort::Session>(
-            *impl_->env, model_path.c_str(), impl_->opts);
+        {
+            ModelFileSnapshot model(model_path);
+            const auto directory = xen::filesystem_detail::path_utf8(model_path.parent_path());
+            impl_->opts.AddConfigEntry(
+                kOrtSessionOptionsModelExternalInitializersFileFolderPath, directory.c_str());
+            const ScopedModelLoadLocale locale;
+            impl_->session = std::make_unique<Ort::Session>(
+                *impl_->env, model.data(), model.size(), impl_->opts);
+            impl_->model_sha256 = model.sha256();
+        }
 
         const size_t input_count = impl_->session->GetInputCount();
         const size_t output_count = impl_->session->GetOutputCount();

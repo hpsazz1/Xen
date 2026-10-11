@@ -318,6 +318,8 @@ public:
 
     /// 是否已加载
     bool loaded() const noexcept;
+    /// 成功加载时实际解析的模型容器字节SHA；不包含外置initializer。
+    std::string model_sha256() const;
 
     /// 释放模型资源
     void reset();

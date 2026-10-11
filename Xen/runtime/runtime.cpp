@@ -81,6 +81,7 @@ struct Runtime::Impl {
     std::unique_ptr<Detector> detector;
     std::shared_ptr<data_collection::Collector> data_collector;
     std::uint64_t active_detector_generation = 1;
+    std::string active_model_sha256; // 与current_snapshot模型代次共用snapshot_mutex。
     std::unique_ptr<Aim> aim;
     std::shared_ptr<IMouseController> mouse;
     bool owns_mouse = false;
@@ -295,6 +296,7 @@ struct Runtime::Impl {
                 mouse->supports_wasd_keyboard(), false);
             current_snapshot.provider = detector->backend_name();
             current_snapshot.active_model_path = config.detector.model_path;
+            active_model_sha256 = detector->model_sha256();
             current_snapshot.detector_generation = 1;
             active_detector_generation = 1;
             current_snapshot.output_allowed_by_config =
@@ -1379,6 +1381,7 @@ bool Runtime::start_data_collection(const data_collection::Config& config,
             error = "Runtime正在启动、停止或切换模型，请完成后重新开始采集";
             return false;
         }
+        auto bound_config = config;
         {
             std::lock_guard snapshot_lock(impl_->snapshot_mutex);
             const auto& current = impl_->current_snapshot;
@@ -1393,6 +1396,13 @@ bool Runtime::start_data_collection(const data_collection::Config& config,
                 error = "Runtime或模型已变化，请核对当前模型后重新开始采集";
                 return false;
             }
+            if (impl_->active_model_sha256.empty() ||
+                (!config.expected_model_sha256.empty() &&
+                 config.expected_model_sha256 != impl_->active_model_sha256)) {
+                error = "模型字节身份与已加载模型不同，请重新加载模型并确认类别后采集";
+                return false;
+            }
+            bound_config.expected_model_sha256 = impl_->active_model_sha256;
             if (current.d3d11_cuda_interop || current.d3d11_directml_interop) {
                 error = "当前GPU纹理路径不支持图片采集，请停止后选择CPU图像路径";
                 return false;
@@ -1400,7 +1410,7 @@ bool Runtime::start_data_collection(const data_collection::Config& config,
         }
         if (!impl_->data_collector) { error = "图片采集模块未接入"; return false; }
         // 模型哈希和会话创建可能访问磁盘，不持snapshot锁；生命周期锁阻止stop或新重载穿过提交。
-        return impl_->data_collector->start(config, error,
+        return impl_->data_collector->start(bound_config, error,
             {expected.runtime_generation, expected.detector_generation});
     } catch (const std::exception& exception) {
         error = exception.what();
@@ -1646,6 +1656,7 @@ bool Runtime::reload_detector(const DetectorConfig& config) noexcept {
 
                 std::string provider = candidate->backend_name();
                 std::string active_model_path = config.model_path;
+                auto model_sha256 = candidate->model_sha256();
                 const std::string loaded_provider = provider;
                 const std::string loaded_model_path = active_model_path;
                 state->config.detector = std::move(config);
@@ -1660,6 +1671,7 @@ bool Runtime::reload_detector(const DetectorConfig& config) noexcept {
                     }
                     retired = std::move(state->detector);
                     state->detector = std::move(candidate);
+                    state->active_model_sha256.swap(model_sha256);
                     state->safety_gate.block_visual_output();
                     state->aim_reset_requested.store(
                         true, std::memory_order_release);

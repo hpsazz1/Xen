@@ -966,6 +966,10 @@ bool Detector::loaded() const noexcept {
     return impl_ && impl_->loaded;
 }
 
+std::string Detector::model_sha256() const {
+    return loaded() ? impl_->session.model_sha256() : std::string{};
+}
+
 void Detector::reset() {
     impl_ = std::make_unique<Impl>();
 }

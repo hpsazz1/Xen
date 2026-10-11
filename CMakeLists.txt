@@ -284,7 +284,7 @@ target_include_directories(detector
 
 target_link_libraries(detector
     PUBLIC  ${ONNXRUNTIME_LIB} ${OpenCV_LIBS} ${CMAKE_DL_LIBS} log
-    PRIVATE Threads::Threads)
+    PRIVATE Threads::Threads bcrypt)
 if(XEN_ONNXRUNTIME_HAS_CUDA)
     # CUDA D3D11 interop 仅依赖 Windows 系统 d3d11 导入库，不新增可部署 DLL。
     target_link_libraries(detector PRIVATE CUDA::cudart d3d11)
@@ -1044,6 +1044,16 @@ if(BUILD_TESTING)
         ${OpenCV_LIBS} bcrypt)
     xen_deploy_runtime_dlls(video_visibility_tests OPENCV)
     add_test(NAME video_visibility_tests COMMAND video_visibility_tests)
+
+    add_executable(model_file_identity_tests tests/model_file_identity_tests.cpp)
+    target_link_libraries(model_file_identity_tests PRIVATE detector)
+    xen_deploy_runtime_dlls(model_file_identity_tests OPENCV ORT)
+    add_test(NAME model_file_identity_tests COMMAND model_file_identity_tests
+        "${PROJECT_SOURCE_DIR}/tests/fixtures/detector_identity_external.onnx")
+    add_test(NAME model_file_identity_ascii_tests COMMAND model_file_identity_tests
+        "${PROJECT_SOURCE_DIR}/tests/fixtures/detector_identity_external.onnx" --ascii)
+    add_test(NAME model_file_identity_locale_tests COMMAND model_file_identity_tests
+        "${PROJECT_SOURCE_DIR}/tests/fixtures/detector_identity_external.onnx" --existing-thread-locale)
 
     add_executable(mouse_benchmark_close_tests tests/mouse_benchmark_close_tests.cpp)
     target_link_libraries(mouse_benchmark_close_tests PRIVATE mouse_benchmark)
@@ -2268,7 +2278,7 @@ if(BUILD_TESTING)
         target_link_libraries(collection_lifecycle_tests PRIVATE app_input model_workspace xen_debug)
         xen_deploy_runtime_dlls(collection_lifecycle_tests OPENCV ORT NDI)
         foreach(case ui-response stop-interleave writer-failure concurrent-stop
-                     admission-stop admission-commit admission-restart admission-reload admission-stopping frame-identity)
+                     admission-stop admission-commit admission-restart admission-reload admission-stopping frame-identity model-identity)
             add_test(NAME collection_lifecycle_${case}
                 COMMAND collection_lifecycle_tests "${XEN_TEST_MODEL}" "--${case}")
             set_tests_properties(collection_lifecycle_${case} PROPERTIES TIMEOUT 45)

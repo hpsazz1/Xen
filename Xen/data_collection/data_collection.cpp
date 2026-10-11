@@ -250,6 +250,8 @@ bool Collector::start(const Config& config, std::string& error, SessionIdentity 
         const auto model_path = std::filesystem::u8path(config.model_path);
         if (!std::filesystem::is_regular_file(model_path)) throw std::runtime_error("模型必须是可读取的真实文件");
         const auto model_hash = hash_file(model_path);
+        if (!config.expected_model_sha256.empty() && model_hash != config.expected_model_sha256)
+            throw std::runtime_error("模型字节身份已变化，请重新加载模型并确认类别后采集");
         auto& p = *impl_;
         std::lock_guard lock(p.mutex);
         p.config = config;

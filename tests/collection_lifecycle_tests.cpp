@@ -2,6 +2,7 @@
 #include "app/report_lifecycle_internal.h"
 #include "app/workspace_actions_internal.h"
 #include "data_collection/lifecycle_internal.h"
+#include "detector/model_file_snapshot_internal.h"
 #include "runtime/startup_internal.h"
 #include "model_workspace/actions_internal.h"
 #include "log/log.h"
@@ -262,6 +263,163 @@ void collection_frame_identity(const char* model, const char* reload_model) {
               << " old_saved=" << old_result.saved << " saved=" << result.saved << " paused=" << result.paused
               << " record_generation=" << record.at("detector_generation") << '\n';
 }
+void model_snapshot_contract(const std::filesystem::path& root) {
+    const auto path = root / L"模型-\U0001F680.bin";
+    { std::ofstream output(path, std::ios::binary); output << "abc"; }
+    {
+        detector::detail::ModelFileSnapshot snapshot(path);
+        expect(snapshot.size() == 3 && std::memcmp(snapshot.data(), "abc", 3) == 0 &&
+                   snapshot.sha256() == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+               "Unicode文件字节与独立已知SHA-256向量一致");
+        HANDLE writer = CreateFileW(path.c_str(), GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+        expect(writer == INVALID_HANDLE_VALUE && GetLastError() == ERROR_SHARING_VIOLATION,
+               "加载字节快照存活期间拒绝写入共享");
+        if (writer != INVALID_HANDLE_VALUE) CloseHandle(writer);
+        expect(!MoveFileExW(path.c_str(), (root / L"renamed.bin").c_str(), 0),
+               "加载快照存活期间拒绝替换文件名");
+    }
+    { std::ofstream output(path, std::ios::binary | std::ios::trunc); output << "def";
+      output.close(); expect(output.good(), "快照析构释放句柄后允许原路径写入"); }
+    { std::ofstream output(path, std::ios::binary | std::ios::trunc); }
+    bool rejected = false;
+    try { detector::detail::ModelFileSnapshot empty(path); } catch (const std::exception&) { rejected = true; }
+    expect(rejected, "空模型拒绝加载");
+    { std::ofstream output(path, std::ios::binary); output << "abc"; output.close();
+      expect(output.good(), "构造失败也释放文件句柄以便恢复"); }
+    expect(detector::detail::ModelFileSnapshot(path).size() == 3, "空文件失败后同路径恢复");
+}
+
+void collection_model_identity(const char* source_model) {
+    const auto root = std::filesystem::temp_directory_path() /
+        ("xen-collection-model-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directory(root);
+    model_snapshot_contract(root);
+    const auto model = root / "model.onnx";
+    std::filesystem::copy_file(source_model, model);
+    auto collector = std::make_shared<data_collection::Collector>();
+    auto mouse = std::make_shared<NoOutputMouse>();
+    std::atomic<unsigned> requested{0};
+    runtime::detail::StartupAdapter adapter;
+    adapter.create_capture = [&](const CaptureConfig&) { return std::make_unique<FrameCapture>(requested); };
+    auto runtime = runtime::detail::make_runtime_with_startup_adapter(std::move(adapter));
+    struct Cleanup { Runtime& runtime; ~Cleanup() { runtime.stop(); } } cleanup{*runtime};
+    AppConfig config;
+    config.detector.model_path = model.string(); config.detector.backend = BackendType::CPU;
+    config.capture.backend = CaptureBackend::UDP_MJPEG; config.capture.udp_url = "udp://127.0.0.1:19876";
+    config.mouse.allow_send_input = false;
+    if (!runtime->set_data_collector(collector) || !runtime->start(config, mouse))
+        throw std::runtime_error("模型身份CPU Runtime启动失败：" + runtime->snapshot().last_error);
+    const auto loaded_a = runtime->snapshot();
+    data_collection::Config collection;
+    collection.root_directory = root / "raw"; collection.model_path = model.string();
+    collection.class_names = {"person"};
+    std::string error;
+    if (!runtime->start_data_collection(collection, loaded_a, error)) throw std::runtime_error(error);
+    collector->request_sample(); requested = 1;
+    if (!await([&] { return collector->snapshot().saved == 1; }))
+        throw std::runtime_error("原始模型未完成真实CPU推理与PNG保存");
+    nlohmann::json manifest_a;
+    { std::ifstream input(collector->snapshot().session_directory / "session.json"); input >> manifest_a; }
+    collector->stop();
+    // ONNX ModelProto producer_name重复字段合法，后值生效；保持图结构和权重不变。
+    { std::ofstream output(model, std::ios::binary | std::ios::app);
+      output.write("\x12\x01" "B", 3); output.close();
+      if (!output) throw std::runtime_error("模型B改写失败"); }
+    Detector check_b(config.detector);
+    if (!check_b.load()) throw std::runtime_error("改写后的B必须仍是可加载的真实ONNX");
+    (void)check_b.detect(cv::Mat(32, 32, CV_8UC3, cv::Scalar(10, 20, 30)));
+    expect(check_b.profile().status == DetectionStatus::SUCCESS, "B模型CPU推理控制必须成功");
+    // 独立Collector只取得当前文件B的真实摘要，随后经App与Workspace生产入口发起采集。
+    data_collection::Collector inspect;
+    auto inspection = collection; inspection.root_directory = root / "identity-control";
+    if (!inspect.start(inspection, error)) throw std::runtime_error(error);
+    nlohmann::json manifest_b;
+    { std::ifstream input(inspect.snapshot().session_directory / "session.json"); input >> manifest_b; }
+    inspect.stop();
+    expect(check_b.model_sha256() == manifest_b.at("model_sha256").get<std::string>(), "Detector摘要与真实文件B摘要一致");
+    const auto retained_hash = check_b.model_sha256();
+    HANDLE held_writer = CreateFileW(model.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, OPEN_EXISTING, 0, nullptr);
+    expect(held_writer != INVALID_HANDLE_VALUE, "加载失败控制必须先实际占用写共享");
+    if (held_writer != INVALID_HANDLE_VALUE) {
+        expect(!check_b.load() && check_b.loaded() && check_b.model_sha256() == retained_hash,
+               "共享冲突加载失败保留原可用模型及其字节身份");
+        CloseHandle(held_writer);
+        expect(check_b.load() && check_b.model_sha256() == retained_hash,
+               "共享冲突释放后允许健康重载");
+    }
+    expect(manifest_a.at("model_sha256") != manifest_b.at("model_sha256"), "A/B文件摘要必须实际不同");
+    model_workspace::Workspace workspace(collector);
+    model_workspace::Settings settings;
+    if (!workspace.initialize(root, settings, error)) throw std::runtime_error(error);
+    settings.schema_model_path = model.string();
+    settings.schema_model_sha256 = manifest_b.at("model_sha256").get<std::string>();
+    settings.class_names = "person"; settings.class_schema_confirmed = true;
+    std::string message;
+    const auto start = [&] {
+        return app::detail::route_workspace_action(workspace, model_workspace::Action::START_COLLECTION,
+            settings, *runtime, runtime->snapshot(), config.detector,
+            [](DetectorConfig&) { return true; }, message);
+    };
+    const bool accepted = start();
+    expect(!accepted && !collector->snapshot().active,
+           "运行中的A模型不得接受路径已替换且类别身份为B的新采集");
+    expect(workspace.poll().message.find("模型字节身份") != std::string::npos,
+           "模型字节身份不一致必须由Runtime提交门明确报告");
+    if (accepted) {
+        collector->request_sample(); requested = 2;
+        if (!await([&] { return collector->snapshot().saved == 1; }))
+            throw std::runtime_error("旧代码反例未完成实际推理与错误归属保存");
+        nlohmann::json actual;
+        { std::ifstream input(collector->snapshot().session_directory / "session.json"); input >> actual; }
+        std::cout << "MISMATCH loaded_A=" << manifest_a.at("model_sha256")
+                  << " recorded=" << actual.at("model_sha256")
+                  << " current_B=" << manifest_b.at("model_sha256")
+                  << " detector_generation=" << runtime->snapshot().detector_generation << '\n';
+    }
+    collector->stop();
+    expect(runtime->snapshot().detector_generation == loaded_a.detector_generation,
+           "路径改写和错误采集请求不得偷换已加载模型代次");
+    expect(runtime->reload_detector(config.detector), "明确重载当前B后允许恢复");
+    if (!await([&] { return runtime->snapshot().detector_reload_state == DetectorReloadState::SUCCEEDED; }))
+        throw std::runtime_error("B模型真实CPU重载失败");
+    expect(runtime->snapshot().detector_generation > loaded_a.detector_generation, "重载B产生新代次");
+    expect(start(), "明确重载B后相同类别确认应恢复采集");
+    collector->request_sample(); requested = 3;
+    if (!await([&] { return collector->snapshot().saved == 1; }))
+        throw std::runtime_error("重载B后未完成真实CPU推理与PNG保存");
+    nlohmann::json recovered;
+    { std::ifstream input(collector->snapshot().session_directory / "session.json"); input >> recovered; }
+    expect(recovered.at("model_sha256") == manifest_b.at("model_sha256"), "恢复会话记录B实际字节身份");
+    collector->stop();
+    bool replace_after_schema = true;
+    model_workspace::detail::ActionAdapter boundary;
+    boundary.before_collection_start = [&] {
+        if (replace_after_schema) {
+            replace_after_schema = false;
+            std::filesystem::copy_file(source_model, model, std::filesystem::copy_options::overwrite_existing);
+        }
+    };
+    auto race_workspace = model_workspace::detail::make_workspace_with_action_adapter(collector, std::move(boundary));
+    if (!race_workspace->initialize(root, settings, error)) throw std::runtime_error(error);
+    const auto race_start = [&] {
+        return app::detail::route_workspace_action(*race_workspace, model_workspace::Action::START_COLLECTION,
+            settings, *runtime, runtime->snapshot(), config.detector,
+            [](DetectorConfig&) { return true; }, message);
+    };
+    expect(!race_start() && !collector->snapshot().active && !replace_after_schema &&
+               race_workspace->poll().message.find("模型字节身份") != std::string::npos,
+           "类别校验通过后路径字节变化也必须在提交前拒绝");
+    { std::ofstream output(model, std::ios::binary | std::ios::app); output.write("\x12\x01" "B", 3); }
+    expect(race_start(), "恢复与已加载B相同的字节后允许再次采集");
+    collector->request_sample(); requested = 4;
+    if (!await([&] { return collector->snapshot().saved == 1; }))
+        throw std::runtime_error("提交边界恢复后未保存实际推理样本");
+    expect(mouse->moves == 0, "模型身份链始终零设备输出");
+    std::cout << "MODEL_IDENTITY fixture=" << root.string() << " rejected=" << !accepted << '\n';
+}
+
 void ui_response(Fixture& f, bool fail_write) {
     f.queue(fail_write);
     f.runtime->post_intent({RuntimeIntentType::AIM_HOLD_CHANGED, true});
@@ -440,6 +598,11 @@ int main(int argc, char** argv) {
     try {
         if (std::string(argv[2]) == "--frame-identity") {
             collection_frame_identity(argv[1], argc == 4 ? argv[3] : argv[1]);
+            Log::shutdown();
+            return failures ? 1 : 0;
+        }
+        if (std::string(argv[2]) == "--model-identity") {
+            collection_model_identity(argv[1]);
             Log::shutdown();
             return failures ? 1 : 0;
         }

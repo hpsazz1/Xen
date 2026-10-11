@@ -694,6 +694,7 @@ bool Workspace::execute(Action action, Settings& settings,
             config.root_directory = checked_path(path_from(settings.root_directory));
             config.class_names = names_from(settings);
             config.model_path = active_model_path;
+            config.expected_model_sha256 = settings.schema_model_sha256;
             check(!settings.schema_model_path.empty() && !settings.schema_model_sha256.empty(),
                   "请先在训练页检查当前ONNX，再核对类别并开始采集");
             check(fs::equivalent(checked_path(path_from(settings.schema_model_path)),
