@@ -416,8 +416,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         else {
             report_resume.cancel();
             pending_detector_config.reset();
-            app_message = "旧报告保存失败，已取消自动重启/切段并保留当前进程内的数据。"
-                          "请修复磁盘问题后点击停止或启动重试；退出会丢失未保存数据。原因：" + report_finalization.error();
+            if (*report_lifecycle.error()) {
+                app_message = std::string("后台任务失败，已取消自动重启/切段操作。原因：") + report_lifecycle.error();
+            } else {
+                app_message = "旧报告保存失败，已取消自动重启/切段并保留当前进程内的数据。"
+                              "请修复磁盘问题后点击停止或启动重试；退出会丢失未保存数据。原因：" + report_finalization.error();
+            }
         }
     };
 

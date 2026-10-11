@@ -152,17 +152,18 @@ public:
     ReportLifecycle(const ReportLifecycle&) = delete;
     ReportLifecycle& operator=(const ReportLifecycle&) = delete;
 
-    bool finishing() const noexcept { return finish_job_.valid(); }
-    bool stopping() const noexcept { return stop_job_.valid(); }
+    bool finishing() const noexcept { return finish_job_.valid() || failed_launch_ == ReportJobKind::FINISH; }
+    bool stopping() const noexcept { return stop_job_.valid() || failed_launch_ == ReportJobKind::STOP; }
     bool stop_pending() const noexcept { return stop_pending_; }
     bool busy() const noexcept { return finishing() || stopping(); }
     void defer_stop() noexcept { stop_pending_ = true; }
     void cancel_restart() noexcept { restart_.cancel(); }
+    const char* error() const noexcept { return async_error_ ? async_error_ : ""; }
 
     template<class Work>
     void finish_async(Work&& work) {
         if (busy()) return;
-        finish_job_ = std::async(std::launch::async, std::forward<Work>(work));
+        launch(finish_job_, ReportJobKind::FINISH, std::forward<Work>(work));
     }
 
     template<class Runtime, class Finish>
@@ -177,7 +178,7 @@ public:
             ((!report_active_ && !archive_active_) || (!retry_report && finalization_.failed())))
             return ReportStopRequest::IDLE;
         runtime.post_intent({RuntimeIntentType::DISARM_OUTPUT, true});
-        stop_job_ = std::async(std::launch::async, [this, &runtime, finish = std::move(finish), retry_report]() mutable {
+        launch(stop_job_, ReportJobKind::STOP, [this, &runtime, finish = std::move(finish), retry_report]() mutable {
             runtime.stop();
             // 自动收尾仍停止设备，但不在磁盘持续失败时按 UI 帧率重试。
             if (!retry_report && finalization_.failed()) return false;
@@ -197,6 +198,10 @@ public:
 
     template<class Stop, class Collect>
     void poll(bool stop_blocked, Stop&& stop, Collect&& collect) {
+        if (const auto failed = std::exchange(failed_launch_, std::nullopt)) {
+            restart_.finish_completed(false);
+            collect(false, *failed);
+        }
         collect_ready(finish_job_, ReportJobKind::FINISH, collect);
         collect_ready(stop_job_, ReportJobKind::STOP, collect);
         if (stop_pending_ && !stop_blocked && !finishing()) {
@@ -211,10 +216,27 @@ public:
     }
 
 private:
+    template<class Work>
+    void launch(std::future<bool>& job, ReportJobKind kind, Work&& work) {
+        async_error_ = nullptr;
+        try {
+            job = std::async(std::launch::async, std::forward<Work>(work));
+        } catch (...) {
+            // 失败通知本身不分配内存；回收前保留busy，阻止同帧继续切段、退出或重启。
+            failed_launch_ = kind;
+            async_error_ = "无法创建后台任务，本次停止或封尾未执行；请稍后重试。";
+        }
+    }
+
     template<class Collect>
     void collect_ready(std::future<bool>& job, ReportJobKind kind, Collect& collect) {
         if (!job.valid() || job.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) return;
-        const bool succeeded = job.get();
+        bool succeeded = false;
+        try {
+            succeeded = job.get();
+        } catch (...) {
+            async_error_ = "后台任务异常结束，停止或报告保存尚未确认；请检查状态后重试。";
+        }
         restart_.finish_completed(succeeded);
         collect(succeeded, kind);
     }
@@ -223,6 +245,8 @@ private:
     const bool& archive_active_;
     const ReportFinalization& finalization_;
     ReportRestart restart_;
+    std::optional<ReportJobKind> failed_launch_;
+    const char* async_error_ = nullptr;
     bool stop_pending_ = false;
     std::future<bool> stop_job_;
     std::future<bool> finish_job_;
