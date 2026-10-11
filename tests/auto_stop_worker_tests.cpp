@@ -67,6 +67,7 @@ public:
     bool output_owner_exclusive() const noexcept override { return true; }
     bool supports_wasd_keyboard() const noexcept override { return true; }
     bool poll_input(InputSnapshot& input) noexcept override {
+        if (before_poll) before_poll();
         std::unique_lock<std::mutex> lock(mutex);
         input = {}; input.status = healthy ? InputMonitorStatus::READY : InputMonitorStatus::FAILURE;
         input.state_valid = healthy;
@@ -79,6 +80,7 @@ public:
         input.virtual_keys['A'] = (held & 2) != 0;
         input.virtual_keys['S'] = (held & 4) != 0;
         input.virtual_keys['D'] = (held & 8) != 0;
+        if (!input.virtual_keys['1']) ++rescue_key_up_polls;
         const bool inject_release = release_after_poll.exchange(false);
         const auto inject_press = press_after_poll.exchange(0);
         lock.unlock();
@@ -198,6 +200,8 @@ public:
     int cleanups = 0, cleanup_checks = 0, subscriptions = 0;
     int physical_during_cleanup = -1;
     int cleanup_report_mode = 0;
+    std::uint64_t rescue_key_up_polls = 0;
+    std::function<void()> before_poll;
     std::function<void()> after_first_software;
     std::function<void()> before_wasd_read;
     std::function<void()> before_cleanup;
@@ -1565,8 +1569,67 @@ void movement_suspension_contracts() {
     require(!worker.movement_suspension_ready(), "stopped worker cannot grant movement");
 }
 
+void fault_rescue_retry_contract(bool delayed_poll) {
+    AutoStopConfig config{true, 5};
+    config.use_counterpulse_timing = false;
+    auto fake = std::make_shared<Fake>();
+    std::atomic<bool> allowed{true};
+    auto arbiter = std::make_shared<AutoStopOutputArbiter>();
+    std::atomic<bool> delay_poll{false}, poll_delayed{false};
+    fake->before_poll = [&] {
+        if (delay_poll.exchange(false)) {
+            // 覆盖工作线程未能在旧5毫秒窗口内轮询的合法调度。
+            poll_delayed = true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    };
+    AutoStopWorker worker(fake, arbiter, [&] { return allowed.load(); });
+    require(worker.start(config), "故障救援测试启动");
+    ready(worker, fake);
+    require(worker.request(1), "救援前建立已持键盘债务");
+    wait_for([&] { return fake->has_software(); });
+    { std::lock_guard<std::mutex> lock(fake->mutex); fake->cleanup_fails = true; }
+    worker.cancel(1);
+    wait_for([&] { return worker.snapshot().status == AutoStopStatus::FAULT && worker.snapshot().cleanup_unknown; });
+    allowed.store(false); worker.set_paused(true);
+    const auto reports_before_rescue = fake->reports().size();
+    { std::lock_guard<std::mutex> lock(fake->mutex); fake->extra_keys['1'] = true; }
+    wait_for([&] { return worker.snapshot().rescue_failed == 1; });
+    require(worker.snapshot().cleanup_unknown && !fake->released(), "救援未收到ACK不能报告已归还");
+    { std::lock_guard<std::mutex> lock(fake->mutex); fake->cleanup_fails = false; }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    require(worker.snapshot().rescue_attempts == 1, "持续按住救援键不能重复刷清理命令");
+    if (delayed_poll) {
+        delay_poll = true;
+        wait_for([&] { return poll_delayed.load(); });
+    }
+    std::uint64_t release_polls_before;
+    {
+        std::lock_guard<std::mutex> lock(fake->mutex);
+        release_polls_before = fake->rescue_key_up_polls;
+        fake->extra_keys['1'] = false;
+    }
+    // 必须把真实的新释放快照交给worker；主线程睡眠不代表另一线程已读取输入。
+    wait_for([&] {
+        std::lock_guard<std::mutex> lock(fake->mutex);
+        return fake->rescue_key_up_polls > release_polls_before;
+    });
+    { std::lock_guard<std::mutex> lock(fake->mutex); fake->extra_keys['1'] = true; }
+    wait_for([&] { return fake->released() && worker.snapshot().rescue_succeeded == 1; });
+    require(!worker.snapshot().cleanup_unknown && worker.snapshot().rescue_attempts == 2 &&
+        fake->reports().size() == reports_before_rescue, "释放再按可重试，救援不能发送新DOWN");
+    require(worker.snapshot().status == AutoStopStatus::FAULT, "救援只清急停债务，不解除共享故障锁存");
+    require(!arbiter->try_enter_aim().owns_lock(), "救援成功不得清除共享输出故障");
+    worker.stop();
+}
+
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--rescue-retry") {
+            fault_rescue_retry_contract(false);
+            fault_rescue_retry_contract(true);
+            return 0;
+        }
         movement_suspension_contracts();
         movement_suspension_reentry_contract();
         movement_shared_worker_contract();
@@ -2049,36 +2112,8 @@ int main(int argc, char** argv) {
             wait_for([&] { return fake->released() && worker.snapshot().canceled == 1; });
             worker.stop();
         }
-        {
-            auto fake = std::make_shared<Fake>();
-            std::atomic<bool> allowed{true};
-            auto arbiter = std::make_shared<AutoStopOutputArbiter>();
-            AutoStopWorker worker(fake, arbiter, [&] { return allowed.load(); });
-            require(worker.start(config), "故障救援测试启动");
-            ready(worker, fake);
-            require(worker.request(1), "救援前建立已持键盘债务");
-            wait_for([&] { return fake->has_software(); });
-            { std::lock_guard<std::mutex> lock(fake->mutex); fake->cleanup_fails = true; }
-            worker.cancel(1);
-            wait_for([&] { return worker.snapshot().status == AutoStopStatus::FAULT && worker.snapshot().cleanup_unknown; });
-            allowed.store(false); worker.set_paused(true);
-            const auto reports_before_rescue = fake->reports().size();
-            { std::lock_guard<std::mutex> lock(fake->mutex); fake->extra_keys['1'] = true; }
-            wait_for([&] { return worker.snapshot().rescue_failed == 1; });
-            require(worker.snapshot().cleanup_unknown && !fake->released(), "救援未收到ACK不能报告已归还");
-            { std::lock_guard<std::mutex> lock(fake->mutex); fake->cleanup_fails = false; }
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            require(worker.snapshot().rescue_attempts == 1, "持续按住救援键不能重复刷清理命令");
-            { std::lock_guard<std::mutex> lock(fake->mutex); fake->extra_keys['1'] = false; }
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            { std::lock_guard<std::mutex> lock(fake->mutex); fake->extra_keys['1'] = true; }
-            wait_for([&] { return fake->released() && worker.snapshot().rescue_succeeded == 1; });
-            require(!worker.snapshot().cleanup_unknown && worker.snapshot().rescue_attempts == 2 &&
-                fake->reports().size() == reports_before_rescue, "释放再按可重试，救援不能发送新DOWN");
-            require(worker.snapshot().status == AutoStopStatus::FAULT, "救援只清急停债务，不解除共享故障锁存");
-            require(!arbiter->try_enter_aim().owns_lock(), "救援成功不得清除共享输出故障");
-            worker.stop();
-        }
+        fault_rescue_retry_contract(false);
+        fault_rescue_retry_contract(true);
         for (const int rescue_key : config.release_virtual_keys) {
             auto fake = std::make_shared<Fake>();
             AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; });
