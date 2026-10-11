@@ -114,15 +114,20 @@ detail::Focus foreground_focus(std::string_view process_name) noexcept {
     const HWND window = GetForegroundWindow();
     if (!window) return detail::Focus::Unknown;
     DWORD process_id = 0;
-    if (!GetWindowThreadProcessId(window, &process_id) || process_id == 0) return detail::Focus::Unknown;
+    const DWORD thread_id = GetWindowThreadProcessId(window, &process_id);
+    if (!thread_id || process_id == 0) return detail::Focus::Unknown;
     const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id);
     if (!process) return detail::Focus::Unknown;
     wchar_t path[32768];
     DWORD size = static_cast<DWORD>(std::size(path));
     const bool queried = QueryFullProcessImageNameW(process, 0, path, &size) != 0;
+    DWORD current_process_id = 0;
+    // HWND 可被回收复用；映像查询前后的窗口、进程和线程必须属于同一次观察。
+    const bool same_owner = queried && GetForegroundWindow() == window &&
+        GetWindowThreadProcessId(window, &current_process_id) == thread_id &&
+        current_process_id == process_id;
     CloseHandle(process);
-    // 查询期间窗口切换就不给焦点许可，不把查询前后的不同状态拼成一条证据。
-    if (!queried || GetForegroundWindow() != window) return detail::Focus::Unknown;
+    if (!same_owner) return detail::Focus::Unknown;
     std::size_t start = size;
     while (start > 0 && path[start - 1] != L'\\' && path[start - 1] != L'/') --start;
     char name[64]{};
