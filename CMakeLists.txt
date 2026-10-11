@@ -1778,6 +1778,11 @@ if(BUILD_TESTING)
                 --case "${report_case}")
         set_tests_properties(composite_report_${report_case} PROPERTIES TIMEOUT 60)
     endforeach()
+    add_test(NAME composite_input_snapshot_tests
+        COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+            "${PROJECT_SOURCE_DIR}/tests/composite_input_snapshot_tests.py"
+            --seal-executable "$<TARGET_FILE:xen_mouse_effect_probe_composite_seal>")
+    set_tests_properties(composite_input_snapshot_tests PROPERTIES TIMEOUT 60)
     add_test(NAME composite_sidecar_binding_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
             "${PROJECT_SOURCE_DIR}/tests/composite_sidecar_binding_tests.py"

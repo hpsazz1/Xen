@@ -104,15 +104,16 @@ def _reject(condition: bool, reason_code: str, message: str) -> None:
         raise BinderError(reason_code, message)
 
 
-def _load_json(path: pathlib.Path, label: str) -> dict[str, Any]:
+def _load_json_snapshot(path: pathlib.Path, label: str) -> tuple[dict[str, Any], str]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8-sig"))
+        content = path.read_bytes()
+        value = json.loads(content.decode("utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise BinderError(
             "INPUT_LEDGER_INVALID", f"{label} 无法读取: {error}") from error
     if not isinstance(value, dict):
         raise BinderError("INPUT_LEDGER_INVALID", f"{label} 必须是 object")
-    return value
+    return value, hashlib.sha256(content).hexdigest()
 
 
 def _verify_semantic(value: dict[str, Any], field: str,
@@ -1031,14 +1032,13 @@ def bind_calibration(
         "evaluate_mouse_effect_probe_b_composite_phase.py")
     _reject(not evaluator_path.is_file(), "PLAN_SEAL_INVALID",
             "冻结 evaluator 文件缺失")
-    plan = _load_json(plan_path, "plan")
-    capture = _load_json(capture_path, "capture ledger")
-    commands = _load_json(command_path, "command ledger")
+    plan, plan_hash = _load_json_snapshot(plan_path, "plan")
+    capture, capture_hash = _load_json_snapshot(capture_path, "capture ledger")
+    commands, commands_hash = _load_json_snapshot(command_path, "command ledger")
     plan_semantic, pulses, controls, expected_windows = _validate_plan(
         plan, binder_path, evaluator_path)
     denylist = set(SEEN_ARTIFACT_SHA256)
-    input_paths = (plan_path, capture_path, command_path)
-    input_hashes = [_file_sha256(path) for path in input_paths]
+    input_hashes = [plan_hash, capture_hash, commands_hash]
     _reject(any(value in denylist for value in input_hashes),
             "INPUT_IDENTITY_MISMATCH",
             "当前 seen diagnosis artifact 不得作为 calibration 输入")

@@ -75,11 +75,16 @@ def finite_number(value: Any, context: str) -> float:
     return result
 
 
-def read_object(path: pathlib.Path, label: str) -> dict[str, Any]:
+def read_object_snapshot(path: pathlib.Path, label: str) -> tuple[dict[str, Any], str]:
     try:
-        return parse_object(path.read_bytes(), label)
+        content = path.read_bytes()
     except OSError as error:
         raise ProducerError(f"{label} 无法读取: {error}") from error
+    return parse_object(content, label), bytes_sha256(content)
+
+
+def read_object(path: pathlib.Path, label: str) -> dict[str, Any]:
+    return read_object_snapshot(path, label)[0]
 
 
 def parse_object(content: bytes, label: str) -> dict[str, Any]:
@@ -253,13 +258,13 @@ def produce(options: argparse.Namespace) -> tuple[dict[str, Any],
     safety_path = options.safety.resolve()
     manifest_path = options.manifest.resolve()
     assessment_path = options.human_assessment.resolve()
-    plan = read_object(plan_path, "plan")
+    plan, plan_file_sha256 = read_object_snapshot(plan_path, "plan")
     # 同一次读取的字节用于解析、原生校验和下游身份，不再回读可被替换的原路径。
     report_bytes = report_path.read_bytes()
     report_file_sha256 = bytes_sha256(report_bytes)
     report = parse_object(report_bytes, "command report")
-    schedule = read_object(schedule_path, "schedule ledger")
-    safety = read_object(safety_path, "safety ledger")
+    schedule, schedule_file_sha256 = read_object_snapshot(schedule_path, "schedule ledger")
+    safety, safety_file_sha256 = read_object_snapshot(safety_path, "safety ledger")
     manifest = read_object(manifest_path, "sidecar manifest")
     assessment = read_object(assessment_path, "human assessment")
 
@@ -335,11 +340,11 @@ def produce(options: argparse.Namespace) -> tuple[dict[str, Any],
                 plan.get("scheduler_policy", {}).get("timer_mode") or
             schedule.get("source_dispatch_count") != 38 or
             schedule.get("composite_plan_file_sha256") !=
-                file_sha256(plan_path) or
+                plan_file_sha256 or
             schedule.get("command_report_file_sha256") !=
                 report_file_sha256 or
             schedule.get("safety_ledger_file_sha256") !=
-                file_sha256(safety_path)):
+                safety_file_sha256):
         raise ProducerError("plan/report/schedule/safety identity 漂移")
     result = report.get("result")
     schedule_events = schedule.get("events")
@@ -837,7 +842,7 @@ def produce(options: argparse.Namespace) -> tuple[dict[str, Any],
         "clock_mapping_semantic_sha256": mapping["semantic_sha256"],
         **source_counts,
         "command_report_file_sha256": report_file_sha256,
-        "schedule_ledger_file_sha256": file_sha256(schedule_path),
+        "schedule_ledger_file_sha256": schedule_file_sha256,
         "events": command_events,
         "negative_controls": command_controls,
     }
