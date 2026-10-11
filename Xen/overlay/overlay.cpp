@@ -5,6 +5,7 @@
 #include "config/hotkey_config_internal.h"
 #include "config/ui_palette.h"
 #include "overlay/overlay_internal.h"
+#include "overlay/log_panel_internal.h"
 #include "overlay/recoil_panel.h"
 #include "overlay/input_training_panel.h"
 #include "overlay/debug_panel.h"
@@ -675,7 +676,7 @@ struct Overlay::Impl {
     int preview_texture_width = 0;
     int preview_texture_height = 0;
     std::uint64_t preview_uploaded_sequence = 0;
-    std::string last_log_tail;
+    bool log_scroll_to_latest = false;
     MetricHistory capture_fps_history;
     MetricHistory total_latency_history;
     MetricHistory target_confidence_history;
@@ -704,7 +705,7 @@ struct Overlay::Impl {
         if (message == WM_KEYDOWN && wparam == VK_F9 &&
             (lparam & (1LL << 30)) == 0 && self) {
             self->show_log_panel = !self->show_log_panel;
-            if (self->show_log_panel) self->last_log_tail.clear();
+            if (self->show_log_panel) self->log_scroll_to_latest = true;
             return 0;
         }
         if (ImGui_ImplWin32_WndProcHandler(hwnd, message, wparam, lparam)) {
@@ -2039,14 +2040,6 @@ struct Overlay::Impl {
 
     void render_log_panel() {
         const auto lines = Log::get_ring_buffer(64);
-        const bool log_changed = lines.empty()
-            ? !last_log_tail.empty()
-            : lines.back() != last_log_tail;
-        if (lines.empty()) {
-            last_log_tail.clear();
-        } else {
-            last_log_tail = lines.back();
-        }
 
         const float height = std::max(
             160.0f, ImGui::GetContentRegionAvail().y);
@@ -2066,20 +2059,8 @@ struct Overlay::Impl {
         show_help_tooltip("关闭最近日志面板并返回当前功能页；不会清空日志环形缓冲区。");
         ImGui::Dummy(ImVec2(0.0f, 4.0f));
 
-        ImGui::BeginChild(
-            "log_entries", ImVec2(0.0f, 0.0f),
-            ImGuiChildFlags_None);
-        if (lines.empty()) {
-            ImGui::TextColored(rgba(kFaintInk), "暂无可显示日志");
-        } else {
-            for (const auto& line : lines) {
-                ImGui::TextWrapped("%s", line.c_str());
-            }
-            if (log_changed) {
-                ImGui::SetScrollHereY(1.0f);
-            }
-        }
-        ImGui::EndChild();
+        overlay::detail::render_log_entries(lines, rgba(kFaintInk), log_scroll_to_latest);
+        log_scroll_to_latest = false;
         end_surface();
     }
 
