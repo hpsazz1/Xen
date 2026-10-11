@@ -65,6 +65,35 @@ with tempfile.TemporaryDirectory(prefix="xen-reference-cli-") as temporary:
     assert not (root / "backwards-report").exists()
     empty = fixture("empty", [])
     run(empty, root / "empty-report", ok=False)
+    # 由实际CLI生成两块合法档案，第一块已有可评分前缀；不是只拒绝坏清单。
+    many = fixture("two-chunks", [
+        {"at_ms": index * 5, "held_mask": {10: 2, 12: 8}.get(index, 0)}
+        for index in range(4100)])
+    many_report = run(many, root / "two-chunks-report")
+    assert many_report["reference"]["assessments"]
+    two_chunks = root / "two-chunks-report" / "input-copy"
+    assert sorted(p.name for p in two_chunks.glob("events-*.csv")) == ["events-0.csv", "events-1.csv"]
+    last_chunk = two_chunks / "events-1.csv"
+    original_last = last_chunk.read_bytes()
+    for fault in ("bad-last-row", "unfinished-last-line", "missing-last-chunk"):
+        if fault == "bad-last-row":
+            # 保持文件长度和清单一致，仅最后一条raw_report的十六进制非法。
+            last_chunk.write_bytes(original_last[:-2] + b"z\n")
+        elif fault == "unfinished-last-line":
+            last_chunk.write_bytes(original_last[:-1])
+        else:
+            last_chunk.unlink()
+        before = {p.name: p.read_bytes() for p in two_chunks.iterdir()}
+        destination = root / (fault + "-report")
+        run(two_chunks, destination, archive=True, ok=False)
+        assert not destination.exists(), "late failure must discard the useful prefix"
+        assert before == {p.name: p.read_bytes() for p in two_chunks.iterdir()}
+        last_chunk.write_bytes(original_last)
+        recovered = run(two_chunks, root / (fault + "-recovered"), archive=True)
+        assert recovered["reference"] == many_report["reference"]
+        assert recovered["xen_input_training"] == many_report["xen_input_training"]
+        assert recovered["physical_output"] is False and recovered["game_stop_verified"] is False
+        print(f"late-archive {fault}: rejected without output, recovered {recovered['event_count']} events")
     # 完整归档校验失败时禁止部分成功报告。
     archive = root / "example" / "input-copy"
     manifest = archive / "manifest.txt"

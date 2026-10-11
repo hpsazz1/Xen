@@ -28,6 +28,9 @@ void write(const fs::path& path, const std::string& contents) {
     std::ofstream out(path, std::ios::binary);
     out << contents;
     if (!out) throw std::runtime_error("无法写入报告文件");
+    // 析构不能向调用者报告缓冲写出或关闭失败，成功返回前确认最终状态。
+    out.close();
+    if (!out) throw std::runtime_error("无法关闭报告文件");
 }
 std::vector<Row> read_fixture(const fs::path& file, Json& document) {
     if (fs::file_size(file) > 32 * 1024 * 1024) throw std::runtime_error("样例超过32MiB");
