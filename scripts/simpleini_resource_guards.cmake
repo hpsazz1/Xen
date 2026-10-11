@@ -58,6 +58,14 @@ function(xen_prepare_simpleini source_header output_directory)
         m_uDataLen = uLen+1;
     }]=] header "${header}")
 
+    # 保存配置会复制字符串；list 登记抛出时，数组仍由本次调用负责释放。
+    string(REPLACE [=[    memcpy(pCopy, a_pString, sizeof(SI_CHAR)*uLen);
+    m_strings.push_back(pCopy);
+    a_pString = pCopy;]=] [=[    std::unique_ptr<SI_CHAR[]> copyOwner(pCopy);
+    memcpy(pCopy, a_pString, sizeof(SI_CHAR)*uLen);
+    m_strings.push_back(pCopy);
+    a_pString = copyOwner.release();]=] header "${header}")
+
     file(MAKE_DIRECTORY "${output_directory}")
     # 相同内容不更新 mtime，避免每次配置都重编译 config。
     file(CONFIGURE OUTPUT "${output_directory}/SimpleIni.h" CONTENT "${header}" @ONLY)

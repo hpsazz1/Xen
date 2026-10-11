@@ -71,12 +71,44 @@ std::vector<int> parse_int_list(const char* value,
 
 std::string format_int_list(const std::vector<int>& values) {
     std::ostringstream stream;
+    // 扩容失败不能被流吞掉后当成一个完整列表保存。
+    stream.exceptions(std::ios::badbit | std::ios::failbit);
     for (std::size_t index = 0; index < values.size(); ++index) {
         if (index > 0) stream << ',';
         stream << values[index];
     }
     return stream.str();
 }
+
+// 仅用于构造一次完整配置；任一 setter 失败后不能发布缺项内容。
+class ConfigIniWriter {
+public:
+    ConfigIniWriter() { ini_.SetUnicode(true); }
+
+    void SetValue(const char* section, const char* key, const char* value) {
+        if (result_ >= 0) result_ = ini_.SetValue(section, key, value);
+    }
+
+    void SetLongValue(const char* section, const char* key, long value) {
+        if (result_ >= 0) result_ = ini_.SetLongValue(section, key, value);
+    }
+
+    void SetDoubleValue(const char* section, const char* key, double value) {
+        if (result_ >= 0) result_ = ini_.SetDoubleValue(section, key, value);
+    }
+
+    void SetBoolValue(const char* section, const char* key, bool value) {
+        if (result_ >= 0) result_ = ini_.SetBoolValue(section, key, value);
+    }
+
+    SI_Error Save(std::string& output, bool add_signature) const {
+        return result_ < 0 ? result_ : ini_.Save(output, add_signature);
+    }
+
+private:
+    CSimpleIniA ini_;
+    SI_Error result_ = SI_OK;
+};
 
 BackendType parse_backend(const char* value, BackendType fallback) {
     if (!value) return fallback;
@@ -1589,11 +1621,9 @@ bool save_app_config(const std::string& path,
                      std::string& error) noexcept {
     try {
         if (!validate_app_config(config, error)) return false;
-        CSimpleIniA ini;
-        ini.SetUnicode(true);
+        ConfigIniWriter ini;
         ini.SetBoolValue("movement", "enabled", config.movement.enabled);
         ini.SetBoolValue("movement", "wheel_down_positive", config.movement.wheel_down_positive);
-        ini.Delete("movement", "mode");
         ini.SetBoolValue("movement", "spin_enabled", config.movement.spin_enabled);
         ini.SetBoolValue("movement", "large_enabled", config.movement.large_enabled);
         ini.SetBoolValue("movement", "large_ctrl_enabled", config.movement.large_ctrl_enabled);

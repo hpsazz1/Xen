@@ -2040,6 +2040,14 @@ if(BUILD_TESTING)
     add_executable(config_load_failure_tests tests/config_load_failure_tests.cpp)
     target_link_libraries(config_load_failure_tests PRIVATE config)
     add_test(NAME config_load_failure_tests COMMAND config_load_failure_tests)
+    add_executable(config_save_failure_tests tests/config_save_failure_tests.cpp)
+    target_link_libraries(config_save_failure_tests PRIVATE config)
+    add_test(NAME config_save_failure_tests COMMAND config_save_failure_tests)
+    # 单独编译 config.cpp 做局部 I/O 注入，生产库没有故障开关。
+    add_executable(config_save_io_failure_tests tests/config_save_io_failure_tests.cpp)
+    target_include_directories(config_save_io_failure_tests PRIVATE ${XEN_SIMPLEINI_INCLUDE_DIR})
+    target_link_libraries(config_save_io_failure_tests PRIVATE config)
+    add_test(NAME config_save_io_failure_tests COMMAND config_save_io_failure_tests)
     add_test(NAME simpleini_resource_guards_tests COMMAND ${CMAKE_COMMAND}
         "-DSOURCE_HEADER=${simpleini_SOURCE_DIR}/SimpleIni.h"
         "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
