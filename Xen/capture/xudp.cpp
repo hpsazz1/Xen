@@ -252,6 +252,17 @@ private:
                 assembler_.record_invalid_frame();
                 return false;
             }
+            int width = 0, height = 0;
+            NetworkFrameGeometry geometry;
+            if (!read_network_jpeg_dimensions(completed.jpeg, width, height) ||
+                !((width == completed.descriptor.encoded_width &&
+                   height == completed.descriptor.encoded_height) ||
+                  (height == completed.descriptor.encoded_width &&
+                   width == completed.descriptor.encoded_height)) ||
+                !resolve_xudp_frame_geometry(config_, completed.descriptor, geometry)) {
+                assembler_.record_invalid_frame();
+                return false;
+            }
             // imdecode 只在调用期间读取该 Mat；底层分片槽在下一包前保持有效。
             const cv::Mat encoded(
                 1, static_cast<int>(completed.jpeg.size()), CV_8UC1,
@@ -263,13 +274,6 @@ private:
                     static_cast<int>(completed.descriptor.encoded_width) ||
                 decoded.rows !=
                     static_cast<int>(completed.descriptor.encoded_height)) {
-                assembler_.record_invalid_frame();
-                return false;
-            }
-
-            NetworkFrameGeometry geometry;
-            if (!resolve_xudp_frame_geometry(
-                    config_, completed.descriptor, geometry)) {
                 assembler_.record_invalid_frame();
                 return false;
             }

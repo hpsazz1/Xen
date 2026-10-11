@@ -2097,6 +2097,7 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(io_tests OPENCV NDI)
     add_test(NAME io_tests COMMAND io_tests)
     add_test(NAME xudp_stream_validation_tests COMMAND io_tests --xudp-only)
+    add_test(NAME network_jpeg_preflight_tests COMMAND io_tests --jpeg-preflight-only)
 
     if(XEN_HAS_NDI)
         # 注入 SDK/外部时钟，仍经真实接收线程、发布与公开 grab；不初始化 NDI 实网。

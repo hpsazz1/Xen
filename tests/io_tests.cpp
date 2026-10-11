@@ -1873,6 +1873,155 @@ void test_xudp_challenger_requires_decodable_frame(int invalid_kind) {
     capture->close();
 }
 
+class DecodeAllocationObserver final : public cv::MatAllocator {
+public:
+    DecodeAllocationObserver(int width, int height)
+        : previous_(cv::Mat::getDefaultAllocator()), width_(width), height_(height) {
+        cv::Mat::setDefaultAllocator(this);
+    }
+    ~DecodeAllocationObserver() override { cv::Mat::setDefaultAllocator(previous_); }
+    cv::UMatData* allocate(int dims, const int* sizes, int type, void* data,
+            size_t* step, cv::AccessFlag access, cv::UMatUsageFlags usage) const override {
+        if (dims == 2 && sizes[0] == height_ && sizes[1] == width_ && type == CV_8UC3)
+            observed.fetch_add(1);
+        return previous_->allocate(dims, sizes, type, data, step, access, usage);
+    }
+    bool allocate(cv::UMatData* data, cv::AccessFlag access,
+                  cv::UMatUsageFlags usage) const override {
+        return previous_->allocate(data, access, usage);
+    }
+    void deallocate(cv::UMatData* data) const override { previous_->deallocate(data); }
+    mutable std::atomic<int> observed{0};
+private:
+    cv::MatAllocator* previous_;
+    int width_, height_;
+};
+
+void test_network_jpeg_header_contract() {
+    const std::vector<std::uint8_t> header{
+        0xff,0xd8, 0xff,0xe1,0,6,0xff,0xc0,0,0,
+        0xff,0xc0,0,11,8,0,96,0,128,1,1,0x11,0, 0xff,0xd9};
+    int width = 0, height = 0;
+    expect(capture::detail::read_network_jpeg_dimensions(header, width, height) &&
+               width == 128 && height == 96,
+           "必须跳过APP段内假SOF标记并读取真实帧头");
+    for (std::size_t length = 0; length < 23; ++length) {
+        width = height = 42;
+        expect(!capture::detail::read_network_jpeg_dimensions(
+                   std::span(header).first(length), width, height) && width == 0 && height == 0,
+               "每个截断帧头都应拒绝且清空输出尺寸");
+    }
+    for (const auto change : std::array<std::pair<std::size_t, std::uint8_t>, 9>{{
+             {0,0}, {11,0xda}, {11,0xd0}, {11,0xc4}, {13,1}, {13,40}, {16,0}, {18,0}, {19,0}}}) {
+        auto invalid = header;
+        invalid[change.first] = change.second;
+        expect(!capture::detail::read_network_jpeg_dimensions(invalid, width, height),
+               "错误标记、段长、零尺寸或分量计数必须拒绝");
+    }
+    auto boundary = header;
+    boundary[17] = 0x40; boundary[18] = 0;
+    expect(capture::detail::read_network_jpeg_dimensions(boundary, width, height) && width == 16384,
+           "既有16384网络维度上界保持可表示，不申请像素");
+    boundary[18] = 1;
+    expect(!capture::detail::read_network_jpeg_dimensions(boundary, width, height),
+           "超过网络维度上界必须在解码前拒绝");
+    auto filled = header;
+    filled.insert(filled.begin() + 10, {0xff,0xff,0x01});
+    expect(capture::detail::read_network_jpeg_dimensions(filled, width, height),
+           "合法填充字节及TEM独立标记不应破坏帧头读取");
+}
+
+void test_jpeg_rejected_before_decode_allocation(CaptureBackend backend, bool over_dimension) {
+    WinsockSession winsock;
+    const auto port = reserve_loopback_port();
+    expect(winsock.ready() && port != 0, "JPEG前置检查需要任务回环端口");
+    if (!winsock.ready() || port == 0) return;
+    const int width = over_dimension ? 16385 : 128;
+    const int height = over_dimension ? 1 : 96;
+    std::vector<unsigned char> invalid, valid, rotated;
+    expect(cv::imencode(".jpg", cv::Mat(height, width, CV_8UC3, cv::Scalar::all(96)), invalid) &&
+               cv::imencode(".jpg", cv::Mat(32, 32, CV_8UC3, cv::Scalar::all(192)), valid),
+           "夹具使用小内存真实JPEG，最大约48KiB像素");
+    if (invalid.empty() || valid.empty()) return;
+    expect(cv::imencode(".jpg", cv::Mat(32, 64, CV_8UC3, cv::Scalar::all(160)), rotated,
+                         {cv::IMWRITE_JPEG_PROGRESSIVE, 1}), "恢复控制生成真实渐进JPEG");
+    // 最小EXIF小端TIFF IFD：Orientation(0x0112), SHORT, count=1, value=6。
+    const std::vector<unsigned char> orientation{
+        0xff,0xe1,0,34,'E','x','i','f',0,0,'I','I',42,0,8,0,0,0,
+        1,0,0x12,1,3,0,1,0,0,0,6,0,0,0,0,0,0,0};
+    if (rotated.size() < 2) return;
+    rotated.insert(rotated.begin() + 2, orientation.begin(), orientation.end());
+    const auto rotation_control = cv::imdecode(rotated, cv::IMREAD_COLOR);
+    expect(rotation_control.cols == 32 && rotation_control.rows == 64,
+           "夹具必须由实际OpenCV应用EXIF方向，不能假设宽高已转置");
+    CaptureConfig config;
+    config.backend = backend;
+    config.udp_url = "udp://127.0.0.1:" + std::to_string(port);
+    config.udp_read_timeout_ms = 20;
+    config.udp_disconnect_timeout_ms = 500;
+    config.acquire_timeout_ms = 10;
+    config.roi_width = config.roi_height = 32;
+    if (backend == CaptureBackend::UDP_MJPEG && !over_dimension) {
+        config.udp_frame_layout = UdpFrameLayout::CENTER_CROP_1_TO_1;
+        config.udp_source_width = config.udp_source_height = 64;
+    }
+    // 全局观察器仅在无其他OpenCV任务的测试进程使用，先安装再起线程，join后恢复。
+    DecodeAllocationObserver observer(width, height);
+    auto capture = create_capture(config);
+    expect(capture && capture->open(), "JPEG前置检查打开生产网络接收器");
+    if (!capture || capture->status() != CaptureStatus::READY) return;
+    const SOCKET sender = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    expect(sender != INVALID_SOCKET, "JPEG前置检查创建本机发送端");
+    if (sender == INVALID_SOCKET) { capture->close(); return; }
+    sockaddr_in destination{};
+    destination.sin_family = AF_INET;
+    destination.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    destination.sin_port = htons(port);
+    const auto send = [&](const std::vector<unsigned char>& jpeg, std::uint64_t id,
+                          int encoded_width = 32, int encoded_height = 32) {
+        if (backend == CaptureBackend::UDP_MJPEG)
+            return send_fragmented_jpeg(sender, destination, jpeg);
+        auto descriptor = make_xudp_descriptor(id, jpeg.size(), encoded_width, encoded_height);
+        descriptor.source_width = descriptor.source_height = 64;
+        descriptor.source_roi_x = descriptor.source_roi_y = 16;
+        descriptor.source_roi_width = descriptor.source_roi_height = 32;
+        const auto packets = make_xudp_packets(descriptor, jpeg);
+        const std::array<std::size_t, 3> order{{0, 1, 2}};
+        return send_xudp_datagrams(sender, destination, packets, order);
+    };
+    expect(send(invalid, 1), "不符合网络几何的JPEG应实际到达接收器");
+    CapturedFrame frame;
+    bool published = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto status = capture->grab(frame);
+        published = published || status == CaptureStatus::FRAME;
+        if (status != CaptureStatus::NO_FRAME && status != CaptureStatus::FRAME) break;
+    }
+    expect(!published, "不符合帧合同的JPEG不得发布");
+    if (backend == CaptureBackend::UDP_MJPEG && !over_dimension) {
+        expect(capture->status() == CaptureStatus::INVALID_CONFIG,
+               "原UDP几何不匹配的错误类型保持");
+        capture->close();
+        expect(capture->open(), "UDP几何失败后可显式重新打开");
+    }
+    expect(send(valid, 2) && wait_for_capture_frame(*capture, 0, frame) &&
+               frame.bgr.cols == 32 && frame.bgr.rows == 32,
+           "拒绝坏帧后合法JPEG仍经真实解码器恢复");
+    if (backend == CaptureBackend::XUDP_JPEG)
+        expect(frame.timing.transport_invalid_packets >= 1, "XUDP必须记录坏帧拒绝");
+    const auto previous = frame.timing.sequence;
+    expect(send(rotated, 3, 32, 64) && wait_for_capture_frame(*capture, previous, frame) &&
+               frame.encoded_width == 32 && frame.encoded_height == 64,
+           "渐进JPEG与EXIF宽高转置须保持实际网络接收兼容性");
+    closesocket(sender);
+    capture->close();
+    const auto count = observer.observed.load();
+    std::cout << "JPEG分配前拒绝 backend=" << static_cast<int>(backend)
+              << " size=" << width << 'x' << height << " allocations=" << count << '\n';
+    expect(count == 0, "必须在OpenCV分配不合约尺寸前拒绝，而非解码后才验证");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1881,6 +2030,14 @@ int main(int argc, char** argv) {
     log_config.enable_file = false;
     log_config.enable_ringbuf = false;
     Log::init(log_config);
+    if (argc == 2 && std::string(argv[1]) == "--jpeg-preflight-only") {
+        test_network_jpeg_header_contract();
+        for (const auto backend : {CaptureBackend::UDP_MJPEG, CaptureBackend::XUDP_JPEG})
+            for (const bool over_dimension : {false, true})
+                test_jpeg_rejected_before_decode_allocation(backend, over_dimension);
+        Log::shutdown();
+        return failures == 0 ? 0 : 1;
+    }
     if (argc == 2 && std::string(argv[1]) == "--xudp-only") {
         test_udp_latest_frame_pool();
         test_udp_pool_is_bounded();

@@ -171,6 +171,46 @@ bool known_attribute(std::string_view key) noexcept {
 
 } // namespace
 
+bool read_network_jpeg_dimensions(std::span<const std::uint8_t> bytes,
+                                 int& width, int& height) noexcept {
+    width = height = 0;
+    if (bytes.size() < 4 || bytes[0] != 0xff || bytes[1] != 0xd8) return false;
+    std::size_t position = 2;
+    while (position < bytes.size()) {
+        if (bytes[position++] != 0xff) return false;
+        while (position < bytes.size() && bytes[position] == 0xff) ++position;
+        if (position == bytes.size()) return false;
+        const auto marker = bytes[position++];
+        // SOF之前不应出现熵编码字节、另一个SOI、扫描或图像结束。
+        if (marker == 0 || marker == 0xd8 || marker == 0xd9 || marker == 0xda ||
+            (marker >= 0xd0 && marker <= 0xd7)) return false;
+        if (marker == 0x01) continue; // TEM是无长度的独立标记。
+        if (bytes.size() - position < 2) return false;
+        const std::size_t length =
+            (static_cast<std::size_t>(bytes[position]) << 8) | bytes[position + 1];
+        if (length < 2 || length > bytes.size() - position) return false;
+        const bool start_of_frame = marker >= 0xc0 && marker <= 0xcf &&
+            marker != 0xc4 && marker != 0xc8 && marker != 0xcc;
+        if (start_of_frame) {
+            // T.81 B.2.2: Lf = 8 + 3*Nf，随后为精度、Y、X和分量表。
+            if (length < 8 || bytes[position + 7] == 0 ||
+                length != 8U + 3U * bytes[position + 7]) return false;
+            const int parsed_height = (static_cast<int>(bytes[position + 3]) << 8) |
+                bytes[position + 4];
+            const int parsed_width = (static_cast<int>(bytes[position + 5]) << 8) |
+                bytes[position + 6];
+            if (parsed_width <= 0 || parsed_height <= 0 ||
+                parsed_width > kMaxSourceDimension || parsed_height > kMaxSourceDimension)
+                return false;
+            width = parsed_width;
+            height = parsed_height;
+            return true;
+        }
+        position += length;
+    }
+    return false;
+}
+
 bool parse_xen_frame_metadata(std::string_view metadata,
                               XenFrameMetadata& parsed) noexcept {
     try {

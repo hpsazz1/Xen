@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string_view>
 
 namespace capture::detail {
@@ -90,6 +91,11 @@ private:
 
 bool parse_xen_frame_metadata(std::string_view metadata,
                               XenFrameMetadata& parsed) noexcept;
+
+// 只读取JPEG帧头，不分配像素；尺寸必须在既有网络维度上界内。
+// EXIF可能让解码后的宽高对调，调用者仍须验证实际解码几何。
+bool read_network_jpeg_dimensions(std::span<const std::uint8_t> bytes,
+                                 int& width, int& height) noexcept;
 
 bool resolve_network_frame_geometry(
     const NetworkGeometryConfig& config,

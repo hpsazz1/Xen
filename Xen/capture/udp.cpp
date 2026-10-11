@@ -343,6 +343,20 @@ private:
     bool decode_and_publish(
             std::chrono::steady_clock::time_point started) noexcept {
         try {
+            int width = 0, height = 0;
+            if (!read_network_jpeg_dimensions(jpeg_bytes_, width, height)) {
+                frames_.record_drop();
+                return false;
+            }
+            UdpFrameGeometry geometry;
+            // 保留EXIF转置的既有解码行为；两种方向均不兼容时无需分配像素。
+            if (!resolve_udp_frame_geometry(config_, width, height, geometry) &&
+                !resolve_udp_frame_geometry(config_, height, width, geometry)) {
+                fail(CaptureStatus::INVALID_CONFIG,
+                     "UDP MJPEG 解码尺寸与几何配置不兼容");
+                frame_condition_.notify_all();
+                return false;
+            }
             const cv::Mat decoded = cv::imdecode(
                 jpeg_bytes_, cv::IMREAD_COLOR, &decoded_frame_);
             if (decoded.empty() || decoded.type() != CV_8UC3) {
@@ -350,7 +364,6 @@ private:
                 return false;
             }
 
-            UdpFrameGeometry geometry;
             if (!resolve_udp_frame_geometry(
                     config_, decoded.cols, decoded.rows, geometry)) {
                 fail(CaptureStatus::INVALID_CONFIG,
