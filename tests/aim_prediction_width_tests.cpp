@@ -99,6 +99,73 @@ Summary replay(Width width, std::ostream* csv, bool closed_loop = false,
 }
 
 enum class Boundary { WIDTH_ONLY, ONE_EDGE, CAMERA_ONLY, STOP_REVERSE, SOURCE_BREAK };
+struct ReverseReplay { int first_reverse = -1; std::vector<double> leads; std::vector<int> commands; };
+ReverseReplay reverse_scale_replay(float scale, bool pause = true) {
+    AimConfig config;
+    config.min_confirmed_hits = 1;
+    config.enable_prediction = config.enable_delay_compensation = true;
+    config.control_delay_ms = 15;
+    config.max_delay_compensation_ms = 44;
+    config.max_delay_compensation_percent = 15;
+    config.max_prediction_lead_percent = 35;
+    config.counts_per_pixel_x = config.counts_per_pixel_y = .5f;
+    config.deadzone_pixels = 12;
+    config.soft_zone_radius_percent = 0;
+    config.acquisition_range_percent = 100;
+    Aim aim(config);
+    const auto begin = Clock::time_point{} + 40s;
+    AimFrame previous;
+    std::uint64_t identity = 0;
+    ReverseReplay replay;
+    int& first_reverse = replay.first_reverse;
+    int positive_leads = 0;
+    double stop_lead = 0;
+    for (int n = 0; n < (pause ? 240 : 200); ++n) {
+        // 相同source轨迹：正向、停止、反向；只改变ROI缩放，未闭环执行命令。
+        const float source_x = 160 + 1.5f * (n < 60 ? n : pause && n < 90 ? 59 : 59 - (n - (pause ? 89 : 59)));
+        AimFrame frame;
+        frame.sequence = n + 1;
+        frame.captured_at = begin + std::chrono::nanoseconds(static_cast<long long>(n) * 1000000000 / 240);
+        frame.control_at = frame.captured_at + 3ms;
+        frame.roi_width = frame.roi_height = static_cast<int>(std::lround(320 / scale));
+        frame.control_center_x = frame.control_center_y = 160 / scale;
+        frame.source_pixels_per_roi_pixel_x = frame.source_pixels_per_roi_pixel_y = scale;
+        frame.lock_active = true;
+        frame.observation_epoch = 1;
+        frame.detections = {{(source_x - 10) / scale, 141.1f / scale,
+                             (source_x + 10) / scale, 195.1f / scale, .95f, 0}};
+        if (n) {
+            auto& bg = frame.background_motion_x;
+            bg.status = AimBackgroundMotionStatus::VALID;
+            bg.previous_sequence = previous.sequence; bg.sequence = frame.sequence;
+            bg.previous_captured_at = previous.captured_at; bg.captured_at = frame.captured_at;
+            bg.observation_epoch = 1;
+            bg.dx_roi_pixels = 0; bg.usable_patch_count = 2; bg.min_response = 1;
+        }
+        const auto result = aim.process(frame);
+        if (!identity && result.has_target) identity = result.target.track_id;
+        expect(result.status == AimStatus::SUCCESS && result.has_target && identity &&
+            result.target.track_id == identity && result.target.state == TrackState::CONFIRMED &&
+            !result.target.predicted && result.target.matched_observation_valid,
+            "反向缩放必须保持同一实测目标，不能以丢失代替停发");
+        if (n) expect(result.control.background_motion_use_x == AimBackgroundMotionUse::CONSUMED,
+            "反向缩放必须消费每个背景帧对");
+        const double lead = (result.target.prediction_aim_x - result.target.base_aim_x) * scale;
+        replay.leads.push_back(lead);
+        replay.commands.push_back(result.has_command ? result.command.dx_counts : 0);
+        if (n >= 40 && n < 60 && lead > 6) ++positive_leads;
+        if (pause && n >= 80 && n < 90) stop_lead = std::max(stop_lead, std::abs(lead));
+        if (n >= (pause ? 90 : 60) && lead < -6 && first_reverse < 0) first_reverse = n;
+        expect(aim.record_backend_completed_command(frame.sequence, frame.control_at, 0, 0),
+            "反向缩放每帧记录明确零执行回执");
+        previous = frame;
+    }
+    std::cout << "reverse scale=" << scale << "; pause=" << pause << "; first_reverse=" << first_reverse
+              << "; positive_frames=" << positive_leads << "; stop_lead=" << stop_lead << '\n';
+    expect(positive_leads > 0 && stop_lead < .01 && first_reverse > (pause ? 90 : 60),
+        "反向接管场景必须经历实际正向前探、停止和反向恢复");
+    return replay;
+}
 std::vector<std::array<int, 3>> loss_replay(bool prediction, float legacy_gain) {
     AimConfig config;
     config.min_confirmed_hits = 1;
@@ -262,6 +329,19 @@ int main(int argc, char** argv) try {
         for (float gain : {.5f, 1.0f})
             expect(loss_replay(prediction, gain) == baseline,
                 "旧比例0/0.5/1必须产生相同的检测、丢失和恢复输出序列");
+    }
+    for (bool pause : {false, true}) {
+        const auto reverse_one = reverse_scale_replay(1, pause);
+        for (float scale : {.5f, 2.f}) {
+            const auto scaled = reverse_scale_replay(scale, pause);
+            expect(std::abs(scaled.first_reverse - reverse_one.first_reverse) <= 1,
+                "同一source轨迹的X反向接管时刻不得因ROI缩放改变");
+            expect(scaled.commands == reverse_one.commands &&
+                scaled.leads.size() == reverse_one.leads.size() &&
+                std::equal(scaled.leads.begin(), scaled.leads.end(), reverse_one.leads.begin(),
+                    [](double a, double b) { return std::abs(a - b) < .01; }),
+                "反向缩放每帧source前探及X命令必须与基准一致");
+        }
     }
     Log::shutdown();
     return failures ? 1 : 0;
