@@ -199,6 +199,22 @@ void test_single_process_handler_ownership() {
     Log::shutdown();
 }
 
+void test_install_failure_then_retry() {
+    TempDirectory directory("install-retry");
+    const auto occupied = directory.path() / "occupied";
+    { std::ofstream file(occupied); file << "保持原文件"; }
+    CrashHandler handler;
+    expect(!handler.install(path_to_utf8(occupied)) && !handler.installed(),
+           "普通文件不能作为日志目录，失败不得占有进程处理器");
+    expect(read_file(occupied) == "保持原文件", "安装失败不得改写占位文件");
+    handler.uninstall();
+    expect(handler.install(path_to_utf8(directory.path() / "valid")),
+           "安装失败后同一实例应可重试有效目录");
+    handler.uninstall();
+    handler.uninstall();
+    expect(!handler.installed(), "重复卸载后必须保持未安装状态");
+}
+
 bool run_child_process(const std::wstring& mode,
                        const std::filesystem::path& directory,
                        DWORD& exit_code) {
@@ -244,8 +260,8 @@ void test_real_crash_child(const std::wstring& mode,
     DWORD exit_code = 0U;
     expect(run_child_process(mode, directory.path(), exit_code),
            "真实崩溃子进程必须在超时前结束");
-    expect(exit_code != 0U && exit_code != STILL_ACTIVE,
-           "真实崩溃子进程必须以非零状态退出");
+    expect(exit_code == (mode == L"--seh-child" ? kChildExceptionCode : 0xE0000001U),
+           "必须进入真实崩溃路径，不能将安装失败或超时误算通过");
 
     const auto report = read_file(directory.path() / "crash_tail.log");
     expect(!report.empty(), "真实崩溃必须生成 crash_tail.log");
@@ -260,6 +276,40 @@ void test_real_crash_child(const std::wstring& mode,
     expect(report.find("emergency_tail_begin\r\n") != std::string::npos &&
                report.find("emergency_tail_end\r\n") != std::string::npos,
            "崩溃报告必须完整标记紧急尾部边界");
+}
+
+void test_report_failure_child(const std::wstring& mode, bool lock_report) {
+    TempDirectory directory(lock_report ? "report-locked" : "report-directory");
+    const auto report = directory.path() / "crash_tail.log";
+    constexpr auto sentinel = "已有报告内容，不得覆盖";
+    struct ReportLock {
+        HANDLE handle = INVALID_HANDLE_VALUE;
+        ~ReportLock() { if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle); }
+    } held;
+    if (lock_report) {
+        { std::ofstream file(report, std::ios::binary); file << sentinel; }
+        held.handle = CreateFileW(report.c_str(), GENERIC_READ, 0, nullptr,
+                                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        expect(held.handle != INVALID_HANDLE_VALUE, "必须实际独占已有报告");
+        if (held.handle == INVALID_HANDLE_VALUE) return;
+    } else {
+        std::filesystem::create_directory(report);
+        { std::ofstream file(report / "sentinel"); file << sentinel; }
+    }
+    DWORD exit_code = 0U;
+    expect(run_child_process(mode, directory.path(), exit_code),
+           "报告写出失败的崩溃子进程也必须在超时前结束");
+    expect(exit_code == (mode == L"--seh-child" ? kChildExceptionCode : 0xE0000001U),
+           "报告失败不能改变实际崩溃退出身份");
+    if (lock_report) {
+        CloseHandle(held.handle);
+        held.handle = INVALID_HANDLE_VALUE;
+        expect(read_file(report) == sentinel, "独占失败后已有报告必须逐字节保留");
+    } else {
+        expect(std::filesystem::is_directory(report) &&
+                   read_file(report / "sentinel") == sentinel,
+               "报告路径冲突不能删除或修改已有目录");
+    }
 }
 
 [[noreturn]] void run_crashing_child(
@@ -297,12 +347,17 @@ int wmain(int argc, wchar_t* argv[]) {
         test_emergency_tail_contract();
         test_concurrent_emergency_tail_is_not_torn();
         test_single_process_handler_ownership();
+        test_install_failure_then_retry();
         test_real_crash_child(
             L"--seh-child", "unhandled_exception", "0xE0424242",
             "seh-child-unique-marker");
         test_real_crash_child(
             L"--terminate-child", "terminate", "0xE0000001",
             "terminate-child-unique-marker");
+        for (const auto* mode : {L"--seh-child", L"--terminate-child"}) {
+            test_report_failure_child(mode, false);
+            test_report_failure_child(mode, true);
+        }
     } catch (const std::exception& exception) {
         std::cerr << "[FAIL] 测试出现未捕获异常: "
                   << exception.what() << '\n';
