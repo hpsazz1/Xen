@@ -7,9 +7,11 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 
 namespace {
 using Json = nlohmann::json;
@@ -32,6 +34,24 @@ void write(const fs::path& path, const std::string& contents) {
     out.close();
     if (!out) throw std::runtime_error("无法关闭报告文件");
 }
+template <typename Integer>
+Integer bounded_integer(const Json& value, Integer minimum, Integer maximum, const char* name) {
+    const auto checked = [&](auto raw) {
+        if (std::cmp_less(raw, minimum) || std::cmp_greater(raw, maximum))
+            throw std::runtime_error(std::string(name) + "整数越界");
+        return static_cast<Integer>(raw);
+    };
+    // JSON数值转换不校验溢出，也会截断小数；保留原始有符号性再比较。
+    if (value.is_number_unsigned()) return checked(value.get<std::uint64_t>());
+    if (value.is_number_integer()) return checked(value.get<std::int64_t>());
+    throw std::runtime_error(std::string(name) + "必须是整数");
+}
+template <typename Integer>
+Integer integer_or(const Json& object, const char* name, Integer fallback,
+                   Integer minimum, Integer maximum) {
+    const auto found = object.find(name);
+    return found == object.end() ? fallback : bounded_integer(*found, minimum, maximum, name);
+}
 std::vector<Row> read_fixture(const fs::path& file, Json& document) {
     if (fs::file_size(file) > 32 * 1024 * 1024) throw std::runtime_error("样例超过32MiB");
     std::ifstream in(file);
@@ -42,18 +62,21 @@ std::vector<Row> read_fixture(const fs::path& file, Json& document) {
     for (const auto& item : document.at("events")) {
         if (rows.size() == kMaxEvents) throw std::runtime_error("事件超过200000条");
         const double ms = item.at("at_ms").get<double>();
-        const int mask = item.at("held_mask").get<int>();
-        if (!std::isfinite(ms) || ms < 0 || ms > 600000 || mask < 0 || mask > 15)
-            throw std::runtime_error("时间或WASD位图越界");
+        const int mask = bounded_integer(item.at("held_mask"), 0, 15, "held_mask");
+        if (!std::isfinite(ms) || ms < 0 || ms > 600000)
+            throw std::runtime_error("时间越界");
         Row row;
         row.event.received_at_ns = 1000000000 + static_cast<std::int64_t>(std::llround(ms * 1e6));
-        row.event.epoch = item.value("epoch", std::uint64_t{1});
-        row.event.sequence = item.value("sequence", std::uint64_t{rows.size() + 1});
+        row.event.epoch = integer_or(item, "epoch", std::uint64_t{1}, std::uint64_t{0},
+                                    std::numeric_limits<std::uint64_t>::max());
+        row.event.sequence = integer_or(item, "sequence", std::uint64_t{rows.size() + 1},
+                                       std::uint64_t{0}, std::numeric_limits<std::uint64_t>::max());
         row.event.held_mask = static_cast<std::uint8_t>(mask);
         row.event.left_down = item.value("left_down", false);
         row.event.state_valid = item.value("state_valid", true);
         row.event.gap = item.value("gap", false);
-        row.event.timing_uncertainty_ns = item.value("timing_uncertainty_ns", std::int64_t{-1});
+        row.event.timing_uncertainty_ns = integer_or(item, "timing_uncertainty_ns", std::int64_t{-1},
+            std::int64_t{-1}, std::numeric_limits<std::int64_t>::max());
         row.crouch = item.value("crouch", false);
         row.shift = item.value("shift", false);
         row.space = item.value("space", false);
@@ -184,11 +207,11 @@ Json h40_plans(const Json& document) {
     if (!document["h40_plans"].is_array() || document["h40_plans"].size()>32)
         throw std::runtime_error("H40计划最多32项");
     for (const auto& plan : document["h40_plans"]) {
-        const int mask = plan.at("held_mask").get<int>();
-        const int delay = plan.at("ack_delay_ms").get<int>();
-        const int cancel = plan.value("cancel_after_ms", -1);
-        if (mask<=0 || mask>15 || (mask&5)==5 || (mask&10)==10 || delay<1 || delay>100 || cancel < -1 || cancel>500)
-            throw std::runtime_error("H40计划位图/假ACK/取消时间无效");
+        const int mask = bounded_integer(plan.at("held_mask"), 1, 15, "held_mask");
+        const int delay = bounded_integer(plan.at("ack_delay_ms"), 1, 100, "ack_delay_ms");
+        const int cancel = integer_or(plan, "cancel_after_ms", -1, -1, 500);
+        if ((mask&5)==5 || (mask&10)==10)
+            throw std::runtime_error("H40计划位图不能包含同轴相反方向");
         AutoStopConfig config;
         AutoStopController controller(config);
         WasdInputHistory history;

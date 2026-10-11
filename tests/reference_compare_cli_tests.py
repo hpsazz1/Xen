@@ -100,4 +100,62 @@ with tempfile.TemporaryDirectory(prefix="xen-reference-cli-") as temporary:
     manifest.write_text(manifest.read_text().replace(" 0 262144", " 1 262144"))
     run(archive, root / "truncated-report", archive=True, ok=False)
     assert not (root / "truncated-report").exists()
+    # 整数合同必须在缩窄转换前校验；收集全部反例，避免首个失败遮住其他字段。
+    bad_integer_cases = []
+    for key, values in {
+        "held_mask": [2.5, 4294967298, -4294967294, True, "2", 16],
+        "epoch": [-1, 1.5, 18446744073709551616, True],
+        "sequence": [-1, 2.5, 18446744073709551616, True],
+        "timing_uncertainty_ns": [-2, -1.5, 18446744073709551615, 9223372036854775808, False],
+    }.items():
+        for value in values:
+            bad_integer_cases.append(("event", key, value))
+    for key, values in {
+        "held_mask": [2.5, 4294967298, -4294967294, 16, True],
+        "ack_delay_ms": [1.5, 4294967297, 101, 0],
+        "cancel_after_ms": [1.5, 4294967295, -4294967297, -2, 501],
+    }.items():
+        for value in values:
+            bad_integer_cases.append(("plan", key, value))
+    incorrect = []
+    for index, (kind, key, value) in enumerate(bad_integer_cases):
+        document = {"schema": 1, "events": [{"at_ms": 0, "held_mask": 0}]}
+        if kind == "event":
+            document["events"][0][key] = value
+        else:
+            document["h40_plans"] = [{"held_mask": 2, "ack_delay_ms": 10, "cancel_after_ms": -1}]
+            document["h40_plans"][0][key] = value
+        source = root / f"invalid-integer-{index}.json"
+        source.write_text(json.dumps(document), encoding="utf-8")
+        destination = root / f"invalid-integer-{index}-report"
+        result = subprocess.run([str(exe), "--events", str(source), "--output", str(destination)],
+                                capture_output=True, timeout=15)
+        if result.returncode == 0 or destination.exists():
+            incorrect.append((kind, key, value, result.returncode, destination.exists()))
+    print(f"integer preflight: {len(bad_integer_cases)} cases, {len(incorrect)} incorrect results", flush=True)
+    for case in incorrect:
+        print("FAIL integer preflight", case, flush=True)
+    # 原格式的边界与默认值保持；at_ms仍允许合法小数。
+    boundaries = fixture("integer-boundaries", [
+        {"at_ms": 0, "held_mask": 0, "epoch": 18446744073709551615,
+         "sequence": 18446744073709551614, "timing_uncertainty_ns": -1},
+        {"at_ms": 0.25, "held_mask": 15, "epoch": 18446744073709551615,
+         "sequence": 18446744073709551615, "timing_uncertainty_ns": 0},
+        {"at_ms": 1, "held_mask": 0, "epoch": 0, "sequence": 0,
+         "timing_uncertainty_ns": 9223372036854775807}])
+    boundary_document = json.loads(boundaries.read_text(encoding="utf-8"))
+    boundary_document["h40_plans"] = [
+        {"held_mask": 1, "ack_delay_ms": 1, "cancel_after_ms": -1},
+        {"held_mask": 4, "ack_delay_ms": 100, "cancel_after_ms": 500},
+        {"held_mask": 2, "ack_delay_ms": 10, "cancel_after_ms": 0}]
+    boundaries.write_text(json.dumps(boundary_document), encoding="utf-8")
+    boundary_report = run(boundaries, root / "integer-boundaries-report")
+    assert boundary_report["event_count"] == 3
+    boundary_rows = (root / "integer-boundaries-report" / "input-copy" / "events-0.csv").read_text().splitlines()
+    assert boundary_rows[1].split(",")[:2] == ["18446744073709551615", "18446744073709551614"]
+    assert boundary_rows[-1].split(",")[12] == "9223372036854775807"
+    assert not boundary_report["physical_output"] and not boundary_report["game_stop_verified"]
+    assert [plan["simulated_ack_delay_ms"] for plan in boundary_report["h40_simulated_plans"]] == [1, 100, 10]
+    assert all(not plan["fire_permission"] for plan in boundary_report["h40_simulated_plans"])
+    assert not incorrect, "integer input must be rejected before report directory creation"
 print("独立比较CLI：同输入回放、歧义传播、精度、断点、假ACK及错误边界通过")
