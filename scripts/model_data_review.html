@@ -211,6 +211,9 @@ if (typeof globalThis !== 'undefined') globalThis.XenReviewCore = XenReviewCore;
   function applyBatch(state){safely(()=>{const changes=C.batch(data.samples,visible.map(C.key),selected,state,decisions,data.class_names);C.requireLoaded(changes,loaded,state);if(changes.some(d=>data.samples.find(s=>C.key(s)===C.key(d)).state!=='UNKNOWN')&&!confirm('所选含已有审核。确认用本次明确决定更新这些记录？'))return;changes.forEach(d=>decisions.set(C.key(d),d));selected.clear();render();message(`已处理 ${changes.length} 张；本页保留供核对；仅看未处理时刷新可移除已处理项。请导出保存。`);});}
   $('positive').onclick=()=>applyBatch('VERIFIED_POSITIVE');$('negative').onclick=()=>applyBatch('VERIFIED_NEGATIVE');$('exclude').onclick=()=>applyBatch('EXCLUDED');
   function fieldState(){
+    const saved=(decisions.get(C.key(active))||active).detections,fields=['class_id','x1','y1','x2','y2'];
+    // 以当前已确认标注为基准；未产生差异或改回原值都不算未确认修改。
+    dirty=draft.length!==saved.length||draft.some((b,i)=>fields.some(k=>b[k]!==saved[i][k]));
     $('boxes').replaceChildren();draft.forEach((b,i)=>$('boxes').append(option(String(i),`${i+1} · ${data.class_names[b.class_id]}`)));$('boxes').value=String(picked);
     const b=draft[picked];if(b){$('class').value=String(b.class_id);['x1','y1','x2','y2'].forEach(k=>$(k).value=String(b[k]));}
     ['apply-box','delete-box','x1','y1','x2','y2'].forEach(id=>$(id).disabled=!b);
@@ -232,7 +235,7 @@ if (typeof globalThis !== 'undefined') globalThis.XenReviewCore = XenReviewCore;
     });
     ctx.restore();
   }
-  function resetDraft(){draft=C.clone((decisions.get(C.key(active))||active).detections);picked=draft.length?0:-1;dirty=false;fieldState();}
+  function resetDraft(){draft=C.clone((decisions.get(C.key(active))||active).detections);picked=draft.length?0:-1;fieldState();}
   function imageMessage(text,error=false){$('detail-image-status').textContent=text;$('detail-image-status').className='notice'+(error?' error':'');}
   function openDetail(s){
     active=s;imageReady=false;imageMessage('正在加载详细图片…');
@@ -247,7 +250,7 @@ if (typeof globalThis !== 'undefined') globalThis.XenReviewCore = XenReviewCore;
   }
   function point(event){return C.displayToImage({x:event.clientX,y:event.clientY},active.width,active.height,$('canvas').getBoundingClientRect());}
   $('canvas').onpointerdown=e=>{if(!imageReady)return;const p=point(e);if($('mode').value==='draw'){anchor=p;$('canvas').setPointerCapture(e.pointerId);}else{picked=-1;for(let i=draft.length-1;i>=0;i--){const b=draft[i];if(p.x>=b.x1&&p.x<=b.x2&&p.y>=b.y1&&p.y<=b.y2){picked=i;break;}}fieldState();}};
-  $('canvas').onpointerup=e=>{if(!anchor)return;const p=point(e),a=anchor;anchor=null;const b={class_id:Number($('class').value),x1:Math.min(a.x,p.x),y1:Math.min(a.y,p.y),x2:Math.max(a.x,p.x),y2:Math.max(a.y,p.y)};safely(()=>{C.boxes([b],active,data.class_names);draft.push(b);picked=draft.length-1;dirty=true;fieldState();});};
+  $('canvas').onpointerup=e=>{if(!anchor)return;const p=point(e),a=anchor;anchor=null;const b={class_id:Number($('class').value),x1:Math.min(a.x,p.x),y1:Math.min(a.y,p.y),x2:Math.max(a.x,p.x),y2:Math.max(a.y,p.y)};safely(()=>{C.boxes([b],active,data.class_names);draft.push(b);picked=draft.length-1;fieldState();});};
   $('canvas').onpointermove=e=>{
     if(!anchor)return;draw();const p=point(e),canvas=$('canvas'),ctx=canvas.getContext('2d');
     const sx=canvas.width/active.width,sy=canvas.height/active.height;
@@ -255,13 +258,13 @@ if (typeof globalThis !== 'undefined') globalThis.XenReviewCore = XenReviewCore;
     ctx.strokeRect(anchor.x,anchor.y,p.x-anchor.x,p.y-anchor.y);ctx.restore();
   };
   $('canvas').onpointercancel=()=>{anchor=null;};$('boxes').onchange=()=>{picked=Number($('boxes').value);fieldState();};
-  $('apply-box').onclick=()=>safely(()=>{if(picked<0)return;const b={class_id:Number($('class').value)};for(const k of ['x1','y1','x2','y2']){if($(k).value.trim()==='')throw new Error('坐标不能为空');b[k]=Number($(k).value);}draft[picked]=C.boxes([b],active,data.class_names)[0];dirty=true;fieldState();});
-  $('delete-box').onclick=()=>{if(picked<0)return;draft.splice(picked,1);picked=draft.length?Math.min(picked,draft.length-1):-1;dirty=true;fieldState();};
-  $('clear-boxes').onclick=()=>{if(draft.length&&!confirm('清空此图所有框？这不会自动确认负样本。'))return;draft=[];picked=-1;dirty=true;fieldState();};$('undo').onclick=resetDraft;
-  function dismissDetail(){active=null;anchor=null;image=null;imageReady=false;$('detail').close();}
+  $('apply-box').onclick=()=>safely(()=>{if(picked<0)return;const b={class_id:Number($('class').value)};for(const k of ['x1','y1','x2','y2']){if($(k).value.trim()==='')throw new Error('坐标不能为空');b[k]=Number($(k).value);}draft[picked]=C.boxes([b],active,data.class_names)[0];fieldState();});
+  $('delete-box').onclick=()=>{if(picked<0)return;draft.splice(picked,1);picked=draft.length?Math.min(picked,draft.length-1):-1;fieldState();};
+  $('clear-boxes').onclick=()=>{if(draft.length&&!confirm('清空此图所有框？这不会自动确认负样本。'))return;draft=[];picked=-1;fieldState();};$('undo').onclick=resetDraft;
+  function dismissDetail(){dirty=false;active=null;anchor=null;image=null;imageReady=false;$('detail').close();}
   function closeDetail(){if(dirty&&!confirm('放弃此图尚未确认的修改？'))return;dismissDetail();}
   $('close-detail').onclick=closeDetail;$('detail').oncancel=e=>{e.preventDefault();closeDetail();};
-  function commitDetail(state){safely(()=>{if(!imageReady)throw new Error('请先加载图片');const d=C.decision(active,state,draft,data.class_names);if(active.state!=='UNKNOWN'&&!confirm('此图已有审核，确认更新？'))return;decisions.set(C.key(active),d);dirty=false;dismissDetail();render();message('此图已明确处理，请导出保存。');});}
+  function commitDetail(state){safely(()=>{if(!imageReady)throw new Error('请先加载图片');const d=C.decision(active,state,draft,data.class_names);if(active.state!=='UNKNOWN'&&!confirm('此图已有审核，确认更新？'))return;decisions.set(C.key(active),d);dismissDetail();render();message('此图已明确处理，请导出保存。');});}
   $('detail-positive').onclick=()=>commitDetail('VERIFIED_POSITIVE');$('detail-negative').onclick=()=>commitDetail('VERIFIED_NEGATIVE');$('detail-exclude').onclick=()=>commitDetail('EXCLUDED');
   $('export').onclick=()=>safely(()=>{const result=C.exportDraft(data,decisions);const url=URL.createObjectURL(new Blob([JSON.stringify(result,null,2)],{type:'application/json'}));const a=el('a');a.href=url;a.download='review-decisions.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message('已请求下载 review-decisions.json。请回 Xen 采集页选择该文件并导入；页面导出不等于已经导入。');});
   $('import').onchange=async()=>{const f=$('import').files[0];if(!f)return;try{if(f.size>32*1024*1024)throw new Error('草稿文件超过32MiB，拒绝读取');const parsed=JSON.parse(await f.text()),next=C.importDraft(data,parsed);if(decisions.size&&!confirm('用导入草稿替换本页未导出的处理记录？'))return;decisions=next;refreshRows();message(`已恢复 ${next.size} 项明确决定，未覆盖报告原件。`);}catch(e){message(e.message,true);}finally{$('import').value='';}};

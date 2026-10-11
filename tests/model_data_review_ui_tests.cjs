@@ -93,8 +93,9 @@ console.log(`model_data_review_ui_tests: ${checks} checks passed`);
 
 // 运行原始 UI 事件块，只替换浏览器资源边界；不复制 open/close/commit 逻辑。
 // Image 完成由异步队列控制，DOM/canvas 替身不验证布局、解码或浏览器事件派发。
-function eventPage() {
+function eventPage({empty=false}={}) {
   const requests=[], drawn=[], confirmations=[], downloads=[];
+  const listeners=new Map(), faults={export:null};
   const ctx={clearRect(){},save(){},restore(){},setTransform(){},strokeRect(){},fillText(){},
     drawImage(image){drawn.push(image);}};
   class Element {
@@ -109,20 +110,22 @@ function eventPage() {
     showModal(){assert.equal(this.open,false);this.open=true;}
     close(){this.open=false;}
     getContext(){return ctx;}
+    getBoundingClientRect(){return {left:0,top:0,width:this.width,height:this.height};}
+    setPointerCapture(){}
     click(){if(this.tagName==='a')downloads.push(this.href);else this.onclick?.();}
   }
   const elements=new Map([...html.matchAll(/<([\w-]+)\b[^>]*\bid="([^"]+)"[^>]*>/g)]
     .map(m=>[m[2],new Element(m[1])]));
   const get=id=>elements.get(id);
-  const fixture={...data,samples:[1,2,3].map(i=>({...sample(i),detections:[{...box}]}))};
+  const fixture={...data,samples:[1,2,3].map(i=>({...sample(i),detections:empty?[]:[{...box}]}))};
   get('review-data').textContent=JSON.stringify(fixture);
   get('sort').value='priority';get('mode').value='select';get('show-boxes').checked=true;
   const sandbox=vm.createContext({
     document:{getElementById:get,createElement:tag=>new Element(tag),createElementNS:(_,tag)=>new Element(tag)},
-    window:{addEventListener(){}},
+    window:{addEventListener:(name,handler)=>{assert.equal(listeners.has(name),false);listeners.set(name,handler);}},
     Image:class {constructor(){requests.push(this);}},
     confirm:()=>{assert.ok(confirmations.length,'必须显式指定确认回答');return confirmations.shift();},
-    Blob,URL:{createObjectURL:blob=>blob,revokeObjectURL(){}},setTimeout:()=>{}
+    Blob,URL:{createObjectURL:blob=>{if(faults.export)throw new Error(faults.export);return blob;},revokeObjectURL(){}},setTimeout:()=>{}
   });
   for(const m of html.matchAll(/<script id="[^"]+">([\s\S]*?)<\/script>/g))
     vm.runInContext(m[1],sandbox,{filename:'model_data_review.html'});
@@ -153,10 +156,17 @@ function eventPage() {
     title:get('detail-title').textContent,draft:get('draft-status').textContent,
     progress:get('progress').textContent,open:get('detail').open,drawn:drawn.length});
   async function exported() {
-    click('export');assert.equal(downloads.length,1);
-    return JSON.parse(await downloads[0].text());
+    const previous=downloads.length;click('export');assert.equal(downloads.length,previous+1);
+    return JSON.parse(await downloads.at(-1).text());
   }
-  return {get,click,open,cancel,complete,snapshot,imageMessage,confirmations,drawn,exported};
+  function leaving() {
+    let prevented=false;
+    const event={returnValue:undefined,preventDefault(){prevented=true;}};
+    assert.ok(listeners.has('beforeunload'));listeners.get('beforeunload')(event);
+    assert.equal(prevented,event.returnValue==='','现代与旧版离页保护应一致');
+    return prevented;
+  }
+  return {get,click,open,cancel,complete,snapshot,imageMessage,confirmations,drawn,exported,leaving,faults};
 }
 
 async function eventChecks() {
@@ -266,4 +276,109 @@ async function eventChecks() {
   console.log(`model_data_review_ui_events: ${passed} scenarios passed, ${failed} failed`);
   if(failed)process.exitCode=1;
 }
-eventChecks().catch(error=>{console.error(error);process.exitCode=1;});
+async function lifecycleChecks() {
+  let passed=0,failed=0;
+  async function scenario(name,run,options) {
+    try {await run(eventPage(options));passed++;console.log(`  PASS ${name}`);}
+    catch(error){failed++;console.error(`  FAIL ${name}: ${error.stack}`);}
+  }
+  const edit=(h,x)=>{h.get('x1').value=String(x);h.click('apply-box');};
+  const load=async(h,id=1)=>{const request=h.open(id);await h.complete(request,'load');};
+  await scenario('browsing and closing untouched samples needs no leave warning',async h=>{
+    assert.equal(h.leaving(),false);await load(h);assert.equal(h.leaving(),false);
+    h.click('close-detail');assert.equal(h.leaving(),false);await load(h,2);h.cancel();
+    assert.equal(h.leaving(),false);assert.equal(h.leaving(),false);
+  });
+  for(const close of ['button','cancel'])
+    await scenario(`accepting ${close} discard clears only the abandoned draft`,async h=>{
+      await load(h);edit(h,4);assert.equal(h.leaving(),true);h.confirmations.push(true);
+      close==='button'?h.click('close-detail'):h.cancel();
+      assert.equal(h.get('detail').open,false);assert.equal(h.leaving(),false);assert.equal(h.leaving(),false);
+      await load(h);assert.equal(h.get('x1').value,'2');h.click('close-detail');
+      await load(h,2);assert.equal(h.leaving(),false);h.click('close-detail');
+      assert.equal(h.leaving(),false);
+    });
+  for(const close of ['button','cancel'])
+    await scenario(`declining ${close} discard preserves the applied edit`,async h=>{
+      await load(h);edit(h,4);h.confirmations.push(false);
+      close==='button'?h.click('close-detail'):h.cancel();
+      assert.equal(h.get('detail').open,true);assert.equal(h.get('x1').value,'4');assert.equal(h.leaving(),true);
+      h.click('detail-positive');assert.equal((await h.exported()).samples[0].detections[0].x1,4);
+    });
+  await scenario('applying unchanged coordinates does not create a draft',async h=>{
+    await load(h);edit(h,'02');assert.equal(h.leaving(),false);
+    assert.equal(h.get('draft-status').textContent,'未修改草稿');h.click('close-detail');
+  });
+  await scenario('editing back to the original coordinates clears draft changes',async h=>{
+    await load(h);edit(h,4);assert.equal(h.leaving(),true);edit(h,2);
+    assert.equal(h.leaving(),false);h.click('close-detail');
+  });
+  await scenario('clearing an already empty box list is unchanged',async h=>{
+    await load(h);h.click('clear-boxes');assert.equal(h.leaving(),false);
+    assert.equal(h.get('draft-status').textContent,'未修改草稿');h.click('close-detail');
+  },{empty:true});
+  await scenario('deletion is protected and undo restores the original draft',async h=>{
+    await load(h);h.click('delete-box');assert.equal(h.leaving(),true);h.click('undo');
+    assert.equal(h.leaving(),false);assert.equal(h.get('boxes').children.length,1);
+    assert.equal(h.get('x1').value,'2');h.click('close-detail');
+  });
+  await scenario('adding then deleting a new box restores an unchanged draft',async h=>{
+    await load(h);h.get('mode').value='draw';const canvas=h.get('canvas');
+    canvas.onpointerdown({clientX:20,clientY:20,pointerId:1});
+    canvas.onpointerup({clientX:30,clientY:30,pointerId:1});
+    assert.equal(h.leaving(),true);assert.equal(h.get('boxes').children.length,2);
+    h.click('delete-box');assert.equal(h.get('boxes').children.length,1);
+    assert.equal(h.leaving(),false);h.click('close-detail');
+  });
+  await scenario('confirmed edits remain protected as page decisions',async h=>{
+    await load(h);edit(h,4);h.click('detail-positive');
+    assert.equal(h.get('detail').open,false);assert.equal(h.leaving(),true);
+    const result=await h.exported();assert.equal(result.samples[0].detections[0].x1,4);
+    assert.equal(h.leaving(),true,'下载请求不能证明磁盘保存成功');
+  });
+  await scenario('rejected confirmation retains editable data and leave protection',async h=>{
+    await load(h);edit(h,4);h.click('detail-negative');
+    assert.equal(h.get('detail').open,true);assert.match(h.get('message').textContent,/带框不能确认负样本/);
+    assert.equal(h.get('x1').value,'4');assert.equal(h.leaving(),true);
+    assert.match(h.get('progress').textContent,/处理 0 /);
+    h.click('detail-positive');assert.equal((await h.exported()).samples[0].detections[0].x1,4);
+  });
+  await scenario('image failure cannot discard applied edits on confirmation',async h=>{
+    const request=h.open(1);edit(h,4);await h.complete(request,'error');h.click('detail-positive');
+    assert.equal(h.get('detail').open,true);assert.equal(h.get('x1').value,'4');assert.equal(h.leaving(),true);
+    assert.match(h.get('message').textContent,/请先加载图片/);h.click('undo');assert.equal(h.leaving(),false);
+  });
+  await scenario('failed export retains decisions for an unchanged retry',async h=>{
+    await load(h);edit(h,4);h.click('detail-positive');h.faults.export='fixture export failure';h.click('export');
+    assert.match(h.get('message').textContent,/fixture export failure/);assert.equal(h.leaving(),true);
+    h.faults.export=null;const result=await h.exported();assert.equal(result.samples.length,1);
+    assert.equal(result.samples[0].sample_id,'1');assert.equal(result.samples[0].detections[0].x1,4);
+    assert.equal(h.leaving(),true);
+  });
+  await scenario('export with no decisions reports the error without false dirty state',async h=>{
+    h.click('export');assert.match(h.get('message').textContent,/尚未明确处理/);
+    assert.equal(h.leaving(),false);assert.equal(h.leaving(),false);
+  });
+  await scenario('discarding re-edits preserves the previous confirmed decision',async h=>{
+    await load(h);edit(h,4);h.click('detail-positive');await load(h);edit(h,6);
+    h.confirmations.push(true);h.click('close-detail');assert.equal(h.leaving(),true);
+    await load(h);assert.equal(h.get('x1').value,'4');assert.equal(h.get('draft-status').textContent,'未修改草稿');
+    h.click('close-detail');assert.equal((await h.exported()).samples[0].detections[0].x1,4);
+  });
+  await scenario('discarding a different sample keeps the earlier decision',async h=>{
+    await load(h);h.click('detail-positive');await load(h,2);edit(h,6);
+    h.confirmations.push(true);h.cancel();assert.equal(h.leaving(),true);
+    const result=await h.exported();assert.equal(result.samples.length,1);assert.equal(result.samples[0].sample_id,'1');
+  });
+  await scenario('export never silently commits or clears an unconfirmed re-edit',async h=>{
+    await load(h);edit(h,4);h.click('detail-positive');await load(h);edit(h,6);
+    const result=await h.exported();assert.equal(result.samples[0].detections[0].x1,4);
+    assert.equal(h.get('x1').value,'6');assert.equal(h.get('draft-status').textContent,'有未确认修改');
+    assert.equal(h.leaving(),true);h.click('undo');assert.equal(h.get('x1').value,'4');
+    assert.equal(h.leaving(),true,'撤销草稿不删除已确认决定');
+  });
+  console.log(`model_data_review_ui_lifecycle: ${passed} scenarios passed, ${failed} failed`);
+  if(failed)process.exitCode=1;
+}
+async function runEventTests(){await eventChecks();await lifecycleChecks();}
+runEventTests().catch(error=>{console.error(error);process.exitCode=1;});
