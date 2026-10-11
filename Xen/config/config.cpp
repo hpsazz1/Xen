@@ -433,13 +433,21 @@ void set_file_error(std::string& error,
                   " (Win32=" + std::to_string(win32_error) + ")");
 }
 
-bool write_file_atomically(const std::string& path,
-                           const std::string& bytes,
-                           std::string& error) {
+enum class ConfigWriteResult { Saved, AlreadyExists, Failed };
+
+ConfigWriteResult save_config_file(const std::string& path,
+                                   const AppConfig& config,
+                                   std::string& error,
+                                   bool replace_existing) noexcept;
+
+ConfigWriteResult write_file_atomically(const std::string& path,
+                                        const std::string& bytes,
+                                        std::string& error,
+                                        bool replace_existing) {
     const auto target_path = config_path_from_utf8(path);
     if (target_path.empty()) {
         set_error(error, "配置文件路径不能为空");
-        return false;
+        return ConfigWriteResult::Failed;
     }
 
     // 临时文件名直接派生自目标路径，确保创建在同一目录和同一卷；
@@ -468,13 +476,13 @@ bool write_file_atomically(const std::string& path,
             create_error != ERROR_ALREADY_EXISTS) {
             set_file_error(
                 error, "无法创建同目录配置临时文件", path, create_error);
-            return false;
+            return ConfigWriteResult::Failed;
         }
     }
     if (!temporary_file.valid()) {
         set_file_error(
             error, "无法创建唯一配置临时文件", path, create_error);
-        return false;
+        return ConfigWriteResult::Failed;
     }
 
     ScopedTemporaryPath cleanup(temporary_path);
@@ -492,7 +500,7 @@ bool write_file_atomically(const std::string& path,
             temporary_file.close();
             set_file_error(
                 error, "无法写入配置临时文件", path, write_error);
-            return false;
+            return ConfigWriteResult::Failed;
         }
         offset += written;
     }
@@ -502,29 +510,35 @@ bool write_file_atomically(const std::string& path,
         temporary_file.close();
         set_file_error(
             error, "无法刷新配置临时文件", path, flush_error);
-        return false;
+        return ConfigWriteResult::Failed;
     }
     if (!temporary_file.close()) {
         const DWORD close_error = GetLastError();
         set_file_error(
             error, "无法关闭配置临时文件", path, close_error);
-        return false;
+        return ConfigWriteResult::Failed;
     }
 
     // 同卷 MoveFileExW 是一次 rename；只有 rename 成功后旧目标才会
     // 被替换，失败路径仍由 cleanup 删除未发布的临时文件。
     if (!MoveFileExW(
             temporary_path.c_str(), target_path.c_str(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            MOVEFILE_WRITE_THROUGH |
+                (replace_existing ? MOVEFILE_REPLACE_EXISTING : 0))) {
         const DWORD replace_error = GetLastError();
+        if (!replace_existing &&
+            (replace_error == ERROR_FILE_EXISTS ||
+             replace_error == ERROR_ALREADY_EXISTS)) {
+            return ConfigWriteResult::AlreadyExists;
+        }
         set_file_error(
             error, "无法原子替换配置文件", path, replace_error);
-        return false;
+        return ConfigWriteResult::Failed;
     }
 
     cleanup.release();
     error.clear();
-    return true;
+    return ConfigWriteResult::Saved;
 }
 
 struct TypedConfigKey {
@@ -1611,16 +1625,24 @@ bool load_or_create_app_config(const std::string& path,
 
     // 此时 config 仍是调用方传入的代码默认值。只为真正缺失的文件生成完整配置，
     // 避免把拼写错误或被截断的现有配置静默恢复为默认值。
-    if (!save_app_config(path, config, error)) return false;
+    const auto result = save_config_file(path, config, error, false);
+    if (result == ConfigWriteResult::AlreadyExists) {
+        // 另一进程已创建配置；加载其完整文件，不能用本进程默认值覆盖。
+        return load_app_config(path, config, error);
+    }
+    if (result != ConfigWriteResult::Saved) return false;
     created = true;
     return true;
 }
 
-bool save_app_config(const std::string& path,
-                     const AppConfig& config,
-                     std::string& error) noexcept {
+namespace {
+
+ConfigWriteResult save_config_file(const std::string& path,
+                                   const AppConfig& config,
+                                   std::string& error,
+                                   bool replace_existing) noexcept {
     try {
-        if (!validate_app_config(config, error)) return false;
+        if (!validate_app_config(config, error)) return ConfigWriteResult::Failed;
         ConfigIniWriter ini;
         ini.SetBoolValue("movement", "enabled", config.movement.enabled);
         ini.SetBoolValue("movement", "wheel_down_positive", config.movement.wheel_down_positive);
@@ -1885,11 +1907,19 @@ bool save_app_config(const std::string& path,
         std::string serialized;
         if (ini.Save(serialized, true) < 0) {
             error = "无法序列化配置文件: " + path;
-            return false;
+            return ConfigWriteResult::Failed;
         }
-        return write_file_atomically(path, serialized, error);
+        return write_file_atomically(path, serialized, error, replace_existing);
     } catch (...) {
         set_error(error, "写入配置时发生未知异常");
-        return false;
+        return ConfigWriteResult::Failed;
     }
+}
+
+} // namespace
+
+bool save_app_config(const std::string& path,
+                     const AppConfig& config,
+                     std::string& error) noexcept {
+    return save_config_file(path, config, error, true) == ConfigWriteResult::Saved;
 }

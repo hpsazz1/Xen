@@ -2048,6 +2048,13 @@ if(BUILD_TESTING)
     target_include_directories(config_save_io_failure_tests PRIVATE ${XEN_SIMPLEINI_INCLUDE_DIR})
     target_link_libraries(config_save_io_failure_tests PRIVATE config)
     add_test(NAME config_save_io_failure_tests COMMAND config_save_io_failure_tests)
+    # Separate fixture processes pause before rename; no application/device startup.
+    add_executable(config_first_create_probe tests/config_first_create_probe.cpp)
+    target_include_directories(config_first_create_probe PRIVATE ${XEN_SIMPLEINI_INCLUDE_DIR})
+    target_link_libraries(config_first_create_probe PRIVATE config)
+    add_test(NAME config_first_create_tests COMMAND "${XEN_PYTHON_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/config_first_create_tests.py"
+        "$<TARGET_FILE:config_first_create_probe>")
     add_test(NAME simpleini_resource_guards_tests COMMAND ${CMAKE_COMMAND}
         "-DSOURCE_HEADER=${simpleini_SOURCE_DIR}/SimpleIni.h"
         "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
