@@ -66,5 +66,6 @@ cmake --build <build> --config Release --target xen_app --parallel 6
 
 V3 直接消费者及 V4 STA/消息循环专项通过；本轮检查的是实际组件、原生宿主及同类 cancel→poll 回收协议，
 没有运行完整 Overlay/App 关闭集成测试，其退出屏障仅做源码复核。
+该历史缺口随后由 [R3 生产入口集成](app_file_dialog_shutdown_validation_20261011.md) 补齐；R2 本身的证据范围不变。
 当前错误提示反例通过不保证任意 Shell 扩展、任意深层或不可关闭提示都能退出；没有强制接受确认、放宽超时或提前清 busy。
 未执行全量 CTest、多 Provider、真实设备/游戏/KMBOX、远程部署或主分支合并。

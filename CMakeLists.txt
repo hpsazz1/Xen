@@ -1553,6 +1553,25 @@ if(BUILD_TESTING)
     target_link_libraries(debug_workspace_ui_preview PRIVATE overlay imgui ${OpenCV_LIBS} log)
     xen_deploy_runtime_dlls(debug_workspace_ui_preview OPENCV ORT NDI)
 
+    # 通过生产 wWinMain 验证完整退出屏障；测试入口只驱动界面并观察回收。
+    add_executable(app_file_dialog_shutdown_tests
+        tests/app_file_dialog_shutdown_tests.cpp
+        Xen/app/main.cpp
+        Xen/app/model_catalog.cpp
+        Xen/app/xen.rc)
+    add_dependencies(app_file_dialog_shutdown_tests
+        xen_recoil_calibration xen_recoil_tuner model_workspace_tools)
+    target_link_libraries(app_file_dialog_shutdown_tests PRIVATE
+        overlay app_input app_startup runtime xen_debug config crash log app_release imgui)
+    xen_deploy_runtime_dlls(app_file_dialog_shutdown_tests OPENCV ORT NDI)
+    foreach(dialog_state picker error)
+        add_test(NAME app_file_dialog_shutdown_${dialog_state}
+            COMMAND app_file_dialog_shutdown_tests
+                "${CMAKE_BINARY_DIR}/app-file-dialog-shutdown-tests" ${dialog_state})
+        set_tests_properties(app_file_dialog_shutdown_${dialog_state} PROPERTIES
+            TIMEOUT 45 RUN_SERIAL TRUE LABELS "app;ui;shutdown")
+    endforeach()
+
     # Overlay Present 系统 seam 与标量 helper 均不创建 Win32/D3D11 窗口，
     # 测试只注入 HRESULT，也不链接 ImGui。
     add_executable(overlay_tests
