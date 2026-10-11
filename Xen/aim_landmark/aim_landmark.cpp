@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 
 namespace aim_landmark {
 namespace {
@@ -59,13 +60,15 @@ Diagnostic inspect_head_landmark(
             sequence, &target, Status::NO_CURRENT_OBSERVATION);
     }
 
-    const float observation_x1 = target.matched_observation_x1;
-    const float observation_y1 = target.matched_observation_y1;
-    const float observation_x2 = target.matched_observation_x2;
-    const float observation_y2 = target.matched_observation_y2;
-    const float observation_width = observation_x2 - observation_x1;
-    const float observation_height = observation_y2 - observation_y1;
-    const float observation_area = observation_width * observation_height;
+    // 有限 float 端点的差和面积仍可能超出 float；诊断不能因此伪造
+    // 关联失败，也不能把无穷中心标为有效。只扩大局部几何计算精度。
+    const double observation_x1 = target.matched_observation_x1;
+    const double observation_y1 = target.matched_observation_y1;
+    const double observation_x2 = target.matched_observation_x2;
+    const double observation_y2 = target.matched_observation_y2;
+    const double observation_width = observation_x2 - observation_x1;
+    const double observation_height = observation_y2 - observation_y1;
+    const double observation_area = observation_width * observation_height;
     if (!std::isfinite(observation_x1) ||
         !std::isfinite(observation_y1) ||
         !std::isfinite(observation_x2) ||
@@ -91,12 +94,12 @@ Diagnostic inspect_head_landmark(
         if (target.matched_observation_head_only) {
             associated = same_box(detection, target);
         } else {
-            const float head_x = (detection.x1 + detection.x2) * 0.5f;
-            const float head_y = (detection.y1 + detection.y2) * 0.5f;
-            const float head_area =
-                (detection.x2 - detection.x1) *
-                (detection.y2 - detection.y1);
-            const float area_ratio = observation_area > 0.0f
+            const float head_x = std::midpoint(detection.x1, detection.x2);
+            const float head_y = std::midpoint(detection.y1, detection.y2);
+            const double head_area =
+                (static_cast<double>(detection.x2) - detection.x1) *
+                (static_cast<double>(detection.y2) - detection.y1);
+            const double area_ratio = observation_area > 0.0f
                 ? head_area / observation_area : 1.0f;
             associated = head_x >= observation_x1 &&
                 head_x <= observation_x2 &&
@@ -139,8 +142,8 @@ Diagnostic inspect_head_landmark(
     result.y1 = candidate->y1;
     result.x2 = candidate->x2;
     result.y2 = candidate->y2;
-    result.x = (candidate->x1 + candidate->x2) * 0.5f;
-    result.y = (candidate->y1 + candidate->y2) * 0.5f;
+    result.x = std::midpoint(candidate->x1, candidate->x2);
+    result.y = std::midpoint(candidate->y1, candidate->y2);
     result.confidence = candidate->confidence;
     result.class_id = candidate->class_id;
     return result;

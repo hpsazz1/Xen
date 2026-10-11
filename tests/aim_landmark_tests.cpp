@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <limits>
@@ -86,6 +87,79 @@ void test_nonfinite_associated_head_fails_closed() {
                evidence.x == 0.0f && evidence.y == 0.0f &&
                evidence.confidence == 0.0f && evidence.class_id == -1,
            "非有限的同帧 head 不能降级伪装成遮挡或沿用旧坐标");
+}
+
+void test_finite_head_only_centers_do_not_overflow() {
+    const float maximum = std::numeric_limits<float>::max();
+    const std::array<std::array<float, 2>, 3> endpoints{{
+        {maximum * 0.75f, maximum * 0.875f},
+        {-maximum * 0.875f, -maximum * 0.75f},
+        {-maximum, maximum},
+    }};
+    AimConfig config;
+    config.head_class_ids = {1};
+    config.low_confidence = 0.1f;
+    for (const auto& bounds : endpoints) {
+        AimResult result;
+        result.status = AimStatus::SUCCESS;
+        result.has_target = true;
+        result.target = current_body_target(17);
+        auto& target = result.target;
+        target.matched_observation_head_only = true;
+        target.matched_observation_x1 = bounds[0];
+        target.matched_observation_y1 = bounds[0];
+        target.matched_observation_x2 = bounds[1];
+        target.matched_observation_y2 = bounds[1];
+        const std::array<Detection, 1> detections{{
+            {bounds[0], bounds[0], bounds[1], bounds[1], 0.9f, 1},
+        }};
+        const auto diagnostic = aim_landmark::inspect_head_landmark(
+            201, detections, config, result);
+        expect(diagnostic.valid && diagnostic.fresh &&
+                   diagnostic.status == aim_landmark::Status::VALID &&
+                   !diagnostic.control_eligible &&
+                   std::isfinite(diagnostic.x) &&
+                   std::isfinite(diagnostic.y) &&
+                   diagnostic.x >= bounds[0] && diagnostic.x <= bounds[1] &&
+                   diagnostic.y >= bounds[0] && diagnostic.y <= bounds[1],
+               "有限 head-only 端点必须给出框内有限中心，不能发布无穷坐标");
+    }
+}
+
+void test_body_head_association_preserves_geometry_across_scales() {
+    AimConfig config;
+    config.person_class_ids = {0};
+    config.head_class_ids = {1};
+    config.low_confidence = 0.1f;
+    for (const float scale : {1.0f, 1.0e20f, 1.0e-25f}) {
+        AimResult result;
+        result.status = AimStatus::SUCCESS;
+        result.has_target = true;
+        result.target = current_body_target(18);
+        auto& target = result.target;
+        target.matched_observation_x1 *= scale;
+        target.matched_observation_y1 *= scale;
+        target.matched_observation_x2 *= scale;
+        target.matched_observation_y2 *= scale;
+        auto detections = body_and_head();
+        for (auto& detection : detections) {
+            detection.x1 *= scale;
+            detection.y1 *= scale;
+            detection.x2 *= scale;
+            detection.y2 *= scale;
+        }
+        const auto diagnostic = aim_landmark::inspect_head_landmark(
+            202, detections, config, result);
+        expect(diagnostic.valid && diagnostic.fresh &&
+                   diagnostic.status == aim_landmark::Status::VALID &&
+                   !diagnostic.control_eligible && diagnostic.track_id == 18 &&
+                   diagnostic.candidate_count == 1 &&
+                   std::abs(static_cast<double>(diagnostic.x) / scale - 150.0)
+                       < 0.001 &&
+                   std::abs(static_cast<double>(diagnostic.y) / scale - 85.0)
+                       < 0.001,
+               "等比缩放的唯一 body/head 关联不得因面积溢出或下溢丢失");
+    }
 }
 
 void test_unselected_local_head_is_reported_as_ambiguous() {
@@ -390,6 +464,8 @@ void test_diagnostic_call_preserves_all_aim_control_state() {
 int main() {
     test_unique_current_head_is_reported_without_observer_state();
     test_nonfinite_associated_head_fails_closed();
+    test_finite_head_only_centers_do_not_overflow();
+    test_body_head_association_preserves_geometry_across_scales();
     test_unselected_local_head_is_reported_as_ambiguous();
     test_missing_declared_head_is_an_association_mismatch();
     test_missing_current_observation_keeps_requested_identity_without_point();
