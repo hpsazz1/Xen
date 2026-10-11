@@ -236,6 +236,83 @@ void exercise_public_detector(const std::string& model_path) {
     }
 }
 
+// 只注入 SDK 的一次 Run 失败边界；恢复帧仍由真实 CPU ORT 执行。
+// 该替身不能证明任何 GPU 在途工作已完成。
+class RunFailureScope {
+public:
+    explicit RunFailureScope(const OrtApi& real) : real_(real), forwarding_(real) {
+        forwarding_.Run = &fail_run;
+        Ort::InitApi(&forwarding_);
+    }
+    ~RunFailureScope() { Ort::InitApi(&real_); }
+    RunFailureScope(const RunFailureScope&) = delete;
+    RunFailureScope& operator=(const RunFailureScope&) = delete;
+private:
+    static OrtStatus* ORT_API_CALL fail_run(OrtSession*, const OrtRunOptions*,
+            const char* const*, const OrtValue* const*, size_t,
+            const char* const*, size_t, OrtValue**) noexcept {
+        return OrtGetApiBase()->GetApi(ORT_API_VERSION)->CreateStatus(
+            ORT_FAIL, "有界 CPU Run 失败 fixture");
+    }
+    const OrtApi& real_;
+    OrtApi forwarding_;
+};
+
+void exercise_failure_and_recovery(const std::string& model_path, const OrtApi& real) {
+    DetectorConfig config;
+    config.model_path = model_path;
+    config.backend = BackendType::CPU;
+    config.intra_threads = 1;
+    config.enable_gpu_preprocess = false;
+    config.enable_trt_cuda_graph = false;
+    Detector detector(config);
+    expect(detector.load() && detector.backend_name() == "CPUExecutionProvider",
+           "恢复专项必须只加载 CPU Provider");
+    if (!detector.loaded()) return;
+    const cv::Mat white(4, 4, CV_8UC3, cv::Scalar::all(255));
+    const cv::Mat black(4, 4, CV_8UC3, cv::Scalar::all(0));
+    expect(detector.segment(white).detections.size() == 1,
+           "失败前必须先产生真实非空结果");
+    for (const bool segmentation : {false, true}) {
+        {
+            RunFailureScope failure(real);
+            if (segmentation) {
+                const auto result = detector.segment(white);
+                expect(result.detections.empty() && result.masks.empty() && !result.mask_pixels,
+                       "SDK失败不能返回上一帧检测框或掩码");
+            } else {
+                expect(detector.detect(white).empty(), "SDK失败不能返回上一帧轻量框");
+            }
+            expect(detector.profile().status == DetectionStatus::INFERENCE_FAILED,
+                   "SDK失败必须发布明确失败状态");
+        }
+        expect(detector.segment(black).detections.empty() &&
+                   detector.profile().status == DetectionStatus::SUCCESS,
+               "失败后实际黑图应恢复为合法空结果，而非残留错误");
+        expect(detector.detect(white).size() == 1 &&
+                   detector.profile().status == DetectionStatus::SUCCESS,
+               "恢复后的实际白图应重新生成轻量框");
+    }
+    expect(detector.detect(cv::Mat(4, 4, CV_8UC1)).empty() &&
+               detector.profile().status == DetectionStatus::INVALID_INPUT,
+           "错误像素格式应显式拒绝");
+    expect(detector.pose(white).detections.empty() &&
+               detector.profile().status == DetectionStatus::UNSUPPORTED_TASK,
+           "模型任务不匹配应显式拒绝");
+    expect(detector.detect_d3d11({}).empty() &&
+               detector.profile().status == DetectionStatus::INVALID_INPUT &&
+               !detector.d3d11_interop_supported(),
+           "空纹理必须在任何GPU操作前拒绝");
+    detector.reset();
+    expect(!detector.loaded() && detector.input_width() == 0 && detector.input_height() == 0 &&
+               detector.detect(white).empty() &&
+               detector.profile().status == DetectionStatus::NOT_LOADED,
+           "reset后不能继续返回旧模型结果或尺寸");
+    expect(detector.load() && detector.segment(white).detections.size() == 1 &&
+               detector.profile().status == DetectionStatus::SUCCESS,
+           "reset后同一实例可重载并由真实CPU模型恢复");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -261,6 +338,7 @@ int main(int argc, char** argv) {
     }
     // 监测通过后再验证正常释放路径，避免隔离释放掩盖修复后的运行问题。
     if (failures == 0) exercise_public_detector(argv[1]);
+    if (failures == 0) exercise_failure_and_recovery(argv[1], *real);
     Log::shutdown();
     return failures == 0 ? 0 : 1;
 }
