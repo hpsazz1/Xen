@@ -82,12 +82,19 @@ struct PickerCancellation {
     IFileDialog* dialog;
     const std::atomic<bool>* canceled;
     UINT_PTR timer = 0;
+    bool close_posted = false;
 };
 thread_local PickerCancellation* active_picker = nullptr;
 void CALLBACK cancel_picker_timer(HWND, UINT, UINT_PTR timer, DWORD) noexcept {
-    // 模态窗口消息循环在创建 COM 对象的同一 STA 调用此回调。
-    if (active_picker && active_picker->timer == timer && active_picker->canceled->load())
-        active_picker->dialog->Close(HRESULT_FROM_WIN32(ERROR_CANCELLED));
+    // 定时器在同一 STA 运行，但不是 IFileDialogEvents 回调；直接 Close 可能不退出 Show。
+    // 只向此 COM 对象的窗口投递关闭；窗口尚未建立或投递失败时，保留取消并在下一次重试。
+    if (!active_picker || active_picker->timer != timer || active_picker->close_posted ||
+        !active_picker->canceled->load()) return;
+    Microsoft::WRL::ComPtr<IOleWindow> window_interface;
+    HWND window=nullptr;
+    if (SUCCEEDED(active_picker->dialog->QueryInterface(IID_PPV_ARGS(&window_interface))) &&
+        SUCCEEDED(window_interface->GetWindow(&window)) && window && PostMessageW(window,WM_CLOSE,0,0))
+        active_picker->close_posted=true;
 }
 std::string choose_recoil_profile(HWND owner, const std::shared_ptr<std::atomic<bool>>& canceled) {
     if(canceled->load())return {};

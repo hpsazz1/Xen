@@ -253,7 +253,8 @@ void recoil_flow_preview(const std::filesystem::path& output, bool candidate_onl
         for (int i=0;i<5000;++i) { frame(); if (!panel->busy() && i>5) return; std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
         throw std::runtime_error("面板后台任务未在有界时间内完成");
     };
-    auto click = [&](const char* label, bool popup = false, const char* scope = nullptr, const char* parent_scope = nullptr) {
+    auto click = [&](const char* label, bool popup = false, const char* scope = nullptr,
+                     const char* parent_scope = nullptr, bool settle_after = true) {
         settle(); pending_focus_window=popup?"##Combo_00":"recoil-flow";
         auto* window = ImGui::FindWindowByName(pending_focus_window.c_str()); require(window != nullptr,"流程窗口缺失");
         const auto scope_id=scope?(parent_scope?ImHashStr(scope,0,window->GetID(parent_scope)):window->GetID(scope)):0;
@@ -268,7 +269,8 @@ void recoil_flow_preview(const std::filesystem::path& output, bool candidate_onl
         require(window->ClipRect.Contains(point)&&rectangle.GetWidth()>0&&rectangle.GetHeight()>0,"真实目标控件没有可点击矩形");
         { std::ofstream trace(output/"flow-clicks.txt",std::ios::app); trace << label << " at " << point.x << ',' << point.y << '\n'; }
         io.AddMousePosEvent(point.x,point.y); frame();
-        io.AddMouseButtonEvent(0,true); frame(); io.AddMouseButtonEvent(0,false); frame(); settle();
+        io.AddMouseButtonEvent(0,true); frame(); io.AddMouseButtonEvent(0,false); frame();
+        if (settle_after) settle();
     };
     settle();
     // 精确候选专项可独立运行；完整入口继续保留原生文件选择与取消回归。
@@ -399,20 +401,45 @@ void recoil_flow_preview(const std::filesystem::path& output, bool candidate_onl
     require(emitted.size()==1 && std::filesystem::path(emitted.back().debug_request.recoil_profile_path).filename()=="second.json",
         "展开外部导入后直接验证必须仍使用测试曲线已选中的文件");
     emitted.clear();
-    auto native_selection = [&](const std::filesystem::path& path, bool cancel, bool panel_cancel = false) {
+    const auto native_dialog = [](bool visible_only = false) {
+        struct DialogSearch { HWND window = nullptr; bool visible_only = false; } search;
+        search.visible_only = visible_only;
+        EnumWindows([](HWND window,LPARAM context)->BOOL {
+            auto& search=*reinterpret_cast<DialogSearch*>(context);
+            DWORD process=0;GetWindowThreadProcessId(window,&process);
+            if(process!=GetCurrentProcessId()||(search.visible_only&&!IsWindowVisible(window)))return TRUE;
+            wchar_t title[128]{};GetWindowTextW(window,title,128);
+            if(std::wstring_view(title)==L"选择弹道曲线 JSON"){
+                search.window=window;return FALSE;
+            }return TRUE;
+        },reinterpret_cast<LPARAM>(&search));
+        return search.window;
+    };
+    const auto selected_profile = [] {
+        std::ifstream file("cache/recoil/workflow-settings.json"); nlohmann::json settings; file>>settings;
+        return settings.at("ak47").at("selected_file").get<std::string>();
+    };
+    const auto profile_files = [] {
+        std::vector<std::filesystem::path> files;
+        for(const auto& file:std::filesystem::directory_iterator("profiles"))files.push_back(file.path());
+        std::sort(files.begin(),files.end()); return files;
+    };
+    const auto selected_before_cancel=selected_profile();
+    const auto profiles_before_cancel=profile_files();
+    const auto require_canceled_selection = [&] {
+        require(emitted.empty(),"取消文件选择不得产生Prepare动作");
+        require(!panel->busy(),"取消文件选择后必须释放busy");
+        require(selected_profile()==selected_before_cancel,"取消文件选择不得改写已选曲线");
+        require(profile_files()==profiles_before_cancel,"取消文件选择不得新增、删除或替换曲线文件名");
+        require(!native_dialog(),"取消完成后不能遗留本进程的文件选择窗口");
+    };
+    auto native_selection = [&](const std::filesystem::path& path, bool cancel, bool panel_cancel = false,
+                                bool wait_until_visible = false) {
         std::atomic<bool> seen{false}, chosen{false}, fallback_cancel{false};
         std::jthread response([&](std::stop_token stop) {
             const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(8);
             while(!stop.stop_requested()&&std::chrono::steady_clock::now()<deadline) {
-                HWND dialog=nullptr;
-                EnumWindows([](HWND window,LPARAM context)->BOOL {
-                    DWORD process=0;GetWindowThreadProcessId(window,&process);
-                    if(process!=GetCurrentProcessId())return TRUE;
-                    wchar_t title[128]{};GetWindowTextW(window,title,128);
-                    if(std::wstring_view(title)==L"选择弹道曲线 JSON"){
-                        *reinterpret_cast<HWND*>(context)=window;return FALSE;
-                    }return TRUE;
-                },reinterpret_cast<LPARAM>(&dialog));
+                const auto dialog=native_dialog(wait_until_visible);
                 if(dialog) {
                     seen=true;
                     if(panel_cancel) {
@@ -446,12 +473,18 @@ void recoil_flow_preview(const std::filesystem::path& output, bool candidate_onl
         require(std::filesystem::current_path()==output,"系统文件选择不得改变工作目录");
     };
     emitted.clear();native_selection({},true);
-    require(emitted.empty(),"取消文件选择不得准备任务或改写当前曲线");
-    const auto profiles_before_cancel=std::distance(std::filesystem::directory_iterator("profiles"),std::filesystem::directory_iterator{});
-    emitted.clear();native_selection({},false,true);
-    require(emitted.empty()&&!panel->busy(),"全局取消文件选择后必须释放busy且不能Prepare");
-    require(std::distance(std::filesystem::directory_iterator("profiles"),std::filesystem::directory_iterator{})==profiles_before_cancel,
-        "全局取消运行中文件选择不得新建曲线文件");
+    require_canceled_selection();
+    // 按钮释放帧只排队；此处尚未执行下一次poll，不允许启动原生窗口。
+    click("选择曲线文件",false,"导入已有曲线 JSON",nullptr,false);
+    require(panel->busy()&&!native_dialog(),"文件选择必须先排队，不能在UI点击帧同步打开");
+    panel->request_cancel();
+    require(!panel->busy(),"取消尚未poll的文件选择必须立即清除排队动作");
+    settle(); require_canceled_selection();
+    // 连续重开覆盖首次捕获窗口和窗口已经可见后的取消，检查每轮状态完整回收。
+    for(int attempt=0;attempt<3;++attempt) {
+        emitted.clear();native_selection({},false,true);require_canceled_selection();
+        emitted.clear();native_selection({},false,true,true);require_canceled_selection();
+    }
     emitted.clear();native_selection(std::filesystem::absolute("profiles/second.json"),false);
     require(emitted.size()==1&&std::filesystem::path(emitted.back().debug_request.recoil_profile_path).filename()=="second.json",
         "选择目录内已有曲线应直接载入验证，不能因重复版本拒绝");
@@ -838,6 +871,8 @@ void recoil_flow_preview(const std::filesystem::path& output, bool candidate_onl
     click("载入采集结果",false,"高级：按路径载入","载入以前的采集");
     require(screen_contains("已锁定前段：100.000 ms"),"高级载入旧run/result.json须从同目录计划恢复锁定");
     std::ofstream report(output/"recoil-flow.txt"); report << "真实RecoilPanel无设备交互回归通过；自动动作仅PREPARE，等待下一次人工按键。\n";
+    if(!candidate_only)report << "文件选择取消：原生取消1次、尚未poll取消1次、窗口创建即取消及窗口可见后取消各3次；"
+        "每次检查未Prepare、busy回收、已选曲线及文件集合不变，之后目录内和外部文件选择成功。\n";
 }
 }
 
