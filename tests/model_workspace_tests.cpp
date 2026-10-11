@@ -84,6 +84,42 @@ void test_tool_paths(const fs::path& test_root, const char* python) {
                "同名自定义脚本不能被猜测成默认路径而覆盖");
     }
 }
+
+void test_job_record_path_boundary(const fs::path& test_root, const char* python,
+                                   const char* script) {
+    // The worker cwd remains below MAX_PATH; job.json.pending crosses it.
+    const auto parent = test_root / L"job-boundary";
+    expect(parent.native().size() < 194, "边界夹具父目录长度");
+    if (parent.native().size() >= 194) return;
+    const auto root = parent / std::wstring(194 - parent.native().size(), L'x');
+    model_workspace::Workspace workspace(nullptr);
+    model_workspace::Settings settings;
+    std::string error;
+    expect(workspace.initialize(root, settings, error), "长工作目录初始化");
+    settings.python_executable = python;
+    settings.script_path = script;
+    settings.class_names = "person,head";
+    settings.class_schema_confirmed = true;
+    const bool started = workspace.execute(model_workspace::Action::INSPECT_DATA,
+                                           settings, false, false, "");
+    if (!started) std::cerr << "boundary launch: " << workspace.poll().message << '\n';
+    expect(started, "job临时记录超过MAX_PATH仍能启动离线作业");
+    const auto view = wait(workspace);
+    const auto jobs = root / "cache/model-workspace/jobs";
+    const auto first_job = fs::directory_iterator(jobs);
+    const auto job = first_job != fs::directory_iterator{} ? first_job->path() : fs::path{};
+    std::cerr << "boundary cwd=" << job.native().size() << " pending="
+              << (job / L"job.json.pending").native().size() << '\n';
+    expect(job.native().size() < MAX_PATH &&
+           (job / L"job.json.pending").native().size() >= MAX_PATH,
+           "夹具只越过文件IO边界，不越过进程工作目录限制");
+    expect(!view.job_running && view.job_state == "SUCCEEDED",
+           "长记录路径的真实子进程状态可读并完成");
+    expect(workspace.execute(model_workspace::Action::INSPECT_DATA,
+                             settings, false, false, ""),
+           "长记录作业结束后可重新启动");
+    expect(wait(workspace).job_state == "SUCCEEDED", "长记录路径重试完成");
+}
 }
 
 int main(int argc, char** argv) try {
@@ -94,6 +130,7 @@ int main(int argc, char** argv) try {
         L"中文 space & literal";
     fs::create_directories(root);
     test_tool_paths(root, argv[1]);
+    test_job_record_path_boundary(root, argv[1], argv[2]);
     auto collector = std::make_shared<data_collection::Collector>();
     model_workspace::Workspace workspace(collector);
     model_workspace::Settings settings;

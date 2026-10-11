@@ -1534,6 +1534,10 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(model_workspace_tests OPENCV)
     add_test(NAME model_workspace_tests COMMAND model_workspace_tests
         "${XEN_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/model_workspace_worker_fixture.py")
+    # Explicit-only host: the default suite does not require the training environment.
+    add_executable(model_workspace_cpu_integration tests/model_workspace_cpu_integration.cpp)
+    target_link_libraries(model_workspace_cpu_integration PRIVATE model_workspace nlohmann_json::nlohmann_json)
+    xen_deploy_runtime_dlls(model_workspace_cpu_integration OPENCV)
     add_executable(model_workspace_status_tests tests/model_workspace_status_tests.cpp)
     target_link_libraries(model_workspace_status_tests PRIVATE model_workspace)
     xen_deploy_runtime_dlls(model_workspace_status_tests OPENCV)

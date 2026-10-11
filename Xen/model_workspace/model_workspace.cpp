@@ -15,6 +15,7 @@
 #include "model_workspace/model_workspace.h"
 #include "model_workspace/actions_internal.h"
 #include "log/log.h"
+#include "platform/filesystem_path_internal.h"
 
 #include <nlohmann/json.hpp>
 #include <array>
@@ -31,6 +32,7 @@ namespace model_workspace {
 namespace {
 using Json = nlohmann::json;
 namespace fs = std::filesystem;
+using xen::filesystem_detail::windows_io_path;
 
 std::string utf8(const fs::path& path) {
     const auto value = path.u8string();
@@ -70,7 +72,7 @@ fs::path checked_path(const fs::path& path) {
     check(!path.empty(), "路径不能为空");
     const auto absolute = fs::absolute(path).lexically_normal();
     for (auto current = absolute; !current.empty();) {
-        const DWORD attributes = GetFileAttributesW(current.c_str());
+        const DWORD attributes = GetFileAttributesW(windows_io_path(current).c_str());
         check(attributes == INVALID_FILE_ATTRIBUTES ||
               !(attributes & FILE_ATTRIBUTE_REPARSE_POINT),
               "数据工作区不接受链接或重解析路径");
@@ -83,9 +85,10 @@ fs::path checked_path(const fs::path& path) {
 
 Json read_json(const fs::path& path, std::uintmax_t max_bytes = 1024 * 1024) {
     checked_path(path);
-    check(fs::is_regular_file(path) && fs::file_size(path) <= max_bytes,
+    const auto io_path = windows_io_path(path);
+    check(fs::is_regular_file(io_path) && fs::file_size(io_path) <= max_bytes,
           "JSON文件缺失或超过读取上限");
-    std::ifstream stream(path, std::ios::binary);
+    std::ifstream stream(io_path, std::ios::binary);
     check(stream.good(), "无法读取状态文件");
     return Json::parse(stream);
 }
@@ -94,14 +97,16 @@ void write_json(const fs::path& path, const Json& value) {
     checked_path(path);
     const auto pending = fs::path(path.wstring() + L".pending");
     checked_path(pending);
+    const auto io_path = windows_io_path(path);
+    const auto io_pending = windows_io_path(pending);
     {
-        std::ofstream stream(pending, std::ios::binary | std::ios::trunc);
+        std::ofstream stream(io_pending, std::ios::binary | std::ios::trunc);
         check(stream.good(), "无法创建工作区记录");
         stream << value.dump(2) << '\n';
         stream.close();
         check(!stream.fail(), "工作区记录写入失败");
     }
-    check(MoveFileExW(pending.c_str(), path.c_str(),
+    check(MoveFileExW(io_pending.c_str(), io_path.c_str(),
                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0,
           "工作区记录原子提交失败");
 }
@@ -142,7 +147,7 @@ std::wstring quote(const std::wstring& argument) {
 
 std::string sha256(const fs::path& path) {
     checked_path(path);
-    std::ifstream stream(path, std::ios::binary);
+    std::ifstream stream(windows_io_path(path), std::ios::binary);
     check(stream.good(), "无法读取模型文件");
     BCRYPT_ALG_HANDLE algorithm = nullptr;
     BCRYPT_HASH_HANDLE hash = nullptr;
@@ -254,18 +259,18 @@ struct Workspace::Impl {
         check(fs::is_regular_file(script) && script.extension() == L".py",
               "训练工具脚本不存在，请选择model_data_pipeline.py");
         const auto jobs = checked_path(workspace_root / "jobs");
-        fs::create_directories(jobs);
+        fs::create_directories(windows_io_path(jobs));
         const auto ticks = std::chrono::system_clock::now().time_since_epoch().count();
         job_directory = jobs / (std::to_string(ticks) + "-" +
                          std::to_string(GetCurrentProcessId()) + "-" + std::to_string(++sequence));
-        check(fs::create_directory(job_directory), "无法创建独立训练作业目录");
+        check(fs::create_directory(windows_io_path(job_directory)), "无法创建独立训练作业目录");
         Json spec = specification;
         spec["output"] = utf8(job_directory / "result");
         environment_check_request = spec.at("operation") == "env_check" ? spec : Json();
         write_json(job_directory / "job.json", spec);
 
         SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
-        Handle output(CreateFileW((job_directory / "process.log").c_str(),
+        Handle output(CreateFileW(windows_io_path(job_directory / "process.log").c_str(),
             GENERIC_WRITE, FILE_SHARE_READ, &security, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
         Handle input(CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
             &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
@@ -384,7 +389,7 @@ struct Workspace::Impl {
         if (!finished && now - last_poll < std::chrono::milliseconds(500)) return;
         last_poll = now;
         const auto status_path = job_directory / "status.json";
-        if (fs::exists(status_path)) {
+        if (fs::exists(windows_io_path(status_path))) {
             try {
                 const Json status = read_json(status_path);
                 check(status.value("schema_version", 0) == 1, "训练状态版本不兼容");
@@ -770,16 +775,17 @@ bool Workspace::execute(Action action, Settings& settings,
                 }
             }
             const auto directory = checked_path(impl_->data_root / "models");
-            fs::create_directories(directory);
+            fs::create_directories(windows_io_path(directory));
             const auto destination = directory / ("candidate-" + digest.substr(0, 16) + ".onnx");
-            check(!fs::exists(destination), "该候选已存在于模型目录，未覆盖旧文件");
+            check(!fs::exists(windows_io_path(destination)), "该候选已存在于模型目录，未覆盖旧文件");
             const auto pending = directory / ("candidate-" + digest.substr(0, 16) + "-" +
                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".pending");
-            check(fs::copy_file(source, pending, fs::copy_options::none), "候选导入失败");
+            check(fs::copy_file(windows_io_path(source), windows_io_path(pending),
+                                fs::copy_options::none), "候选导入失败");
             check(sha256(pending) == digest, "候选复制校验失败，未发布ONNX");
             write_json(fs::path(destination.wstring() + L".json"), impl_->last_result);
             // sidecar与临时模型均完整后才出现可枚举的ONNX；绝不覆盖旧候选。
-            fs::rename(pending, destination);
+            fs::rename(windows_io_path(pending), windows_io_path(destination));
             impl_->view.candidate_path = utf8(destination);
             impl_->view.message = "候选已导入；请在检测页刷新模型并明确选择。当前模型未自动切换。";
             return true;
