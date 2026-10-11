@@ -35,6 +35,7 @@
 <div id="grid"></div>
 <dialog id="detail">
 <h2 id="detail-title">样本</h2><p id="detail-reasons"></p>
+<p id="detail-image-status" class="notice" role="status"></p>
 <div class="detail"><div><canvas id="canvas"></canvas><p><small>选择模式：点击框。新增模式：在图上拖出矩形；坐标可在右侧精确调整。当前修改只有点击确认才进入决策。</small></p></div>
 <div><div class="bar"><label>操作 <select id="mode"><option value="select">选择框</option><option value="draw">新增框</option></select></label></div>
 <select id="boxes" size="6" aria-label="框列表"></select>
@@ -232,7 +233,18 @@ if (typeof globalThis !== 'undefined') globalThis.XenReviewCore = XenReviewCore;
     ctx.restore();
   }
   function resetDraft(){draft=C.clone((decisions.get(C.key(active))||active).detections);picked=draft.length?0:-1;dirty=false;fieldState();}
-  function openDetail(s){active=s;imageReady=false;$('detail-title').textContent=`样本 ${s.sample_id} · ${s.width} × ${s.height}`;$('detail-reasons').textContent=s.reasons.join(' / ');const size=C.canvasSize(s.width,s.height);$('canvas').width=size.width;$('canvas').height=size.height;resetDraft();const loading=new Image();image=loading;loading.onload=()=>{if(image!==loading)return;imageReady=true;draw();};loading.onerror=()=>message('详细图片无法读取，不能凭空确认标注',true);loading.src=s.image;$('detail').showModal();}
+  function imageMessage(text,error=false){$('detail-image-status').textContent=text;$('detail-image-status').className='notice'+(error?' error':'');}
+  function openDetail(s){
+    active=s;imageReady=false;imageMessage('正在加载详细图片…');
+    $('detail-title').textContent=`样本 ${s.sample_id} · ${s.width} × ${s.height}`;$('detail-reasons').textContent=s.reasons.join(' / ');
+    const size=C.canvasSize(s.width,s.height);$('canvas').width=size.width;$('canvas').height=size.height;resetDraft();
+    const loading=new Image();image=loading;
+    // 同一图片重开也是新请求；关闭或切换后，已排队的成功/失败回调均失效。
+    const current=()=>active===s&&image===loading;
+    loading.onload=()=>{if(!current())return;imageReady=true;imageMessage('详细图片已加载，可检查标注。');draw();};
+    loading.onerror=()=>{if(!current())return;imageReady=false;imageMessage('详细图片无法读取，不能凭空确认标注',true);draw();};
+    loading.src=s.image;$('detail').showModal();
+  }
   function point(event){return C.displayToImage({x:event.clientX,y:event.clientY},active.width,active.height,$('canvas').getBoundingClientRect());}
   $('canvas').onpointerdown=e=>{if(!imageReady)return;const p=point(e);if($('mode').value==='draw'){anchor=p;$('canvas').setPointerCapture(e.pointerId);}else{picked=-1;for(let i=draft.length-1;i>=0;i--){const b=draft[i];if(p.x>=b.x1&&p.x<=b.x2&&p.y>=b.y1&&p.y<=b.y2){picked=i;break;}}fieldState();}};
   $('canvas').onpointerup=e=>{if(!anchor)return;const p=point(e),a=anchor;anchor=null;const b={class_id:Number($('class').value),x1:Math.min(a.x,p.x),y1:Math.min(a.y,p.y),x2:Math.max(a.x,p.x),y2:Math.max(a.y,p.y)};safely(()=>{C.boxes([b],active,data.class_names);draft.push(b);picked=draft.length-1;dirty=true;fieldState();});};
@@ -246,9 +258,10 @@ if (typeof globalThis !== 'undefined') globalThis.XenReviewCore = XenReviewCore;
   $('apply-box').onclick=()=>safely(()=>{if(picked<0)return;const b={class_id:Number($('class').value)};for(const k of ['x1','y1','x2','y2']){if($(k).value.trim()==='')throw new Error('坐标不能为空');b[k]=Number($(k).value);}draft[picked]=C.boxes([b],active,data.class_names)[0];dirty=true;fieldState();});
   $('delete-box').onclick=()=>{if(picked<0)return;draft.splice(picked,1);picked=draft.length?Math.min(picked,draft.length-1):-1;dirty=true;fieldState();};
   $('clear-boxes').onclick=()=>{if(draft.length&&!confirm('清空此图所有框？这不会自动确认负样本。'))return;draft=[];picked=-1;dirty=true;fieldState();};$('undo').onclick=resetDraft;
-  function closeDetail(){if(dirty&&!confirm('放弃此图尚未确认的修改？'))return;$('detail').close();active=null;anchor=null;}
+  function dismissDetail(){active=null;anchor=null;image=null;imageReady=false;$('detail').close();}
+  function closeDetail(){if(dirty&&!confirm('放弃此图尚未确认的修改？'))return;dismissDetail();}
   $('close-detail').onclick=closeDetail;$('detail').oncancel=e=>{e.preventDefault();closeDetail();};
-  function commitDetail(state){safely(()=>{if(!imageReady)throw new Error('请先加载图片');const d=C.decision(active,state,draft,data.class_names);if(active.state!=='UNKNOWN'&&!confirm('此图已有审核，确认更新？'))return;decisions.set(C.key(active),d);dirty=false;$('detail').close();active=null;render();message('此图已明确处理，请导出保存。');});}
+  function commitDetail(state){safely(()=>{if(!imageReady)throw new Error('请先加载图片');const d=C.decision(active,state,draft,data.class_names);if(active.state!=='UNKNOWN'&&!confirm('此图已有审核，确认更新？'))return;decisions.set(C.key(active),d);dirty=false;dismissDetail();render();message('此图已明确处理，请导出保存。');});}
   $('detail-positive').onclick=()=>commitDetail('VERIFIED_POSITIVE');$('detail-negative').onclick=()=>commitDetail('VERIFIED_NEGATIVE');$('detail-exclude').onclick=()=>commitDetail('EXCLUDED');
   $('export').onclick=()=>safely(()=>{const result=C.exportDraft(data,decisions);const url=URL.createObjectURL(new Blob([JSON.stringify(result,null,2)],{type:'application/json'}));const a=el('a');a.href=url;a.download='review-decisions.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);message('已请求下载 review-decisions.json。请回 Xen 采集页选择该文件并导入；页面导出不等于已经导入。');});
   $('import').onchange=async()=>{const f=$('import').files[0];if(!f)return;try{if(f.size>32*1024*1024)throw new Error('草稿文件超过32MiB，拒绝读取');const parsed=JSON.parse(await f.text()),next=C.importDraft(data,parsed);if(decisions.size&&!confirm('用导入草稿替换本页未导出的处理记录？'))return;decisions=next;refreshRows();message(`已恢复 ${next.size} 项明确决定，未覆盖报告原件。`);}catch(e){message(e.message,true);}finally{$('import').value='';}};
