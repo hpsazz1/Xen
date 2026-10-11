@@ -151,7 +151,10 @@ Xen-unified-<版本>/
 
 其余专项入口位于 [scripts/](../../scripts/)。脚本是参数和证据格式的事实源；不要长期维护一次性脚本。
 
-仅更新审核脚本和页面时，使用 `publish_worker_delta.ps1 -ModelDataReviewOnly`，只投递两项审核资源与清单，保留既有 Worker 构建身份，无需重建二进制。
+仅更新模型工作区资源时，使用 `publish_worker_delta.ps1 -ModelDataReviewOnly`，固定投递审核脚本、页面、
+训练环境脚本和依赖声明四项资源及清单，保留既有 Worker 构建身份，无需重建二进制。
+`-IncludeModelDataReview` 在 Worker 差量中选中同一组资源；这两个既有开关均保持完整依赖组，
+旧包缺少训练环境脚本或依赖声明时一并补入。
 
 向既有主辅日常包投递长稳工具时，`publish_worker_delta.ps1 -IncludeSoakAcceptanceTools`
 显式纳入验收入口、资源采集器、共享监督脚本和 source-session 启动脚本，绑定同一次源码提交；
@@ -163,6 +166,10 @@ Capture 共享实现变化且日常包包含采集工具时，使用 `publish_wo
 从同一 Release 构建同步 `XenSender.exe`、`XenCaptureEvidence.exe`、`XenAutoStopCapture.exe`。
 该开关仅更新基包已有的三个固定工具，检查工具未运行、文件可独占打开，并沿用变化文件校验、
 备份恢复和最后更新 manifest 的顺序；用户配置保持原字节。它不能与 `-ModelDataReviewOnly` 混用。
+
+Clock 共享实现变化时，使用 `-IncludeClockSource` 同步基包已有的 `tools/source/XenClockSource.exe`，
+源文件固定取自同一构建目录的 `Release/XenClockSource.exe`；沿用逐 EXE 链接身份、共享工具归属、
+进程占用与独占文件检查，也不能混入 `-ModelDataReviewOnly` 或 `-AimToolsOnly`。
 
 ## 报告语义与时间边界
 

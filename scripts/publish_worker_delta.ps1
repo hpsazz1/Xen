@@ -11,6 +11,7 @@
     [switch]$IncludeLauncher,
     [switch]$IncludeRecoilTools,
     [switch]$IncludeCaptureTools,
+    [switch]$IncludeClockSource,
     [switch]$IncludeRecoilMigrationScripts,
     [switch]$IncludeSourceSessionScript,
     [switch]$IncludeHudAcceptanceScript,
@@ -28,6 +29,7 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($ModelDataReviewOnly -and $IncludeCaptureTools) { throw '仅审核资源模式不能更新采集工具。' }
+if ($ModelDataReviewOnly -and $IncludeClockSource) { throw '仅审核资源模式不能更新时钟源工具。' }
 if ($ModelDataReviewOnly) { $IncludeModelDataReview = $true }
 if ($IncludeSoakAcceptanceTools) {
     $IncludeHudAcceptanceScript = $true
@@ -95,7 +97,7 @@ try {
         -RepositoryRoot $RepositoryRoot -GitExecutable $GitExecutable -ChangesOnly `
         -PackageNotesPath $PackageNotesPath -ManualAcceptancePath $ManualAcceptancePath `
         -SourceContextExecutable $SourceContextExecutable -IncludeLauncher:$IncludeLauncher -IncludeRecoilTools:$IncludeRecoilTools `
-        -IncludeCaptureTools:$IncludeCaptureTools `
+        -IncludeCaptureTools:$IncludeCaptureTools -IncludeClockSource:$IncludeClockSource `
         -IncludeRecoilMigrationScripts:$IncludeRecoilMigrationScripts `
         -IncludeSourceSessionScript:$IncludeSourceSessionScript `
         -IncludeHudAcceptanceScript:$IncludeHudAcceptanceScript `
@@ -120,6 +122,7 @@ try {
     if ($IncludeCaptureTools) {
         $relativeFiles += @('tools/source/XenSender.exe', 'tools/source/XenCaptureEvidence.exe', 'tools/source/XenAutoStopCapture.exe')
     }
+    if ($IncludeClockSource) { $relativeFiles += 'tools/source/XenClockSource.exe' }
     if ($IncludeRecoilMigrationScripts) {
         $relativeFiles += @('tools/recoil/import_recoil_profiles.py', 'tools/recoil/migrate_legacy_recoil_profiles.py',
             'tools/recoil/invoke_recoil_legacy_acceptance.ps1')
@@ -133,7 +136,8 @@ try {
         $relativeFiles += @('tools/acceptance/measure_process_resources.ps1', 'tools/acceptance/soak_acceptance_support.ps1')
     }
     if ($IncludeModelDataReview) {
-        $relativeFiles += @('tools/model-data/model_data_pipeline.py', 'tools/model-data/model_data_review.html')
+        $relativeFiles += @('tools/model-data/model_data_pipeline.py', 'tools/model-data/model_data_review.html',
+            'tools/model-data/model_training_environment.py', 'tools/model-data/model_training_requirements.txt')
     }
     $baseManifest = Get-Content -LiteralPath (Join-Path $localRoot 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     foreach ($relative in $relativeFiles) {
@@ -179,7 +183,7 @@ try {
         }
     }
     $completed = $true
-    if ($ModelDataReviewOnly) { Write-Host '主辅机审核资源差量更新完成；仅两项资源及 manifest，未读取或传输 Worker、模型、DLL。' }
+    if ($ModelDataReviewOnly) { Write-Host '主辅机审核资源差量更新完成；仅四项模型工作区资源及 manifest，未读取或传输 Worker、模型、DLL。' }
     else { Write-Host '主辅机 Worker 差量更新完成；未复制未变化 Worker、模型、DLL，未覆盖用户配置。' }
 } catch {
     $failure = $_

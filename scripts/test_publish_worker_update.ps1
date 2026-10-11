@@ -6,6 +6,9 @@ $ownedTest = New-XenOwnedTestDirectory -BasePath $TestRoot -RepositoryRoot (Spli
 $runRoot = $ownedTest.RootPath
 $publisher = Join-Path $PSScriptRoot 'publish_worker_update.ps1'
 $captureToolNames = @('XenSender.exe', 'XenCaptureEvidence.exe', 'XenAutoStopCapture.exe')
+$sharedSourceToolNames = $captureToolNames + @('XenClockSource.exe')
+$modelReviewNames = @('model_data_pipeline.py', 'model_data_review.html',
+    'model_training_environment.py', 'model_training_requirements.txt')
 $script:passed = 0
 function Assert-UpdateTest([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw "FAIL: $Message" }
@@ -15,9 +18,11 @@ function Write-UpdateFixture([string]$Path, [string]$Value) {
     New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
     [IO.File]::WriteAllText($Path, $Value, [Text.UTF8Encoding]::new($false))
 }
-function Assert-UpdateReject([hashtable]$Parameters, [string]$Message) {
+function Assert-UpdateReject([hashtable]$Parameters, [string]$Message, [string]$ExpectedError = '') {
     $rejected = $false
-    try { & $publisher @Parameters } catch { $rejected = $true }
+    try { & $publisher @Parameters } catch {
+        $rejected = -not $ExpectedError -or $_.Exception.Message -match $ExpectedError
+    }
     Assert-UpdateTest $rejected $Message
     Assert-UpdateTest (-not (Test-Path -LiteralPath $Parameters.OutputDirectory)) "$Message 未产生正式目录"
 }
@@ -51,8 +56,8 @@ try {
     & $git -C $sourceRoot init --quiet
     if ($LASTEXITCODE -ne 0) { throw 'fixture git init failed' }
     Write-UpdateFixture (Join-Path $sourceRoot 'fixture.txt') 'worker source'
-    foreach ($tool in @('model_data_pipeline.py', 'model_data_review.html',
-        'invoke_aim_manual_acceptance.ps1', 'aim_report.ps1', 'aim_control_diagnostics.ps1', 'aim_fixed_scene_analysis.ps1')) {
+    foreach ($tool in ($modelReviewNames + @(
+        'invoke_aim_manual_acceptance.ps1', 'aim_report.ps1', 'aim_control_diagnostics.ps1', 'aim_fixed_scene_analysis.ps1'))) {
         Write-UpdateFixture (Join-Path $sourceRoot "scripts/$tool") "updated-$tool"
     }
     Write-UpdateFixture (Join-Path $sourceRoot 'scripts/start_source_context_session.ps1') 'updated-source-session-script'
@@ -65,6 +70,7 @@ try {
     }
     & $git -C $sourceRoot add fixture.txt scripts/start_source_context_session.ps1
     & $git -C $sourceRoot add scripts/model_data_pipeline.py scripts/model_data_review.html
+    & $git -C $sourceRoot add scripts/model_training_environment.py scripts/model_training_requirements.txt
     & $git -C $sourceRoot add scripts/invoke_aim_manual_acceptance.ps1 scripts/aim_report.ps1 scripts/aim_control_diagnostics.ps1 scripts/aim_fixed_scene_analysis.ps1
     & $git -C $sourceRoot add scripts/invoke_hud_stop_acceptance.ps1
     & $git -C $sourceRoot add scripts/measure_process_resources.ps1 scripts/soak_acceptance_support.ps1
@@ -79,7 +85,7 @@ try {
     foreach ($tool in @('xen_recoil_calibration.exe', 'xen_recoil_tuner.exe')) {
         Write-UpdateFixture (Join-Path $buildRoot "Release/$tool") "updated-$tool"
     }
-    foreach ($tool in $captureToolNames) {
+    foreach ($tool in $sharedSourceToolNames) {
         Write-UpdateFixture (Join-Path $buildRoot "Release/$tool") "updated-$tool"
     }
     $identityPath = Join-Path $buildRoot 'xen-build-identity.json'
@@ -110,11 +116,15 @@ try {
     Write-UpdateFixture (Join-Path $baseRoot 'tools/acceptance/PACKAGE-NOTES.md') 'old package notes'
     Write-UpdateFixture (Join-Path $baseRoot 'tools/acceptance/MANUAL-ACCEPTANCE.md') 'old manual acceptance'
     Write-UpdateFixture (Join-Path $baseRoot 'tools/source/xen_source_context.exe') 'old source context'
-    foreach ($tool in $captureToolNames) {
+    foreach ($tool in $sharedSourceToolNames) {
         Write-UpdateFixture (Join-Path $baseRoot "tools/source/$tool") "old-$tool"
     }
     Write-UpdateFixture (Join-Path $baseRoot 'tools/source/start_source_context_session.ps1') 'old source session script'
     Write-UpdateFixture (Join-Path $baseRoot 'tools/recoil/import_recoil_profiles.py') 'old import script'
+    # 旧包只有审核脚本和页面；四资源开关须原位补全训练依赖组。
+    foreach ($tool in @('model_data_pipeline.py', 'model_data_review.html')) {
+        Write-UpdateFixture (Join-Path $baseRoot "tools/model-data/$tool") "old-$tool"
+    }
     foreach ($file in Get-ChildItem -LiteralPath $baseRoot -Recurse -File) {
         $relative = $file.FullName.Substring($baseRoot.Length + 1).Replace('\', '/')
         $runtime = if ($relative -match '^runtimes/([^/]+)/') { $Matches[1] } else { '' }
@@ -150,6 +160,26 @@ try {
     Write-UpdateFixture $staleParameters.SourceContextExecutable 'replaced-after-link'
     Assert-UpdateReject $changedArtifact 'F04 artifact payload must match linked SHA'
     Write-UpdateFixture $staleParameters.SourceContextExecutable $artifactOriginal
+    $clockParameters = $parameters.Clone()
+    $clockParameters.IncludeClockSource = $true
+    $clockParameters.OutputDirectory = Join-Path $runRoot 'clock-invalid-identity'
+    $clockPath = Join-Path $buildRoot 'Release/XenClockSource.exe'
+    $clockStampPath = $clockPath + '.identity.json'
+    $validClockStamp = [IO.File]::ReadAllText($clockStampPath)
+    foreach ($invalidField in @('git_commit', 'runtime', 'artifact', 'sha256')) {
+        $badClockStamp = $validClockStamp | ConvertFrom-Json
+        $badClockStamp.$invalidField = switch ($invalidField) {
+            'git_commit' { 'b' * 40 }
+            'runtime' { 'directml' }
+            'artifact' { 'XenSender.exe' }
+            'sha256' { '0' * 64 }
+        }
+        Write-UpdateFixture $clockStampPath ($badClockStamp | ConvertTo-Json)
+        Assert-UpdateReject $clockParameters "时钟工具拒绝错误链接身份 $invalidField" 'Linked artifact identity'
+    }
+    Remove-Item -LiteralPath $clockStampPath
+    Assert-UpdateReject $clockParameters '时钟工具缺少链接身份时拒绝' 'linked artifact identity'
+    Write-UpdateFixture $clockStampPath $validClockStamp
     $aimOnly = $parameters.Clone()
     $aimOnly.AimToolsOnly = $true; $aimOnly.ChangesOnly = $true
     $aimOnly.OutputDirectory = Join-Path $runRoot 'aim-tools-only'
@@ -316,8 +346,19 @@ try {
     $deltaParameters.SourceContextExecutable = Join-Path $buildRoot 'Release\xen_source_context.exe'
     $deltaParameters.IncludeRecoilTools = $true
     $deltaParameters.IncludeCaptureTools = $true
+    $deltaParameters.IncludeClockSource = $true
     $deltaParameters.IncludeRecoilMigrationScripts = $true
     $deltaParameters.IncludeSoakAcceptanceTools = $true
+    $legacyReview = @{ BasePackagePath = $baseRoot; Runtime = 'nvidia'; RepositoryRoot = $sourceRoot
+        GitExecutable = $git; OutputDirectory = (Join-Path $runRoot 'legacy-review-only');
+        ChangesOnly = $true; ModelDataReviewOnly = $true }
+    & $publisher @legacyReview
+    Assert-UpdateTest (@(Get-ChildItem -LiteralPath $legacyReview.OutputDirectory -Recurse -File).Count -eq 5) '既有资源-only开关从两资源旧包生成四资源及清单'
+    $legacyReviewManifest = Get-Content -LiteralPath (Join-Path $legacyReview.OutputDirectory 'manifest.json') -Raw | ConvertFrom-Json
+    Assert-UpdateTest ($legacyReviewManifest.git_commit -ceq ('a' * 40)) '补齐旧资源组不改变包构建提交'
+    foreach ($tool in $modelReviewNames) {
+        Assert-UpdateTest (Test-Path -LiteralPath (Join-Path $legacyReview.OutputDirectory "tools/model-data/$tool")) "旧包依赖组补齐 $tool"
+    }
     # 干净且构建身份匹配的缺文件反例，不能因git脏拒绝而假测缺文件门。
     foreach ($tool in @('measure_process_resources.ps1', 'soak_acceptance_support.ps1')) {
         & $git -C $sourceRoot rm --quiet "scripts/$tool"
@@ -344,12 +385,12 @@ try {
         Assert-UpdateReject $missingTool "基包清单不存在 $tool 时不可扩充载荷"
         Write-UpdateFixture $baseManifestPath $baseJson
     }
-    foreach ($tool in $captureToolNames) {
+    foreach ($tool in $sharedSourceToolNames) {
         $missingTool = $deltaParameters.Clone()
         $missingTool.OutputDirectory = Join-Path $runRoot "missing-$tool"
         $toolPath = Join-Path $buildRoot "Release/$tool"
         Remove-Item -LiteralPath $toolPath
-        Assert-UpdateReject $missingTool "启用采集工具时缺少同构建 $tool 必须拒绝"
+        Assert-UpdateReject $missingTool "启用源工具时缺少同构建 $tool 必须拒绝"
         Write-UpdateFixture $toolPath "updated-$tool"
         $missingRecord = $baseJson | ConvertFrom-Json
         $missingRecord.files = @($missingRecord.files | Where-Object { $_.path -cne "tools/source/$tool" })
@@ -358,7 +399,7 @@ try {
         $wrongRuntime = $baseJson | ConvertFrom-Json
         @($wrongRuntime.files | Where-Object { $_.path -ceq "tools/source/$tool" })[0].runtime = 'nvidia'
         Write-UpdateFixture $baseManifestPath ($wrongRuntime | ConvertTo-Json -Depth 10)
-        Assert-UpdateReject $missingTool "共享采集工具 $tool 不能冒充运行时私有载荷"
+        Assert-UpdateReject $missingTool "共享源工具 $tool 不能冒充运行时私有载荷" '共享工具清单'
         Write-UpdateFixture $baseManifestPath $baseJson
     }
     $invalidTool = $deltaParameters.Clone()
@@ -370,24 +411,24 @@ try {
     # 锁住未选 Worker，证明差量生成不会读取或重哈希继承二进制。
     $inheritedGuard = [IO.File]::Open((Join-Path $baseRoot 'runtimes/directml/Xen.exe'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
     try { & $publisher @deltaParameters } finally { $inheritedGuard.Dispose() }
-    Assert-UpdateTest (@(Get-ChildItem -LiteralPath $deltaOutput -Recurse -File).Count -eq 18) '差量只生成选定Worker/工具、审核两资源、长稳依赖、来源证据和清单'
+    Assert-UpdateTest (@(Get-ChildItem -LiteralPath $deltaOutput -Recurse -File).Count -eq 21) '差量只生成选定Worker/工具、模型四资源、长稳依赖、来源证据和清单'
     $captureEvidence = Get-Content -LiteralPath (Join-Path $deltaOutput $evidenceRelative) -Raw | ConvertFrom-Json
     Assert-UpdateTest (-not $captureEvidence.inherited_payload_hashes_verified) '采集工具差量不虚称继承文件已重哈希'
     $captureManifest = Get-Content -LiteralPath (Join-Path $deltaOutput 'manifest.json') -Raw | ConvertFrom-Json
-    foreach ($tool in $captureToolNames) {
+    foreach ($tool in $sharedSourceToolNames) {
         $relative = "tools/source/$tool"
         $sourcePath = (Get-Item -LiteralPath (Join-Path $buildRoot "Release/$tool")).FullName
         $sourceHash = (Get-FileHash -LiteralPath $sourcePath).Hash.ToLowerInvariant()
         $toolIdentity = @($captureEvidence.updated_components | Where-Object { $_.path -ceq $relative })
         $toolRecord = @($captureManifest.files | Where-Object { $_.path -ceq $relative })
-        Assert-UpdateTest ((Get-FileHash -LiteralPath (Join-Path $deltaOutput $relative)).Hash.ToLowerInvariant() -ceq $sourceHash) "采集工具载荷来自同构建目录 $tool"
+        Assert-UpdateTest ((Get-FileHash -LiteralPath (Join-Path $deltaOutput $relative)).Hash.ToLowerInvariant() -ceq $sourceHash) "源工具载荷来自同构建目录 $tool"
         Assert-UpdateTest ($toolIdentity.Count -eq 1 -and $toolIdentity[0].runtime -ceq '' -and
             $toolIdentity[0].git_commit -ceq $commit -and $toolIdentity[0].sha256 -ceq $sourceHash -and
-            $toolIdentity[0].build_identity_sha256 -ceq (Get-FileHash -LiteralPath $identityPath).Hash.ToLowerInvariant()) "采集工具证据绑定提交、SHA及构建身份 $tool"
+            $toolIdentity[0].build_identity_sha256 -ceq (Get-FileHash -LiteralPath $identityPath).Hash.ToLowerInvariant()) "源工具证据绑定提交、SHA及构建身份 $tool"
         Assert-UpdateTest ($toolRecord.Count -eq 1 -and $toolRecord[0].source -ceq "$sourcePath@$commit" -and
-            $toolRecord[0].sha256 -ceq $sourceHash -and $toolRecord[0].runtime -ceq '') "采集工具清单来源及共享归属准确 $tool"
+            $toolRecord[0].sha256 -ceq $sourceHash -and $toolRecord[0].runtime -ceq '') "源工具清单来源及共享归属准确 $tool"
     }
-    foreach ($tool in @('model_data_pipeline.py', 'model_data_review.html')) {
+    foreach ($tool in $modelReviewNames) {
         Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $deltaOutput "tools/model-data/$tool") -Raw) -ceq "updated-$tool") "审核资源来自当前源码 $tool"
     }
     Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $deltaOutput 'tools/source/start_source_context_session.ps1') -Raw) -ceq 'updated-source-session-script') '长稳开关自动纳入源启动依赖脚本'
@@ -400,8 +441,10 @@ try {
     $deltaEntries = @()
     foreach ($relative in @('runtimes/nvidia/Xen.exe', 'runtimes/nvidia/xen_recoil_calibration.exe',
         'tools/model-data/model_data_pipeline.py', 'tools/model-data/model_data_review.html',
+        'tools/model-data/model_training_environment.py', 'tools/model-data/model_training_requirements.txt',
         'runtimes/nvidia/xen_recoil_tuner.exe', 'tools/source/xen_source_context.exe', 'tools/source/start_source_context_session.ps1',
         'tools/source/XenSender.exe', 'tools/source/XenCaptureEvidence.exe', 'tools/source/XenAutoStopCapture.exe',
+        'tools/source/XenClockSource.exe',
         'tools/recoil/import_recoil_profiles.py', 'tools/recoil/migrate_legacy_recoil_profiles.py', 'tools/recoil/invoke_recoil_legacy_acceptance.ps1',
         'tools/acceptance/invoke_hud_stop_acceptance.ps1', 'tools/acceptance/measure_process_resources.ps1',
         'tools/acceptance/soak_acceptance_support.ps1', 'tools/acceptance/WORKER-UPDATE.json', 'manifest.json')) {
@@ -426,6 +469,14 @@ try {
     try { & $apply -PackageRoot $baseRoot -StageName $deltaName -CheckOnly } catch { $unknownToolRejected = $true }
     Assert-UpdateTest $unknownToolRejected '长稳白名单不授予任意验收脚本路径'
     Assert-UpdateTest ((Get-FileHash -LiteralPath $baseManifestPath).Hash -ceq $baseHash) '非法长稳载荷拒绝时基包未改变'
+    $incompleteModelPacket = $goodPacket | ConvertFrom-Json
+    $incompleteModelPacket.files = @($incompleteModelPacket.files | Where-Object { $_.path -cne 'tools/model-data/model_training_environment.py' })
+    Write-UpdateFixture $packetPath ($incompleteModelPacket | ConvertTo-Json -Depth 10)
+    $incompleteModelRejected = $false
+    try { & $apply -PackageRoot $baseRoot -StageName $deltaName -CheckOnly } catch {
+        $incompleteModelRejected = $_.Exception.Message -match '完整四文件依赖组'
+    }
+    Assert-UpdateTest $incompleteModelRejected '应用阶段拒绝缺少训练环境脚本的部分资源组'
     Write-UpdateFixture $packetPath $goodPacket
     function Get-Process { param($Name, $ErrorAction); [pscustomobject]@{ Path = $null } }
     $runningRejected = $false
@@ -445,7 +496,7 @@ try {
         }
         Assert-UpdateTest $runningRejected "选中压枪工具运行时拒绝 $tool"
     }
-    foreach ($tool in $captureToolNames) {
+    foreach ($tool in $sharedSourceToolNames) {
         $runningCaptureTool = [IO.Path]::GetFileNameWithoutExtension($tool)
         Set-Item Function:Get-Process -Value ({
             param($Name, $ErrorAction)
@@ -455,19 +506,19 @@ try {
         try { & $apply -PackageRoot $baseRoot -StageName $deltaName } catch {
             $runningRejected = $_.Exception.Message -match 'XEN_WORKER_RUNNING'
         }
-        Assert-UpdateTest $runningRejected "选中采集工具运行时拒绝 $tool"
+        Assert-UpdateTest $runningRejected "选中源工具运行时拒绝 $tool"
     }
     function Get-Process { param($Name, $ErrorAction); return @() }
-    foreach ($tool in $captureToolNames) {
+    foreach ($tool in $sharedSourceToolNames) {
         $toolLock = [IO.File]::Open((Join-Path $baseRoot "tools/source/$tool"), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
         $lockedToolRejected = $false
         try { & $apply -PackageRoot $baseRoot -StageName $deltaName } catch { $lockedToolRejected = $true }
         finally { $toolLock.Dispose() }
-        Assert-UpdateTest $lockedToolRejected "锁定采集工具拒绝替换 $tool"
+        Assert-UpdateTest $lockedToolRejected "锁定源工具拒绝替换 $tool"
         foreach ($entry in $deltaEntries) {
             $target = Join-Path $baseRoot $entry.path
             $actual = if (Test-Path -LiteralPath $target) { (Get-FileHash -LiteralPath $target).Hash.ToLowerInvariant() } else { '' }
-            Assert-UpdateTest ($actual -ceq $entry.old_sha256) "采集工具占用拒绝时不修改载荷 $($entry.path)"
+            Assert-UpdateTest ($actual -ceq $entry.old_sha256) "源工具占用拒绝时不修改载荷 $($entry.path)"
         }
     }
     $lock = [IO.File]::Open((Join-Path $baseRoot 'runtimes/nvidia/Xen.exe'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
@@ -508,16 +559,40 @@ try {
     $forbiddenReview = $reviewParameters.Clone()
     $forbiddenReview.IncludeCaptureTools = $true
     Assert-UpdateReject $forbiddenReview '仅审核资源模式拒绝混入采集工具'
+    $forbiddenReview = $reviewParameters.Clone()
+    $forbiddenReview.IncludeClockSource = $true
+    Assert-UpdateReject $forbiddenReview '仅审核资源模式拒绝混入时钟源工具'
+    $forbiddenAim = $aimOnly.Clone()
+    $forbiddenAim.OutputDirectory = Join-Path $runRoot 'aim-with-clock'
+    $forbiddenAim.IncludeClockSource = $true
+    Assert-UpdateReject $forbiddenAim '仅Aim工具模式拒绝混入时钟源工具'
     $deltaMixedRejected = $false
     try {
         & (Join-Path $PSScriptRoot 'publish_worker_delta.ps1') -PackageRoot 'unused' -Runtime nvidia `
             -DestinationRoot 'unused' -RemotePackageRoot 'unused' -ModelDataReviewOnly -IncludeCaptureTools
     } catch { $deltaMixedRejected = $_.Exception.Message -match '仅审核资源模式不能更新采集工具' }
     Assert-UpdateTest $deltaMixedRejected '远程差量入口在接触路径和网络前拒绝资源模式混入采集工具'
+    $deltaClockMixedRejected = $false
+    try {
+        & (Join-Path $PSScriptRoot 'publish_worker_delta.ps1') -PackageRoot 'unused' -Runtime nvidia `
+            -DestinationRoot 'unused' -RemotePackageRoot 'unused' -ModelDataReviewOnly -IncludeClockSource
+    } catch { $deltaClockMixedRejected = $_.Exception.Message -match '仅审核资源模式不能更新时钟源工具' }
+    Assert-UpdateTest $deltaClockMixedRejected '远程差量入口在接触路径和网络前拒绝资源模式混入时钟源工具'
+    # 资源-only不校验构建身份；保持干净源码，逐项证明拒绝的确来自缺失资源。
+    foreach ($tool in $modelReviewNames) {
+        & $git -C $sourceRoot rm --quiet "scripts/$tool"
+        & $git -C $sourceRoot -c user.name=XenTest -c user.email=xen-test@example.invalid commit --quiet -m '缺失模型资源夹具'
+        if ($LASTEXITCODE -ne 0) { throw '模型资源缺件夹具提交失败' }
+        $missingModel = $reviewParameters.Clone()
+        $missingModel.OutputDirectory = Join-Path $runRoot "missing-model-$tool"
+        Assert-UpdateReject $missingModel "模型资源组缺少 $tool 时拒绝" ([regex]::Escape($tool))
+        & $git -C $sourceRoot checkout --quiet $commit
+        if ($LASTEXITCODE -ne 0) { throw '模型资源夹具恢复失败' }
+    }
     & $publisher @reviewParameters
-    Assert-UpdateTest (@(Get-ChildItem -LiteralPath $reviewOutput -Recurse -File).Count -eq 3) '无构建目录生成两资源和manifest'
+    Assert-UpdateTest (@(Get-ChildItem -LiteralPath $reviewOutput -Recurse -File).Count -eq 5) '无构建目录生成四资源和manifest'
     $reviewManifest = Get-Content -LiteralPath (Join-Path $reviewOutput 'manifest.json') -Raw | ConvertFrom-Json
-    foreach ($tool in @('model_data_pipeline.py', 'model_data_review.html')) {
+    foreach ($tool in $modelReviewNames) {
         $reviewRecord = @($reviewManifest.files | Where-Object { $_.path -ceq "tools/model-data/$tool" })
         Assert-UpdateTest ($reviewRecord.Count -eq 1 -and $reviewRecord[0].source.EndsWith("@$commit")) '仅审核资源的manifest来源绑定当前源码提交'
     }
@@ -526,7 +601,8 @@ try {
     $reviewStage = Join-Path $baseRoot $reviewName
     [IO.Directory]::Move($reviewOutput, $reviewStage)
     $reviewEntries = @()
-    foreach ($relative in @('tools/model-data/model_data_pipeline.py', 'tools/model-data/model_data_review.html', 'manifest.json')) {
+    foreach ($relative in @('tools/model-data/model_data_pipeline.py', 'tools/model-data/model_data_review.html',
+        'tools/model-data/model_training_environment.py', 'tools/model-data/model_training_requirements.txt', 'manifest.json')) {
         $reviewEntries += [ordered]@{ path = $relative
             old_sha256 = (Get-FileHash -LiteralPath (Join-Path $baseRoot $relative)).Hash.ToLowerInvariant()
             new_sha256 = (Get-FileHash -LiteralPath (Join-Path $reviewStage $relative)).Hash.ToLowerInvariant() }
@@ -580,6 +656,20 @@ try {
         $relative = "tools/source/$tool"
         Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $baseRoot $relative) -Raw) -ceq "updated-$tool") "选中采集工具已原子更新 $tool"
         Assert-UpdateTest (-not (Test-Path -LiteralPath (Join-Path $captureDefault.OutputDirectory $relative))) "未选采集工具不进入差量 $tool"
+    }
+    Assert-UpdateTest (Test-Path -LiteralPath (Join-Path $captureDefault.OutputDirectory 'tools/source/XenClockSource.exe')) '时钟开关独立于采集工具开关'
+    $clockDefault = $deltaParameters.Clone()
+    $clockDefault.Remove('IncludeClockSource')
+    $clockDefault.Remove('IncludeModelDataReview')
+    $clockDefault.OutputDirectory = Join-Path $runRoot 'clock-and-model-default-omitted'
+    & $publisher @clockDefault
+    Assert-UpdateTest (-not (Test-Path -LiteralPath (Join-Path $clockDefault.OutputDirectory 'tools/source/XenClockSource.exe'))) '未选时钟工具不进入差量'
+    Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $baseRoot 'tools/source/XenClockSource.exe') -Raw) -ceq 'updated-XenClockSource.exe') '选中时钟工具已原子更新'
+    foreach ($tool in $captureToolNames) {
+        Assert-UpdateTest (Test-Path -LiteralPath (Join-Path $clockDefault.OutputDirectory "tools/source/$tool")) '采集工具开关独立于时钟开关'
+    }
+    foreach ($tool in $modelReviewNames) {
+        Assert-UpdateTest (-not (Test-Path -LiteralPath (Join-Path $clockDefault.OutputDirectory "tools/model-data/$tool"))) "未选模型资源不进入差量 $tool"
     }
     foreach ($entry in $protected) {
         Assert-UpdateTest ((Get-FileHash -LiteralPath (Join-Path $baseRoot $entry.path)).Hash.ToLowerInvariant() -ceq $entry.sha256) '差量后用户配置原字节保留'

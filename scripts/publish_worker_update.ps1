@@ -13,6 +13,7 @@
     [switch]$IncludeLauncher,
     [switch]$IncludeRecoilTools,
     [switch]$IncludeCaptureTools,
+    [switch]$IncludeClockSource,
     [switch]$IncludeRecoilMigrationScripts,
     [switch]$IncludeSourceSessionScript,
     [switch]$IncludeHudAcceptanceScript,
@@ -29,7 +30,7 @@ Set-StrictMode -Version Latest
 $toolsOnly = $ModelDataReviewOnly -or $AimToolsOnly
 if ($AimToolsOnly) {
     if (-not $ChangesOnly -or $ModelDataReviewOnly -or $IncludeLauncher -or
-        $IncludeRecoilTools -or $IncludeCaptureTools -or $ConfigPath -or $WorkspaceSettingsPath -or
+        $IncludeRecoilTools -or $IncludeCaptureTools -or $IncludeClockSource -or $ConfigPath -or $WorkspaceSettingsPath -or
         $SourceContextExecutable -or $IncludeModelDataReview -or $IncludeRecoilMigrationScripts -or
         $IncludeSourceSessionScript -or $IncludeHudAcceptanceScript -or $IncludeSoakAcceptanceTools -or
         $PackageNotesPath -or $ManualAcceptancePath) {
@@ -39,10 +40,10 @@ if ($AimToolsOnly) {
 }
 if ($ModelDataReviewOnly) {
     if ($IncludeAimTools) { throw 'Model review-only and Aim tool publication cannot be combined.' }
-    if (-not $ChangesOnly -or $IncludeLauncher -or $IncludeRecoilTools -or $IncludeCaptureTools -or $IncludeRecoilMigrationScripts -or
+    if (-not $ChangesOnly -or $IncludeLauncher -or $IncludeRecoilTools -or $IncludeCaptureTools -or $IncludeClockSource -or $IncludeRecoilMigrationScripts -or
         $IncludeSourceSessionScript -or $IncludeHudAcceptanceScript -or $IncludeSoakAcceptanceTools -or
         $SourceContextExecutable -or $ConfigPath -or $WorkspaceSettingsPath -or $PackageNotesPath -or $ManualAcceptancePath) {
-        throw '仅审核资源模式只能生成两项审核资源的差量。'
+        throw '仅审核资源模式只能生成四项模型工作区资源的差量。'
     }
     $IncludeModelDataReview = $true
 }
@@ -197,7 +198,7 @@ if ($IncludeSourceSessionScript) {
     $sourceScriptHash = (Get-FileHash -LiteralPath $overrides[$sourceScriptRelative] -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 $recoilToolHashes = @{}
-$captureToolHashes = @{}
+$sharedSourceToolHashes = @{}
 $hudScriptRelative = 'tools/acceptance/invoke_hud_stop_acceptance.ps1'
 $hudScriptHash = ''
 if ($IncludeHudAcceptanceScript) {
@@ -214,7 +215,8 @@ $recoilScriptHashes = @{}
 $soakScriptHashes = @{}
 $modelReviewHashes = @{}
 if ($IncludeModelDataReview) {
-    foreach ($tool in @('model_data_pipeline.py', 'model_data_review.html')) {
+    foreach ($tool in @('model_data_pipeline.py', 'model_data_review.html',
+        'model_training_environment.py', 'model_training_requirements.txt')) {
         $relative = "tools/model-data/$tool"
         $overrides[$relative] = Resolve-UpdateFile (Join-Path $sourceRoot "scripts/$tool")
         $modelReviewHashes[$relative] = (Get-FileHash -LiteralPath $overrides[$relative] -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -272,15 +274,16 @@ if ($IncludeRecoilTools) {
         $recoilToolHashes[$relative] = (Get-FileHash -LiteralPath $overrides[$relative] -Algorithm SHA256).Hash.ToLowerInvariant()
     }
 }
-if ($IncludeCaptureTools) {
-    foreach ($tool in @('XenSender.exe', 'XenCaptureEvidence.exe', 'XenAutoStopCapture.exe')) {
-        $relative = "tools/source/$tool"
-        if (-not $records.ContainsKey($relative) -or $records[$relative].runtime -cne '') {
-            throw "采集工具必须已存在于基包共享工具清单：$relative"
-        }
-        $overrides[$relative] = Resolve-UpdateFile (Join-Path $buildRoot "Release/$tool")
-        $captureToolHashes[$relative] = (Get-FileHash -LiteralPath $overrides[$relative] -Algorithm SHA256).Hash.ToLowerInvariant()
+$sharedSourceToolNames = @()
+if ($IncludeCaptureTools) { $sharedSourceToolNames += @('XenSender.exe', 'XenCaptureEvidence.exe', 'XenAutoStopCapture.exe') }
+if ($IncludeClockSource) { $sharedSourceToolNames += 'XenClockSource.exe' }
+foreach ($tool in $sharedSourceToolNames) {
+    $relative = "tools/source/$tool"
+    if (-not $records.ContainsKey($relative) -or $records[$relative].runtime -cne '') {
+        throw "源工具必须已存在于基包共享工具清单：$relative"
     }
+    $overrides[$relative] = Resolve-UpdateFile (Join-Path $buildRoot "Release/$tool")
+    $sharedSourceToolHashes[$relative] = (Get-FileHash -LiteralPath $overrides[$relative] -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 if ($IncludeLauncher) {
     $overrides['XenLauncher.exe'] = Resolve-UpdateFile (Join-Path $buildRoot 'Release\XenLauncher.exe')
@@ -342,8 +345,8 @@ try {
             if ($recoilToolHashes.ContainsKey($relative) -and $sourceHash -cne $recoilToolHashes[$relative]) {
                 throw '压枪工具在发布期间变化。'
             }
-            if ($captureToolHashes.ContainsKey($relative) -and $sourceHash -cne $captureToolHashes[$relative]) {
-                throw '采集工具在发布期间变化。'
+            if ($sharedSourceToolHashes.ContainsKey($relative) -and $sourceHash -cne $sharedSourceToolHashes[$relative]) {
+                throw '源工具在发布期间变化。'
             }
             if ($recoilScriptHashes.ContainsKey($relative) -and $sourceHash -cne $recoilScriptHashes[$relative]) {
                 throw '压枪迁移脚本在发布期间变化。'
@@ -353,7 +356,7 @@ try {
             }
             $record.size = [long]$length
             $record.sha256 = $sourceHash
-            $record.source = if ($relative -in @($workerRelative, $sourceToolRelative, $sourceScriptRelative, $hudScriptRelative) -or $recoilToolHashes.ContainsKey($relative) -or $captureToolHashes.ContainsKey($relative) -or $recoilScriptHashes.ContainsKey($relative)) { "$source@$commit" } else { $source }
+            $record.source = if ($relative -in @($workerRelative, $sourceToolRelative, $sourceScriptRelative, $hudScriptRelative) -or $recoilToolHashes.ContainsKey($relative) -or $sharedSourceToolHashes.ContainsKey($relative) -or $recoilScriptHashes.ContainsKey($relative)) { "$source@$commit" } else { $source }
         } elseif ($length -ne [long]$record.size) { throw "继承载荷复制长度错误：$relative" }
         $copiedBytes += $length
         Write-Progress -Activity '继承统一包显式载荷' -Status "$copiedBytes / $totalBytes 字节" `
@@ -417,10 +420,10 @@ try {
             sha256 = $recoilToolHashes[$relative]; build_identity_sha256 = $identityHash
         }
     }
-    foreach ($relative in @($captureToolHashes.Keys | Sort-Object)) {
+    foreach ($relative in @($sharedSourceToolHashes.Keys | Sort-Object)) {
         $updateEvidence.updated_components += [ordered]@{
             runtime = ''; path = $relative; git_commit = $commit.ToLowerInvariant()
-            sha256 = $captureToolHashes[$relative]; build_identity_sha256 = $identityHash
+            sha256 = $sharedSourceToolHashes[$relative]; build_identity_sha256 = $identityHash
         }
     }
     foreach ($relative in @($recoilScriptHashes.Keys | Sort-Object)) {
