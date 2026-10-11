@@ -71,7 +71,14 @@ public:
     }
     KeyboardReceipt set_wasd_keyboard(std::uint8_t mask) noexcept override {
         if (keyboard_delay_ms) std::this_thread::sleep_for(std::chrono::milliseconds(keyboard_delay_ms));
-        std::lock_guard lock(mutex); software.push_back(mask);
+        std::unique_lock lock(mutex); software.push_back(mask);
+        if (keyboard_gate_armed_) {
+            keyboard_gate_entered_ = true;
+            keyboard_gate_cv_.notify_all();
+            keyboard_gate_expired_ = !keyboard_gate_cv_.wait_for(lock, std::chrono::seconds(3),
+                [&] { return keyboard_gate_released_; });
+            keyboard_gate_armed_ = false;
+        }
         return {KeyboardDisposition::ACKNOWLEDGED};
     }
     KeyboardReceipt set_wasd_mask(std::uint8_t key, bool masked) noexcept override {
@@ -89,7 +96,8 @@ public:
     }
     bool read_movement_reports(InputReportCursor& cursor, InputReportBatch& batch) noexcept override {
         std::unique_lock lock(mutex);
-        const bool gate_ready = read_gate_kind_ == ReadGate::SEQUENCE ? cursor.sequence >= read_gate_after_ :
+        const bool gate_ready = read_gate_kind_ == ReadGate::SEQUENCE ? cursor.sequence >= read_gate_after_ &&
+            (read_gate_epoch_ == 0 || cursor.epoch == read_gate_epoch_) :
             read_gate_kind_ == ReadGate::TURN_RELEASED ? software.size() >= 3 && software.back() == 0 && ctrl_events.empty() :
             read_gate_kind_ == ReadGate::CTRL_ACKNOWLEDGED ? ctrl_down : cleanups.load() > 0;
         // read入口位于上一轮后端receipt返回后；不用伪造Worker状态或生产时钟。
@@ -133,10 +141,26 @@ public:
     int total() const { std::lock_guard lock(mutex); int result = 0; for (int value : moves) result += value; return result; }
     std::vector<int> keys() const { std::lock_guard lock(mutex); return software; }
 
-    void arm_read_gate(std::uint64_t after_sequence) {
+    void arm_keyboard_gate() {
+        std::lock_guard lock(mutex);
+        keyboard_gate_armed_ = true;
+        keyboard_gate_entered_ = keyboard_gate_released_ = keyboard_gate_expired_ = false;
+    }
+    bool await_keyboard_gate() {
+        std::unique_lock lock(mutex);
+        return keyboard_gate_cv_.wait_for(lock, std::chrono::seconds(3), [&] { return keyboard_gate_entered_; });
+    }
+    void release_keyboard_gate() {
+        { std::lock_guard lock(mutex); keyboard_gate_released_ = true; }
+        keyboard_gate_cv_.notify_all();
+    }
+    bool keyboard_gate_expired() const { std::lock_guard lock(mutex); return keyboard_gate_expired_; }
+
+    void arm_read_gate(std::uint64_t after_sequence, std::uint64_t expected_epoch = 0) {
         std::lock_guard lock(mutex);
         read_gate_kind_ = ReadGate::SEQUENCE;
         read_gate_after_ = after_sequence;
+        read_gate_epoch_ = expected_epoch;
         read_gate_armed_ = true;
         read_gate_entered_ = read_gate_released_ = read_gate_expired_ = false;
     }
@@ -200,8 +224,12 @@ private:
     std::condition_variable read_gate_cv_;
     ReadGate read_gate_kind_ = ReadGate::SEQUENCE;
     std::uint64_t read_gate_after_ = 0;
+    std::uint64_t read_gate_epoch_ = 0;
     bool read_gate_armed_ = false, read_gate_entered_ = false;
     bool read_gate_released_ = false, read_gate_expired_ = false;
+    std::condition_variable keyboard_gate_cv_;
+    bool keyboard_gate_armed_ = false, keyboard_gate_entered_ = false;
+    bool keyboard_gate_released_ = false, keyboard_gate_expired_ = false;
 };
 
 class WorkerObservation;
@@ -764,6 +792,66 @@ void running_config_is_frozen() {
     wait_for([&] { return worker.snapshot().completed == 2; });
     require(fake->total() == -300, "新动作未使用新参数"); worker.stop();
 }
+void hot_config_crosses_cancel_and_ack() {
+    // 在实际Worker等待内存后端方向ACK时，交叉热配置、取消、尾报告和清理未知。
+    for (int scenario = 0; scenario < 4; ++scenario) {
+        DiagnosticIteration diagnostic("hot_config_cancel", scenario);
+        auto fake = std::make_shared<Fake>();
+        std::atomic<bool> suspended{false};
+        movement::Worker worker(fake, [] { return true; },
+            [&](bool value) { suspended = value; return true; });
+        WorkerObservation observation(*fake, worker);
+        auto initial = config();
+        fake->arm_keyboard_gate();
+        require(worker.start(initial), "热配置交错启动失败");
+        trigger(fake);
+        const bool entered = fake->await_keyboard_gate();
+        if (!entered) fake->release_keyboard_gate();
+        require(entered, "未到达方向ACK屏障");
+        auto changed = initial;
+        changed.spin_angle_degrees = 2;
+        changed.spin_duration_ms = 20;
+        changed.report_mode = movement::ReportMode::RELATIVE_DELTA;
+        if (scenario == 1) worker.cancel();
+        worker.configure(changed);
+        if (scenario != 1) worker.cancel();
+        if (scenario == 2) { changed.spin_enabled = false; worker.configure(changed); }
+        fake->fail_cleanup = scenario == 3;
+        fake->report(-20, 2, true, 0x04); // 旧动作尾部输入不得排队为下一动作。
+        fake->release_keyboard_gate();
+        wait_for([&] { return worker.snapshot().canceled == 1; });
+        require(!fake->keyboard_gate_expired(), "方向ACK闸门不是自动超时放行");
+        require(fake->total() == 0 && fake->keys() == std::vector<int>{2},
+            "配置跨取消后方向ACK返回仍产生位移或额外方向键");
+        require(worker.snapshot().started == 1 && fake->cleanups == 1,
+            "取消尾报告重启旧动作或未承担清理责任");
+        if (scenario == 3) {
+            require(worker.snapshot().state == movement::State::FAULT && suspended,
+                "未知清理ACK被热配置清除或归还共享键盘");
+            worker.stop();
+            require(!worker.start(initial), "未知清理债务被stop/start清除");
+        } else {
+            wait_for([&] { return !suspended.load(); });
+            changed.spin_enabled = true;
+            worker.configure(changed);
+            // 新epoch基线先被实际读取，再提交新触发，避免用sleep猜配置已消费。
+            fake->new_epoch();
+            fake->arm_read_gate(1, 2);
+            fake->report(0, 0, true, 0x04);
+            const bool baseline_read = fake->await_read_gate();
+            fake->report(-10, 1, true, 0x04);
+            fake->release_read_gate();
+            require(baseline_read, "新配置输入基线未消费");
+            wait_for([&] { return worker.snapshot().completed == 1; });
+            require(fake->total() == -200 && worker.snapshot().started == 2,
+                "取消后新动作未采用新角度或重复处理尾报告");
+            require(!fake->read_gate_expired(), "恢复基线闸门自动超时");
+            worker.stop();
+        }
+        std::lock_guard lock(fake->mutex);
+        require(!fake->subscribed, "stop后未释放输入订阅");
+    }
+}
 void epoch_and_delay_cancel() {
     auto fake = std::make_shared<Fake>(); movement::Worker worker(fake, [] { return true; });
     WorkerObservation observation_worker(*fake, worker);
@@ -933,6 +1021,10 @@ void observation_diagnostic(std::string_view mode) {
 }
 }
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--hot-config-cancel") {
+        try { hot_config_crosses_cancel_and_ack(); std::cout << "热配置取消交错通过\n"; return 0; }
+        catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
+    }
     if (argc > 1 && std::string_view(argv[1]) == "--diagnostic-cancel") {
         try {
             require(argc == 3, "用法：--diagnostic-cancel pending|held|cleanup|cleanup-unknown");
@@ -980,6 +1072,7 @@ int main(int argc, char** argv) {
         invalid=config(); invalid.large_enabled=true; require(!movement::valid_config(invalid),"双触发冲突未拒绝");
         timed_ctrl_lifecycle(); long_ctrl_hold_lifecycle(); relative_field_and_wait_expiry(); guard_boundary_and_packets(); guard_consumes_all_triggers(); waiting_guard_key_and_epoch(); wheel_mapping_default_regression(); spin_and_symmetric_large(); disabled_has_no_output(); cancel_and_permission(); fault_latches(); wrap_and_relative_dedup(); running_config_is_frozen(); epoch_and_delay_cancel(); mouse_failure_and_polarity(); shared_trigger_clock(); long_jump_ack_does_not_consume_turn(); disabling_active_item_cleans_up(); latest_direction_and_independent_triggers(); key_trigger_and_stale_direction();
         keyboard_direction(); waiting_and_rearm(); fixed_large_and_tail(); cancellation_and_faults(); reports_and_restart(); config_delay_and_fail_move();
+        hot_config_crosses_cancel_and_ack();
         std::cout << "身法专项通过\n"; return 0;
     } catch(const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
