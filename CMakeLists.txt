@@ -1268,6 +1268,13 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(runtime_camera_motion_tests OPENCV)
     add_test(NAME runtime_camera_motion_tests COMMAND runtime_camera_motion_tests)
 
+    add_executable(runtime_cpu_plant_tests tests/runtime_cpu_plant_tests.cpp)
+    target_link_libraries(runtime_cpu_plant_tests PRIVATE runtime ws2_32)
+    xen_deploy_runtime_dlls(runtime_cpu_plant_tests OPENCV ORT NDI)
+    add_test(NAME runtime_cpu_plant_tests COMMAND runtime_cpu_plant_tests
+        "${PROJECT_SOURCE_DIR}/tests/fixtures/runtime_cpu_plant.onnx")
+    set_tests_properties(runtime_cpu_plant_tests PROPERTIES TIMEOUT 30)
+
     add_executable(runtime_aim_frame_tests
         tests/runtime_aim_frame_tests.cpp Xen/runtime/camera_motion.cpp Xen/runtime/runtime_queue.cpp)
     target_include_directories(runtime_aim_frame_tests PRIVATE
