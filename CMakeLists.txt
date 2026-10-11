@@ -1513,6 +1513,11 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(model_workspace_tests OPENCV)
     add_test(NAME model_workspace_tests COMMAND model_workspace_tests
         "${XEN_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/model_workspace_worker_fixture.py")
+    add_executable(model_workspace_status_tests tests/model_workspace_status_tests.cpp)
+    target_link_libraries(model_workspace_status_tests PRIVATE model_workspace)
+    xen_deploy_runtime_dlls(model_workspace_status_tests OPENCV)
+    add_test(NAME model_workspace_status_tests COMMAND model_workspace_status_tests
+        "${XEN_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/model_workspace_status_fixture.py")
     add_test(NAME evidence_publication_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
         "${PROJECT_SOURCE_DIR}/tests/evidence_publication_tests.py")
