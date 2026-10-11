@@ -1,0 +1,9 @@
+# 在途Recoil位移遇到源换代
+
+普通RecoilWorker、Controller、MotionLedger和共享仲裁器真实执行，自有内存schema3曲线经既有Loader；不保存、采用或登记候选，不启动校准输出。Mouse仅记录调用，在第一条非零move返回前用有界屏障改变source_context_epoch。
+
+三种完成结果：成功且完成时刻有效、返回失败、声称成功但缺完成时刻。第一条位移均为Y=7 counts：有效完成仍记confirmed_y=7；后两种记unknown_y=7且confirmed_y=0，不能把已调用的命令按零取消或重发。实际执行记录必须证明source变化位于backend_called_at与backend_returned_at之间；屏障超时不能通过。此处Recoil ACKNOWLEDGED枚举表示其成功完成契约，不冒称Mouse提供了协议ACK或物理E。
+
+三例均在连续20次后续输入检查中不重复旧命令。成功完成后健康松按允许新session=2；UNKNOWN即使重新松按仍不输出，账本不完整、共享输出门故障、停止保留fault；停止后归还Y所有权。初次三例全过，无生产反例、无生产修改。
+
+Release目标与CTest均为recoil_source_receipt_tests，30秒超时；相关回归motion_ledger_tests。独立目标避免执行其他业务工作流。没有真实鼠标/游戏/网络/采集/UI/GPU，源为直接合成epoch；真实E与配置D适用范围仍未证明，不能据此调控制参数。既有D12/E1及D16实际来源适配证据仍绑定各自历史SHA。
