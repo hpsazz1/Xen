@@ -203,7 +203,7 @@ void require_page_table(const char* table_name) {
 }
 
 // 真实面板+ImGui交互，只截获动作，不构造Session/Runtime/设备。
-void recoil_flow_preview(const std::filesystem::path& output) {
+void recoil_flow_preview(const std::filesystem::path& output, bool candidate_only = false) {
     const auto previous = std::filesystem::current_path();
     struct RestoreDirectory { std::filesystem::path path; ~RestoreDirectory() { std::filesystem::current_path(path); } } restore{previous};
     std::filesystem::current_path(output);
@@ -271,6 +271,8 @@ void recoil_flow_preview(const std::filesystem::path& output) {
         io.AddMouseButtonEvent(0,true); frame(); io.AddMouseButtonEvent(0,false); frame(); settle();
     };
     settle();
+    // 精确候选专项可独立运行；完整入口继续保留原生文件选择与取消回归。
+    if (!candidate_only) {
     // 最终入口标签由生产面板提供；本测试不调用内部状态修改接口。
     click("验证已有弹道");
     require(!emitted.empty() && emitted.back().debug_action == debug_session::Action::PREPARE &&
@@ -463,6 +465,7 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     const std::string imported_text{std::istreambuf_iterator<char>(imported_file),{}};std::string imported_error;
     require(load_recoil_profile(imported_text,imported_result,imported_error)&&imported_result.id=="external-ui",
         "导入结果必须是所选外部曲线的真实内容");
+    }
     // 使用生产结果导入与真实控件，确认初始候选、五组优化和阶段推进在主流程可达。
     settle(); panel.reset(); debug={}; emitted.clear();
     { std::ofstream file("cache/recoil/workflow-settings.json");
@@ -507,11 +510,14 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     require(emitted.size()==1 && emitted.back().debug_request.mode==debug_session::Mode::RECOIL_CALIBRATE,
         "恢复旧成功候选但标定已失效时，记录优化数据不得静默降为无测量测试");
     const auto first_named_curve=std::filesystem::path(emitted.back().debug_request.recoil_profile_path);
-    require(first_named_curve.filename().string().starts_with("ak47-2shots-") && std::filesystem::is_regular_file(first_named_curve),
-        "采集保存文件必须明确武器和本次发数");
+    require(first_named_curve.filename().string().starts_with("weapon_ak47-r") && std::filesystem::is_regular_file(first_named_curve),
+        "采集保存文件必须使用正式武器版本命名");
     std::ifstream first_named_input(first_named_curve);
     const std::string first_named_text{std::istreambuf_iterator<char>(first_named_input),{}};
     first_named_input.close();
+    RecoilProfile first_named_profile; std::string first_named_error;
+    require(load_recoil_profile(first_named_text,first_named_profile,first_named_error) &&
+        first_named_profile.id.starts_with("ak47-2shots-"),"采集保存曲线身份必须明确武器和本次发数");
     std::filesystem::copy_file(first_named_curve,"stage-candidate.json",std::filesystem::copy_options::overwrite_existing);
     debug.generation=101;debug.result=std::make_shared<const nlohmann::json>(nlohmann::json{
         {"weapon_id","ak47"},{"success",true},{"completed",true},{"cleanup_known",true},
@@ -527,7 +533,7 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     require(emitted.size()==1 && emitted.back().debug_request.mode==debug_session::Mode::RECOIL_TEST,
         "同发数再次人工保存仅准备当前新候选测试");
     const auto second_named_curve=std::filesystem::path(emitted.back().debug_request.recoil_profile_path);
-    require(second_named_curve!=first_named_curve && second_named_curve.filename().string().starts_with("ak47-2shots-"),
+    require(second_named_curve!=first_named_curve && second_named_curve.filename().string().starts_with("weapon_ak47-r"),
         "同武器同发数两次保存必须生成独立可识别文件");
     { std::ifstream file(first_named_curve); const std::string unchanged{std::istreambuf_iterator<char>(file),{}};
       require(unchanged==first_named_text,"保存第二条候选不得覆盖第一次文件"); }
@@ -537,6 +543,40 @@ void recoil_flow_preview(const std::filesystem::path& output) {
         stage_result(index,false);
         click("画面已核对：加入优化数据");
         require(emitted.empty(),"人工加入测量不得自动启动下一组或推进阶段");
+        if (index == 1) {
+            // 真实保存按钮走到另一候选的载入拒绝，旧执行基线与人工待用组必须一起保留。
+            stage_result(20,true);
+            click("画面已核对：保存候选并准备测试");
+            require(emitted.empty(),"候选载入被待用组拒绝后不得误准备另一条曲线");
+            require(screen_contains("当前有待用组，不能切换执行基线") &&
+                screen_contains("训练 1/3，验证 0/2") &&
+                screen_contains("画面已核对：保存候选并准备测试") &&
+                screen_contains(second_named_curve.filename().string().c_str()) &&
+                !screen_contains("采集候选已载入"),
+                "候选载入失败必须保留原选择、待用组、待核对候选和失败提示");
+            { std::ifstream file("cache/recoil/workflow-settings.json"); nlohmann::json settings; file>>settings;
+              require(settings.at("ak47").at("selected_file")==second_named_curve.filename().string(),
+                  "候选载入失败不得持久化尚未载入的文件选择"); }
+            click("测试曲线");
+            const auto previous_label="AK-47 | 2发 | v"+std::to_string(first_named_profile.revision)+" | "+
+                first_named_curve.filename().string()+"###"+first_named_curve.filename().string();
+            click(previous_label.c_str(),true);
+            require(emitted.empty() && screen_contains("当前有待用组，不能切换执行基线") &&
+                screen_contains("训练 1/3，验证 0/2") && screen_contains(second_named_curve.filename().string().c_str()),
+                "下拉切换被拒绝时也必须保留待用组和原执行基线");
+            click("清空本轮待用数据");
+            click("画面已核对：保存候选并准备测试");
+            require(emitted.size()==1 && emitted.back().debug_request.mode==debug_session::Mode::RECOIL_TEST &&
+                screen_contains("训练 0/3，验证 0/2") && screen_contains("采集候选已载入"),
+                "明确清空待用组后重试应实际载入候选并仅准备一次测试");
+            const auto retry_curve=std::filesystem::path(emitted.back().debug_request.recoil_profile_path);
+            require(retry_curve!=second_named_curve && screen_contains(retry_curve.filename().string().c_str()),
+                "重试成功后请求和当前曲线必须同时指向新候选");
+            std::filesystem::copy_file(retry_curve,"stage-candidate.json",std::filesystem::copy_options::overwrite_existing);
+            emitted.clear(); stage_result(21,false); click("画面已核对：加入优化数据");
+            require(emitted.empty() && screen_contains("训练 1/3，验证 0/2"),
+                "重试成功后必须能够按新执行基线重新加入优化数据");
+        }
     }
     require(screen_contains("训练 3/3，验证 2/2") && screen_contains("下一步：5组已齐") &&
         screen_contains("优化本阶段并载入候选") && screen_contains("阶段目标：2 / 6 发；复测通过后追加至 4 发"),
@@ -747,10 +787,11 @@ void recoil_flow_preview(const std::filesystem::path& output) {
         emitted.back().debug_request.recoil_target_shots==8&&emitted.back().debug_request.recoil_locked_prefix_ms==100,
         "五组优化后仅准备8发新候选且保持原锁前段");
     const auto optimized_path=std::filesystem::path(emitted.back().debug_request.recoil_profile_path);
-    require(optimized_path.filename().string().starts_with("ak47-8shots-"),"优化后必须保存明确8发的新文件");
+    require(optimized_path.filename().string().starts_with("weapon_ak47-r"),"优化后必须保存正式武器版本文件");
     RecoilProfile optimized; std::string optimized_error;
     { std::ifstream file(optimized_path); const std::string text{std::istreambuf_iterator<char>(file),{}};
       require(load_recoil_profile(text,optimized,optimized_error),"优化候选必须可读"); }
+    require(optimized.id.starts_with("ak47-8shots-"),"优化候选身份必须明确8发目标");
     require(optimized.points.back().time_ms==200,"8发优化候选须实际延长采集时域");
     for(double time:{0.,50.,100.}) {
         const auto before=sample_recoil_profile(prefix_base,time),after=sample_recoil_profile(optimized,time);
@@ -811,8 +852,11 @@ int wmain(int argc, wchar_t** argv) {
         struct RestorePreviewDirectory { std::filesystem::path path; ~RestorePreviewDirectory(){std::filesystem::current_path(path);} } restore_preview{preview_previous};
         std::filesystem::current_path(output); // 历史浏览也只能读取本预览独立目录。
         LogConfig logs; logs.enable_file = false; logs.enable_debug_file = false; Log::init(logs);
-        for (int i=2;i<argc;++i) if (std::wstring_view(argv[i])==L"--recoil-flow") {
-            recoil_flow_preview(output); Log::shutdown(); std::cout << "PASS recoil-flow\n"; return 0;
+        for (int i=2;i<argc;++i) if (std::wstring_view(argv[i])==L"--recoil-flow" ||
+            std::wstring_view(argv[i])==L"--recoil-candidate-flow") {
+            const bool candidate_only=std::wstring_view(argv[i])==L"--recoil-candidate-flow";
+            recoil_flow_preview(output,candidate_only); Log::shutdown();
+            std::cout << (candidate_only ? "PASS recoil-candidate-flow\n" : "PASS recoil-flow\n"); return 0;
         }
         Overlay overlay; AppConfig config;
         config.ui.width = kMinimumUiWidth; config.ui.height = kMinimumUiHeight;

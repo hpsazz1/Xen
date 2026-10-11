@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import re
+import struct
 import uuid
 
 from import_recoil_profiles import convert, convert_discrete, load_weapon_names
@@ -19,6 +20,25 @@ SOURCE_PROFILES_SHA256 = "3b16b56c3a51fc0d09cafffc8ffc49e280a5abffad0c6340e2f2ad
 
 def digest(raw):
     return hashlib.sha256(raw).hexdigest()
+
+
+def confirmation_sha256(profile, gsi_weapon):
+    """与生产解析器共享 v1 内容合同；浮点按位编码，避免 JSON 数字格式差异。"""
+    discrete = profile["schema_version"] == 3
+    key = "events" if discrete else "points"
+    def bits(value):
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise ValueError("确认内容包含无效数值")
+        return struct.pack(">d", float(value)).hex()
+    payload = {"binding": "xen.recoil.confirmation.v1", "schema_version": 3 if discrete else 2,
+               "id": profile["id"], "revision": profile["revision"], "weapon_id": gsi_weapon,
+               "unit": profile.get("unit", "device_counts"),
+               "sample_semantics": "discrete_delta" if discrete else "cumulative",
+               "fire_mode": "automatic", "input_path": "kmbox_net",
+               "sensitivity": bits(profile["sensitivity"]),
+               key: [[bits(value) for value in point] for point in profile[key]]}
+    return digest(json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                             separators=(",", ":"), allow_nan=False).encode("utf-8"))
 
 
 def encoded(value):
@@ -58,6 +78,7 @@ def prepare(source, source_profiles, target, output, data_root, expected_source_
     if digest(profiles_raw) != expected_source_hash:
         raise ValueError("旧recoil_profiles.json SHA256不符")
     names = load_weapon_names(data_root)
+    gsi_names = {canonical: alias for alias, canonical in names.items() if alias.startswith("weapon_")}
     old_by_id = {p["name"]: p for p in profiles["weapons"]}
     entries = manifest["profiles"]
     if len(entries) != 17 or len({e['id'] for e in entries}) != 17 or set(old_by_id) != {e['id'] for e in entries}:
@@ -74,6 +95,7 @@ def prepare(source, source_profiles, target, output, data_root, expected_source_
         if any(old[a] != entry[b] for a, b in pairs) or Path(old["pattern_file"]).name != entry["file"]:
             raise ValueError("旧profile参数与批准清单不符")
         canonical = names[entry["canonical_weapon_id"].casefold()]
+        gsi_weapon = gsi_names[canonical]
         keys = [key for key in active["active"] if names.get(key.casefold()) == canonical]
         if len(keys) != 1:
             raise ValueError("活动曲线缺失或存在歧义: " + canonical)
@@ -88,6 +110,8 @@ def prepare(source, source_profiles, target, output, data_root, expected_source_
             raise ValueError("原灵敏度无效")
         if type(current.get("revision")) is not int or not 0 < current["revision"] < 2147483647:
             raise ValueError("原修订号无效")
+        if current.get("confirmation_sha256") != confirmation_sha256(current, gsi_weapon):
+            raise ValueError("原曲线缺少有效内容确认，请在编辑器重新确认后再迁移: " + key)
         if redirected(source / entry["file"]) or (source / entry["file"]).resolve().parent != source:
             raise ValueError("CSV路径无效")
         raw_csv = (source / entry["file"]).read_bytes()
@@ -99,8 +123,9 @@ def prepare(source, source_profiles, target, output, data_root, expected_source_
                     for x, y in zip(a, b)) for a, b in zip(points, prior["points"])):
             raise ValueError("当前累计曲线不是批准来源的原转换结果: " + key)
         migrated = convert_discrete(raw_csv, entry, manifest, sensitivity)
-        migrated.update(id=current["id"], weapon_id=current["weapon_id"],
+        migrated.update(id=current["id"], weapon_id=gsi_weapon,
                         revision=current["revision"] + 1, verified=True)
+        migrated["confirmation_sha256"] = confirmation_sha256(migrated, gsi_weapon)
         new_file = f"{current['id']}-r{migrated['revision']}-discrete.json"
         if child(target, new_file).exists() or new_file in files:
             raise FileExistsError("目标版本已存在，禁止覆盖")
@@ -151,6 +176,8 @@ def validate_plan(output):
         raw, profile = read(child(output / "profiles", name))
         if digest(raw) != change["new_sha256"] or profile.get("schema_version") != 3 or profile.get("verified") is not True:
             raise ValueError("计划曲线被修改或不是确认离散版本")
+        if profile.get("confirmation_sha256") != confirmation_sha256(profile, profile["weapon_id"]):
+            raise ValueError("计划曲线内容确认失效")
         expected["active"][weapon] = {"file": name, "previous": change["old_file"]}
     if expected != after:
         raise ValueError("计划修改了范围外索引")

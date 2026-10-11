@@ -49,9 +49,10 @@ void test_live_worker_handoff() {
     auto profile = std::make_shared<RecoilProfile>();
     std::string error;
     check(load_recoil_profile(R"({"schema_version":3,"id":"synthetic_cz75","revision":1,
-        "weapon_id":"cz75","sensitivity":1.4,"verified":true,"sample_semantics":"discrete_delta",
+        "weapon_id":"cz75","sensitivity":1.4,"verified":false,"sample_semantics":"discrete_delta",
         "events":[[40,0,2],[100,0,2],[200,0,2],[300,0,2],[400,0,2]]})", *profile, error),
         "CZ75自制离散曲线通过生产Loader");
+    check(confirm_recoil_profile(*profile,error),"CZ75自制离散夹具显式人工确认");
     check(profile->weapon_id == weapon::normalize_weapon_id("weapon_cz75a"), "GSI身份匹配Loader曲线");
     auto mouse = std::make_shared<FakeMouse>();
     auto arbiter = std::make_shared<AutoStopOutputArbiter>();
@@ -125,8 +126,9 @@ void test_late_worker_issue_time(std::chrono::milliseconds backend_hold) {
     auto profile = std::make_shared<RecoilProfile>();
     std::string error;
     check(load_recoil_profile(R"({"schema_version":3,"id":"late_synthetic","revision":1,
-        "weapon_id":"ak47","sensitivity":1.4,"verified":true,"sample_semantics":"discrete_delta",
+        "weapon_id":"ak47","sensitivity":1.4,"verified":false,"sample_semantics":"discrete_delta",
         "events":[[16,6,0]]})", *profile, error), "迟到曲线经真实Loader验证");
+    check(confirm_recoil_profile(*profile,error),"迟到执行夹具显式人工确认");
     auto mouse = std::make_shared<FakeMouse>();
     auto arbiter = std::make_shared<AutoStopOutputArbiter>();
     auto ledger = std::make_shared<MotionLedger>();
