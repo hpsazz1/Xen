@@ -95,3 +95,6 @@ Job 覆盖本轮纳入的进程树，不涵盖独立 Shell broker；顶层窗口
 本轮仅验证当前构建实际 EXE、普通选择器/文件不存在提示和主窗 `WM_CLOSE`，独立组合平台 API，未复制第三方实现或新增依赖。
 没有执行 Launcher 发布入口、系统关机、Runtime 运行中退出、其他 Shell 扩展、全量 CTest、多 Provider、
 模型/离线回放指标、真实设备/KMBOX、远程部署或主分支合并。
+
+后续 [R5 Runtime 关闭验证](runtime_file_dialog_shutdown_validation_20261011.md) 补齐实际 EXE 的无设备 Runtime 退出，
+以及保持生产界面限制下的 Runtime/选择器组件组合；本文仍仅描述 R4 执行范围。

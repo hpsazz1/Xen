@@ -1574,9 +1574,23 @@ if(BUILD_TESTING)
 
     # 显式桌面验收：启动实际 Xen.exe，界面操作与进程外回收见证分离。
     add_executable(xen_exe_shutdown_probe tests/xen_exe_shutdown_probe.cpp)
-    target_link_libraries(xen_exe_shutdown_probe PRIVATE config recoil nlohmann_json::nlohmann_json)
+    target_link_libraries(xen_exe_shutdown_probe PRIVATE config recoil nlohmann_json::nlohmann_json ${OpenCV_LIBS} ws2_32)
     add_dependencies(xen_exe_shutdown_probe xen_app)
-    xen_deploy_runtime_dlls(xen_exe_shutdown_probe)
+    xen_deploy_runtime_dlls(xen_exe_shutdown_probe OPENCV)
+
+    # 测试宿主构造 Runtime 与弹窗共存；保留实际应用的运行时编辑限制。
+    add_executable(runtime_file_dialog_shutdown_tests tests/runtime_file_dialog_shutdown_tests.cpp Xen/app/xen.rc)
+    target_link_libraries(runtime_file_dialog_shutdown_tests PRIVATE
+        overlay runtime xen_debug config recoil log imgui ${OpenCV_LIBS} ws2_32)
+    xen_deploy_runtime_dlls(runtime_file_dialog_shutdown_tests OPENCV ORT NDI)
+    foreach(dialog_state picker error)
+        add_test(NAME runtime_file_dialog_shutdown_${dialog_state}
+            COMMAND runtime_file_dialog_shutdown_tests
+                "${CMAKE_BINARY_DIR}/runtime-file-dialog-shutdown-tests" ${dialog_state}
+                "${PROJECT_SOURCE_DIR}/tests/fixtures/detector_typeinfo_segmentation.onnx")
+        set_tests_properties(runtime_file_dialog_shutdown_${dialog_state} PROPERTIES
+            TIMEOUT 60 RUN_SERIAL TRUE LABELS "runtime;ui;shutdown")
+    endforeach()
 
     # Overlay Present 系统 seam 与标量 helper 均不创建 Win32/D3D11 窗口，
     # 测试只注入 HRESULT，也不链接 ImGui。

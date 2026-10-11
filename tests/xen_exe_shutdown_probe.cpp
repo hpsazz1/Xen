@@ -1,5 +1,6 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
 #include <Windows.h>
 #ifdef ERROR
 #undef ERROR
@@ -7,6 +8,7 @@
 
 #include "config/config.h"
 #include "recoil/recoil.h"
+#include "xen_exe_runtime_fixture.h"
 #include <nlohmann/json.hpp>
 
 #include <chrono>
@@ -138,6 +140,7 @@ struct Probe {
     std::filesystem::path executable;
     std::filesystem::path output;
     bool error_mode = false;
+    std::unique_ptr<xen::tests::RuntimeFixture> runtime_fixture;
     Clock::time_point started = Clock::now();
     Clock::time_point close_started{};
     Handle job;
@@ -204,7 +207,7 @@ struct Probe {
     }
 
     Json state() const {
-        return {{"schema_version", 1}, {"status", status}, {"pid", process_id}, {"mode", error_mode ? "error" : "picker"},
+        return {{"schema_version", 1}, {"status", status}, {"pid", process_id}, {"mode", runtime_fixture ? "runtime" : error_mode ? "error" : "picker"},
             {"executable", utf8(executable)}, {"output", utf8(output)}, {"ready", prepared},
             {"main_hwnd", window_number(main_window)}, {"main_thread_id", main_thread_id},
             {"picker_hwnd", window_number(picker)}, {"picker_thread_id", picker_thread_id},
@@ -258,6 +261,7 @@ struct Probe {
         config.ui.width = 1100;
         config.ui.height = 850;
         config.log.log_dir = "logs";
+        if (runtime_fixture) runtime_fixture->prepare(config);
         std::string error;
         const bool saved = save_app_config(utf8(output / "config.ini"), config, error);
         require(saved, error.c_str());
@@ -280,7 +284,7 @@ struct Probe {
         require_win32(SetEnvironmentVariableW(L"XEN_DATA_ROOT", output.c_str()) != 0, "独立数据根设置失败");
         for (const auto* name : {L"XEN_RELEASE_ROOT", L"XEN_RUNTIME_ID", L"XEN_RELEASE_BACKENDS", L"XEN_RUNTIME_DIAGNOSTICS"})
             require_win32(SetEnvironmentVariableW(name, nullptr) != 0, "子进程发布环境隔离失败");
-        record("fixture_prepared", {{"physical_output_allowed", false}, {"runtime_requested", false},
+        record("fixture_prepared", {{"physical_output_allowed", false}, {"runtime_requested", runtime_fixture != nullptr},
             {"prepare_deadline_ms", 300000}, {"close_deadline_ms", 3000}});
     }
 
@@ -314,6 +318,7 @@ struct Probe {
         record("process_started", {{"pid", process_id}, {"created_suspended", true},
             {"assigned_before_resume", true}, {"process_handle", static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(process.get()))}});
         std::cout << "真实Xen.exe已启动，PID=" << process_id << "，证据目录=" << utf8(output) << std::endl;
+        if (runtime_fixture) runtime_fixture->start_sender();
     }
 
     DWORD process_state() const {
@@ -331,17 +336,33 @@ struct Probe {
 
     void wait_until_close_request() {
         const auto deadline = started + std::chrono::seconds(300);
+        bool confirming_runtime = false;
+        std::uint64_t runtime_watermark = 0;
         while (Clock::now() < deadline) {
             require(process_state() == WAIT_TIMEOUT, "真实Xen.exe在关闭场景准备完成前已退出");
             if (!main_window) {
                 main_window = search_window({process_id});
                 if (main_window) {
                     main_thread_id = GetWindowThreadProcessId(main_window, nullptr);
-                    status = "waiting_picker";
+                    status = runtime_fixture ? "waiting_runtime" : "waiting_picker";
                     record("main_window_observed", {{"main_hwnd", window_number(main_window)}, {"thread_id", main_thread_id}});
                 }
             }
-            if (main_window && !picker) {
+            if (main_window && runtime_fixture) {
+                require(verified_main(), "Runtime准备期间主窗口失效");
+                const auto running = runtime_fixture->poll_running(process_id);
+                if (confirming_runtime && running.at("last_processed_frames").get<std::uint64_t>() > runtime_watermark) {
+                    record("runtime_fresh_after_close_request", running);
+                    return;
+                }
+                if (running.value("ready", false) && !prepared) {
+                    prepared = true;
+                    status = "ready";
+                    record("runtime_running_observed", running);
+                    std::cout << "ready：Runtime已实际持续处理无设备合成输入，等待close.request" << std::endl;
+                }
+            }
+            if (main_window && !picker && !runtime_fixture) {
                 require(verified_main(), "准备期间已固定的主窗口失效");
                 picker = search_window({process_id, main_thread_id, main_window, nullptr, true});
                 if (picker) {
@@ -379,7 +400,16 @@ struct Probe {
                         << "场景，等待close.request" << std::endl;
                 }
             }
-            if (prepared && std::filesystem::exists(output / "close.request")) return;
+            if (prepared && std::filesystem::exists(output / "close.request")) {
+                if (!runtime_fixture) return;
+                if (!confirming_runtime) {
+                    const auto running = runtime_fixture->poll_running(process_id);
+                    runtime_watermark = running.at("last_processed_frames").get<std::uint64_t>();
+                    confirming_runtime = true;
+                    status = "confirming_runtime_running";
+                    record("close_request_awaiting_fresh_runtime", {{"processed_frames", runtime_watermark}});
+                }
+            }
             Sleep(10);
         }
         throw std::runtime_error("准备场景或等待关闭请求超过300秒预算");
@@ -387,8 +417,9 @@ struct Probe {
 
     void close_and_observe() {
         require(process_state() == WAIT_TIMEOUT && verified_main(), "投递关闭前真实进程与主窗口必须仍存在");
-        require(picker && same_window(picker, process_id, picker_thread_id) && IsWindowVisible(picker) &&
-            WaitForSingleObject(picker_thread.get(), 0) == WAIT_TIMEOUT, "投递关闭前文件选择器与线程必须仍活跃");
+        require(runtime_fixture || (picker && same_window(picker, process_id, picker_thread_id) && IsWindowVisible(picker) &&
+            WaitForSingleObject(picker_thread.get(), 0) == WAIT_TIMEOUT), "投递关闭前文件选择器与线程必须仍活跃");
+        if (runtime_fixture) record("runtime_before_close", runtime_fixture->poll_running(process_id));
         require(!error_mode || (prompt && same_window(prompt, process_id, picker_thread_id) &&
             GetWindow(prompt, GW_OWNER) == picker && IsWindowVisible(prompt) && !IsWindowEnabled(picker)),
             "错误场景必须在真实错误提示仍打开时请求关闭");
@@ -397,7 +428,7 @@ struct Probe {
         close_started = Clock::now();
         // 关闭期间不写磁盘，以免错过短暂的生产主窗口仍存活、picker已经回收的观察窗口。
         record("main_close_requested", {{"repeat_count", 2}, {"main_hwnd", window_number(main_window)},
-            {"process_running_before", true}, {"picker_thread_running_before", true}}, false);
+            {"process_running_before", true}, {"picker_thread_running_before", static_cast<bool>(picker_thread)}}, false);
         require_win32(PostMessageW(main_window, WM_CLOSE, 0, 0) != 0, "真实主窗口关闭投递失败");
         require_win32(PostMessageW(main_window, WM_CLOSE, 0, 0) != 0, "真实主窗口重复关闭投递失败");
         const auto deadline = close_started + std::chrono::seconds(3);
@@ -405,7 +436,7 @@ struct Probe {
             const DWORD before = process_state();
             if (before == WAIT_OBJECT_0) { process_exited = true; break; }
             const bool main_before = verified_main();
-            const DWORD thread_state = WaitForSingleObject(picker_thread.get(), 0);
+            const DWORD thread_state = picker_thread ? WaitForSingleObject(picker_thread.get(), 0) : WAIT_TIMEOUT;
             require_win32(thread_state != WAIT_FAILED, "关闭期间文件选择线程状态读取失败");
             const bool picker_gone = !IsWindow(picker);
             const bool prompt_gone = !prompt || !IsWindow(prompt);
@@ -437,11 +468,16 @@ struct Probe {
         process.reset();
         wait_for_empty_job(deadline, false);
         save();
-        require(pre_exit_observed, "未观察到进程退出前主窗仍存在且文件选择线程/窗口均回收的快照，不能外推为通过");
+        require(runtime_fixture || pre_exit_observed, "未观察到进程退出前主窗仍存在且文件选择线程/窗口均回收的快照，不能外推为通过");
         require(exit_code == 0, "真实Xen.exe未正常返回0");
         require(no_process_windows, "真实Xen.exe退出后仍存在目标PID窗口");
         require(job_empty, "关闭3秒预算内私有Job活动进程数未归零");
         require(Clock::now() <= deadline, "完整关闭证据超出3秒预算");
+        if (runtime_fixture) {
+            runtime_fixture->stop_sender();
+            record("runtime_stopped_report_verified", runtime_fixture->validate_stopped(process_id));
+            record("synthetic_sender_recovered", runtime_fixture->sender_evidence());
+        }
         status = "passed";
         completed = true;
         record("passed", {{"forced", false}, {"rescue_used", false}});
@@ -463,6 +499,7 @@ struct Probe {
     }
 
     void fail_and_collect(const char* message) noexcept {
+        if (runtime_fixture) runtime_fixture->stop_sender();
         failed = true;
         rescue_used = true;
         status = "failed";
@@ -527,19 +564,21 @@ struct Probe {
 
 int wmain(int argc, wchar_t** argv) {
     try {
-        require(argc == 4, "用法：xen_exe_shutdown_probe <Xen.exe绝对路径> <全新绝对输出目录> <picker|error>");
+        require(argc == 4 || argc == 5, "用法：xen_exe_shutdown_probe <Xen.exe绝对路径> <全新绝对输出目录> <picker|error|runtime> [合成ONNX绝对路径]");
         const std::wstring_view mode(argv[3]);
-        require(mode == L"picker" || mode == L"error", "观察场景必须为picker或error");
+        require((argc == 4 && (mode == L"picker" || mode == L"error")) || (argc == 5 && mode == L"runtime"),
+            "picker/error使用三个参数；runtime必须额外传入合成ONNX路径");
         Probe probe;
         probe.executable = std::filesystem::path(argv[1]);
         probe.output = std::filesystem::path(argv[2]);
         probe.error_mode = mode == L"error";
+        if (mode == L"runtime") probe.runtime_fixture = std::make_unique<xen::tests::RuntimeFixture>(probe.output, std::filesystem::path(argv[4]));
         try {
             probe.prepare_files();
             probe.launch();
             probe.wait_until_close_request();
             probe.close_and_observe();
-            std::cout << "真实Xen.exe关闭验证通过：" << (probe.error_mode ? "错误提示" : "文件选择器") << std::endl;
+            std::cout << "真实Xen.exe关闭验证通过：" << (probe.runtime_fixture ? "无设备Runtime" : probe.error_mode ? "错误提示" : "文件选择器") << std::endl;
             return 0;
         } catch (const std::exception& error) {
             probe.fail_and_collect(error.what());
