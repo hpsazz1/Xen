@@ -41,8 +41,10 @@ public:
         capacity_ = std::max<std::size_t>(1, capacity);
         pipeline_.clear();
         control_.clear();
-        sorted_.clear();
-        sorted_.reserve(capacity_);
+        pipeline_sorted_.clear();
+        control_sorted_.clear();
+        pipeline_sorted_.reserve(capacity_);
+        control_sorted_.reserve(capacity_);
         pipeline_summary_ = {};
         control_summary_ = {};
     }
@@ -50,9 +52,9 @@ public:
     void observe(const PipelineProfile& profile, AimStatus aim_status,
             MouseStatus mouse_status, bool mouse_sent) {
         if (!pipeline_sample_succeeded(profile.detector.status, aim_status, mouse_status, mouse_sent)) return;
-        append(pipeline_, profile.total_ms, pipeline_summary_);
+        append(pipeline_, pipeline_sorted_, profile.total_ms, pipeline_summary_);
         if (profile.mouse_backend_completion_timing_valid) {
-            append(control_, profile.capture_to_mouse_backend_completion_ms, control_summary_);
+            append(control_, control_sorted_, profile.capture_to_mouse_backend_completion_ms, control_summary_);
         }
     }
 
@@ -60,18 +62,22 @@ public:
     const LatencyPercentiles& control() const noexcept { return control_summary_; }
 
 private:
-    void append(std::deque<double>& values, double value, LatencyPercentiles& summary) {
+    void append(std::deque<double>& values, std::vector<double>& sorted,
+                double value, LatencyPercentiles& summary) {
         values.push_back(value);
-        while (values.size() > capacity_) values.pop_front();
-        sorted_.assign(values.begin(), values.end());
-        std::sort(sorted_.begin(), sorted_.end());
+        if (values.size() > capacity_) {
+            // 每路独立保留有序副本，只移除最旧样本的一次出现，重复值不多删。
+            sorted.erase(std::lower_bound(sorted.begin(), sorted.end(), values.front()));
+            values.pop_front();
+        }
+        sorted.insert(std::lower_bound(sorted.begin(), sorted.end(), value), value);
         summary = {values.size(), value,
-                   sorted_percentile(sorted_, 0.50), sorted_percentile(sorted_, 0.95)};
+                   sorted_percentile(sorted, 0.50), sorted_percentile(sorted, 0.95)};
     }
 
     std::size_t capacity_ = 1;
     std::deque<double> pipeline_, control_;
-    std::vector<double> sorted_;
+    std::vector<double> pipeline_sorted_, control_sorted_;
     LatencyPercentiles pipeline_summary_, control_summary_;
 };
 

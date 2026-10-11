@@ -1,9 +1,12 @@
 #include "runtime/runtime_internal.h"
 #include "runtime/statistics_internal.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <chrono>
+#include <deque>
 #include <iostream>
 #include <memory>
 #include <limits>
@@ -101,6 +104,61 @@ void test_successful_latency_window_survives_failures() {
     expect(window.pipeline().count == 0 && window.pipeline().p95 == 0 &&
                window.control().count == 0,
            "新Runtime会话不继承旧会话成功窗口");
+}
+
+void test_latency_window_matches_full_sort() {
+    runtime::detail::PipelineLatencyWindow window;
+    std::deque<double> pipeline, control;
+    std::uint32_t random = 0x13579bdfU;
+    const auto equal = [](const auto& actual, const std::deque<double>& values) {
+        if (values.empty()) return actual.count == 0 && actual.last == 0 &&
+            actual.p50 == 0 && actual.p95 == 0;
+        std::vector<double> sorted(values.begin(), values.end());
+        std::sort(sorted.begin(), sorted.end());
+        const auto percentile = [&](double q) {
+            const double position = (sorted.size() - 1) * q;
+            const auto lower = static_cast<std::size_t>(std::floor(position));
+            const auto upper = static_cast<std::size_t>(std::ceil(position));
+            const double fraction = position - lower;
+            return sorted[lower] * (1.0 - fraction) + sorted[upper] * fraction;
+        };
+        return actual.count == values.size() && actual.last == values.back() &&
+            actual.p50 == percentile(0.5) && actual.p95 == percentile(0.95);
+    };
+    const auto append = [](std::deque<double>& values, double value, std::size_t capacity) {
+        values.push_back(value);
+        if (values.size() > capacity) values.pop_front();
+    };
+    // 同一实例反复缩放/重置；重复值淘汰、两通道不同步和失败均逐步核对。
+    for (const std::size_t requested : {0U, 1U, 2U, 3U, 64U, 256U, 4096U, 3U}) {
+        window.reset(requested);
+        pipeline.clear(); control.clear();
+        const auto capacity = std::max<std::size_t>(1, requested);
+        expect(equal(window.pipeline(), pipeline) && equal(window.control(), control),
+               "重置必须同时清空两路历史和摘要");
+        for (int i = 0; i < 10000; ++i) {
+            random ^= random << 13; random ^= random >> 17; random ^= random << 5;
+            PipelineProfile profile;
+            profile.total_ms = i < 100 ? 7.0 : (i < 1000 ? i / 8.0 : (random % 100000) / 1000.0);
+            profile.capture_to_mouse_backend_completion_ms = (random % 31) / 4.0;
+            profile.mouse_backend_completion_timing_valid = i % 3 != 0;
+            profile.detector.status = i % 13 == 0 ? DetectionStatus::INFERENCE_FAILED : DetectionStatus::SUCCESS;
+            const auto aim = i % 17 == 0 ? AimStatus::NOT_RUN : AimStatus::SUCCESS;
+            const auto mouse = i % 11 == 0 ? MouseStatus::SEND_FAILED : MouseStatus::READY;
+            const bool sent = i % 7 != 0;
+            if (profile.detector.status == DetectionStatus::SUCCESS && aim == AimStatus::SUCCESS &&
+                (!sent || mouse == MouseStatus::READY)) {
+                append(pipeline, profile.total_ms, capacity);
+                if (profile.mouse_backend_completion_timing_valid)
+                    append(control, profile.capture_to_mouse_backend_completion_ms, capacity);
+            }
+            window.observe(profile, aim, mouse, sent);
+            if (!equal(window.pipeline(), pipeline) || !equal(window.control(), control)) {
+                expect(false, "增量窗口每次成功/失败更新都必须等价于独立完整排序");
+                return;
+            }
+        }
+    }
 }
 
 void publish(runtime::detail::LatestFrameQueue& queue,
@@ -996,6 +1054,7 @@ int main() {
             "缺少可信源时间不可维持人工保持");
     }
     test_successful_latency_window_survives_failures();
+    test_latency_window_matches_full_sort();
     test_processed_frame_timing_evidence_preserves_raw_identity();
     test_latest_frame_queue();
     test_malformed_capture_frame_is_not_counted_as_published();
