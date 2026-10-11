@@ -241,6 +241,26 @@ bool write_text_file(const std::filesystem::path& path,
     return true;
 }
 
+bool write_png_file(const std::filesystem::path& path, const cv::Mat& bgr,
+                    const std::vector<int>& parameters, std::string& error) {
+    // OpenCV 的文件名接口依赖窄字符编码；将编码和原生路径 I/O 分开。
+    // 只在 finish 阶段暂存当前一帧的编码，不增加采集阶段的工作。
+    std::vector<unsigned char> encoded;
+    if (!cv::imencode(".png", bgr, encoded, parameters)) {
+        set_error(error, "无法编码无损 PNG：" + path_to_utf8(path));
+        return false;
+    }
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output.write(reinterpret_cast<const char*>(encoded.data()),
+                 static_cast<std::streamsize>(encoded.size()));
+    output.close();
+    if (!output) {
+        set_error(error, "无法写入或关闭无损 PNG：" + path_to_utf8(path));
+        return false;
+    }
+    return true;
+}
+
 bool transient_directory_publish_error(
         const std::error_code& error) noexcept {
     const int value = error.value();
@@ -594,8 +614,7 @@ bool CaptureEvidenceRecorder::finish(std::string& error) noexcept {
             auto& buffered = impl_->frames[index];
             const std::string file_name = frame_file_name(index);
             const auto path = impl_->pending_directory / "frames" / file_name;
-            if (!cv::imwrite(path.string(), buffered.bgr, png_parameters)) {
-                set_error(error, "无法写入无损 PNG：" + path_to_utf8(path));
+            if (!write_png_file(path, buffered.bgr, png_parameters, error)) {
                 return false;
             }
             std::string png_sha256;

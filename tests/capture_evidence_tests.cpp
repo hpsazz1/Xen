@@ -22,6 +22,7 @@
 #include <limits>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -298,6 +299,62 @@ void test_lossless_atomic_publication_and_identity() {
            "最终目录已存在时必须拒绝覆盖");
     expect(read_file(manifest_path) == original_manifest,
            "拒绝覆盖后既有证据必须逐字节不变");
+}
+
+void test_unicode_output_paths_preserve_png_bytes() {
+    TemporaryDirectory temporary;
+    expect(temporary.valid(), "Unicode PNG 测试必须创建临时目录");
+    std::string reference_png;
+    for (const wchar_t* name : {L"ascii", L"中文证据", L"emoji-\U0001F680"}) {
+        auto config = test_config(temporary, 1);
+        config.output_directory = temporary.path() / name;
+        capture_evidence::CaptureEvidenceRecorder recorder;
+        std::string error;
+        const auto frame = test_frame(1, 17);
+        expect(recorder.start(config, error), "Unicode 目录必须可启动：" + error);
+        expect(recorder.record(frame, error), "Unicode 目录必须接收帧：" + error);
+        const bool published = recorder.finish(error);
+        expect(published, "Unicode 目录必须发布 PNG：" + error);
+        if (!published) continue;
+        const auto png = read_file(config.output_directory / "frames" / "000000.png");
+        const std::vector<unsigned char> bytes(png.begin(), png.end());
+        const auto decoded = cv::imdecode(bytes, cv::IMREAD_COLOR);
+        expect(!decoded.empty() && cv::norm(decoded, frame.bgr, cv::NORM_INF) == 0.0,
+               "Unicode 目录的 PNG 解码后必须逐像素相同");
+        if (reference_png.empty()) reference_png = png;
+        expect(png == reference_png, "目录字符不得影响编码后的 PNG 字节");
+        const auto manifest = read_file(config.output_directory / "manifest.json");
+        expect(!manifest.empty() &&
+                   read_file(config.output_directory / "source-binding.json") ==
+                       read_file(config.source_binding_path),
+               "Unicode 证据必须同时发布 manifest 与原 binding");
+        capture_evidence::CaptureEvidenceRecorder duplicate;
+        expect(!duplicate.start(config, error) &&
+                   read_file(config.output_directory / "manifest.json") == manifest,
+               "Unicode 已有证据仍拒绝覆盖且保持原字节");
+    }
+}
+
+void test_png_write_failure_can_retry_without_publishing() {
+    TemporaryDirectory temporary;
+    const auto config = test_config(temporary, 1);
+    capture_evidence::CaptureEvidenceRecorder recorder;
+    std::string error;
+    expect(recorder.start(config, error), "PNG 失败测试必须启动");
+    expect(recorder.record(test_frame(1, 19), error), "PNG 失败测试必须接收帧");
+    const auto pending = find_unique_pending_directory(temporary.path(), "evidence");
+    expect(!pending.empty(), "PNG 失败测试必须找到本轮 incoming");
+    if (pending.empty()) return;
+    const auto conflict = pending / "frames" / "000000.png";
+    expect(std::filesystem::create_directory(conflict), "建立本测试独占的 PNG 同名目录");
+    expect(!recorder.finish(error) && !error.empty() &&
+               !std::filesystem::exists(config.output_directory) &&
+               !std::filesystem::exists(pending / "manifest.json"),
+           "PNG 无法写入不得发布 manifest 或最终目录");
+    expect(std::filesystem::remove(conflict), "仅移除本测试创建的空冲突目录");
+    expect(recorder.finish(error) &&
+               std::filesystem::is_regular_file(config.output_directory / "manifest.json"),
+           "移除写入冲突后同一 Recorder 必须可以重试发布：" + error);
 }
 
 void test_invalid_or_incomplete_capture_never_publishes() {
@@ -819,6 +876,8 @@ void test_impossible_frame_byte_budget_is_rejected_at_start() {
 
 int main() {
     test_lossless_atomic_publication_and_identity();
+    test_unicode_output_paths_preserve_png_bytes();
+    test_png_write_failure_can_retry_without_publishing();
     test_invalid_or_incomplete_capture_never_publishes();
     test_required_source_timing_rejects_invalid_frames();
     test_required_source_timing_rejects_missing_timestamp_fact();

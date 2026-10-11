@@ -41,7 +41,8 @@ def main():
         }
         input_binding = root / 'probe-binding.json'
         fixture.write_json(input_binding, binding)
-        output = root / 'recorded'
+        # 输入像素仍在 ASCII 夹具目录；生产 Recorder 的输出与下游读取走 Unicode 路径。
+        output = root / 'recorded-中文-\U0001f680'
         recorded = subprocess.run([str(args.recorder_fixture.resolve()), str(paths['manifest']), str(input_binding), str(output)],
             capture_output=True, text=True, encoding='utf-8')
         fixture.expect(recorded.returncode == 0, '真实Recorder失败: ' + recorded.stderr)
