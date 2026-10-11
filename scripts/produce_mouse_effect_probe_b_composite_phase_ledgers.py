@@ -192,10 +192,12 @@ def load_bgr(frame_root: pathlib.Path, frame: dict[str, Any]) -> np.ndarray:
     root = frame_root.resolve()
     if root not in path.parents or not path.is_file():
         raise ProducerError("sidecar PNG 越界或缺失")
+    # 原生文件名解码接口受 Windows 代码页限制；校验与解码使用同一份字节。
+    content = path.read_bytes()
     if (not is_sha256(frame.get("png_sha256")) or
-            file_sha256(path) != frame["png_sha256"]):
+            bytes_sha256(content) != frame["png_sha256"]):
         raise ProducerError("sidecar PNG 文件 SHA-256 漂移")
-    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    image = cv2.imdecode(np.frombuffer(content, dtype=np.uint8), cv2.IMREAD_COLOR)
     if (image is None or image.dtype != np.uint8 or image.ndim != 3 or
             image.shape[2] != 3):
         raise ProducerError("sidecar PNG 不是 CPU BGR8")

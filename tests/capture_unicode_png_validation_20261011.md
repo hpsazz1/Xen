@@ -22,7 +22,10 @@ ASCII 与中文输出目录成功，含非 BMP 字符 `🚀` 的目录失败且�
 
 既有 252 帧真实 Recorder→原生 verifier→producer→binder→evaluator 测试现使用
 中文及非 BMP 输出目录，继续核对十二个重封摘要来源绑定负例，避免只验证孤立 PNG。
-固定提交 Release、两项相关 CTest、产物与源码身份、远端及 CI 的最终记录见本地
+首次固定提交 `bd6f82d` 的 C++ 回归通过，但完整链暴露 Python producer 的
+`cv2.imread` 同样无法读该路径。修正为一次 pathlib.read_bytes，再对相同字节
+校验文件摘要并 imdecode；仍核对解码后 BGR 摘要。这次 1/2 失败保留。
+最终固定提交 Release、相关 CTest、产物与源码身份、远端及 CI 的最终记录见本地
 `docs/evidence/XEN-ROUND1-CLOSEOUT-20261011-001/CAPTURE_UNICODE_RESULT.md`。
 
 本修复不扩展任意长路径支持，不改变输出许可、来源时钟或数据审核边界。
