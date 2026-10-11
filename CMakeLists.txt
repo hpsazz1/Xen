@@ -1563,8 +1563,13 @@ if(BUILD_TESTING)
             COMMAND "${XEN_NODE_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/tests/model_data_review_ui_tests.cjs")
         set_tests_properties(model_data_review_ui_tests PROPERTIES TIMEOUT 30)
+        add_test(NAME model_data_review_integration_tests
+            COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
+            "${PROJECT_SOURCE_DIR}/tests/model_data_review_integration_tests.py"
+            --node "${XEN_NODE_EXECUTABLE}")
+        set_tests_properties(model_data_review_integration_tests PROPERTIES TIMEOUT 120)
     else()
-        message(STATUS "未找到 Node.js，未登记 model_data_review_ui_tests；CI 单独执行该专项")
+        message(STATUS "未找到 Node.js，未登记审核页核心与跨语言测试；CI 单独执行核心专项")
     endif()
     add_test(NAME model_training_environment_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
