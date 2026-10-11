@@ -27,7 +27,12 @@ ctest --test-dir build/nvidia -C Release -R '^kmbox_(button|delayed_close_observ
 ## 身法超时
 
 原场景、原谓词、3 秒等待与 1 ms 轮询保持不变。超时时输出调用位置、循环参数、谓词文本、
-Worker 快照、最后 16 批输入交付及其年龄、最后 8 条输入与 Ctrl 事件历史。普通专项不武装屏障。
+Worker 快照、最后 16 批输入交付及其年龄、最后 8 条输入与 Ctrl 事件历史。
+
+取消专项的 pending/held 两个场景在真实后端 receipt 返回后的下一次输入读取握手，待测试按原谓词
+发起 cancel 后才放行。这样保留对“待发时取消不得发送 Ctrl”和“持有时取消必须清理”的验证，
+避免把观察线程错过 80/15 ms 短暂状态当成生产未发生。生产时钟照常推进，握手最多 3 秒；原谓词、
+完成/取消计数与清理断言不变。其他普通场景不武装门。
 
 ```powershell
 ctest --test-dir build/nvidia -C Release -R '^movement_tests$' --output-on-failure -j 1
@@ -38,6 +43,16 @@ ctest --test-dir build/nvidia -C Release -R '^movement_tests$' --output-on-failu
 不作为普通 CTest 通过项登记。它们分别控制报告读取时机和观察者开始等待的时机，验证日志能
 区别过期未启动与已完成后错过瞬态状态。生产 100 ms 新鲜度、80 ms 延迟和 15 ms 持有窗口不变。
 异常退出先释放测试门，再回收 Worker。
+
+以下四个普通 CTest 覆盖延迟观察后的正确取消，以及清理尾水位返回前后正常/UNKNOWN状态发布：
+
+```powershell
+ctest --test-dir build/nvidia -C Release -R '^movement_(tests|(pending_cancel|held_cancel|cleanup|cleanup_unknown)_observer_tests)$' --output-on-failure -j 1
+```
+
+`--diagnostic-cancel pending|held` 将测试观察者延后 150 ms，仍必须满足原取消和释放断言。
+握手以前，同一原测试函数在确认 Worker 已进入对应阶段后、生产正常完成再继续观察，两场景均以
+原等待超时退出 1。该确定性 fixture 竞态红绿不证明历史那次 3.80 秒事件的唯一根因。
 
 历史 b212b2d 的通用超时没有场景/谓词记录，无法由这些人为对照唯一归因。保留该问题，
 后续实际复现时按新增现场定位；不以原命令偶尔通过、增加等待预算或人为红例冒充已修复。

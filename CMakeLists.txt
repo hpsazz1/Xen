@@ -1465,6 +1465,10 @@ if(BUILD_TESTING)
     add_executable(movement_tests tests/movement_tests.cpp)
     target_link_libraries(movement_tests PRIVATE movement)
     add_test(NAME movement_tests COMMAND movement_tests)
+    add_test(NAME movement_pending_cancel_observer_tests COMMAND movement_tests --diagnostic-cancel pending)
+    add_test(NAME movement_held_cancel_observer_tests COMMAND movement_tests --diagnostic-cancel held)
+    add_test(NAME movement_cleanup_observer_tests COMMAND movement_tests --diagnostic-cancel cleanup)
+    add_test(NAME movement_cleanup_unknown_observer_tests COMMAND movement_tests --diagnostic-cancel cleanup-unknown)
     xen_deploy_runtime_dlls(movement_tests)
 
     add_executable(input_training_panel_tests tests/input_training_panel_tests.cpp

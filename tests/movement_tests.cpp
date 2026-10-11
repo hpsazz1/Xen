@@ -34,6 +34,7 @@ private:
 
 class Fake final : public IMouseController {
 public:
+    enum class ReadGate { SEQUENCE, TURN_RELEASED, CTRL_ACKNOWLEDGED, CLEANUP_RETURNED };
     mutable std::mutex mutex;
     std::vector<InputReportEvent> reports;
     std::vector<int> moves, software;
@@ -88,8 +89,11 @@ public:
     }
     bool read_movement_reports(InputReportCursor& cursor, InputReportBatch& batch) noexcept override {
         std::unique_lock lock(mutex);
-        // 仅独立诊断 CLI 武装；普通专项没有等待门，不改变原报告交付顺序。
-        if (read_gate_armed_ && cursor.sequence >= read_gate_after_) {
+        const bool gate_ready = read_gate_kind_ == ReadGate::SEQUENCE ? cursor.sequence >= read_gate_after_ :
+            read_gate_kind_ == ReadGate::TURN_RELEASED ? software.size() >= 3 && software.back() == 0 && ctrl_events.empty() :
+            read_gate_kind_ == ReadGate::CTRL_ACKNOWLEDGED ? ctrl_down : cleanups.load() > 0;
+        // read入口位于上一轮后端receipt返回后；不用伪造Worker状态或生产时钟。
+        if (read_gate_armed_ && gate_ready) {
             read_gate_entered_ = true;
             read_gate_cv_.notify_all();
             read_gate_expired_ = !read_gate_cv_.wait_for(lock, std::chrono::seconds(3),
@@ -131,10 +135,18 @@ public:
 
     void arm_read_gate(std::uint64_t after_sequence) {
         std::lock_guard lock(mutex);
+        read_gate_kind_ = ReadGate::SEQUENCE;
         read_gate_after_ = after_sequence;
         read_gate_armed_ = true;
         read_gate_entered_ = read_gate_released_ = read_gate_expired_ = false;
     }
+    void arm_read_gate(ReadGate kind) {
+        std::lock_guard lock(mutex);
+        read_gate_kind_ = kind;
+        read_gate_armed_ = true;
+        read_gate_entered_ = read_gate_released_ = read_gate_expired_ = false;
+    }
+    bool read_gate_expired() const { std::lock_guard lock(mutex); return read_gate_expired_; }
     bool await_read_gate() {
         std::unique_lock lock(mutex);
         return read_gate_cv_.wait_for(lock, std::chrono::seconds(3), [&] { return read_gate_entered_; });
@@ -153,7 +165,7 @@ public:
             << " epoch=" << epoch << " sequence=" << sequence << " read_calls=" << read_calls_
             << " moves=" << moves.size() << " software=" << software.size() << " masks=" << masks.size()
             << " cleanups=" << cleanups.load() << " ctrl_down=" << ctrl_down
-            << " gate_after=" << read_gate_after_ << " gate_entered=" << read_gate_entered_
+            << " gate_kind=" << static_cast<int>(read_gate_kind_) << " gate_after=" << read_gate_after_ << " gate_entered=" << read_gate_entered_
             << " gate_released=" << read_gate_released_ << " gate_expired=" << read_gate_expired_ << '\n';
         const auto first_read = read_records_ > reads_.size() ? read_records_ - reads_.size() : 0;
         for (auto i = first_read; i < read_records_; ++i) {
@@ -186,6 +198,7 @@ private:
     std::array<ReadObservation, 16> reads_{};
     std::uint64_t read_calls_ = 0, read_records_ = 0;
     std::condition_variable read_gate_cv_;
+    ReadGate read_gate_kind_ = ReadGate::SEQUENCE;
     std::uint64_t read_gate_after_ = 0;
     bool read_gate_armed_ = false, read_gate_entered_ = false;
     bool read_gate_released_ = false, read_gate_expired_ = false;
@@ -258,10 +271,11 @@ movement::Config config() {
 void trigger(const std::shared_ptr<Fake>& fake, int x = -10) {
     fake->report(0, 0, true, 0x04); fake->report(x, 1, true, x < 0 ? 0x04 : 0x07);
 }
-void timed_ctrl_lifecycle() {
+void timed_ctrl_lifecycle(int only_scenario = -1) {
     require(movement::Config{}.large_angle_degrees == 25 && movement::Config{}.large_duration_ms == 170,
         "正式Long Jump默认参数错误");
     for (int scenario = 0; scenario < 7; ++scenario) {
+        if (only_scenario >= 0 && scenario != only_scenario) continue;
         DiagnosticIteration diagnostic_scenario("scenario", static_cast<int>(scenario));
         auto fake = std::make_shared<Fake>(); auto value = config();
         value.spin_enabled = false; value.large_enabled = true; value.large_ctrl_enabled = true;
@@ -278,12 +292,25 @@ void timed_ctrl_lifecycle() {
         movement::Worker worker(fake, [] { return true; },
             [&](bool value) { suspended = value; return true; });
         WorkerObservation observation_worker(*fake, worker);
+        if (scenario == 1 || scenario == 2)
+            fake->arm_read_gate(scenario == 1 ? Fake::ReadGate::TURN_RELEASED : Fake::ReadGate::CTRL_ACKNOWLEDGED);
         require(worker.start(value), "Ctrl测试启动失败");
         const auto began = Clock::now(); trigger(fake);
+        if (scenario == 1 || scenario == 2) {
+            if (!fake->await_read_gate()) { dump_observations(); require(false, "取消测试阶段未到达"); }
+            if (only_scenario >= 0) {
+                dump_observations();
+                // 只延迟测试观察者；生产时间照常推进，握手保证取消仍在要验证的阶段发起。
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                dump_observations();
+            }
+            require(!fake->read_gate_expired(), "取消测试阶段握手超时");
+        }
         if (scenario == 1) {
             wait_for([&]{return worker.snapshot().state == movement::State::CTRL_PENDING;}); worker.cancel();
         }
         if (scenario == 2) { wait_for([&]{return fake->ctrl_held();}); worker.cancel(); }
+        if (scenario == 1 || scenario == 2) fake->release_read_gate();
         if (scenario == 0) wait_for([&]{return worker.snapshot().completed == 1;});
         else if (scenario == 6) wait_for([&]{return worker.snapshot().state == movement::State::FAULT;});
         else wait_for([&]{return worker.snapshot().canceled == 1;});
@@ -303,6 +330,37 @@ void timed_ctrl_lifecycle() {
         if (scenario != 5) require(!suspended.load(), "stopped clean worker must return counter-strafe ownership");
         if (scenario != 5) require(!fake->ctrl_down, "Ctrl正常或故障取消后未清理");
     }
+}
+
+// 完成计数必须等cleanup及尾水位返回；阻塞解除后区分正常完成和UNKNOWN清理锁定。
+void cleanup_observation_control(bool unknown) {
+    auto fake = std::make_shared<Fake>();
+    fake->fail_cleanup = unknown;
+    fake->arm_read_gate(Fake::ReadGate::CLEANUP_RETURNED);
+    std::atomic<bool> suspended{false};
+    movement::Worker worker(fake, [] { return true; }, [&](bool value) { suspended = value; return true; });
+    WorkerObservation observation(*fake, worker);
+    require(worker.start(config()), "清理状态对照启动失败");
+    trigger(fake);
+    if (!fake->await_read_gate()) { dump_observations(); require(false, "清理尾水位门未到达"); }
+    const auto blocked = worker.snapshot();
+    dump_observations();
+    require(blocked.started == 1 && blocked.completed == 0 && blocked.canceled == 0 && suspended.load(),
+        "尾水位未返回已提前发布完成或归还所有权");
+    require(blocked.state == (unknown ? movement::State::FAULT : movement::State::CLEANING),
+        "阻塞清理状态与ACK结果不一致");
+    fake->release_read_gate();
+    if (unknown) wait_for([&] { return worker.snapshot().canceled == 1; });
+    else wait_for([&] { return worker.snapshot().completed == 1; });
+    if (!unknown) wait_for([&] { return !suspended.load(); });
+    const auto finished = worker.snapshot();
+    require(!fake->read_gate_expired(), "清理尾水位门超时");
+    require(unknown ? finished.completed == 0 && finished.state == movement::State::FAULT && suspended.load()
+        : finished.canceled == 0 && finished.state == movement::State::IDLE,
+        "尾水位解除后遗漏完成/取消/FAULT状态");
+    dump_observations();
+    worker.stop();
+    require(suspended.load() == unknown, "结束后UNKNOWN与已确认清理的所有权边界错误");
 }
 
 void long_ctrl_hold_lifecycle() {
@@ -875,6 +933,22 @@ void observation_diagnostic(std::string_view mode) {
 }
 }
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string_view(argv[1]) == "--diagnostic-cancel") {
+        try {
+            require(argc == 3, "用法：--diagnostic-cancel pending|held|cleanup|cleanup-unknown");
+            const std::string_view mode = argv[2];
+            require(mode == "pending" || mode == "held" || mode == "cleanup" || mode == "cleanup-unknown",
+                "未知取消/清理诊断模式");
+            LogConfig cfg; cfg.enable_console = false; cfg.enable_file = false; cfg.enable_ringbuf = true;
+            Log::init(cfg);
+            if (mode == "pending" || mode == "held") timed_ctrl_lifecycle(mode == "pending" ? 1 : 2);
+            else cleanup_observation_control(mode == "cleanup-unknown");
+            Log::shutdown(); return 0;
+        } catch (const std::exception& error) {
+            for (const auto& line : Log::get_ring_buffer()) std::cerr << "[movement-observer] " << line << '\n';
+            std::cerr << error.what() << '\n'; Log::shutdown(); return 1;
+        }
+    }
     if (argc > 1 && std::string_view(argv[1]) == "--diagnostic-observation") {
         try {
             require(argc == 3, "用法：--diagnostic-observation fresh|baseline|stale|miss-pending|miss-held");
