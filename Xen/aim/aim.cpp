@@ -1013,11 +1013,13 @@ std::vector<int> minimum_cost_assignment(
     std::vector<double> column_potential(size + 1, 0.0);
     std::vector<std::size_t> matched_row(size + 1, 0);
     std::vector<std::size_t> previous_column(size + 1, 0);
+    // 每次调用独占最小代价工作区；逐增广行重置，避免反复分配。
+    std::vector<double> minimum(size + 1);
     for (std::size_t row = 1; row <= size; ++row) {
         matched_row[0] = row;
         std::size_t column = 0;
-        std::vector<double> minimum(size + 1,
-                                    std::numeric_limits<double>::max());
+        std::fill(minimum.begin(), minimum.end(),
+                  std::numeric_limits<double>::max());
         std::vector<bool> used(size + 1, false);
         do {
             used[column] = true;
