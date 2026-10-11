@@ -1546,6 +1546,16 @@ if(BUILD_TESTING)
     add_test(NAME model_data_review_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
         "${PROJECT_SOURCE_DIR}/tests/model_data_review_tests.py")
+    # 页面核心仅依赖 Node 内置模块；缺少 Node 不阻塞原生构建。
+    find_program(XEN_NODE_EXECUTABLE NAMES node)
+    if(XEN_NODE_EXECUTABLE)
+        add_test(NAME model_data_review_ui_tests
+            COMMAND "${XEN_NODE_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/model_data_review_ui_tests.cjs")
+        set_tests_properties(model_data_review_ui_tests PROPERTIES TIMEOUT 30)
+    else()
+        message(STATUS "未找到 Node.js，未登记 model_data_review_ui_tests；CI 单独执行该专项")
+    endif()
     add_test(NAME model_training_environment_tests
         COMMAND "${XEN_PYTHON_EXECUTABLE}" -B -X utf8
         "${PROJECT_SOURCE_DIR}/tests/model_training_environment_tests.py")

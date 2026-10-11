@@ -1,0 +1,32 @@
+name: 数据审核核心检查
+
+on:
+  push:
+    paths:
+      - '.github/workflows/review-core.yml'
+      - 'scripts/model_data_review.html'
+      - 'tests/model_data_review_ui_tests.cjs'
+  pull_request:
+    paths:
+      - '.github/workflows/review-core.yml'
+      - 'scripts/model_data_review.html'
+      - 'tests/model_data_review_ui_tests.cjs'
+
+permissions:
+  contents: read
+
+jobs:
+  review-core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      # 直接运行页面共享核心的既有断言，不加载浏览器或安装 npm 包。
+      - name: 验证数据审核与坐标契约
+        run: node tests/model_data_review_ui_tests.cjs
