@@ -677,6 +677,7 @@ struct Overlay::Impl {
     int preview_texture_height = 0;
     std::uint64_t preview_uploaded_sequence = 0;
     bool log_scroll_to_latest = false;
+    overlay::detail::LogFilter log_filter{};
     MetricHistory capture_fps_history;
     MetricHistory total_latency_history;
     MetricHistory target_confidence_history;
@@ -2059,7 +2060,9 @@ struct Overlay::Impl {
         show_help_tooltip("关闭最近日志面板并返回当前功能页；不会清空日志环形缓冲区。");
         ImGui::Dummy(ImVec2(0.0f, 4.0f));
 
-        overlay::detail::render_log_entries(lines, rgba(kFaintInk), log_scroll_to_latest);
+        const bool filter_changed = overlay::detail::render_log_filter(log_filter);
+        overlay::detail::render_log_entries(lines, rgba(kFaintInk),
+            log_scroll_to_latest || filter_changed, log_filter.data());
         log_scroll_to_latest = false;
         end_surface();
     }
