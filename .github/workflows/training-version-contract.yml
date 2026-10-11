@@ -1,0 +1,37 @@
+name: 训练版本契约检查
+
+on:
+  push:
+    paths:
+      - '.github/workflows/training-version-contract.yml'
+      - 'scripts/model_training_environment.py'
+      - 'scripts/model_data_pipeline.py'
+      - 'scripts/model_training_requirements.txt'
+      - 'tests/training_version_contract_tests.py'
+  pull_request:
+    paths:
+      - '.github/workflows/training-version-contract.yml'
+      - 'scripts/model_training_environment.py'
+      - 'scripts/model_data_pipeline.py'
+      - 'scripts/model_training_requirements.txt'
+      - 'tests/training_version_contract_tests.py'
+
+permissions:
+  contents: read
+
+jobs:
+  version-contract:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          architecture: 'x64'
+      # 仅标准库fixture；安装和GPU检查命令均由现有测试替身接管。
+      - name: 检查九项版本声明与安装快照契约
+        shell: pwsh
+        run: python -B -S -X utf8 tests/training_version_contract_tests.py --output-root "$env:RUNNER_TEMP/training-version-fixtures"
