@@ -1,0 +1,41 @@
+file(MAKE_DIRECTORY "${TEST_BINARY_DIR}")
+set(source_copy "${TEST_BINARY_DIR}/SimpleIni-original.h")
+file(READ "${SOURCE_HEADER}" original)
+file(WRITE "${source_copy}" "${original}")
+file(SHA256 "${source_copy}" original_hash)
+include("${SOURCE_DIR}/scripts/simpleini_resource_guards.cmake")
+xen_prepare_simpleini("${source_copy}" "${TEST_BINARY_DIR}/first")
+file(SHA256 "${source_copy}" after_hash)
+if(NOT original_hash STREQUAL after_hash)
+    message(FATAL_ERROR "Preparing a private header changed the upstream source")
+endif()
+
+# Git 的 CRLF/LF 检出策略不应影响固定版本识别或生成内容。
+string(REPLACE "\r\n" "\n" normalized "${original}")
+file(WRITE "${TEST_BINARY_DIR}/lf.h" "${normalized}")
+string(REPLACE "\n" "\r\n" crlf "${normalized}")
+file(WRITE "${TEST_BINARY_DIR}/crlf.h" "${crlf}")
+xen_prepare_simpleini("${TEST_BINARY_DIR}/lf.h" "${TEST_BINARY_DIR}/lf")
+xen_prepare_simpleini("${TEST_BINARY_DIR}/crlf.h" "${TEST_BINARY_DIR}/crlf")
+file(SHA256 "${TEST_BINARY_DIR}/lf/SimpleIni.h" lf_hash)
+file(SHA256 "${TEST_BINARY_DIR}/crlf/SimpleIni.h" crlf_hash)
+if(NOT lf_hash STREQUAL crlf_hash)
+    message(FATAL_ERROR "Private header differs between LF and CRLF checkouts")
+endif()
+
+# 未审核的上游修改必须在配置阶段失败，且不能生成或覆盖头文件。
+file(APPEND "${source_copy}" "\n// unexpected upstream change\n")
+file(WRITE "${TEST_BINARY_DIR}/reject.cmake"
+    "include(\"${SOURCE_DIR}/scripts/simpleini_resource_guards.cmake\")\n"
+    "xen_prepare_simpleini(\"${source_copy}\" \"${TEST_BINARY_DIR}/first\")\n")
+file(SHA256 "${TEST_BINARY_DIR}/first/SimpleIni.h" before_rejection)
+execute_process(COMMAND "${CMAKE_COMMAND}" -P "${TEST_BINARY_DIR}/reject.cmake"
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+if(result EQUAL 0 OR NOT error MATCHES "differs from pinned 4.19")
+    message(FATAL_ERROR "Unexpected header was not rejected: ${output}${error}")
+endif()
+file(SHA256 "${TEST_BINARY_DIR}/first/SimpleIni.h" after_rejection)
+if(NOT before_rejection STREQUAL after_rejection)
+    message(FATAL_ERROR "Rejected input overwrote the private header")
+endif()
+message(STATUS "SimpleIni resource guard preparation contracts passed")

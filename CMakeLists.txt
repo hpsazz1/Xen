@@ -183,13 +183,16 @@ if(WIN32)
 endif()
 FetchContent_MakeAvailable(spdlog)
 
-# SimpleIni 当前可验证的最新稳定 tag 为 4.19。仅使用其单头文件实现，禁止
+# SimpleIni 固定为 4.19，保留既有解析和数值序列化。仅使用其单头文件实现，禁止
 # FetchContent 把上游示例或测试加入 Xen 构建图。
 FetchContent_Declare(simpleini
     GIT_REPOSITORY https://github.com/brofield/simpleini.git
     GIT_TAG        4.19
     SOURCE_SUBDIR  _xen_no_cmake)
 FetchContent_MakeAvailable(simpleini)
+include(scripts/simpleini_resource_guards.cmake)
+set(XEN_SIMPLEINI_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/xen-simpleini")
+xen_prepare_simpleini("${simpleini_SOURCE_DIR}/SimpleIni.h" "${XEN_SIMPLEINI_INCLUDE_DIR}")
 
 # 发布入口使用严格 JSON schema 解析运行时与后端路由，避免用字符串扫描处理
 # 路径安全边界。完整文件哈希只由发布/传输脚本执行，不进入日常 Launcher。
@@ -455,7 +458,7 @@ target_include_directories(config
         ${PROJECT_SOURCE_DIR}/Xen
         ${OpenCV_INCLUDE_DIRS}
     PRIVATE
-        ${simpleini_SOURCE_DIR})
+        ${XEN_SIMPLEINI_INCLUDE_DIR})
 target_link_libraries(config PUBLIC log trigger source_context weapon recoil movement)
 add_library(recoil_calibration_io STATIC Xen/recoil/recoil_calibration_io.cpp)
 target_link_libraries(recoil_calibration_io PUBLIC recoil config)
@@ -2032,6 +2035,16 @@ if(BUILD_TESTING)
         tests/config_tests.cpp)
     target_link_libraries(config_tests PRIVATE config)
     add_test(NAME config_tests COMMAND config_tests)
+
+    # 独立进程注入配置分配失败；只读写合成 INI，不启动设备或输入输出。
+    add_executable(config_load_failure_tests tests/config_load_failure_tests.cpp)
+    target_link_libraries(config_load_failure_tests PRIVATE config)
+    add_test(NAME config_load_failure_tests COMMAND config_load_failure_tests)
+    add_test(NAME simpleini_resource_guards_tests COMMAND ${CMAKE_COMMAND}
+        "-DSOURCE_HEADER=${simpleini_SOURCE_DIR}/SimpleIni.h"
+        "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DTEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/simpleini-resource-guards-test"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/simpleini_resource_guards_tests.cmake")
 
     add_executable(io_tests
         tests/io_tests.cpp)
