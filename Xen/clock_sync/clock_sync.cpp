@@ -322,9 +322,9 @@ MappingResult AffineMapper::map_utc_ns(
     }
     const double mapped_ns = best->local_midpoint_ns + clock_rate *
         (static_cast<double>(source_utc_ns) - best->source_midpoint_ns);
+    // binary64 中 INT64_MAX 会舍入成 2^63；必须在 llround 前排除此不可表示值。
     if (!std::isfinite(mapped_ns) || mapped_ns <= 0.0 ||
-        mapped_ns > static_cast<double>(
-            std::numeric_limits<std::int64_t>::max())) {
+        mapped_ns >= 0x1p63) {
         result.status = MappingStatus::INVALID;
         return result;
     }

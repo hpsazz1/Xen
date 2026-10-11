@@ -173,6 +173,51 @@ void test_affine_mapping_and_expiry() {
            "source session 改变必须清空旧映射并重新 WARMING");
 }
 
+void test_mapping_signed_nanosecond_boundary() {
+    // 二进制精确样本避免拟合舍入掩盖转换边界；不修改系统时钟。
+    constexpr std::uint64_t kLimit = std::uint64_t{1} << 63;
+    constexpr std::uint64_t kSourceOrigin = std::uint64_t{1} << 60;
+    constexpr std::uint64_t kOffset = std::uint64_t{1} << 30;
+    constexpr std::uint64_t kLocalOrigin = kLimit - kOffset;
+    clock_sync::detail::AffineMapper mapper;
+    std::uint64_t last_receive = 0;
+    for (std::uint64_t i = 0; i < 3; ++i) {
+        const auto delta = i * (std::uint64_t{1} << 26);
+        clock_sync::detail::Sample sample;
+        sample.source_session_id = 17;
+        sample.requester_send_steady_ns = kLocalOrigin + delta;
+        sample.source_receive_utc_ns = kSourceOrigin + delta + (std::uint64_t{1} << 20);
+        sample.source_send_utc_ns = sample.source_receive_utc_ns + (std::uint64_t{1} << 12);
+        sample.requester_receive_steady_ns = sample.requester_send_steady_ns +
+            (std::uint64_t{1} << 21) + (std::uint64_t{1} << 12);
+        last_receive = sample.requester_receive_steady_ns;
+        expect(mapper.add_sample(sample), "上界测试三点样本必须合法且可接受");
+    }
+    const auto now = std::chrono::steady_clock::time_point(
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::nanoseconds(static_cast<std::int64_t>(last_receive))));
+    const auto query = [&](std::uint64_t source) {
+        return mapper.map_utc_ns(source, now, std::chrono::seconds(1));
+    };
+    const auto inside = query(kSourceOrigin + kOffset - 1024);
+    expect(inside.valid && inside.status == clock_sync::MappingStatus::VALID &&
+               inside.clock_rate == 1.0 &&
+               std::chrono::duration_cast<std::chrono::nanoseconds>(
+                   inside.local_time.time_since_epoch()).count() ==
+                   static_cast<std::int64_t>(kLimit - 1024),
+           "2^63以下最近可表示double仍须精确映射，不能扩大拒绝合法范围");
+    for (const auto source : {kSourceOrigin + kOffset, kSourceOrigin + kOffset + 4096}) {
+        const auto outside = query(source);
+        std::cout << "signed-range source=" << source << " valid=" << outside.valid
+                  << " mapped_ns=" << std::chrono::duration_cast<std::chrono::nanoseconds>(
+                         outside.local_time.time_since_epoch()).count() << '\n';
+        expect(!outside.valid && outside.status == clock_sync::MappingStatus::INVALID,
+               "映射至2^63及以上必须在llround前拒绝，不得将负时间标为VALID");
+    }
+    expect(query(kSourceOrigin + kOffset - 1024).valid,
+           "非法查询不得破坏已有健康拟合窗口");
+}
+
 void test_client_server_loopback() {
     const unsigned short port = reserve_loopback_port();
     expect(port != 0, "时钟回环测试必须取得临时 UDP 端口");
@@ -347,6 +392,7 @@ void test_server_recovers_after_invalid_exchange() {
 int main() {
     test_protocol_round_trip();
     test_affine_mapping_and_expiry();
+    test_mapping_signed_nanosecond_boundary();
     test_client_server_loopback();
     test_server_recovers_after_invalid_exchange();
     if (failures != 0) {
