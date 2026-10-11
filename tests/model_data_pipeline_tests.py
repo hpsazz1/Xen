@@ -70,6 +70,42 @@ class PipelineTests(unittest.TestCase):
         pipeline.export_dataset(self.context("export", output=str(output)))
         return output
 
+    def test_image_info_preserves_png_modes_at_unicode_paths(self):
+        directory = self.base / "合成图像 ## 路径"
+        directory.mkdir()
+        cases = (("RGB", (8, 50, 100), (8, 50, 100)),
+                 ("RGBA", (8, 50, 100, 0), (8, 50, 100)),
+                 ("L", 23, (23, 23, 23)),
+                 ("LA", (23, 0), (23, 23, 23)),
+                 ("P", 0, (8, 50, 100)),
+                 ("I;16", 500, (255, 255, 255)),
+                 ("1", 1, (255, 255, 255)))
+        for mode, color, expected in cases:
+            for size in ((1, 1), (17, 31)):
+                with self.subTest(mode=mode, size=size):
+                    image = Image.new(mode, size, color)
+                    if mode == "P":
+                        image.putpalette([8, 50, 100] + [0] * 765)
+                    path = directory / f"原图-{mode}-{size[0]}.png"
+                    image.save(path)
+                    observed_size, pixels = pipeline.image_info(path)
+                    self.assertEqual(observed_size, size)
+                    self.assertEqual(pixels, (expected,) * 256)
+
+    def test_image_info_rejects_non_png_and_incomplete_images(self):
+        jpeg = self.base / "伪装-JPEG.png"
+        Image.new("RGB", (17, 31)).save(jpeg, format="JPEG")
+        with self.assertRaisesRegex(pipeline.PipelineError, "必须为 PNG"):
+            pipeline.image_info(jpeg)
+        png = self.base / "截断.png"
+        Image.new("RGB", (17, 31)).save(png)
+        truncated = png.read_bytes()[:20]
+        for data in (truncated, b"not an image"):
+            with self.subTest(data=data):
+                png.write_bytes(data)
+                with self.assertRaises(OSError):
+                    pipeline.image_info(png)
+
     def test_export_rejects_image_replaced_after_review_precheck(self):
         self.approve()
         output = self.base / "replaced-export"

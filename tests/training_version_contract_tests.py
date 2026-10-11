@@ -32,7 +32,7 @@ def main():
         ('onnx-copy-change', original.replace('1.19.0', '1.19.1'), dict(expected, onnx='1.19.1'), False),
         ('duplicate', original + '\nultralytics==8.3.203\n', {}, True),
         ('range', original.replace('ultralytics==8.3.203', 'ultralytics>=8.3.203'), {}, True),
-        ('missing', original.replace('Pillow==11.3.0', ''), {}, True),
+        ('missing', original.replace('Pillow==' + expected['Pillow'], ''), {}, True),
         ('extra', original + '\nrequests==2.32.4\n', {}, True),
         ('wheel-mismatch', original.replace('torch==2.8.0', 'torch==2.8.1'), {}, True),
     ]
