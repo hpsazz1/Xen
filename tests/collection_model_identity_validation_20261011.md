@@ -28,3 +28,6 @@ UTF8 LC_CTYPE并恢复原locale和模式；没有修改系统/全局区域设置
 提交边界与原Detector故障恢复。固定SHA命令、JUnit、身份及远端/CI见本地
 `docs/evidence/XEN-ROUND1-CLOSEOUT-20261011-001/COLLECTION_MODEL_RESULT.md`。
 仅CPU、合成像素、回环UDP与禁输出适配器；不涉及真实设备、采集、原生UI或GPU。
+
+首个固定提交e242be4在直接编译Session源码的旧typeinfo测试链接阶段发现缺少
+bcrypt依赖，22项尚未执行；后续仅补齐该测试目标链接并保留首轮失败日志。

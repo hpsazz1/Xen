@@ -940,7 +940,7 @@ if(BUILD_TESTING)
         XEN_HAS_DIRECTML_INTEROP=0
         XEN_HAS_OPENVINO_PROVIDER=0)
     target_link_libraries(detector_typeinfo_lifetime_tests PRIVATE
-        ${ONNXRUNTIME_LIB} ${OpenCV_LIBS} ${CMAKE_DL_LIBS} log Threads::Threads)
+        ${ONNXRUNTIME_LIB} ${OpenCV_LIBS} ${CMAKE_DL_LIBS} log Threads::Threads bcrypt)
     xen_deploy_runtime_dlls(detector_typeinfo_lifetime_tests OPENCV ORT)
     add_test(NAME detector_typeinfo_lifetime_tests
         COMMAND detector_typeinfo_lifetime_tests
