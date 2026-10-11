@@ -2,6 +2,7 @@
 #include "recoil/recoil_calibration.h"
 #include "weapon/weapon_catalog.h"
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -36,6 +37,28 @@ std::optional<double> number(const Json& json,const char* key) {
     return json.at(key).get<double>();
 }
 Json optional(std::optional<double> value) { return value ? Json(*value) : Json(nullptr); }
+std::string double_bits(double value) {
+    constexpr char digits[]="0123456789abcdef";
+    const auto bits=std::bit_cast<std::uint64_t>(value);
+    std::string result(16,'0');
+    for(std::size_t i=0;i<result.size();++i)result[i]=digits[(bits>>((15-i)*4))&15];
+    return result;
+}
+std::string confirmation_digest(const RecoilProfile& profile) {
+    // 固定 IEEE754 位编码，避免 JSON 浮点格式、缩进或字段顺序改变确认对象。
+    const bool discrete=profile.schema_version==3;
+    Json samples=Json::array();
+    for(const auto& point:discrete?profile.events:profile.points)
+        samples.push_back({double_bits(point.time_ms),double_bits(point.x_counts),double_bits(point.y_counts)});
+    const auto gsi=weapon::gsi_name(profile.weapon_id);
+    Json payload={{"binding","xen.recoil.confirmation.v1"},{"schema_version",discrete?3:2},
+        {"id",profile.id},{"revision",profile.revision},{"weapon_id",gsi.empty()?profile.weapon_id:std::string(gsi)},
+        {"unit",profile.unit},{"sample_semantics",profile.sample_semantics},{"fire_mode",profile.fire_mode},
+        {"input_path",profile.calibration.input_path},
+        {"sensitivity",profile.calibration.sensitivity?Json(double_bits(*profile.calibration.sensitivity)):Json(nullptr)},
+        {discrete?"events":"points",std::move(samples)}};
+    return recoil_calibration_sha256(payload.dump());
+}
 bool execution_profile(const RecoilProfile& profile) {
     if(profile.schema_version==3)return profile.state==RecoilProfileState::USER_CONFIRMED;
     if(profile.state==RecoilProfileState::USER_CONFIRMED)return profile.execution_phase_budget_ms.has_value();
@@ -103,6 +126,7 @@ bool validate_recoil_profile(const RecoilProfile& p,std::string& error) noexcept
             if((!discrete&&p.execution_phase_budget_ms!=kUserConfirmedPhaseBudgetMs)||p.phase_tolerance_ms||p.recovery_ms||!p.calibration.sensitivity||
                 p.calibration.input_path!="kmbox_net")
                 return reject("人工确认需有效灵敏度和既定软件预算，不得补造实测相位或恢复时间");
+            if(p.source.sha256!=confirmation_digest(p))return reject("弹道内容已改变或缺少确认摘要，请重新人工确认");
         }
         if(p.state==RecoilProfileState::CALIBRATED || p.state==RecoilProfileState::ACCEPTED) {
             const auto canonical = weapon::normalize_weapon_id(p.weapon_id);
@@ -146,10 +170,16 @@ bool load_recoil_profile(std::string_view input,RecoilProfile& output,std::strin
             }
             const auto canonical=weapon::normalize_weapon_id(p.weapon_id);
             if(!canonical.empty())p.weapon_id=canonical;
-            if(json.at("verified").get<bool>()) {
-                if(!confirm_recoil_profile(p,error))return false;
-            } else if(!validate_recoil_profile(p,error))return false;
-            p.source.sha256=recoil_calibration_sha256(serialize_recoil_profile_storage(p));
+            if(!validate_recoil_profile(p,error))return false;
+            const auto digest=confirmation_digest(p);
+            // 读取只核验已有确认；旧布尔标记、缺失或失配摘要均保留为可编辑候选。
+            if(json.at("verified").get<bool>()&&json.contains("confirmation_sha256")&&
+                json.at("confirmation_sha256").is_string()&&json.at("confirmation_sha256").get<std::string>()==digest) {
+                p.state=RecoilProfileState::USER_CONFIRMED;
+                if(!discrete)p.execution_phase_budget_ms=kUserConfirmedPhaseBudgetMs;
+                p.source.sha256=digest;
+                if(!validate_recoil_profile(p,error))return false;
+            } else p.source.sha256=recoil_calibration_sha256(serialize_recoil_profile_storage(p));
             output=std::move(p);return true;
         }
         if(json.at("schema_version")!=1||!json.at("revision").is_number_unsigned())
@@ -210,14 +240,15 @@ bool confirm_recoil_profile(RecoilProfile& profile,std::string& error) noexcept 
         auto confirmed=profile;
         const auto canonical=weapon::normalize_weapon_id(confirmed.weapon_id);
         if(!canonical.empty())confirmed.weapon_id=canonical;
-        confirmed.state=RecoilProfileState::USER_CONFIRMED;
+        confirmed.state=RecoilProfileState::SCHEMA_VALID;
         confirmed.source={};confirmed.calibration.game_build.clear();confirmed.calibration.conditions.clear();
         confirmed.calibration.evidence.clear();confirmed.calibration.input_path="kmbox_net";
-        confirmed.phase_tolerance_ms.reset();confirmed.recovery_ms.reset();
-        if(confirmed.schema_version==3)confirmed.execution_phase_budget_ms.reset();
-        else confirmed.execution_phase_budget_ms=kUserConfirmedPhaseBudgetMs;
+        confirmed.phase_tolerance_ms.reset();confirmed.recovery_ms.reset();confirmed.execution_phase_budget_ms.reset();
         if(!validate_recoil_profile(confirmed,error))return false;
-        confirmed.source.sha256=recoil_calibration_sha256(serialize_recoil_profile_storage(confirmed));
+        confirmed.state=RecoilProfileState::USER_CONFIRMED;
+        if(confirmed.schema_version!=3)confirmed.execution_phase_budget_ms=kUserConfirmedPhaseBudgetMs;
+        confirmed.source.sha256=confirmation_digest(confirmed);
+        if(!validate_recoil_profile(confirmed,error))return false;
         profile=std::move(confirmed);return true;
     } catch(...) {return false;}
 }
@@ -225,19 +256,23 @@ std::string serialize_recoil_profile_storage(const RecoilProfile& p) {
     std::string error;if(!validate_recoil_profile(p,error))throw std::invalid_argument(error);
     if(p.schema_version==3) {
         Json events=Json::array();for(const auto& event:p.events)events.push_back({event.time_ms,event.x_counts,event.y_counts});
-        return Json{{"schema_version",3},{"id",p.id},{"revision",p.revision},{"weapon_id",p.weapon_id},
+        Json json={{"schema_version",3},{"id",p.id},{"revision",p.revision},{"weapon_id",p.weapon_id},
             {"sensitivity",optional(p.calibration.sensitivity)},{"verified",p.state==RecoilProfileState::USER_CONFIRMED},
-            {"unit",p.unit},{"sample_semantics",p.sample_semantics},{"events",events}}.dump(2);
+            {"unit",p.unit},{"sample_semantics",p.sample_semantics},{"events",events}};
+        if(p.state==RecoilProfileState::USER_CONFIRMED)json["confirmation_sha256"]=p.source.sha256;
+        return json.dump(2);
     }
     // 老实测曲线不能在存储层悄悄丢失校准证据；新人工确认路径使用精简格式。
     if(p.state==RecoilProfileState::CALIBRATED||p.state==RecoilProfileState::ACCEPTED)
         return serialize_recoil_profile(p);
     Json points=Json::array();for(const auto& point:p.points)points.push_back({point.time_ms,point.x_counts,point.y_counts});
     const auto gsi=weapon::gsi_name(p.weapon_id);
-    return Json{{"schema_version",2},{"id",p.id},{"revision",p.revision},
+    Json json={{"schema_version",2},{"id",p.id},{"revision",p.revision},
         {"weapon_id",gsi.empty()?p.weapon_id:std::string(gsi)},
         {"sensitivity",optional(p.calibration.sensitivity)},
-        {"verified",p.state==RecoilProfileState::USER_CONFIRMED},{"points",points}}.dump(2);
+        {"verified",p.state==RecoilProfileState::USER_CONFIRMED},{"points",points}};
+    if(p.state==RecoilProfileState::USER_CONFIRMED)json["confirmation_sha256"]=p.source.sha256;
+    return json.dump(2);
 }
 RecoilPoint sample_recoil_profile(const RecoilProfile& p,double time) noexcept {
     if(p.points.empty()||!finite(time)||time<=0)return {};

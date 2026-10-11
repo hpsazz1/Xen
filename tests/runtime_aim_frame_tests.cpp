@@ -383,8 +383,9 @@ int main() {
         auto profile = std::make_shared<RecoilProfile>();
         std::string profile_error;
         expect(load_recoil_profile(R"({"schema_version":3,"id":"source_fixture","revision":1,
-            "weapon_id":"cz75","sensitivity":1.4,"verified":true,"sample_semantics":"discrete_delta",
+            "weapon_id":"cz75","sensitivity":1.4,"verified":false,"sample_semantics":"discrete_delta",
             "events":[[200,0,2]]})", *profile, profile_error), "来源回归曲线经过真实Loader");
+        expect(confirm_recoil_profile(*profile,profile_error),"来源断点执行夹具显式人工确认");
         RecoilController recoil;
         RecoilInput recoil_input; recoil_input.enabled = recoil_input.healthy = recoil_input.focused =
             recoil_input.permission = recoil_input.profile_conditions_match = true;

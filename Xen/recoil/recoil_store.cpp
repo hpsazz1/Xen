@@ -141,6 +141,9 @@ bool RecoilStore::save_new(const RecoilProfile& input,std::string& file,std::str
         profile.revision=std::max(profile.revision,maximum+1);
         if(!preserve){profile.state=RecoilProfileState::SCHEMA_VALID;profile.calibration.evidence.clear();profile.phase_tolerance_ms.reset();profile.recovery_ms.reset();profile.execution_phase_budget_ms.reset();}
         else if(!executable(profile))throw std::runtime_error("明确保存需已校准或用户确认状态及完整证据");
+        // 输入摘要已在分配版本前核验；只绑定存储服务递增的 revision，不接受内容被改的旧确认。
+        else if(profile.state==RecoilProfileState::USER_CONFIRMED&&profile.revision!=input.revision&&
+            !confirm_recoil_profile(profile,error))return false;
         const auto text=serialize_recoil_profile_storage(profile);
         if(text.size()>16*1024*1024)throw std::runtime_error("保存曲线超过16MiB");
         const auto name=stored_weapon(profile.weapon_id)+"-r"+std::to_string(profile.revision)+".json";

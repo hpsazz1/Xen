@@ -85,9 +85,22 @@ struct PickerCancellation {
 };
 thread_local PickerCancellation* active_picker = nullptr;
 void CALLBACK cancel_picker_timer(HWND, UINT, UINT_PTR timer, DWORD) noexcept {
-    // 模态窗口消息循环在创建 COM 对象的同一 STA 调用此回调。
-    if (active_picker && active_picker->timer == timer && active_picker->canceled->load())
-        active_picker->dialog->Close(HRESULT_FROM_WIN32(ERROR_CANCELLED));
+    // 定时器在同一 STA 运行，但不是 IFileDialogEvents 回调；直接 Close 可能不退出 Show。
+    // 文件不存在等模态提示会禁用选择器，必须先关闭其提示，再在后续 tick 关闭选择器。
+    // 投递成功不是退出：每次重新取窗口，直到 Show 返回后由 TimerScope 停止定时器。
+    if (!active_picker || active_picker->timer != timer ||
+        !active_picker->canceled->load()) return;
+    Microsoft::WRL::ComPtr<IOleWindow> window_interface;
+    HWND window=nullptr;
+    if (FAILED(active_picker->dialog->QueryInterface(IID_PPV_ARGS(&window_interface))) ||
+        FAILED(window_interface->GetWindow(&window)) || !window) return;
+    HWND target=window;
+    if (!IsWindowEnabled(window)) {
+        target=GetWindow(window,GW_ENABLEDPOPUP);
+        if (!target || target==window || GetWindow(target,GW_OWNER)!=window) return;
+    }
+    if (GetWindowThreadProcessId(target,nullptr)!=GetCurrentThreadId()) return;
+    PostMessageW(target,WM_CLOSE,0,0);
 }
 std::string choose_recoil_profile(HWND owner, const std::shared_ptr<std::atomic<bool>>& canceled) {
     if(canceled->load())return {};
@@ -434,6 +447,7 @@ struct RecoilPanel::Impl {
     bool workflow_settings_loaded = false, workflow_settings_dirty = false;
     bool workflow_record_measurement = false;
     bool workflow_follow_crosshair = true;
+    enum class LoadPolicy { PreserveSamples, ImportWeapon, ConsumeSamples };
     std::optional<debug_session::Mode> workflow_after_calibration, workflow_prepare_next;
     std::string workflow_profiles_directory;
     void remember_workflow_weapon() {
@@ -577,8 +591,12 @@ struct RecoilPanel::Impl {
                     if (!load_recoil_profile(read_workflow_file(s.workflow_candidate_path), candidate, s.status)) return;
                     candidate.id=new_workflow_profile_id(candidate.weapon_id,s.workflow_requested_shots);
                     RecoilStore store(std::filesystem::u8path(settings.profile_directory));
-                    if (store.save_new(candidate, s.selected_file, s.status)) {
-                        s.load_file(settings, s.selected_file); s.refresh(settings);
+                    std::string saved_file;
+                    if (store.save_new(candidate, saved_file, s.status)) {
+                        if (!s.load_file(settings, saved_file)) {
+                            s.status="候选已保存为 " + saved_file + "，但未载入：" + s.status; return;
+                        }
+                        s.refresh(settings);
                         s.workflow_samples.clear(); s.workflow_locked_prefix_ms = 0;
                         s.bind_workflow_lock(0); s.remember_workflow_weapon();
                         s.workflow_record_measurement = true; s.workflow_prepare_next = debug_session::Mode::RECOIL_TEST;
@@ -659,12 +677,16 @@ struct RecoilPanel::Impl {
                 RecoilCandidateReplayReport replay;
                 if (!validate_recoil_candidate_execution(*result.candidate,{},replay,s.status)) return;
                 RecoilStore store(std::filesystem::u8path(settings.profile_directory));
-                if (!store.save_new(*result.candidate,s.selected_file,s.status)) return;
+                std::string saved_file;
+                if (!store.save_new(*result.candidate,saved_file,s.status)) return;
                 const auto directory = new_output_directory("tuning");
                 std::filesystem::create_directories(std::filesystem::u8path(directory));
                 if (!recoil_tuner::save_wall_report(std::filesystem::u8path(directory)/"analysis.json",result,s.status)) return;
                 const auto locked_prefix=s.workflow_locked_prefix_ms;
-                s.workflow_samples.clear(); s.load_file(settings,s.selected_file); s.refresh(settings);
+                if (!s.load_file(settings,saved_file,LoadPolicy::ConsumeSamples)) {
+                    s.status="候选已保存为 " + saved_file + "，但未载入：" + s.status; return;
+                }
+                s.workflow_samples.clear(); s.refresh(settings);
                 s.bind_workflow_lock(locked_prefix); s.remember_workflow_weapon();
                 s.workflow_measurement_ready = false;
                 s.workflow_record_measurement = true; s.workflow_prepare_next = debug_session::Mode::RECOIL_TEST;
@@ -818,7 +840,13 @@ struct RecoilPanel::Impl {
         if (ImGui::BeginCombo("测试曲线",selected_label.c_str())) {
             for (const auto& file : files) if (file.profile->weapon_id == workflow_weapon) {
                 if (ImGui::Selectable(workflow_curve_label(file).c_str(), selected_file == file.file)) {
-                    load_file(config.recoil, file.file); changed = true;
+                    const auto settings=config.recoil;
+                    actions.debug_plan_edited = true;
+                    launch([settings, selected=file.file](Impl& s) {
+                        if (!s.load_file(settings,selected)) return;
+                        s.workflow_samples.clear(); s.workflow_confirmed = false; s.workflow_count_ok = false;
+                        s.workflow_after_calibration.reset(); s.workflow_prepare_next.reset();
+                    });
                 }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s",file.file.c_str());
             }
@@ -1141,10 +1169,10 @@ struct RecoilPanel::Impl {
             if(serialize_recoil_profile(*saved.profile)==serialize_recoil_profile(candidate)){file=saved.file;break;}
         if(job_cancellation && job_cancellation->load())return;
         if(file.empty()&&!store.save_new(candidate,file,status))return;
-        select_workflow_weapon(candidate.weapon_id);
+        if (!load_file(settings,file,LoadPolicy::ImportWeapon)) return;
+        refresh(settings);
+        workflow_samples.clear(); workflow_measurement_ready = false;
         workflow_after_calibration.reset(); workflow_prepare_next.reset();
-        load_file(settings,file); refresh(settings);
-        if(!loaded||base.weapon_id!=workflow_weapon)return;
         workflow_record_measurement=false; workflow_prepare_next=debug_session::Mode::RECOIL_TEST;
         status="曲线已选中并准备验证；回游戏按测试键即可开始本组。";
     }
@@ -1157,7 +1185,7 @@ struct RecoilPanel::Impl {
         refresh(config);
         if (!selected_file.empty()) {
             const auto remembered = selected_file;
-            load_file(config,remembered);
+            if (!load_file(config,remembered)) return;
             if (loaded && base.weapon_id == workflow_weapon) return;
             selected_file.clear(); loaded = false;
         }
@@ -1169,17 +1197,21 @@ struct RecoilPanel::Impl {
         }
         if (only) load_file(config,only->file);
     }
-    void load_file(const RecoilConfig& config, const std::string& file) {
-        if (!working_copy) { launch([config, file](Impl& state) { state.load_file(config, file); }); return; }
+    bool load_file(const RecoilConfig& config, const std::string& file, LoadPolicy policy = LoadPolicy::PreserveSamples) {
+        if (!working_copy) { launch([config, file, policy](Impl& state) { state.load_file(config, file, policy); }); return false; }
         try { RecoilStore store(std::filesystem::u8path(config.profile_directory)); RecoilProfile p;
         if (store.load(file, p, status)) {
-            if (!workflow_samples.empty() && workflow_execution_text(p)!=workflow_samples.front().executed_profile) {
-                status="当前有待用组，不能切换执行基线；请先优化或明确清空数据。"; return;
+            if (policy != LoadPolicy::ConsumeSamples && !workflow_samples.empty() &&
+                workflow_execution_text(p)!=workflow_samples.front().executed_profile) {
+                status="当前有待用组，不能切换执行基线；请先优化或明确清空数据。"; return false;
             }
+            // 读盘与基线检查成功后才提交选择；优化调用方也只能在此后消费待用组。
+            if (policy == LoadPolicy::ImportWeapon && p.weapon_id != workflow_weapon) select_workflow_weapon(p.weapon_id);
             const auto saved=workflow_weapon_settings.value(workflow_weapon,nlohmann::json::object());
             selected_file = file; set_draft(p); restore_workflow_lock(saved);
             if (workflow_settings_loaded && base.weapon_id == workflow_weapon) remember_workflow_weapon();
-            status = "已加载独立草稿；活动曲线未改变。"; } } catch (...) { status = "曲线文件或目录无效。"; }
+            status = "已加载独立草稿；活动曲线未改变。"; return true; } } catch (...) { status = "曲线文件或目录无效。"; }
+        return false;
     }
     bool strength_controls() {
         if (base.schema_version == 3) {

@@ -8,6 +8,7 @@
 #include <new>
 #include <sstream>
 #include <string_view>
+#include <nlohmann/json.hpp>
 
 namespace allocation_probe {
 std::atomic<bool> enabled{false};
@@ -51,8 +52,71 @@ void test_bounded_read_rejects_file_changes() {
     catch (const std::exception&) { rejected = true; }
     expect(rejected, "底层读取异常不得当作合法EOF");
 }
+void test_confirmation_is_bound_to_saved_content() {
+    const auto directory=std::filesystem::temp_directory_path()/
+        ("xen-recoil-confirmation-test-"+std::to_string(RecoilClock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(directory);
+    RecoilStore store(directory);std::string error;
+    RecoilConfig config;config.input_path="kmbox_net";config.sensitivity=1;
+    for(const bool discrete:{false,true}) {
+        auto candidate=profile();candidate.id=discrete?"discrete_bound":"continuous_bound";
+        if(discrete) {
+            candidate.schema_version=3;candidate.sample_semantics="discrete_delta";
+            candidate.events={{10,1,2}};
+        }
+        expect(confirm_recoil_profile(candidate,error),"绑定回归夹具显式人工确认");
+        std::string file;
+        if(!store.save_new(candidate,file,error,true)) {expect(false,"绑定回归夹具保存");continue;}
+        nlohmann::json original;
+        {std::ifstream stream(directory/file);stream>>original;}
+        const auto write_json=[&](const nlohmann::json& value) {
+            std::ofstream stream(directory/file);stream<<value.dump(4)<<'\n';
+        };
+        write_json(original);
+        RecoilProfile loaded;
+        expect(store.load(file,loaded,error)&&loaded.state==RecoilProfileState::USER_CONFIRMED,
+            "仅调整JSON排版不丢失内容确认");
+        expect(store.set_active(candidate.weapon_id,file,error)&&bool(store.resolve(config,candidate.weapon_id,error)),
+            "未改内容的确认候选可保存加载采用");
+        for(int mutation=0;mutation<8;++mutation) {
+            auto changed=original;
+            auto& point=changed[discrete?"events":"points"][discrete?0:1];
+            if(mutation==0)point[2]=3.0;
+            if(mutation==1)point[0]=11.0;
+            if(mutation==2)changed["sensitivity"]=2.0;
+            if(mutation==3)changed["id"]="replaced_candidate";
+            if(mutation==4)changed["revision"]=100;
+            if(mutation==5)changed.erase("confirmation_sha256");
+            if(mutation==6)changed["weapon_id"]="another_weapon";
+            if(mutation==7)changed["verified"]=false;
+            write_json(changed);
+            const bool loaded_changed=store.load(file,loaded,error);
+            expect(loaded_changed&&loaded.state==RecoilProfileState::SCHEMA_VALID&&!loaded.execution_phase_budget_ms,
+                "变更内容或缺少摘要保留可编辑候选但不得沿用旧人工确认");
+            expect(!store.set_active(candidate.weapon_id,file,error),"变更内容或缺少摘要不能采用");
+            expect(!store.resolve(config,candidate.weapon_id,error),"活动文件变更内容或缺少摘要不能解析执行");
+        }
+        write_json(original);
+        auto changed_in_memory=candidate;changed_in_memory.points.back().y_counts+=1;
+        if(discrete)changed_in_memory.events.back().y_counts+=1;
+        std::string rejected_file;
+        expect(!store.save_new(changed_in_memory,rejected_file,error,true),"内存节点变更不得借保存新revision沿用确认");
+    }
+    std::filesystem::remove_all(directory);
+}
 }
 int main(int argc, char** argv){
+    if(argc==3&&std::string_view(argv[1])=="--validate-confirmed-file") {
+        std::ifstream stream(std::filesystem::u8path(argv[2]),std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(stream)),{});
+        RecoilProfile loaded,restored;std::string error;
+        if(!stream||!load_recoil_profile(text,loaded,error)||loaded.state!=RecoilProfileState::USER_CONFIRMED||
+            !load_recoil_profile(serialize_recoil_profile_storage(loaded),restored,error)||
+            restored.state!=RecoilProfileState::USER_CONFIRMED||restored.source.sha256!=loaded.source.sha256) {
+            std::cerr<<"人工确认文件摘要或存储往返无效："<<error<<'\n';return 1;
+        }
+        return 0;
+    }
     // 实际本地导入产物的只读验收；不设置活动版本、不启动设备。
     if (argc == 3 && std::string_view(argv[1]) == "--validate-imported") {
         RecoilStore imported(std::filesystem::u8path(argv[2]));
@@ -73,6 +137,7 @@ int main(int argc, char** argv){
     }
     if (argc != 1) return 2;
     test_bounded_read_rejects_file_changes();
+    test_confirmation_is_bound_to_saved_content();
     auto directory=std::filesystem::temp_directory_path()/("xen-recoil-store-test-"+std::to_string(RecoilClock::now().time_since_epoch().count()));
     std::filesystem::create_directories(directory);
     RecoilStore store(directory);std::string error,file1,file2,file3;
@@ -133,6 +198,7 @@ int main(int argc, char** argv){
     expect(store.save_new(named,named_file,error,true)&&named_file=="weapon_ak47-r1.json","文件名使用GSI规范名");
     expect(store.set_active("weapon_ak47",named_file,error)&&bool(store.resolve(cfg,"ak47",error)),"GSI活动键与内部短名兼容");
     named.id="another_curve";
+    expect(confirm_recoil_profile(named,error),"更改曲线身份后明确重新确认");
     expect(store.save_new(named,named_next,error,true)&&named_next=="weapon_ak47-r2.json","同武器不同曲线ID共享递增文件版本避免冲突");
     {std::ofstream index(directory/"active.json");index<<"{\"schema_version\":1,\"active\":{\"ak47\":{\"file\":\""<<named_file<<"\",\"previous\":\"\"}}}";}
     expect(bool(store.resolve(cfg,"weapon_ak47",error)),"旧短名活动索引兼容读取");
@@ -141,8 +207,9 @@ int main(int argc, char** argv){
         expect(content.find("weapon_ak47")!=std::string::npos&&content.find("\"ak47\"")==std::string::npos,"写活动索引只保留GSI名称");}
     RecoilProfile discrete;
     expect(load_recoil_profile(R"({"schema_version":3,"id":"discrete_store","revision":1,"weapon_id":"ak47",
-        "sensitivity":1,"verified":true,"sample_semantics":"discrete_delta","events":[[5,0.5,-0.5],[10,2.5,-2.5]]})",
+        "sensitivity":1,"verified":false,"sample_semantics":"discrete_delta","events":[[5,0.5,-0.5],[10,2.5,-2.5]]})",
         discrete,error),"离散曲线可由生产存储入口加载");
+    expect(confirm_recoil_profile(discrete,error),"离散候选经显式人工确认后保存");
     std::string discrete_file;
     expect(store.save_new(discrete,discrete_file,error,true)&&store.load(discrete_file,loaded,error)&&
         loaded.schema_version==3&&loaded.events.size()==2&&!loaded.execution_phase_budget_ms,

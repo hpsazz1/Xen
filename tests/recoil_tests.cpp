@@ -3,6 +3,7 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <nlohmann/json.hpp>
 namespace {
 int failures=0;
 void expect(bool b,const char* message){if(!b){++failures;std::cerr<<message<<'\n';}}
@@ -21,11 +22,12 @@ void acknowledge(RecoilController& c,const RecoilDecision& d,double ms){
 }
 void discrete_schema_keeps_absolute_events(){
     const auto text=R"({"schema_version":3,"id":"synthetic_discrete","revision":1,
-        "weapon_id":"ak47","sensitivity":2.45,"verified":true,"sample_semantics":"discrete_delta",
+        "weapon_id":"ak47","sensitivity":2.45,"verified":false,"sample_semantics":"discrete_delta",
         "events":[[5,0,0],[10,0.75,-0.75],[15,0.75,-0.75],[20,-2.25,2.25],[25,0.75,-0.75]]})";
     RecoilProfile p;std::string error;
     const bool loaded=load_recoil_profile(text,p,error);
     expect(loaded,"离散schema3生产加载成功");if(!loaded)return;
+    expect(confirm_recoil_profile(p,error),"离散事件执行夹具显式人工确认");
     RecoilProfile restored;
     expect(load_recoil_profile(serialize_recoil_profile_storage(p),restored,error)&&restored.schema_version==3,
         "离散存储往返保留执行格式");
@@ -125,8 +127,9 @@ void schema_and_compile(){
 void discrete_recovery_and_unsent_safety(){
     RecoilProfile p;std::string error;
     if(!load_recoil_profile(R"({"schema_version":3,"id":"synthetic_retry","revision":1,
-        "weapon_id":"ak47","sensitivity":2.45,"verified":true,"sample_semantics":"discrete_delta",
+        "weapon_id":"ak47","sensitivity":2.45,"verified":false,"sample_semantics":"discrete_delta",
         "events":[[5,1.25,-1.25],[10,2.25,-2.25]]})",p,error))return;
+    expect(confirm_recoil_profile(p,error),"离散恢复夹具显式人工确认");
     auto make_input=[&]{auto i=input();i.profile=std::make_shared<RecoilProfile>(p);return i;};
     auto candidate=p;candidate.state=RecoilProfileState::SCHEMA_VALID;
     RecoilCandidateReplayReport replay;
@@ -206,7 +209,9 @@ void user_confirmed_execution_keeps_boundaries(){
     text.replace(text.find("IMPORTED"),8,"USER_CONFIRMED");
     text.insert(1,"\"execution_phase_budget_ms\":20,");
     RecoilProfile confirmed;std::string error;
-    const bool valid=load_recoil_profile(text,confirmed,error);
+    expect(!load_recoil_profile(text,confirmed,error),"单改状态和软件预算不能伪造人工确认内容绑定");
+    confirmed=base;
+    const bool valid=confirm_recoil_profile(confirmed,error);
     expect(valid,"用户确认曲线使用独立软件预算准入");
     if(!valid)return;
     expect(!confirmed.phase_tolerance_ms&&!confirmed.recovery_ms,"用户确认不补造实测相位和恢复数据");
@@ -216,8 +221,8 @@ void user_confirmed_execution_keeps_boundaries(){
     expect(!validate_recoil_profile(missing,error),"人工确认仍需灵敏度");
     missing=confirmed;missing.phase_tolerance_ms=20;
     expect(!validate_recoil_profile(missing,error),"人工确认不得混入实测相位声明");
-    auto no_budget=text;no_budget.erase(1,std::string("\"execution_phase_budget_ms\":20,").size());
-    expect(!load_recoil_profile(no_budget,restored,error),"人工确认缺软件预算不得执行");
+    auto no_budget=nlohmann::json::parse(serialize_recoil_profile(confirmed));no_budget.erase("execution_phase_budget_ms");
+    expect(!load_recoil_profile(no_budget.dump(),restored,error),"人工确认缺软件预算不得执行");
     const auto compact=serialize_recoil_profile_storage(confirmed);
     expect(compact.find("source")==std::string::npos&&compact.find("calibration")==std::string::npos&&
         compact.find("phase")==std::string::npos,"用户存储只留弹道与灵敏度及确认状态");

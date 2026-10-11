@@ -789,7 +789,8 @@ if(BUILD_TESTING)
     add_executable(recoil_legacy_parity_tests tests/recoil_legacy_parity_tests.cpp)
     target_link_libraries(recoil_legacy_parity_tests PRIVATE recoil nlohmann_json::nlohmann_json)
     add_test(NAME import_recoil_profiles_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/import_recoil_profiles_tests.py")
-    add_test(NAME migrate_legacy_recoil_profiles_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/migrate_legacy_recoil_profiles_tests.py")
+    add_test(NAME migrate_legacy_recoil_profiles_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/migrate_legacy_recoil_profiles_tests.py"
+        --store-test "$<TARGET_FILE:recoil_store_tests>")
     target_link_libraries(recoil_worker_tests PRIVATE recoil_worker)
     add_test(NAME recoil_worker_tests COMMAND recoil_worker_tests)
     add_executable(recoil_calibration_tests tests/recoil_calibration_tests.cpp)
@@ -1657,6 +1658,45 @@ if(BUILD_TESTING)
     add_executable(debug_workspace_ui_preview tests/debug_workspace_ui_preview.cpp)
     target_link_libraries(debug_workspace_ui_preview PRIVATE overlay imgui ${OpenCV_LIBS} log)
     xen_deploy_runtime_dlls(debug_workspace_ui_preview OPENCV ORT NDI)
+
+    # 通过生产 wWinMain 验证完整退出屏障；测试入口只驱动界面并观察回收。
+    add_executable(app_file_dialog_shutdown_tests
+        tests/app_file_dialog_shutdown_tests.cpp
+        Xen/app/main.cpp
+        Xen/app/model_catalog.cpp
+        Xen/app/xen.rc)
+    add_dependencies(app_file_dialog_shutdown_tests
+        xen_recoil_calibration xen_recoil_tuner model_workspace_tools)
+    target_link_libraries(app_file_dialog_shutdown_tests PRIVATE
+        overlay app_input app_startup runtime xen_debug config crash log app_release imgui)
+    xen_deploy_runtime_dlls(app_file_dialog_shutdown_tests OPENCV ORT NDI)
+    foreach(dialog_state picker error)
+        add_test(NAME app_file_dialog_shutdown_${dialog_state}
+            COMMAND app_file_dialog_shutdown_tests
+                "${CMAKE_BINARY_DIR}/app-file-dialog-shutdown-tests" ${dialog_state})
+        set_tests_properties(app_file_dialog_shutdown_${dialog_state} PROPERTIES
+            TIMEOUT 45 RUN_SERIAL TRUE LABELS "app;ui;shutdown")
+    endforeach()
+
+    # 显式桌面验收：启动实际 Xen.exe，界面操作与进程外回收见证分离。
+    add_executable(xen_exe_shutdown_probe tests/xen_exe_shutdown_probe.cpp)
+    target_link_libraries(xen_exe_shutdown_probe PRIVATE config recoil nlohmann_json::nlohmann_json ${OpenCV_LIBS} ws2_32)
+    add_dependencies(xen_exe_shutdown_probe xen_app)
+    xen_deploy_runtime_dlls(xen_exe_shutdown_probe OPENCV)
+
+    # 测试宿主构造 Runtime 与弹窗共存；保留实际应用的运行时编辑限制。
+    add_executable(runtime_file_dialog_shutdown_tests tests/runtime_file_dialog_shutdown_tests.cpp Xen/app/xen.rc)
+    target_link_libraries(runtime_file_dialog_shutdown_tests PRIVATE
+        overlay runtime xen_debug config recoil log imgui ${OpenCV_LIBS} ws2_32)
+    xen_deploy_runtime_dlls(runtime_file_dialog_shutdown_tests OPENCV ORT NDI)
+    foreach(dialog_state picker error)
+        add_test(NAME runtime_file_dialog_shutdown_${dialog_state}
+            COMMAND runtime_file_dialog_shutdown_tests
+                "${CMAKE_BINARY_DIR}/runtime-file-dialog-shutdown-tests" ${dialog_state}
+                "${PROJECT_SOURCE_DIR}/tests/fixtures/detector_typeinfo_segmentation.onnx")
+        set_tests_properties(runtime_file_dialog_shutdown_${dialog_state} PROPERTIES
+            TIMEOUT 60 RUN_SERIAL TRUE LABELS "runtime;ui;shutdown")
+    endforeach()
 
     # Overlay Present 系统 seam 与标量 helper 均不创建 Win32/D3D11 窗口，
     # 测试只注入 HRESULT，也不链接 ImGui。

@@ -161,9 +161,10 @@ struct DiscreteFixture {
         const auto events = long_sequence ? "[[5,0,0],[10,0,7.5],[11,0,7.5],[12,0,7.5],[1100,-2.75,2]]" :
             "[[5,0,0],[40,0,7.5],[80,0,7.5],[120,0,7.5],[160,-2.75,2]]";
         const std::string json = std::string(R"({"schema_version":3,"id":"worker_synthetic","revision":1,
-            "weapon_id":"ak47","sensitivity":2.45,"verified":true,"sample_semantics":"discrete_delta","events":)") + events + "}";
+            "weapon_id":"ak47","sensitivity":2.45,"verified":false,"sample_semantics":"discrete_delta","events":)") + events + "}";
         std::string error;
         check(load_recoil_profile(json,*profile,error), "自制离散曲线必须通过生产Loader");
+        check(confirm_recoil_profile(*profile,error),"离散Worker夹具显式人工确认");
         ledger->reset(14,16,RecoilClock::now());
         worker = std::make_unique<RecoilWorker>(mouse,arbiter,ledger,[this] {
             RecoilInput input;

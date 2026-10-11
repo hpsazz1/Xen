@@ -203,7 +203,7 @@ void require_page_table(const char* table_name) {
 }
 
 // 真实面板+ImGui交互，只截获动作，不构造Session/Runtime/设备。
-void recoil_flow_preview(const std::filesystem::path& output) {
+void recoil_flow_preview(const std::filesystem::path& output, bool candidate_only = false) {
     const auto previous = std::filesystem::current_path();
     struct RestoreDirectory { std::filesystem::path path; ~RestoreDirectory() { std::filesystem::current_path(path); } } restore{previous};
     std::filesystem::current_path(output);
@@ -226,8 +226,17 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     ImGuiID pending_focus_id=0;
     std::atomic<bool> cancel_picker_on_frame{false};
     std::string pending_focus_window = "recoil-flow";
+    const auto pump_native_messages = [] {
+        MSG message{};
+        while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)) {
+            TranslateMessage(&message);DispatchMessageW(&message);
+        }
+    };
     auto frame = [&] {
-        if(cancel_picker_on_frame.exchange(false))panel->request_cancel();
+        pump_native_messages();
+        if(cancel_picker_on_frame.exchange(false)) {
+            panel->request_cancel();panel->request_cancel(); // 重复取消不得提前回收或污染下一任务。
+        }
         panel->poll(); actions = {};
         ImGui::NewFrame();
         if (!pending_focus.empty()) {
@@ -253,7 +262,8 @@ void recoil_flow_preview(const std::filesystem::path& output) {
         for (int i=0;i<5000;++i) { frame(); if (!panel->busy() && i>5) return; std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
         throw std::runtime_error("面板后台任务未在有界时间内完成");
     };
-    auto click = [&](const char* label, bool popup = false, const char* scope = nullptr, const char* parent_scope = nullptr) {
+    auto click = [&](const char* label, bool popup = false, const char* scope = nullptr,
+                     const char* parent_scope = nullptr, bool settle_after = true) {
         settle(); pending_focus_window=popup?"##Combo_00":"recoil-flow";
         auto* window = ImGui::FindWindowByName(pending_focus_window.c_str()); require(window != nullptr,"流程窗口缺失");
         const auto scope_id=scope?(parent_scope?ImHashStr(scope,0,window->GetID(parent_scope)):window->GetID(scope)):0;
@@ -268,9 +278,12 @@ void recoil_flow_preview(const std::filesystem::path& output) {
         require(window->ClipRect.Contains(point)&&rectangle.GetWidth()>0&&rectangle.GetHeight()>0,"真实目标控件没有可点击矩形");
         { std::ofstream trace(output/"flow-clicks.txt",std::ios::app); trace << label << " at " << point.x << ',' << point.y << '\n'; }
         io.AddMousePosEvent(point.x,point.y); frame();
-        io.AddMouseButtonEvent(0,true); frame(); io.AddMouseButtonEvent(0,false); frame(); settle();
+        io.AddMouseButtonEvent(0,true); frame(); io.AddMouseButtonEvent(0,false); frame();
+        if (settle_after) settle();
     };
     settle();
+    // 精确候选专项可独立运行；完整入口继续保留原生文件选择与取消回归。
+    if (!candidate_only) {
     // 最终入口标签由生产面板提供；本测试不调用内部状态修改接口。
     click("验证已有弹道");
     require(!emitted.empty() && emitted.back().debug_action == debug_session::Action::PREPARE &&
@@ -397,38 +410,113 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     require(emitted.size()==1 && std::filesystem::path(emitted.back().debug_request.recoil_profile_path).filename()=="second.json",
         "展开外部导入后直接验证必须仍使用测试曲线已选中的文件");
     emitted.clear();
-    auto native_selection = [&](const std::filesystem::path& path, bool cancel, bool panel_cancel = false) {
+    struct NativeOwner {
+        HWND window=CreateWindowExW(WS_EX_TOOLWINDOW,L"STATIC",L"Xen 弹道选择器回归宿主",
+            WS_OVERLAPPEDWINDOW,0,0,320,200,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+        void* previous=ImGui::GetMainViewport()->PlatformHandleRaw;
+        ~NativeOwner(){ImGui::GetMainViewport()->PlatformHandleRaw=previous;if(window)DestroyWindow(window);}
+    } native_owner;
+    require(native_owner.window!=nullptr,"无法创建本进程原生选择器宿主窗口");
+    const auto native_dialog = [](bool visible_only = false) {
+        struct DialogSearch { HWND window = nullptr; bool visible_only = false; } search;
+        search.visible_only = visible_only;
+        EnumWindows([](HWND window,LPARAM context)->BOOL {
+            auto& search=*reinterpret_cast<DialogSearch*>(context);
+            DWORD process=0;GetWindowThreadProcessId(window,&process);
+            if(process!=GetCurrentProcessId()||(search.visible_only&&!IsWindowVisible(window)))return TRUE;
+            wchar_t title[128]{};GetWindowTextW(window,title,128);
+            if(std::wstring_view(title)==L"选择弹道曲线 JSON"){
+                search.window=window;return FALSE;
+            }return TRUE;
+        },reinterpret_cast<LPARAM>(&search));
+        return search.window;
+    };
+    const auto selected_profile = [] {
+        std::ifstream file("cache/recoil/workflow-settings.json"); nlohmann::json settings; file>>settings;
+        return settings.at("ak47").at("selected_file").get<std::string>();
+    };
+    const auto profile_files = [] {
+        std::vector<std::filesystem::path> files;
+        for(const auto& file:std::filesystem::directory_iterator("profiles"))files.push_back(file.path());
+        std::sort(files.begin(),files.end()); return files;
+    };
+    const auto selected_before_cancel=selected_profile();
+    const auto profiles_before_cancel=profile_files();
+    const auto require_canceled_selection = [&] {
+        require(emitted.empty(),"取消文件选择不得产生Prepare动作");
+        require(!panel->busy(),"取消文件选择后必须释放busy");
+        require(selected_profile()==selected_before_cancel,"取消文件选择不得改写已选曲线");
+        require(profile_files()==profiles_before_cancel,"取消文件选择不得新增、删除或替换曲线文件名");
+        require(!native_dialog(),"取消完成后不能遗留本进程的文件选择窗口");
+    };
+    const auto filename_edit = [](HWND dialog) {
+        HWND edit=nullptr;
+        EnumChildWindows(dialog,[](HWND child,LPARAM context)->BOOL {
+            wchar_t name[64]{};GetClassNameW(child,name,64);
+            if(IsWindowVisible(child)&&std::wstring_view(name)==L"Edit"){
+                *reinterpret_cast<HWND*>(context)=child;return FALSE;
+            }return TRUE;
+        },reinterpret_cast<LPARAM>(&edit));
+        return edit;
+    };
+    enum class PickerAction { SELECT, NATIVE_CANCEL, CANCEL_EARLY, CANCEL_VISIBLE, CANCEL_PROMPT };
+    auto native_selection = [&](const std::filesystem::path& path, PickerAction action) {
+        const bool panel_cancel=action==PickerAction::CANCEL_EARLY||action==PickerAction::CANCEL_VISIBLE||
+            action==PickerAction::CANCEL_PROMPT;
+        const bool wait_until_visible=action==PickerAction::CANCEL_VISIBLE||action==PickerAction::CANCEL_PROMPT;
+        const bool missing_file_prompt=action==PickerAction::CANCEL_PROMPT;
+        const auto owner=static_cast<HWND>(ImGui::GetMainViewport()->PlatformHandleRaw);
         std::atomic<bool> seen{false}, chosen{false}, fallback_cancel{false};
+        struct WorkerThread {
+            HANDLE handle=nullptr;
+            ~WorkerThread(){if(handle)CloseHandle(handle);}
+        } worker;
+        bool prompt_seen=false,owner_disabled=false;
         std::jthread response([&](std::stop_token stop) {
+            bool submitted_missing=false;
+            HWND picker=nullptr;
+            const auto rescue = [&](HWND dialog) {
+                if(!dialog||!IsWindow(dialog))return;
+                fallback_cancel=true;
+                const auto popup=GetWindow(dialog,GW_ENABLEDPOPUP);
+                if(popup&&popup!=dialog&&GetWindow(popup,GW_OWNER)==dialog&&
+                    GetWindowThreadProcessId(popup,nullptr)==GetWindowThreadProcessId(dialog,nullptr)) {
+                    DWORD_PTR ignored=0;
+                    SendMessageTimeoutW(popup,WM_CLOSE,0,0,SMTO_ABORTIFHUNG|SMTO_BLOCK,1000,&ignored);
+                }
+                PostMessageW(dialog,WM_COMMAND,IDCANCEL,0);
+            };
             const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(8);
             while(!stop.stop_requested()&&std::chrono::steady_clock::now()<deadline) {
-                HWND dialog=nullptr;
-                EnumWindows([](HWND window,LPARAM context)->BOOL {
-                    DWORD process=0;GetWindowThreadProcessId(window,&process);
-                    if(process!=GetCurrentProcessId())return TRUE;
-                    wchar_t title[128]{};GetWindowTextW(window,title,128);
-                    if(std::wstring_view(title)==L"选择弹道曲线 JSON"){
-                        *reinterpret_cast<HWND*>(context)=window;return FALSE;
-                    }return TRUE;
-                },reinterpret_cast<LPARAM>(&dialog));
+                if(!picker)picker=native_dialog(wait_until_visible);
+                const auto dialog=picker;
                 if(dialog) {
                     seen=true;
+                    owner_disabled=owner_disabled||(owner&&!IsWindowEnabled(owner));
+                    if(!worker.handle)worker.handle=OpenThread(SYNCHRONIZE,FALSE,GetWindowThreadProcessId(dialog,nullptr));
+                    if(missing_file_prompt&&!prompt_seen) {
+                        if(!submitted_missing) {
+                            const auto edit=filename_edit(dialog);
+                            if(edit) {
+                                const auto missing=output/L"missing-profile.json";
+                                SendMessageW(edit,WM_SETTEXT,0,reinterpret_cast<LPARAM>(missing.c_str()));
+                                PostMessageW(dialog,WM_COMMAND,IDOK,0);submitted_missing=true;
+                            }
+                        }
+                        const auto popup=GetWindow(dialog,GW_ENABLEDPOPUP);
+                        prompt_seen=!IsWindowEnabled(dialog)&&popup&&popup!=dialog&&IsWindowVisible(popup);
+                        if(!prompt_seen){std::this_thread::sleep_for(std::chrono::milliseconds(10));continue;}
+                    }
                     if(panel_cancel) {
                         cancel_picker_on_frame=true;
                         const auto closed_by=std::chrono::steady_clock::now()+std::chrono::seconds(2);
                         while(IsWindow(dialog)&&std::chrono::steady_clock::now()<closed_by)
                             std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                        if(IsWindow(dialog)){fallback_cancel=true;PostMessageW(dialog,WM_COMMAND,IDCANCEL,0);}
+                        if(IsWindow(dialog))rescue(dialog);
                         chosen=true;return;
                     }
-                    if(cancel){PostMessageW(dialog,WM_COMMAND,IDCANCEL,0);chosen=true;return;}
-                    HWND edit=nullptr;
-                    EnumChildWindows(dialog,[](HWND child,LPARAM context)->BOOL {
-                        wchar_t name[64]{};GetClassNameW(child,name,64);
-                        if(IsWindowVisible(child)&&std::wstring_view(name)==L"Edit"){
-                            *reinterpret_cast<HWND*>(context)=child;return FALSE;
-                        }return TRUE;
-                    },reinterpret_cast<LPARAM>(&edit));
+                    if(action==PickerAction::NATIVE_CANCEL){PostMessageW(dialog,WM_COMMAND,IDCANCEL,0);chosen=true;return;}
+                    const auto edit=filename_edit(dialog);
                     if(edit){
                         SendMessageW(edit,WM_SETTEXT,0,reinterpret_cast<LPARAM>(path.c_str()));
                         PostMessageW(dialog,WM_COMMAND,IDOK,0);chosen=true;return;
@@ -436,33 +524,60 @@ void recoil_flow_preview(const std::filesystem::path& output) {
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
             }
+            rescue(picker); // 夹具超时也须清理自己的窗口；救援始终判失败。
         });
         click("选择曲线文件",false,"导入已有曲线 JSON");
         response.request_stop();response.join();
         require(seen&&chosen,"测试必须实际操作本进程创建的Windows文件选择窗口");
+        require(!missing_file_prompt||prompt_seen,"必须实际触发文件不存在的内嵌模态提示");
         require(!fallback_cancel,"全局取消必须自行关闭运行中的文件选择器，不能依赖再次点击取消");
+        require(worker.handle!=nullptr,"必须在取消或选择前持有实际picker线程句柄");
+        const auto exit_deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+        DWORD exit_state=WAIT_TIMEOUT;
+        while((exit_state=WaitForSingleObject(worker.handle,0))==WAIT_TIMEOUT&&
+            std::chrono::steady_clock::now()<exit_deadline) {pump_native_messages();std::this_thread::yield();}
+        require(exit_state!=WAIT_FAILED,"picker线程退出检查失败");
+        require(exit_state==WAIT_OBJECT_0,"busy回收后创建文件选择器的后台线程必须在有界时间内退出");
+        require(!owner||IsWindowEnabled(owner),"选择器退出后必须恢复宿主窗口");
+        require(!owner||!wait_until_visible||owner_disabled,"可见选择器必须实际禁用宿主，不能跳过owner回归");
         require(std::filesystem::current_path()==output,"系统文件选择不得改变工作目录");
+        std::ofstream lifecycle(output/"picker-lifecycle.txt",std::ios::app);
+        lifecycle << "action=" << static_cast<int>(action) << " owner=" << (owner!=nullptr)
+            << " prompt=" << prompt_seen << " thread_exited=1 owner_restored=1\n";
     };
-    emitted.clear();native_selection({},true);
-    require(emitted.empty(),"取消文件选择不得准备任务或改写当前曲线");
-    const auto profiles_before_cancel=std::distance(std::filesystem::directory_iterator("profiles"),std::filesystem::directory_iterator{});
-    emitted.clear();native_selection({},false,true);
-    require(emitted.empty()&&!panel->busy(),"全局取消文件选择后必须释放busy且不能Prepare");
-    require(std::distance(std::filesystem::directory_iterator("profiles"),std::filesystem::directory_iterator{})==profiles_before_cancel,
-        "全局取消运行中文件选择不得新建曲线文件");
-    emitted.clear();native_selection(std::filesystem::absolute("profiles/second.json"),false);
+    emitted.clear();native_selection({},PickerAction::NATIVE_CANCEL);
+    require_canceled_selection();
+    // 按钮释放帧只排队；此处尚未执行下一次poll，不允许启动原生窗口。
+    click("选择曲线文件",false,"导入已有曲线 JSON",nullptr,false);
+    require(panel->busy()&&!native_dialog(),"文件选择必须先排队，不能在UI点击帧同步打开");
+    panel->request_cancel();
+    require(!panel->busy(),"取消尚未poll的文件选择必须立即清除排队动作");
+    settle(); require_canceled_selection();
+    emitted.clear();native_selection({},PickerAction::CANCEL_PROMPT);require_canceled_selection();
+    ImGui::GetMainViewport()->PlatformHandleRaw=native_owner.window;
+    emitted.clear();native_selection({},PickerAction::NATIVE_CANCEL);require_canceled_selection();
+    // 连续重开覆盖首次捕获窗口和窗口已经可见后的取消，检查每轮状态完整回收。
+    for(int attempt=0;attempt<3;++attempt) {
+        emitted.clear();native_selection({},PickerAction::CANCEL_EARLY);require_canceled_selection();
+        emitted.clear();native_selection({},PickerAction::CANCEL_VISIBLE);require_canceled_selection();
+        emitted.clear();native_selection({},PickerAction::CANCEL_PROMPT);require_canceled_selection();
+    }
+    // 取消回收后重建页面，模拟宿主完成退出屏障再重新进入；随后真实选择不得沿用旧取消标记。
+    panel.reset();panel=std::make_unique<RecoilPanel>();settle();require_canceled_selection();
+    emitted.clear();native_selection(std::filesystem::absolute("profiles/second.json"),PickerAction::SELECT);
     require(emitted.size()==1&&std::filesystem::path(emitted.back().debug_request.recoil_profile_path).filename()=="second.json",
         "选择目录内已有曲线应直接载入验证，不能因重复版本拒绝");
     emitted.clear();auto external=imported;external.id="external-ui";external.revision=3;
     const auto external_path=output/std::filesystem::path(L"外部曲线.json");
     {std::ofstream file(external_path);file<<serialize_recoil_profile(external);}
-    native_selection(external_path,false);
+    native_selection(external_path,PickerAction::SELECT);
     require(emitted.size()==1&&emitted.back().debug_request.mode==debug_session::Mode::RECOIL_TEST&&
         emitted.back().debug_request.recoil_calibration_path.empty(),"系统文件选择后必须实际导入并准备所选曲线");
     RecoilProfile imported_result;std::ifstream imported_file(emitted.back().debug_request.recoil_profile_path);
     const std::string imported_text{std::istreambuf_iterator<char>(imported_file),{}};std::string imported_error;
     require(load_recoil_profile(imported_text,imported_result,imported_error)&&imported_result.id=="external-ui",
         "导入结果必须是所选外部曲线的真实内容");
+    }
     // 使用生产结果导入与真实控件，确认初始候选、五组优化和阶段推进在主流程可达。
     settle(); panel.reset(); debug={}; emitted.clear();
     { std::ofstream file("cache/recoil/workflow-settings.json");
@@ -507,11 +622,14 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     require(emitted.size()==1 && emitted.back().debug_request.mode==debug_session::Mode::RECOIL_CALIBRATE,
         "恢复旧成功候选但标定已失效时，记录优化数据不得静默降为无测量测试");
     const auto first_named_curve=std::filesystem::path(emitted.back().debug_request.recoil_profile_path);
-    require(first_named_curve.filename().string().starts_with("ak47-2shots-") && std::filesystem::is_regular_file(first_named_curve),
-        "采集保存文件必须明确武器和本次发数");
+    require(first_named_curve.filename().string().starts_with("weapon_ak47-r") && std::filesystem::is_regular_file(first_named_curve),
+        "采集保存文件必须使用正式武器版本命名");
     std::ifstream first_named_input(first_named_curve);
     const std::string first_named_text{std::istreambuf_iterator<char>(first_named_input),{}};
     first_named_input.close();
+    RecoilProfile first_named_profile; std::string first_named_error;
+    require(load_recoil_profile(first_named_text,first_named_profile,first_named_error) &&
+        first_named_profile.id.starts_with("ak47-2shots-"),"采集保存曲线身份必须明确武器和本次发数");
     std::filesystem::copy_file(first_named_curve,"stage-candidate.json",std::filesystem::copy_options::overwrite_existing);
     debug.generation=101;debug.result=std::make_shared<const nlohmann::json>(nlohmann::json{
         {"weapon_id","ak47"},{"success",true},{"completed",true},{"cleanup_known",true},
@@ -527,7 +645,7 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     require(emitted.size()==1 && emitted.back().debug_request.mode==debug_session::Mode::RECOIL_TEST,
         "同发数再次人工保存仅准备当前新候选测试");
     const auto second_named_curve=std::filesystem::path(emitted.back().debug_request.recoil_profile_path);
-    require(second_named_curve!=first_named_curve && second_named_curve.filename().string().starts_with("ak47-2shots-"),
+    require(second_named_curve!=first_named_curve && second_named_curve.filename().string().starts_with("weapon_ak47-r"),
         "同武器同发数两次保存必须生成独立可识别文件");
     { std::ifstream file(first_named_curve); const std::string unchanged{std::istreambuf_iterator<char>(file),{}};
       require(unchanged==first_named_text,"保存第二条候选不得覆盖第一次文件"); }
@@ -537,6 +655,40 @@ void recoil_flow_preview(const std::filesystem::path& output) {
         stage_result(index,false);
         click("画面已核对：加入优化数据");
         require(emitted.empty(),"人工加入测量不得自动启动下一组或推进阶段");
+        if (index == 1) {
+            // 真实保存按钮走到另一候选的载入拒绝，旧执行基线与人工待用组必须一起保留。
+            stage_result(20,true);
+            click("画面已核对：保存候选并准备测试");
+            require(emitted.empty(),"候选载入被待用组拒绝后不得误准备另一条曲线");
+            require(screen_contains("当前有待用组，不能切换执行基线") &&
+                screen_contains("训练 1/3，验证 0/2") &&
+                screen_contains("画面已核对：保存候选并准备测试") &&
+                screen_contains(second_named_curve.filename().string().c_str()) &&
+                !screen_contains("采集候选已载入"),
+                "候选载入失败必须保留原选择、待用组、待核对候选和失败提示");
+            { std::ifstream file("cache/recoil/workflow-settings.json"); nlohmann::json settings; file>>settings;
+              require(settings.at("ak47").at("selected_file")==second_named_curve.filename().string(),
+                  "候选载入失败不得持久化尚未载入的文件选择"); }
+            click("测试曲线");
+            const auto previous_label="AK-47 | 2发 | v"+std::to_string(first_named_profile.revision)+" | "+
+                first_named_curve.filename().string()+"###"+first_named_curve.filename().string();
+            click(previous_label.c_str(),true);
+            require(emitted.empty() && screen_contains("当前有待用组，不能切换执行基线") &&
+                screen_contains("训练 1/3，验证 0/2") && screen_contains(second_named_curve.filename().string().c_str()),
+                "下拉切换被拒绝时也必须保留待用组和原执行基线");
+            click("清空本轮待用数据");
+            click("画面已核对：保存候选并准备测试");
+            require(emitted.size()==1 && emitted.back().debug_request.mode==debug_session::Mode::RECOIL_TEST &&
+                screen_contains("训练 0/3，验证 0/2") && screen_contains("采集候选已载入"),
+                "明确清空待用组后重试应实际载入候选并仅准备一次测试");
+            const auto retry_curve=std::filesystem::path(emitted.back().debug_request.recoil_profile_path);
+            require(retry_curve!=second_named_curve && screen_contains(retry_curve.filename().string().c_str()),
+                "重试成功后请求和当前曲线必须同时指向新候选");
+            std::filesystem::copy_file(retry_curve,"stage-candidate.json",std::filesystem::copy_options::overwrite_existing);
+            emitted.clear(); stage_result(21,false); click("画面已核对：加入优化数据");
+            require(emitted.empty() && screen_contains("训练 1/3，验证 0/2"),
+                "重试成功后必须能够按新执行基线重新加入优化数据");
+        }
     }
     require(screen_contains("训练 3/3，验证 2/2") && screen_contains("下一步：5组已齐") &&
         screen_contains("优化本阶段并载入候选") && screen_contains("阶段目标：2 / 6 发；复测通过后追加至 4 发"),
@@ -747,10 +899,11 @@ void recoil_flow_preview(const std::filesystem::path& output) {
         emitted.back().debug_request.recoil_target_shots==8&&emitted.back().debug_request.recoil_locked_prefix_ms==100,
         "五组优化后仅准备8发新候选且保持原锁前段");
     const auto optimized_path=std::filesystem::path(emitted.back().debug_request.recoil_profile_path);
-    require(optimized_path.filename().string().starts_with("ak47-8shots-"),"优化后必须保存明确8发的新文件");
+    require(optimized_path.filename().string().starts_with("weapon_ak47-r"),"优化后必须保存正式武器版本文件");
     RecoilProfile optimized; std::string optimized_error;
     { std::ifstream file(optimized_path); const std::string text{std::istreambuf_iterator<char>(file),{}};
       require(load_recoil_profile(text,optimized,optimized_error),"优化候选必须可读"); }
+    require(optimized.id.starts_with("ak47-8shots-"),"优化候选身份必须明确8发目标");
     require(optimized.points.back().time_ms==200,"8发优化候选须实际延长采集时域");
     for(double time:{0.,50.,100.}) {
         const auto before=sample_recoil_profile(prefix_base,time),after=sample_recoil_profile(optimized,time);
@@ -797,6 +950,9 @@ void recoil_flow_preview(const std::filesystem::path& output) {
     click("载入采集结果",false,"高级：按路径载入","载入以前的采集");
     require(screen_contains("已锁定前段：100.000 ms"),"高级载入旧run/result.json须从同目录计划恢复锁定");
     std::ofstream report(output/"recoil-flow.txt"); report << "真实RecoilPanel无设备交互回归通过；自动动作仅PREPARE，等待下一次人工按键。\n";
+    if(!candidate_only)report << "文件选择取消：原生取消2次、尚未poll取消1次、窗口创建即取消及窗口可见后取消各3次、"
+        "文件不存在提示期间取消4次；每次检查未Prepare、busy回收、已选曲线及文件集合不变。"
+        "覆盖无owner及真实owner，核对宿主恢复、具体picker线程退出，页面重建后目录内和外部文件选择成功。\n";
 }
 }
 
@@ -811,8 +967,11 @@ int wmain(int argc, wchar_t** argv) {
         struct RestorePreviewDirectory { std::filesystem::path path; ~RestorePreviewDirectory(){std::filesystem::current_path(path);} } restore_preview{preview_previous};
         std::filesystem::current_path(output); // 历史浏览也只能读取本预览独立目录。
         LogConfig logs; logs.enable_file = false; logs.enable_debug_file = false; Log::init(logs);
-        for (int i=2;i<argc;++i) if (std::wstring_view(argv[i])==L"--recoil-flow") {
-            recoil_flow_preview(output); Log::shutdown(); std::cout << "PASS recoil-flow\n"; return 0;
+        for (int i=2;i<argc;++i) if (std::wstring_view(argv[i])==L"--recoil-flow" ||
+            std::wstring_view(argv[i])==L"--recoil-candidate-flow") {
+            const bool candidate_only=std::wstring_view(argv[i])==L"--recoil-candidate-flow";
+            recoil_flow_preview(output,candidate_only); Log::shutdown();
+            std::cout << (candidate_only ? "PASS recoil-candidate-flow\n" : "PASS recoil-flow\n"); return 0;
         }
         Overlay overlay; AppConfig config;
         config.ui.width = kMinimumUiWidth; config.ui.height = kMinimumUiHeight;

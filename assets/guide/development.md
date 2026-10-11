@@ -308,6 +308,25 @@ F9通过当前键鼠后端监听源机按键，
 
 构建和测试应按变更影响选择受影响目标，真实设备验收独立于自动测试。
 
+`app_file_dialog_shutdown_tests` 在独立数据目录调用生产 `wWinMain`，通过真实界面打开文件选择器或
+“文件不存在”提示，再请求主窗退出；关闭前核对实际 picker 线程退出，返回后核对无遗留窗口。
+构建该目标后，使用 `ctest --test-dir <build> -C Release -R '^app_file_dialog_shutdown_(picker|error)$' --output-on-failure`
+运行两项集成门禁。需要本地 Win32/D3D11 桌面，禁用物理输出且不启动 Runtime；输出在构建目录的
+`app-file-dialog-shutdown-tests/` 唯一子目录，见 [验证说明](../../tests/app_file_dialog_shutdown_validation_20261011.md)。
+
+`xen_exe_shutdown_probe` 则从进程外启动实际构建的 `Xen.exe`，保留其 CRT/GUI 入口。
+构建该目标后，以 `<Xen.exe绝对路径> <全新绝对输出目录> <picker|error>` 三个参数运行；
+通过真实桌面打开选择器或文件不存在提示，待探针报告 `ready` 后，在输出目录创建 `close.request`。
+探针请求主窗退出并核对实际线程、窗口、退出码及独立 Job 的进程回收；配置禁用物理输出，不启动 Runtime。
+这是需要外部界面操作的桌面专项，不登记无人值守 CTest。命令、判据及本地结果见
+[实际 EXE 验证](../../tests/xen_exe_shutdown_validation_20261011.md)。
+
+该探针另支持 `runtime <合成ONNX绝对路径>`：用独立配置启动实际 Xen.exe，在界面启动 CPU/本机 UDP 合成输入的 Runtime，
+禁止物理输出，验证持续处理、正常停止与报告归档。生产界面仍禁止 Runtime 运行时打开弹道选择器；
+`runtime_file_dialog_shutdown_tests` 由测试宿主构造两者共存，验证真实 Runtime 与 Overlay 的取消/停止接缝。
+构建该目标后执行 `ctest --test-dir <build> -C Release -R '^runtime_file_dialog_shutdown_(picker|error)$' --output-on-failure`。
+两层范围、操作与证据见 [Runtime 关闭验证](../../tests/runtime_file_dialog_shutdown_validation_20261011.md)。
+
 `mouse_effect_probe_scheduler_study_driver_tests` 包含真实 CompositeSeal 入口，并链接与正式工具相同的
 无设备报告校验库；测试替换时钟和等待调用，检查调度编排及零物理发送，不连接设备或创建窗口。
 

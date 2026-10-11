@@ -2,6 +2,8 @@
 
 普通RecoilWorker、Controller、MotionLedger和共享仲裁器真实执行，自有内存schema3曲线经既有Loader；不保存、采用或登记候选，不启动校准输出。Mouse仅记录调用，在第一条非零move返回前用有界屏障改变source_context_epoch。
 
+2026-10-12 集成候选确认绑定合同后，旧夹具仅带 verified:true 而无内容摘要，会正确保持为候选；专项复现“未消费初始健康释放”。夹具改为加载后显式调用生产 confirm_recoil_profile，不再依赖旧布尔确认，原有回执、恢复与故障断言全部保留。
+
 三种完成结果：成功且完成时刻有效、返回失败、声称成功但缺完成时刻。第一条位移均为Y=7 counts：有效完成仍记confirmed_y=7；后两种记unknown_y=7且confirmed_y=0，不能把已调用的命令按零取消或重发。实际执行记录必须证明source变化位于backend_called_at与backend_returned_at之间；屏障超时不能通过。此处Recoil ACKNOWLEDGED枚举表示其成功完成契约，不冒称Mouse提供了协议ACK或物理E。
 
 三例均在连续20次后续输入检查中不重复旧命令。成功完成后健康松按允许新session=2；UNKNOWN即使重新松按仍不输出，账本不完整、共享输出门故障、停止保留fault；停止后归还Y所有权。初次三例全过，无生产反例、无生产修改。

@@ -66,11 +66,12 @@ void source_during_move(Completion completion) {
     auto ledger = std::make_shared<MotionLedger>();
     auto profile = std::make_shared<RecoilProfile>();
     std::string error;
-    // 仅内存自制离散曲线经既有Loader；不保存、采用或登记候选。
+    // 仅内存自制离散曲线经既有Loader与显式确认；不保存、采用或登记候选。
     require(load_recoil_profile(R"({"schema_version":3,"id":"source_receipt_fixture","revision":1,
-        "weapon_id":"ak47","sensitivity":2.45,"verified":true,"sample_semantics":"discrete_delta",
+        "weapon_id":"ak47","sensitivity":2.45,"verified":false,"sample_semantics":"discrete_delta",
         "events":[[5,0,0],[40,0,7.5],[80,0,7.5],[120,0,7.5]]})", *profile, error),
         "自制曲线加载失败");
+    require(confirm_recoil_profile(*profile, error), "自制回执夹具显式确认失败");
     ledger->reset(14, 16, Clock::now());
     std::atomic<std::uint64_t> source_epoch{0};
     RecoilWorker worker(mouse, arbiter, ledger, [&] {
