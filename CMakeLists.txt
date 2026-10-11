@@ -1254,6 +1254,8 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(aim_pixel_feedback_tests OPENCV)
     add_test(NAME aim_pixel_feedback_tests COMMAND aim_pixel_feedback_tests)
     set_tests_properties(aim_pixel_feedback_tests PROPERTIES TIMEOUT 30)
+    add_test(NAME aim_pixel_feedback_sensitivity_tests COMMAND aim_pixel_feedback_tests --sensitivity)
+    set_tests_properties(aim_pixel_feedback_sensitivity_tests PROPERTIES TIMEOUT 30)
 
     add_executable(mouse_tests
         tests/mouse_tests.cpp)
