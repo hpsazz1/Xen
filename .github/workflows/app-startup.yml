@@ -1,0 +1,47 @@
+name: 启动边界原生检查
+
+on:
+  push:
+    paths:
+      - '.github/workflows/app-startup.yml'
+      - 'tests/app_startup_project/CMakeLists.txt'
+      - 'tests/app_startup_tests.cpp'
+      - 'Xen/app/startup.cpp'
+      - 'Xen/app/startup_internal.h'
+      - 'Xen/app/exit_codes_internal.h'
+  pull_request:
+    paths:
+      - '.github/workflows/app-startup.yml'
+      - 'tests/app_startup_project/CMakeLists.txt'
+      - 'tests/app_startup_tests.cpp'
+      - 'Xen/app/startup.cpp'
+      - 'Xen/app/startup_internal.h'
+      - 'Xen/app/exit_codes_internal.h'
+
+permissions:
+  contents: read
+
+jobs:
+  startup:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # 复用 runner 的 CMake/MSVC；只有 CPU fake 边界，无应用、窗口、模型或设备。
+      - name: 配置独立启动边界测试
+        shell: pwsh
+        run: cmake -S tests/app_startup_project -B "$env:RUNNER_TEMP/xen-app-startup" -A x64
+      - name: 构建 Release 测试
+        shell: pwsh
+        run: cmake --build "$env:RUNNER_TEMP/xen-app-startup" --config Release --target app_startup_tests --parallel 2
+      - name: 验证既有五项正常和失败路径
+        shell: pwsh
+        run: ctest --test-dir "$env:RUNNER_TEMP/xen-app-startup" -C Release --no-tests=error --output-on-failure -V
+      - name: 记录测试产物身份与范围
+        shell: pwsh
+        run: |
+          Write-Output "source_sha=$env:GITHUB_SHA"
+          Write-Output "scope=app_startup_tests only; no Xen/Launcher/SDK/device artifacts uploaded"
+          Get-FileHash -Algorithm SHA256 -LiteralPath "$env:RUNNER_TEMP/xen-app-startup/Release/app_startup_tests.exe"

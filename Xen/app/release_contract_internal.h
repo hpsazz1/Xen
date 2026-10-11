@@ -6,11 +6,10 @@
 #include <string>
 #include <vector>
 
+#include "app/exit_codes_internal.h"
 #include "detector/detector.h"
 
 namespace app::detail {
-
-inline constexpr std::uint32_t kReleaseRestartExitCode = 42;
 
 struct ReleaseEnvironment {
     bool managed = false;

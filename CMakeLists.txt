@@ -1635,7 +1635,7 @@ if(BUILD_TESTING)
     # Win32/D3D11 窗口，也不启动 Runtime、Worker 或任何物理输出。
     add_executable(app_startup_tests
         tests/app_startup_tests.cpp)
-    target_link_libraries(app_startup_tests PRIVATE app_startup app_release)
+    target_link_libraries(app_startup_tests PRIVATE app_startup)
     add_test(NAME app_startup_tests COMMAND app_startup_tests)
 
     add_test(NAME mouse_effect_probe_prbs_design_tests

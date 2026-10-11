@@ -1,4 +1,4 @@
-#include "app/release_contract_internal.h"
+#include "app/exit_codes_internal.h"
 #include "app/startup_internal.h"
 
 #include <iostream>
@@ -104,17 +104,16 @@ bool normal_and_restart_exits_are_preserved() {
 } // namespace
 
 int main() {
-    expect(log_failure_is_owned() &&
-               overlay_init_failure_is_owned() &&
-               overlay_render_failure_is_owned() &&
-               overlay_present_error_is_copied_into_visible_terminal() &&
-               normal_and_restart_exits_are_preserved(),
-           "GUI 生产启动边界必须把 Log/Overlay init/render 失败映射为"
-           "固定非零退出和一次用户可见错误，并保留正常/重启终局");
+    expect(log_failure_is_owned(), "Log 初始化失败必须产生一次可见错误和失败退出");
+    expect(overlay_init_failure_is_owned(), "Overlay 初始化失败必须归属启动边界");
+    expect(overlay_render_failure_is_owned(), "重复结束不能重复展示渲染失败");
+    expect(overlay_present_error_is_copied_into_visible_terminal(),
+           "渲染错误详情必须由边界持有，不能引用已覆盖的调用方缓冲");
+    expect(normal_and_restart_exits_are_preserved(), "正常与重启退出码必须保留");
     if (failures != 0) {
         std::cerr << "App 启动边界测试失败数: " << failures << '\n';
         return 1;
     }
-    std::cout << "App 启动边界测试全部通过。\n";
+    std::cout << "App 启动边界五项测试全部通过。\n";
     return 0;
 }
