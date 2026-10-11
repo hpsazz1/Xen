@@ -353,6 +353,10 @@ int run_sender(const SenderOptions& options) noexcept {
             break;
         }
 
+        // grab 期间可能收到终止信号；有效帧不得越过已观察到的取消继续发送。
+        // 采集错误仍按上面的失败路径处理，不被同时到达的取消掩盖。
+        if (stop_requested.load(std::memory_order_acquire)) break;
+
         const auto now = std::chrono::steady_clock::now();
         // 超过目标采样率时直接跳过较早的新帧，不通过 sleep 持有并发送旧画面。
         if (!frame_pacer.due(now)) continue;

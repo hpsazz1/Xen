@@ -2196,6 +2196,13 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(sender_tests OPENCV NDI)
     add_test(NAME sender_tests COMMAND sender_tests)
 
+    add_executable(sender_cancel_tests tests/sender_cancel_tests.cpp)
+    target_link_libraries(sender_cancel_tests PRIVATE
+        sender capture crash log ws2_32 nlohmann_json::nlohmann_json)
+    xen_deploy_runtime_dlls(sender_cancel_tests OPENCV NDI)
+    add_test(NAME sender_cancel_tests COMMAND sender_cancel_tests)
+    set_tests_properties(sender_cancel_tests PROPERTIES TIMEOUT 30)
+
     # 真实模型测试默认关闭，避免仓库绑定私有模型；配置时通过
     # -DXEN_TEST_MODEL=<onnx路径> 启用加载和单帧推理冒烟测试。
     set(XEN_TEST_MODEL "" CACHE FILEPATH "用于 Detector 集成测试的 ONNX 模型")
