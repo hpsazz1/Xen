@@ -117,6 +117,7 @@ void save_rows(const std::filesystem::path& output, const std::vector<Row>& rows
         }
         csv << quote(r.error) << '\n';
     }
+    csv.close();
 }
 int capture(const Options& o) {
     if (!std::filesystem::create_directories(o.output)) throw std::runtime_error("新输出目录创建失败");
@@ -147,7 +148,7 @@ int capture(const Options& o) {
         while (!stopped.load() && Clock::now() < deadline &&
                rows.size() < static_cast<std::size_t>(o.seconds * o.fps + 1)) {
             std::this_thread::sleep_until(next);
-            if (Clock::now() >= deadline) break;
+            if (stopped.load() || Clock::now() >= deadline) break;
             CapturedFrame frame;
             Row row;
             row.started = ns(Clock::now());
@@ -163,9 +164,15 @@ int capture(const Options& o) {
                         throw std::runtime_error("捕获 ROI 与指定几何不符");
                     // 同步编码/写盘扰动保留在时间线上，不补齐或复制帧伪造目标帧率。
                     row.file = "frame_" + std::to_string(rows.size()) + ".png";
-                    if (!cv::imwrite((o.output / row.file).string(), frame.bgr,
-                                     {cv::IMWRITE_PNG_COMPRESSION, 1}))
-                        throw std::runtime_error("PNG 写入失败");
+                    std::vector<unsigned char> encoded;
+                    if (!cv::imencode(".png", frame.bgr, encoded,
+                                      {cv::IMWRITE_PNG_COMPRESSION, 1}))
+                        throw std::runtime_error("PNG 编码失败");
+                    std::ofstream png(o.output / row.file, std::ios::binary);
+                    png.exceptions(std::ios::failbit | std::ios::badbit);
+                    png.write(reinterpret_cast<const char*>(encoded.data()),
+                              static_cast<std::streamsize>(encoded.size()));
+                    png.close();
                     ++saved;
                 } catch (const std::exception& error) { row.error = error.what(); failure = row.error; }
             } else if (row.status == CaptureStatus::NO_FRAME) {
@@ -182,7 +189,8 @@ int capture(const Options& o) {
     finished = Clock::now();
     if (source) source->close();
     SetConsoleCtrlHandler(on_console, FALSE);
-    if (failure.empty() && saved == 0) failure = "有界采样结束，未保存任何有效帧";
+    if (failure.empty() && saved == 0 && !stopped.load())
+        failure = "有界采样结束，未保存任何有效帧";
     save_rows(o.output, rows);
     const double elapsed = std::chrono::duration<double>(finished - began).count();
     std::ofstream summary(o.output / "summary.txt");
@@ -195,6 +203,7 @@ int capture(const Options& o) {
             << "\nobserved_saved_fps_including_open=" << (elapsed > 0 ? saved / elapsed : 0)
             << "\ninterrupted=" << stopped.load() << "\nfailure=" << failure
             << "\n说明=时间戳为本机 steady 域；captured_at 沿用 Capture 语义，非曝光承诺。\n";
+    summary.close();
     std::cout << "采样结束：保存 " << saved << " 帧；空帧等待 " << no_frame << " 次。\n";
     return failure.empty() && saved > 0 && !stopped.load() ? 0 : 1;
 }
