@@ -78,7 +78,8 @@ int wmain(int argc, wchar_t* argv[]) try {
     expect(execute(Action::CANCEL_JOB), "request actual worker cancellation");
     const auto cancelled = wait(workspace);
     expect(cancelled.job_state == "CANCELLED" && !execute(Action::IMPORT_CANDIDATE) &&
-           fs::is_regular_file(fs::u8path(cancelled.job_directory) / "cancel.flag"),
+           fs::is_regular_file(xen::filesystem_detail::windows_io_path(
+               fs::u8path(cancelled.job_directory) / "cancel.flag")),
            "cancelled worker cannot import");
     if (!execute(Action::EVALUATE)) throw std::runtime_error(workspace.poll().message);
     const auto evaluated = wait(workspace);

@@ -36,6 +36,10 @@ Every generated input file has the same final hash as before the run.
 The first diagnostic fixture tried to inspect a snapshot not yet published after
 launch failure; that ancillary assertion was corrected to inspect the actual job
 directory. Its failure is not a separate production defect. Logs retain every
-failed attempt. These tests prove neither model quality nor real-device behavior;
+failed attempt. The first fixed-commit integration run also exposed a test-only
+`cancel.flag` existence check at exactly 260 characters with a five-digit PID;
+the host now uses the same explicit file-path form for that observation. The
+worker cancellation and subsequent evaluation/import themselves succeeded.
+These tests prove neither model quality nor real-device behavior;
 physical acceptance remains `NOT_EXECUTED`. The native CPU host is explicit-only
 because the default suite does not require the training environment.
