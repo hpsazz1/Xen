@@ -1572,6 +1572,12 @@ if(BUILD_TESTING)
             TIMEOUT 45 RUN_SERIAL TRUE LABELS "app;ui;shutdown")
     endforeach()
 
+    # 显式桌面验收：启动实际 Xen.exe，界面操作与进程外回收见证分离。
+    add_executable(xen_exe_shutdown_probe tests/xen_exe_shutdown_probe.cpp)
+    target_link_libraries(xen_exe_shutdown_probe PRIVATE config recoil nlohmann_json::nlohmann_json)
+    add_dependencies(xen_exe_shutdown_probe xen_app)
+    xen_deploy_runtime_dlls(xen_exe_shutdown_probe)
+
     # Overlay Present 系统 seam 与标量 helper 均不创建 Win32/D3D11 窗口，
     # 测试只注入 HRESULT，也不链接 ImGui。
     add_executable(overlay_tests

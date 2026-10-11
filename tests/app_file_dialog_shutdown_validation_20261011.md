@@ -69,3 +69,6 @@ ctest --test-dir <原构建目录> -C Release -R '^app_file_dialog_shutdown_(pic
 这是生产 `wWinMain` 的完整应用源码集成验证，不是直接启动发行 `Xen.exe` 的 CRT/subsystem 或 Launcher 发布验收。
 覆盖本机 Shell 的普通选择器和文件不存在提示、主窗 WM_CLOSE；不外推任意 Shell 扩展/深层提示、系统关机、渲染失败或 Runtime 正在运行时的退出。
 没有执行全量 CTest、多 Provider、模型/离线指标、真实设备/KMBOX、远程部署或主分支合并。
+
+后续 [R4 实际 EXE 验证](xen_exe_shutdown_validation_20261011.md) 已直接启动构建的 `Xen.exe`，
+以进程外见证覆盖上述两类关闭场景，补齐实际 CRT/GUI 入口验证；R3 本文的历史执行范围保持不变。
