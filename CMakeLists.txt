@@ -879,6 +879,12 @@ if(BUILD_TESTING)
     target_link_libraries(log_tests PRIVATE log spdlog::spdlog)
     add_test(NAME log_tests COMMAND log_tests)
 
+    add_executable(log_saturation_shutdown_tests tests/log_saturation_shutdown_tests.cpp)
+    target_include_directories(log_saturation_shutdown_tests PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
+    target_link_libraries(log_saturation_shutdown_tests PRIVATE spdlog::spdlog Threads::Threads)
+    add_test(NAME log_saturation_shutdown_tests COMMAND log_saturation_shutdown_tests)
+    set_tests_properties(log_saturation_shutdown_tests PROPERTIES TIMEOUT 30)
+
     add_executable(crash_tests
         tests/crash_tests.cpp)
     target_link_libraries(crash_tests PRIVATE crash log)
