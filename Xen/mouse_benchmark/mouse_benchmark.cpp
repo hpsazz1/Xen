@@ -473,7 +473,7 @@ bool write_json(const std::filesystem::path& path,
     output.flush();
     const bool succeeded = output.good();
     output.close();
-    return succeeded;
+    return succeeded && !output.fail();
 }
 
 std::string move_failure_message(const char* phase,
@@ -879,7 +879,7 @@ bool write_mouse_benchmark_report(
             return false;
         }
         if (!write_json(temporary_path, options, result)) {
-            set_error(error, "鼠标基准报告临时文件写入失败");
+            set_error(error, "鼠标基准报告临时文件写入或关闭失败");
             std::error_code ignored;
             std::filesystem::remove(temporary_path, ignored);
             temporary_path.clear();
@@ -1129,6 +1129,11 @@ bool run_mouse_benchmark(
                         result.final_status = mouse->status();
                         mouse->close();
 
+                        // 完成已开始的正反命令对后，仍须接收末对期间的取消。
+                        if (run_ok && stop_requested.load(std::memory_order_acquire)) {
+                            run_ok = false;
+                            set_error(error, "鼠标基准被人工中止");
+                        }
                         if (run_ok &&
                             result.samples.size() == options.sample_pairs * 2U &&
                             result.final_status == MouseStatus::READY) {

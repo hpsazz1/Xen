@@ -1045,6 +1045,11 @@ if(BUILD_TESTING)
     xen_deploy_runtime_dlls(video_visibility_tests OPENCV)
     add_test(NAME video_visibility_tests COMMAND video_visibility_tests)
 
+    add_executable(mouse_benchmark_close_tests tests/mouse_benchmark_close_tests.cpp)
+    target_link_libraries(mouse_benchmark_close_tests PRIVATE mouse_benchmark)
+    xen_deploy_runtime_dlls(mouse_benchmark_close_tests)
+    add_test(NAME mouse_benchmark_close_tests COMMAND mouse_benchmark_close_tests)
+
     add_executable(auto_stop_capture_finalize_tests tests/auto_stop_capture_finalize_tests.cpp)
     target_link_libraries(auto_stop_capture_finalize_tests PRIVATE capture)
     xen_deploy_runtime_dlls(auto_stop_capture_finalize_tests OPENCV NDI)

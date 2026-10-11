@@ -83,6 +83,7 @@ void write_u32_le(std::uint8_t* output, std::uint32_t value) noexcept {
 enum class AckMode {
     VALID,
     WRONG_SEQUENCE,
+    VALID_AND_CANCEL,
 };
 
 class FakeKmboxDevice {
@@ -161,6 +162,9 @@ private:
             if (mode == AckMode::WRONG_SEQUENCE) {
                 write_u32_le(ack.data() + 8,
                              read_u32_le(ack.data() + 8) + 1U);
+            }
+            if (mode == AckMode::VALID_AND_CANCEL) {
+                request_mouse_benchmark_stop();
             }
             sendto(socket_, reinterpret_cast<const char*>(ack.data()),
                    static_cast<int>(ack.size()), 0,
@@ -502,6 +506,67 @@ void test_successful_kmbox_run_and_report() {
     std::filesystem::remove(report_path, ignored);
 }
 
+void test_last_pair_cancellation_preserves_compensation_without_publishing() {
+    for (const std::size_t cancelled_packet : {4U, 5U}) {
+        std::vector<AckMode> responses(6, AckMode::VALID);
+        responses[cancelled_packet] = AckMode::VALID_AND_CANCEL;
+        FakeKmboxDevice device(std::move(responses));
+        expect(device.valid(), "末对取消假 KMBOX 必须创建成功");
+        if (!device.valid()) continue;
+        const auto report_path = unique_report_path(
+            cancelled_packet == 4U ? L"cancel-forward" : L"cancel-reverse");
+        auto options = make_kmbox_options(device.port(), report_path);
+        options.warmup_pairs = 0;
+        options.sample_pairs = 1;
+        MouseBenchmarkResult result;
+        std::string error;
+        // 回环 peer 在最后一对的 ACK 返回前取消，不依赖调度延迟。
+        expect(!run_mouse_benchmark(options, result, error),
+               "末对 ACK 前取消不得返回成功");
+        device.finish();
+        expect(!result.complete && error.find("人工中止") != std::string::npos,
+               "末对取消必须保留未完成状态和人工中止原因");
+        expect(result.failed_commands == 0 && result.successful_commands == 4 &&
+                   result.formal_successful_commands == 2 &&
+                   result.samples.size() == 2 &&
+                   result.final_status == MouseStatus::READY,
+               "取消不应丢弃已确认命令或伪造后端失败");
+        const auto packets = device.packets();
+        expect(packets.size() == 6, "末对取消应完成已开始的反向补偿");
+        if (packets.size() == 6) {
+            std::int64_t net_x = 0;
+            std::int64_t net_y = 0;
+            for (std::size_t index = 2; index < packets.size(); ++index) {
+                expect(packets[index].size() == kMovePacketBytes,
+                       "取消场景只能发送预期移动包");
+                if (packets[index].size() != kMovePacketBytes) continue;
+                net_x += static_cast<std::int32_t>(read_u32_le(
+                    packets[index].data() + 20));
+                net_y += static_cast<std::int32_t>(read_u32_le(
+                    packets[index].data() + 24));
+            }
+            expect(net_x == 0 && net_y == 0,
+                   "末对取消后的已确认正反命令必须相互补偿");
+        }
+        expect(!std::filesystem::exists(report_path),
+               "末对取消不得发布 complete 报告");
+        FakeKmboxDevice retry_device(std::vector<AckMode>(6, AckMode::VALID));
+        expect(retry_device.valid(), "取消后重试假 KMBOX 必须创建成功");
+        if (retry_device.valid()) {
+            options.mouse.kmbox_port = retry_device.port();
+            expect(run_mouse_benchmark(options, result, error) && result.complete &&
+                       result.samples.size() == 2 && result.successful_commands == 4 &&
+                       std::filesystem::is_regular_file(report_path),
+                   "同路径新轮次重试应清除取消并仅发布本轮结果");
+            retry_device.finish();
+            expect(retry_device.packets().size() == 6,
+                   "重试仅产生一轮预期命令");
+        }
+        std::error_code ignored;
+        std::filesystem::remove(report_path, ignored);
+    }
+}
+
 void test_failed_command_does_not_publish() {
     FakeKmboxDevice device(
         {AckMode::VALID, AckMode::VALID, AckMode::WRONG_SEQUENCE});
@@ -743,6 +808,7 @@ int main(int argc, char* argv[]) {
     test_production_cli_retains_stop_after_handler_install();
     test_summary();
     test_successful_kmbox_run_and_report();
+    test_last_pair_cancellation_preserves_compensation_without_publishing();
     test_failed_command_does_not_publish();
     test_open_failure_and_first_move_timeout_do_not_observe_ack();
     test_run_rejects_mouse_output_owner_conflict_before_device_open();
