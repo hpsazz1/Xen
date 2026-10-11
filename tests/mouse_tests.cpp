@@ -1112,6 +1112,65 @@ void test_makcu_hid_error_reports_are_unverified() {
                "Valid empty report remains an explicit key release");
     }
 }
+void test_makcu_read_failure_requires_a_complete_fresh_snapshot() {
+    for (const bool during_exchange : {false, true}) {
+        for (const bool mouse_first : {false, true}) {
+            for (int fault = 0; fault < 5; ++fault) {
+                auto state = std::make_shared<FakeMakcuState>();
+                state->responses = {makcu_baud_response(4000000U),
+                    makcu_stream_response(0x0cU), makcu_stream_response(0xa5U)};
+                auto config = make_makcu_config();
+                // 所有写入都由内存串口接管；仅 exchange 场景允许假 move。
+                config.allow_send_input = during_exchange;
+                auto mouse = make_fake_makcu(config, state);
+                expect(mouse && mouse->open(), "读帧故障 fixture 应打开内存串口");
+                if (!mouse) continue;
+                state->responses.push_back(makcu_mouse_stream(1U));
+                state->responses.push_back(makcu_keyboard_stream({0x41U}));
+                InputSnapshot snapshot;
+                expect(mouse->poll_input(snapshot) && snapshot.state_valid &&
+                           snapshot.virtual_keys[0x77] && snapshot.virtual_keys[0x01],
+                       "故障前应有真实解析的完整假键鼠按下事实");
+                const auto sequence = snapshot.sequence;
+                switch (fault) {
+                    case 0: state->responses.push_back({0U}); break;
+                    case 1: state->responses.push_back({kMakcuFrameStart}); break;
+                    case 2: state->responses.push_back(
+                        {kMakcuFrameStart, 0x0cU, 65U, 0U}); break;
+                    case 3: state->responses.push_back(
+                        {kMakcuFrameStart, 0x0cU, 8U, 0U}); break;
+                    case 4:
+                        state->read_results.resize(state->read_index + 1U,
+                            mouse::detail::MakcuIoResult::SUCCESS);
+                        state->read_results.back() = mouse::detail::MakcuIoResult::FAILED;
+                        break;
+                }
+                if (during_exchange) {
+                    expect(!mouse->move({2, -1}), "ACK期间读帧故障必须拒绝本次移动回执");
+                } else {
+                    expect(mouse->poll_input(snapshot) && !snapshot.state_valid &&
+                               snapshot.status == InputMonitorStatus::FAILURE,
+                           "直接轮询读帧故障必须使本次快照无效");
+                }
+                state->read_results.clear();
+                expect(mouse->poll_input(snapshot) && !snapshot.state_valid,
+                       "故障后的空轮询不能复活旧键鼠状态");
+                state->responses.push_back(mouse_first
+                    ? makcu_mouse_stream(0U) : makcu_keyboard_stream({}));
+                expect(mouse->poll_input(snapshot) && !snapshot.state_valid,
+                       "故障后只有一类新报告不能续用另一类旧事实");
+                state->responses.push_back(mouse_first
+                    ? makcu_keyboard_stream({}) : makcu_mouse_stream(0U));
+                expect(mouse->poll_input(snapshot) && snapshot.state_valid &&
+                           snapshot.status == InputMonitorStatus::READY &&
+                           snapshot.sequence == sequence + 2U &&
+                           !snapshot.virtual_keys[0x77] && !snapshot.virtual_keys[0x01],
+                       "两类完整新报告恢复已验证快照，故障不得伪造释放或增加序号");
+            }
+        }
+    }
+}
+
 void test_makcu_interleaved_input_streams() {
     auto state = std::make_shared<FakeMakcuState>();
     state->responses = {
@@ -1295,6 +1354,7 @@ int main() {
     test_makcu_invalid_config_and_commands();
     test_makcu_response_failures();
     test_makcu_hid_error_reports_are_unverified();
+    test_makcu_read_failure_requires_a_complete_fresh_snapshot();
     test_makcu_interleaved_input_streams();
     test_makcu_single_stream_first_report_is_incomplete(true);
     test_makcu_single_stream_first_report_is_incomplete(false);

@@ -579,6 +579,13 @@ private:
     FrameReadResult read_frame(MakcuFrame& frame,
                                int timeout_ms) noexcept {
         frame.size = 0U;
+        const auto fail_frame = [this]() noexcept {
+            // 帧损坏或读取失败后，两类缓存都不能再冒充完整新事实。
+            // 保留键值和序号，等新的鼠标、键盘报告分别恢复资格。
+            mouse_input_received_ = false;
+            keyboard_input_received_ = false;
+            return FrameReadResult::FAILURE;
+        };
         const auto deadline = std::chrono::steady_clock::now() +
             std::chrono::milliseconds((std::max)(0, timeout_ms));
         const auto remaining_timeout = [&]() noexcept {
@@ -597,17 +604,17 @@ private:
         }
         if (first != mouse::detail::MakcuIoResult::SUCCESS ||
             start != kFrameStart) {
-            return FrameReadResult::FAILURE;
+            return fail_frame();
         }
         std::array<std::uint8_t, 3U> tail{};
         if (transport_->read_exact(tail, remaining_timeout(), error) !=
             mouse::detail::MakcuIoResult::SUCCESS) {
-            return FrameReadResult::FAILURE;
+            return fail_frame();
         }
         const std::size_t payload_size =
             static_cast<std::size_t>(tail[1]) |
             (static_cast<std::size_t>(tail[2]) << 8U);
-        if (payload_size > 64U) return FrameReadResult::FAILURE;
+        if (payload_size > 64U) return fail_frame();
         frame.size = 4U + payload_size;
         frame.bytes[0] = start;
         frame.bytes[1] = tail[0];
@@ -619,7 +626,7 @@ private:
                 remaining_timeout(), error) !=
                     mouse::detail::MakcuIoResult::SUCCESS) {
             frame.size = 0U;
-            return FrameReadResult::FAILURE;
+            return fail_frame();
         }
         return FrameReadResult::SUCCESS;
     }

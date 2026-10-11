@@ -300,6 +300,63 @@ void test_listener_generation_resets_sequence_owner() {
            "新设备代际首个有效序号必须重新建事实且不得继承武装");
 }
 
+void test_makcu_frame_failure_cannot_restore_health_from_one_stream(bool mouse_first) {
+    auto stream = std::make_shared<MakcuInputStream>();
+    MouseConfig config;
+    config.backend = MouseBackend::MAKCU;
+    config.allow_send_input = false;
+    config.makcu_port = "COM7";
+    std::shared_ptr<IMouseController> device =
+        mouse::detail::create_makcu_controller_for_test(
+            config, std::make_unique<MakcuInputTransport>(stream));
+    const bool opened = device && device->open();
+    expect(opened, "坏帧集成必须只打开内存串口");
+    if (!opened) return;
+    KeyboardListener keyboard(KeyboardConfig{}, device);
+    Runtime runtime;
+    expect(keyboard.open(), "坏帧集成必须打开生产键盘监听器");
+    stream->mouse_report(true);
+    stream->keyboard_report();
+    auto poll = keyboard.poll();
+    route_poll(runtime, poll);
+    expect(runtime.post_intent({RuntimeIntentType::ARM_OUTPUT, true}) &&
+               runtime.snapshot().aim_hold_active,
+           "完整假输入事实先建立保持键和显式武装状态");
+
+    stream->frames.push_back({0U});
+    poll = keyboard.poll();
+    route_poll(runtime, poll);
+    expect(!poll.input_healthy && poll.events.empty() &&
+               !runtime.snapshot().output_armed && runtime.snapshot().aim_hold_active,
+           "坏帧必须经生产路由解除武装，保留既有保持键事实");
+    poll = keyboard.poll();
+    route_poll(runtime, poll);
+    expect(!poll.input_healthy && !poll.new_input_fact,
+           "故障后的空轮询不能建立新的输入事实");
+
+    if (mouse_first) stream->mouse_report(false);
+    else stream->keyboard_report();
+    poll = keyboard.poll();
+    route_poll(runtime, poll);
+    expect(!poll.input_healthy && !poll.new_input_fact && poll.events.empty() &&
+               runtime.snapshot().aim_hold_active &&
+               !runtime.post_intent({RuntimeIntentType::ARM_OUTPUT, true}),
+           "仅一类新流不能夹带另一类旧键态恢复健康或允许重新武装");
+
+    if (mouse_first) stream->keyboard_report();
+    else stream->mouse_report(false);
+    poll = keyboard.poll();
+    route_poll(runtime, poll);
+    const auto snapshot = runtime.snapshot();
+    expect(poll.input_healthy && poll.new_input_fact &&
+               contains_event(poll, KeyboardEventType::AIM_HOLD_CHANGED, false) &&
+               !snapshot.aim_hold_active && !snapshot.output_armed,
+           "完整新快照恢复健康并交付真实释放，不能自动恢复武装");
+    expect(runtime.post_intent({RuntimeIntentType::ARM_OUTPUT, true}),
+           "完整健康恢复后保留显式武装入口");
+    runtime.post_intent({RuntimeIntentType::DISARM_OUTPUT, false});
+}
+
 void test_makcu_stream_loss_disarms_without_releasing(bool keyboard_continues) {
     auto stream = std::make_shared<MakcuInputStream>();
     MouseConfig config;
@@ -508,6 +565,8 @@ int main() {
     test_poll_failure_visible_in_same_result();
     test_listener_generation_resets_sequence_owner();
     test_makcu_hid_error_disarms_without_false_key_edges();
+    test_makcu_frame_failure_cannot_restore_health_from_one_stream(true);
+    test_makcu_frame_failure_cannot_restore_health_from_one_stream(false);
     test_makcu_stream_loss_disarms_without_releasing(true);
     test_makcu_stream_loss_disarms_without_releasing(false);
     test_global_debug_emergency_uses_both_frontend_sources();
