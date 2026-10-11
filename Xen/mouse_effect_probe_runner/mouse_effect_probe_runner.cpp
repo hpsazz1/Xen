@@ -536,20 +536,39 @@ bool write_composite_schedule_ledger(
 bool validate_composite_plan(
         const MouseEffectProbeRunOptions& options,
         const mouse_effect_probe::MouseEffectProbeSequence& sequence,
+        std::string& actual_plan_sha256,
         std::string& error) noexcept {
+    actual_plan_sha256.clear();
     try {
         std::error_code filesystem_error;
+        if (!std::filesystem::is_regular_file(options.composite_plan_path,
+                                              filesystem_error) || filesystem_error) {
+            set_error(error, "composite plan 文件缺失或类型无效");
+            return false;
+        }
         const auto byte_count = std::filesystem::file_size(
             options.composite_plan_path, filesystem_error);
         if (filesystem_error || byte_count == 0 || byte_count > 1'048'576U) {
             set_error(error, "composite plan 大小合同无效");
             return false;
         }
-        std::ifstream input(options.composite_plan_path, std::ios::binary);
-        const std::string content((std::istreambuf_iterator<char>(input)),
-                                  std::istreambuf_iterator<char>());
-        if ((!input.good() && !input.eof()) || content.empty()) {
-            set_error(error, "composite plan 无法完整读取");
+        // 多读一个字节检测长度变化，内存始终受预算限制；哈希与解析共用此快照。
+        std::string content(static_cast<std::size_t>(byte_count) + 1U, '\0');
+        {
+            std::ifstream input(options.composite_plan_path, std::ios::binary);
+            input.read(content.data(), static_cast<std::streamsize>(content.size()));
+            if (input.bad() || !input.eof() ||
+                input.gcount() != static_cast<std::streamsize>(byte_count)) {
+                set_error(error, "composite plan 无法完整读取或长度发生变化");
+                return false;
+            }
+        }
+        content.resize(static_cast<std::size_t>(byte_count));
+        std::string snapshot_sha256;
+        if (!sha256_payload(std::span<const std::uint8_t>(
+                reinterpret_cast<const std::uint8_t*>(content.data()), content.size()),
+                snapshot_sha256) || snapshot_sha256 != options.expected_composite_plan_sha256) {
+            set_error(error, "composite plan 文件 SHA-256 漂移");
             return false;
         }
         auto document = nlohmann::json::parse(content);
@@ -650,6 +669,7 @@ bool validate_composite_plan(
             set_error(error, "composite scheduler policy 与冻结 sequence 漂移");
             return false;
         }
+        actual_plan_sha256 = std::move(snapshot_sha256);
         error.clear();
         return true;
     } catch (const std::exception& exception) {
@@ -1884,21 +1904,8 @@ bool run_mouse_effect_probe(
                 return false;
             }
             std::string actual_plan_sha256;
-            if (!std::filesystem::is_regular_file(
-                    options.composite_plan_path) ||
-                !mouse_effect_probe::
-                    calculate_mouse_effect_probe_file_sha256(
-                        options.composite_plan_path, actual_plan_sha256,
-                        error) ||
-                actual_plan_sha256 !=
-                    options.expected_composite_plan_sha256) {
-                if (error.empty()) {
-                    set_error(error,
-                        "composite plan 文件缺失或 SHA-256 漂移");
-                }
-                return false;
-            }
-            if (!validate_composite_plan(options, sequence, error)) {
+            if (!validate_composite_plan(
+                    options, sequence, actual_plan_sha256, error)) {
                 return false;
             }
             LARGE_INTEGER frequency{};

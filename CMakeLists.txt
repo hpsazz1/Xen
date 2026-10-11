@@ -1476,6 +1476,12 @@ if(BUILD_TESTING)
     add_test(NAME sequence_file_budget_tests COMMAND sequence_file_budget_tests)
     set_tests_properties(sequence_file_budget_tests PROPERTIES RUN_SERIAL TRUE)
 
+    add_executable(mouse_effect_probe_plan_tests tests/mouse_effect_probe_plan_tests.cpp)
+    target_link_libraries(mouse_effect_probe_plan_tests
+        PRIVATE mouse_effect_probe_runner config nlohmann_json::nlohmann_json bcrypt)
+    add_test(NAME mouse_effect_probe_plan_tests COMMAND mouse_effect_probe_plan_tests)
+    set_tests_properties(mouse_effect_probe_plan_tests PROPERTIES TIMEOUT 30)
+
     add_executable(mouse_effect_probe_runner_tests
         tests/mouse_effect_probe_runner_tests.cpp)
     target_link_libraries(mouse_effect_probe_runner_tests
