@@ -145,7 +145,7 @@ struct SessionArchive::Impl {
     }
     void marker(const Batch& batch) {
         std::uint64_t number;
-        { std::lock_guard lock(mutex); number = ++state.marker_count; }
+        { std::lock_guard lock(mutex); number = state.marker_count + 1; }
         constexpr std::int64_t window = 30000000000LL;
         publish(std::filesystem::path(config.directory) / ("marker-" + std::to_string(number) + ".json"), {
             {"schema",1}, {"label",batch.label}, {"steady_ns",std::to_string(batch.steady)},
@@ -154,6 +154,8 @@ struct SessionArchive::Impl {
             {"pre_truncated",batch.steady-window < started}, {"post_truncated",nullptr},
             {"segment_reference","segment-*.meta.json; select overlapping control/trigger steady timestamps"},
             {"coverage_manifest","manifest.json"}, {"closed",false}});
+        // 仅已发布的标记进入清单计数；失败不能被计作落盘成功。
+        { std::lock_guard lock(mutex); state.marker_count = number; }
     }
     void close_markers() {
         for (const auto& entry : std::filesystem::directory_iterator(config.directory)) {

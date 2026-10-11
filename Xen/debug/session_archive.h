@@ -16,6 +16,7 @@ struct SessionArchiveConfig {
 struct SessionArchiveStatus {
     bool active = false;
     std::uint64_t accepted_samples = 0, written_samples = 0, dropped_samples = 0;
+    // marker_count只计已成功发布的标记，不计排队请求或发布失败。
     std::uint64_t written_segments = 0, trigger_events_dropped = 0, marker_count = 0;
     std::uint64_t dropped_batches = 0;
     std::uint64_t coalesced_batches = 0, queue_capacity_rejections = 0, sample_capacity_rejections = 0;
