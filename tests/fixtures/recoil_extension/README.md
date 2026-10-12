@@ -4,6 +4,18 @@
 微调限幅截断”的缺陷。五组数据已用于原优化，尤其两组 holdout 已消费；这里的再次运行是诊断和
 软件回归，不是新的独立验证、更不是实际压枪质量验收。代理未触发任何真实输出。
 
+## 当前回归入口
+
+[recoil_wall_analysis_tests.cpp](../../recoil_wall_analysis_tests.cpp) 的 `extension_replay()`
+直接读取本目录，通过生产加载、插值和优化接口检查锁定前段、追加净位移及已消费 holdout 的预测残差。
+已构建对应 Release 测试程序后，可从仓库根目录仅重放本组数据：
+
+```powershell
+& .\build\nvidia\Release\recoil_wall_analysis_tests.exe --extension-replay
+```
+
+其他后端按实际构建目录替换路径。以下来源与数值记录保留原采集时点；文档刷新不代表重新运行。
+
 ## 数据契约
 
 - `base.json`：从第一组 `run/plan.json` 的 `/profile` 提取，供 `load_recoil_profile` 读取。

@@ -19,8 +19,8 @@
     <a href="#构建与开发">构建与开发</a> ·
     <a href="#仓库结构">仓库结构</a> ·
     <a href="#使用指南">使用指南</a> ·
-    <a href="https://github.com/hpsazz1/Xen/wiki">Wiki</a> ·
-    <a href="https://github.com/users/hpsazz1/projects/1">项目看板</a>
+    <a href="assets/guide/releases/2026-10-12.md">源码更新记录</a> ·
+    <a href="SUPPORT.md">使用帮助</a>
   </p>
 </div>
 
@@ -30,9 +30,9 @@ Xen 将**采集、检测、瞄准、辅助控制、数据整理和训练**集中
 
 项目追求“小而美的瑞士军刀”：让每项能力有明确入口，让配置、数据和结果可以追溯。
 
-**最新版本：[2026.10.07](https://github.com/hpsazz1/Xen/releases/tag/v2026.10.07)** · [发布说明](assets/guide/releases/2026-10-07.md)。Release 附件仅提供单文件中文教程；包含模型、默认配置和三套运行库的完整便携包仅作本地交付，不上传 GitHub。
+**当前源码说明核对于 2026-10-12**：[main 更新与验证记录](assets/guide/releases/2026-10-12.md)。本轮已合入弹道候选内容确认、文件选择器取消与退出回收、模型和数据集身份一致性等修复；三后端本地构建及主辅机差量交付已完成。软件测试、部署完整性和真实设备效果分别记录。
 
-当前版整合旋转跳、Long Jump 和离线复盘。身法实录见下方[演示](#身法演示)。上一版实战接受范围见 [2026.09.29 记录](assets/guide/releases/2026-09-29.md)。
+[2026.10.07 发布说明](assets/guide/releases/2026-10-07.md)与其单文件教程是历史快照；该次 GitHub Release 附件不含完整程序包。完整便携包采用本地交付，本轮未新建 GitHub Release。日常使用以本仓库的[使用指南](#使用指南)为准。历史实战接受范围见 [2026.09.29 记录](assets/guide/releases/2026-09-29.md)，身法实录见下方[演示](#身法演示)。
 
 ## 功能概览
 
@@ -43,7 +43,7 @@ Xen 将**采集、检测、瞄准、辅助控制、数据整理和训练**集中
 | **瞄准控制** | 目标追踪与选择、范围及瞄点设置、延迟补偿；结合 GSI 上下文进行可选的阵营筛选。 |
 | **辅助控制** | 自动扳机、移动急停联动、旋转跳与 Long Jump、按武器管理弹道；统一显示输入许可、暂停与故障原因。 |
 | **采集与审核** | 按需保存原图和预测，整理重复及疑难样本，批量预览、人工修订并导出训练数据。 |
-| **模型训练** | 专用 Python 环境检查、可信 PT 校验、训练与取消/恢复、独立评价、ONNX 导出和候选导入。 |
+| **模型训练** | 专用 Python 环境检查、可信 PT 校验、冻结数据集、训练与取消/恢复、独立评价、ONNX 导出和手动采用候选。 |
 | **诊断与回放** | 性能信息、运行报告、输入录制、单 Run 离线复盘和对照工具，帮助定位问题与比较结果。 |
 
 **推理后端**：CPU · CUDA · TensorRT · DirectML · OpenVINO<br>
@@ -138,11 +138,11 @@ Xen 将**采集、检测、瞄准、辅助控制、数据整理和训练**集中
 
 | 使用方式 | 入口 | 注意事项 |
 | :-- | :-- | :-- |
-| 便携发行包 | 包根目录的 `Start-Xen.cmd` | 相对路径启动，不绑定开发机目录；教程为同目录 `Xen-guide.html`。 |
+| 已交付的便携包 | 包根目录的 `Start-Xen.cmd` | 相对路径启动，不绑定开发机目录；随包 `Xen-guide.html` 按该包导出日期阅读。 |
 | 标准多后端包 | 包根目录的 `XenLauncher.exe` | 由启动器选择匹配的 Worker，不直接启动 `runtimes/` 内的程序。 |
 | 自行编译 | 构建输出中的 `Xen.exe` | 先完成下方构建步骤，依赖随构建配置部署。 |
 
-完整包已带 `14wv11.onnx`、默认配置和运行库，无需安装开发 SDK。需要 Windows x64 及所选后端对应的硬件/驱动；CUDA、TensorRT 需要受支持的 NVIDIA GPU，OpenVINO 默认选 CPU。个人设备和双机连接信息在界面填写。
+已交付完整包带有指定模型、默认配置和运行库，无需安装开发 SDK；GitHub 源码压缩包不含这些运行依赖。需要 Windows x64 及所选后端对应的硬件/驱动；CUDA、TensorRT 需要受支持的 NVIDIA GPU，OpenVINO 默认选 CPU。个人设备和双机连接信息在界面填写。
 
 ### 2. 接通画面与模型
 
@@ -174,7 +174,7 @@ Xen 将**采集、检测、瞄准、辅助控制、数据整理和训练**集中
 离线复盘在仓库根使用 Python 3.11+ 执行：
 
 ```powershell
-python -B scripts/review_run.py --run "C:\path\to\existing-run" --output "C:\path\to\new-review"
+py -3 -B scripts/review_run.py --run "C:\path\to\existing-run" --output "C:\path\to\new-review"
 ```
 
 将示例路径替换为已有归档与新的报告目录；生成 `index.html`、`REVIEW.md` 和 `review.json`。只读原始归档，缺项标为未知，近似画面对齐不等于逐帧真值。
@@ -191,7 +191,7 @@ flowchart LR
     F --> G[手动采用或回退]
 ```
 
-双机部署中，**辅机仅采集，训练在主机进行**。按会话或对局划分训练、验证和测试集，避免相邻帧跨集合；候选经过独立评价后再决定是否采用，训练完成不会自动替换现役模型。
+双机部署中，**数据采集可在辅机进行，训练在主机进行**；辅机仍可承担实时采集、推理和控制。按会话或对局划分训练、验证和测试集，避免相邻帧跨集合；审核后冻结数据，训练与评价结果绑定该版本。候选经过独立评价后再决定是否采用，训练完成不会自动替换现役模型。检查环境、续训条件与导入流程见[训练指南](assets/guide/training.md)。
 
 运行数据以程序根目录为基准，与启动时的工作目录无关：
 
@@ -222,7 +222,7 @@ flowchart LR
 
 核心技术栈：**C++20 · CMake · ONNX Runtime · OpenCV · Dear ImGui · spdlog**。
 
-需要 Windows x64、带 C++ 桌面开发组件的 Visual Studio 2026 / MSVC v14.51、CMake 4.2+（下例 VS 2026 生成器所需）、ONNX Runtime SDK 和 OpenCV。启用测试时，还需 PowerShell 7，以及可导入 NumPy、OpenCV 的 Python 3。
+需要 Windows x64、带 C++ 桌面开发组件的 Visual Studio 2026 / MSVC v14.51、CMake 4.2+（下例 VS 2026 生成器所需）、ONNX Runtime SDK 和 OpenCV。启用测试时，还需 Git、PowerShell 7，以及可导入 NumPy、OpenCV 的 Python 3；配置阶段会记录工具绝对路径，供干净 PATH 的测试使用。
 
 ```powershell
 $env:ONNXRUNTIME_ROOT = "C:\path\to\onnxruntime"
@@ -230,6 +230,7 @@ $env:OpenCV_DIR = "C:\path\to\opencv\build\x64\vc16\lib"
 $buildDirectory = "build/nvidia" # 按所选 ORT 后端改为 build/directml 或 build/openvino
 
 cmake -S . -B $buildDirectory -G "Visual Studio 18 2026" -A x64 `
+  -DONNXRUNTIME_ROOT="$env:ONNXRUNTIME_ROOT" `
   -DOpenCV_DIR="$env:OpenCV_DIR" `
   -DBUILD_TESTING=ON
 
@@ -273,6 +274,7 @@ cmake --build $buildDirectory --config Release --target xen_app --parallel
 │   ├── model_data_pipeline.py   素材审核与数据集处理
 │   └── model_data_review.html   批量审核页面
 ├── tests/                       单元、集成、契约测试
+│   ├── README.md               当前测试入口与历史报告索引
 │   └── fixtures/               测试素材与夹具
 ├── assets/
 │   ├── config/                 可恢复的完整发行默认配置
@@ -290,7 +292,7 @@ cmake --build $buildDirectory --config Release --target xen_app --parallel
 └── README.md                   项目介绍与使用入口
 ```
 
-专项探针、基准、校准与离线研究目录按用途列在[开发指南](assets/guide/development.md#工具与测试的位置)。`docs/` 与 `AGENTS.md` 仅本地维护；`build/`、`cache/`、`logs/`、`tmp/` 和本机 `config.ini` 不进入公开源码。发布包的目录布局另见[运行与发布目录](assets/guide/development.md#应用启动与发布布局)。
+专项探针、基准、校准与离线研究目录按用途列在[开发指南](assets/guide/development.md#工具与测试的位置)。`docs/` 与 `AGENTS.md` 仅本地维护；`build/`、`cache/`、`logs/`、`temp/`、`tmp/` 和本机 `config.ini` 不进入公开源码。任务临时产物统一使用 `temp/<任务ID>/`。发布包的目录布局另见[运行与发布目录](assets/guide/development.md#应用启动与发布布局)。
 
 ## 使用指南
 
@@ -302,13 +304,14 @@ cmake --build $buildDirectory --config Release --target xen_app --parallel
 | [录制、分析与实验工具](assets/guide/tools.md) | 输入评价、离线对照、有界测试及命令参数。 |
 | [构建与开发](assets/guide/development.md) | 依赖、可执行目标、脚本入口、运行目录和诊断。 |
 | [独立参考评估](assets/reference_assessment/GUIDE.md) | 参考评分与 Xen 输入评估的并列比较。 |
+| [源码更新与验证](assets/guide/releases/2026-10-12.md) · [测试报告索引](tests/README.md) | 已合入功能、构建与交付范围，以及各日期的原始专项说明。 |
 
 ## 反馈与贡献
 
 | 需要什么 | 入口 |
 | :-- | :-- |
-| 使用帮助与排查 | [Wiki 使用手册](https://github.com/hpsazz1/Xen/wiki) · [支持说明](SUPPORT.md) |
-| 查看开发与发布进度 | [项目看板](https://github.com/users/hpsazz1/projects/1)，区分待处理、进行中、待验收与已完成。 |
+| 使用帮助与排查 | 本页[使用指南](#使用指南) · [支持说明](SUPPORT.md) |
+| 查看源码更新与验证范围 | [2026-10-12 更新记录](assets/guide/releases/2026-10-12.md)；历史 Release 保留各自版本说明。 |
 | 报告故障或提出建议 | [问题模板](https://github.com/hpsazz1/Xen/issues/new/choose) |
 | 提交代码或改进文档 | [贡献指南](CONTRIBUTING.md) |
 | 报告安全漏洞 | [安全政策与私密渠道](SECURITY.md) |

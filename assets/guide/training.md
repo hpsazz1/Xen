@@ -8,6 +8,7 @@
 
 - [工作区与操作流程](#工作区与操作流程)
 - [标注、划分与冻结数据](#标注划分与冻结数据)
+- [候选导入与回退](#候选导入与回退)
 - [环境与依赖](#环境与依赖)
 - [CLI作业合同](#cli作业合同)
 
@@ -62,14 +63,16 @@
 6. 指定本地可训练 `.pt`、输入尺寸、轮数、批量大小、数据加载进程数和设备后启动训练。
    轮数是上限，当前训练使用验证集选取 best，并以 patience=20 早停；测试集不参与选择轮数。
    新数据默认是新微调实验；恢复未完成
-   训练时勾选恢复，并选择本工具未完成作业的 `last.pt`，保持原数据版本、总轮数和输入尺寸。
-   恢复在新目录进行，原作业不改写。取消请求等待当前 epoch 保存；直接退出应用会终止剩余进程，
-   仅已落盘且通过身份核验的检查点可恢复。
+   训练时勾选恢复，并选择本工具未完成作业的 `run/weights/last.pt`，保持原数据版本、总轮数、
+   输入尺寸和数据加载进程数。原作业的 `config.json`、`checkpoint.json`、`best.pt` 和 `last.pt`
+   须完整且身份匹配；`last.pt` 还须保留未完成的 epoch 和优化器状态，不能只复制权重文件续训。
+   恢复优化器、EMA 和历史最佳状态后，在新目录继续，原作业不改写。取消请求等待当前 epoch 的
+   验证和检查点保存；直接退出应用会终止剩余进程，仅已落盘且通过身份核验的检查点可恢复。
 7. 训练产出候选 ONNX 后，在预先保留的固定测试划分上作最终评估，可与当前选择的生产模型比较。
    同一报告区分 mAP 使用的置信度下限与固定阈值的匹配/负例误报统计；比较时保持数据和评价条件相同。
-   检查指标和兼容结果后
-   显式导入候选；在检测页刷新并选择才会应用，旧模型保留以便回退。静态兼容和离线指标不代表
-   本机 Provider 性能或真实游戏效果已通过。
+   检查指标和兼容结果后显式导入候选；在检测页刷新并选择后，随下次启动 Runtime 或明确重载应用。
+   导入不自动切换模型，旧模型保留以便回退。静态兼容和离线指标不代表本机 Provider 性能或真实游戏
+   效果已通过；完整步骤见[候选导入与回退](#候选导入与回退)。
 
 ## 标注、划分与冻结数据
 
@@ -88,6 +91,11 @@ YOLO 标签导出保留十位小数；重新读取时仅容许该精度造成的
 真正越界、空框、缺失标签及非有限坐标仍会阻止冻结数据进入训练。
 训练、续训和评价在各自作业目录创建经哈希核对的数据副本，训练器生成的缓存留在该副本内；
 冻结数据始终按原文件清单和哈希校验，取消或失败后也可继续复用。
+冻结目录包含 `dataset.json`、`dataset_identity.json` 和 `data.yaml`。清单的解析与 SHA-256
+来自同一次读取；作业保存其原始字节为 `dataset.snapshot.json`，配置、检查点、候选卡和评价报告
+沿用该版本身份。导出复制后的图像必须与审核绑定的哈希一致，变化时需重新审核；评价使用作业内
+冻结的图像和标签，之后编辑源标签不会改变本次指标。冻结目录含绝对数据路径，移动后须重新导出，
+不能仅改 `data.yaml` 或添加下载配置。
 评价结果将训练库的 NumPy 标量转换为标准 JSON 数值；非有限数或未知对象会明确失败，不用字符串替代指标。
 候选和基线模型也分别冻结到本次作业目录，评价、预测和兼容检查使用同一份字节；发布前再次核对
 源模型与副本身份，期间替换任一模型会明确失败，不生成可用于导入的评价结果。PT 仍需原文件的可信确认；
@@ -98,23 +106,44 @@ YOLO 标签导出保留十位小数；重新读取时仅容许该精度造成的
 恢复训练保持原作业加载进程数，旧作业缺少该字段时按0处理。批量大小改变每轮更新次数，吞吐配置
 不等于模型质量最优配置；小数据集增大批量后需另行检查训练预算与验证表现。
 
+## 候选导入与回退
+
+训练完成只产生 `CANDIDATE_NOT_ACTIVATED` 候选；独立评价和真实验收仍需分别完成。
+在 Runtime 停止、采集结束且没有其他后台作业时：
+
+1. 在“评估 / 预标注模型”填写候选 ONNX，使用已冻结的数据集运行“评估模型”。需要比较时，
+   当前选择的生产模型作为基线；类别顺序、数据划分和评价条件须一致。
+2. 复核报告后点击“导入候选模型”。该动作要求当前成功完成的是评价作业，且结果包含指标并通过
+   ONNX 兼容检查。程序再次核对候选、数据清单及每张图像/标签的哈希；任一变化都须重新评价。
+3. 导入写入程序数据根下 `models/candidate-<SHA256前16位>.onnx` 及同名 `.onnx.json` 评价记录，
+   不覆盖已有候选。到检测页刷新列表并明确选择；Runtime 运行中需点击“重载模型”才切换 Session，
+   重载失败时旧模型继续服务。
+4. 回退时重新选择保留的旧模型，再启动或重载。不要删除旧模型或把离线指标直接当作替换依据。
+
+取消或失败的评价不获得导入资格；后台进程返回成功但结果应用失败时，先查看作业目录的状态和日志，
+修正问题后重新执行对应步骤。重复点击导入会提示文件已存在，不会生成覆盖版本。
+
 ## 环境与依赖
 
 审核导出只需要 Python 与 Pillow；ONNX metadata 检查还需要 onnxruntime。完整预标注、训练和评价
-使用独立 Python 环境，依赖清单是 `scripts/model_training_requirements.txt`（固定 Ultralytics
+使用独立 Python 环境，依赖清单是 [model_training_requirements.txt](../../scripts/model_training_requirements.txt)（固定 Ultralytics
 8.3.203 的外部 NMS 输出合同）。可在选定环境运行：
 
 ```powershell
 & 'C:\path\to\training-env\Scripts\python.exe' -m pip install -r .\scripts\model_training_requirements.txt
 ```
 
-RTX 50 系列的受管理环境明确使用官方 PyTorch 2.8.0 / torchvision 0.23.0 的 CUDA 12.8 wheel，
+受管理环境固定使用 PyTorch 2.8.0 / torchvision 0.23.0 的 CUDA 12.8 wheel，
 然后安装其余固定依赖并运行 GPU 卷积前后向自检。安装/检查报告与完整依赖版本留在作业目录；
 基础 Python 须保留，移动到其他电脑时重建 venv。环境安装需要网络和足够磁盘空间。
 手动配置时还须选择兼容的 PyTorch CUDA wheel，随后在训练菜单选择该解释器并检查环境。
 普通训练作业不临时安装依赖或下载权重；缺少依赖/本地权重会显式失败。
+“安装 / 修复环境”“检查环境”和“检查 PT”目前检查 CUDA GPU，不提供 CPU 环境就绪证明。
+数据流水线的训练、续训与评价支持 `device="cpu"` 或单个 GPU 编号；CPU 作业使用已准备好固定依赖
+的解释器，不能将 CPU 作业成功表述为 GPU 自检通过。训练 Python 的 ORT 版本由上述依赖清单控制，
+与 C++ Runtime 各 Provider 的 SDK 版本分开维护。
 Pillow 固定为 12.3.0，包含图像解码安全修复。旧环境的 Pillow 版本不符时，环境检查会提示失败；
-可通过“安装/修复”创建新环境并完成检查，旧环境会保留。此次调整不改变 PyTorch 或 CUDA 版本。
+可通过“安装/修复”创建新环境并完成检查，旧环境会保留；固定版本以依赖清单和环境脚本为准。
 Ultralytics 与预训练权重按其 AGPL-3.0/Enterprise 等实际许可使用，独立进程或 ONNX 导出不消除
 许可要求。模型、数据和权重不自动上传或加入 Git。
 
@@ -123,12 +152,16 @@ Ultralytics 与预训练权重按其 AGPL-3.0/Enterprise 等实际许可使用�
 离线工具也可直接调用，JSON 作业使用 `operation` 与输入路径，状态独立写入：
 
 ```powershell
-python -B -X utf8 .\scripts\model_data_pipeline.py --job job.json --status status.json --cancel cancel.flag
+& 'C:\path\to\training-env\Scripts\python.exe' -B -X utf8 .\scripts\model_data_pipeline.py `
+  --job job.json --status status.json --cancel cancel.flag
 ```
 
-支持 `inspect`、`prelabel`、`review_export`、`import_labels`、`export`、`train`（可选 `resume=true`）
+支持 `inspect`、`prelabel`、`review_curate`（生成批量审核网页）、`review_export`、`import_labels`、
+`export`、`train`（可选 `resume=true`）
 和 `evaluate`。数据作业的 `root` 指向采集会话根目录，`class_names` 是已确认的有序数组；输出
-`output` 必须是新目录。训练/评价的 `dataset` 指向含 `dataset.json` 和 `data.yaml` 的冻结目录。
+`output` 必须是新目录。训练/评价的 `dataset` 指向含 `dataset.json`、`dataset_identity.json`
+和 `data.yaml` 的冻结目录。脚本退出码为成功 `0`、失败 `1`、取消 `2`，详细状态读取 `status.json`；
+每次作业使用独立状态路径和取消标记，遗留的 `cancel.flag` 会取消新作业。
 CLI加载用户PT时还须提供 `trusted_weights=true`、`trusted_weights_path` 绝对路径及
 `expected_weights_sha256`；确认仅适用于该文件。界面预标注/评价选择PT时，须与已确认来源的
 可训练权重为同一文件。ONNX不使用PT信任确认。旧外部PT用新微调入口，不能直接当作Xen自身作业恢复。
@@ -139,8 +172,5 @@ CLI加载用户PT时还须提供 `trusted_weights=true`、`trusted_weights_path`
 PT检查另需 `weights`、`trusted_weights=true` 和可选 `expected_sha256`，输入 `imgsz` 默认为320。
 就绪结果只代表该次环境/合成兼容检查，换设备、解释器、权重或输入尺寸后应重新检查。
 
-审核资源的单独更新见[开发与诊断](development.md#脚本与发布导航)。
-
-### 导出与评价期间的数据身份
-
-导出复制后的图像必须与人工审核绑定的 SHA256 一致；原图在预检后发生变化时拒绝发布数据集身份，并要求重新审核。独立评价的 mAP、预测与固定阈值统计统一使用评价任务的冻结图像和标签，后续编辑源标签不会改变本次评价口径。
+正式包中的脚本、审核网页和依赖清单位于 `tools/model-data/`；上述路径按所在布局替换。
+这组资源须一起更新，入口见[开发与诊断](development.md#脚本与发布导航)。

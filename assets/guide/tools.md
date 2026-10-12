@@ -26,12 +26,13 @@
 `scripts/review_run.py` 只读已有 Runtime/Aim 报告、配置身份和截图清单，生成可重复查看的离线汇总。使用 Python 3.11+，在仓库根执行：
 
 ```powershell
-python -B -X utf8 scripts/review_run.py --run "C:\path\to\existing-run" --output "C:\path\to\new-review"
+py -3 -B -X utf8 scripts/review_run.py --run "C:\path\to\existing-run" --output "C:\path\to\new-review"
 ```
 
-将路径替换为已有 Run 和全新的输出目录；输出目录必须位于原归档之外。工具生成 `index.html`、`REVIEW.md` 和 `review.json`，保留原文件不变。完整发布包中的入口为 `tools/review/review_run.py`。
+将路径替换为已有 Run 和全新的输出目录；两者不能相同或互相包含。工具生成 `index.html`、`REVIEW.md` 和 `review.json`，保留原文件不变。完整发布包中的入口为 `tools/review/review_run.py`；使用独立 Python 环境时，将 `py -3` 替换为该环境的解释器路径。
 
 报告汇总已记录的性能分布、异常区间和配置哈希；缺失值保持未知。画面关联要求有效的截图哈希与同一来源时钟身份，不用文件时间或相似文件名猜测逐帧对应。离线结果不等于真实设备与游戏效果验证。
+成功生成页面后仍应查看 `integrity.status` 和问题列表；`partial_or_unknown` 表示材料不完整或来源未确认，生成报告本身不会补齐证据。
 
 ## 原生调试工作区
 
@@ -80,6 +81,7 @@ KMBOX，Runtime停止时也可使用，不会启动检测或武装输出。回�
 
 离线回看与归档遍历共用严格校验：多余清单字段、不完整尾行、路径跳转或事件/字节水位不符均拒绝。
 回看恢复录制时的按住片段上限；取消会保留已读进度并把未结束片段标为取消，随后可重新读取完整档案。
+线程启动失败会报告“记录失败”并释放输入订阅，之后可重新开始。输入代际变化或断档会中断当前片段，不能拼接为一次连续动作。停止后若显示“归档提交中”，须继续等待，不能开始新设备任务；提交失败或收尾超时也不能视为已保存。保存错误、限额、丢弃和末尾缺口分别保留，完整比较还须检查归档清单。
 
 换键分级使用接收时差：绝对值不超过2ms为完美、不超过10ms为优秀，其余按重叠/空隙标偏早/偏晚；
 超过120ms、同包先后不明或误差跨界的记录保留为未分类。它衡量输入节奏，不证明游戏停稳。
@@ -196,7 +198,7 @@ ctest --test-dir $buildDirectory -C Release -R '^(reference_assessment_tests|ref
 & "$buildDirectory/Release/XenReferenceCompare.exe" --events .\assets\reference_assessment\example.json --output .\cache\reference-report-1
 ```
 
-构建目录须先按项目依赖完成 CMake 配置。独立打包使用 `scripts/package_reference_compare.ps1`，只创建新目录，保留原发布入口。
+构建目录须先按项目依赖完成 CMake 配置。独立打包使用 `scripts/package_reference_compare.ps1 -BuildDirectory <构建目录> -OutputDirectory <全新目录>`；它要求当前干净提交及与之匹配的 EXE 构建身份，只创建新目录，保留原发布入口。普通完整包与独立参考工具包的入口不同，以各自文件清单为准。
 
 ## 有界设备实验与画面取证
 
@@ -222,6 +224,7 @@ W/A/S/D 对应位值 1/2/4/8。`--plan <计划> --output <新报告> --dry-run` 
 `--output <新目录> --seconds <1～30> --fps <1～240>`；默认采样左侧 650×310 HUD 区域，
 可通过 `--roi-x/--roi-y/--roi-width/--roi-height` 调整。PNG 与 `frames.csv` 保留实际帧时间，
 请求 FPS 不代表实际采样率。该工具没有物理输出能力，不改变生产采集 ROI。
+结束后核对退出码及 `summary.txt`：仅有有效帧、完整封存且状态为 `COMPLETED` 才返回成功；取消、零有效帧或 PNG/CSV/摘要保存失败均返回失败，不能仅凭输出目录或部分 PNG 判断完成。
 `scripts/read_auto_stop_hud.ps1` 使用 Windows PowerShell 5.1 的本地 WinRT OCR，保留原文和缺失值；
 `scripts/analyze_auto_stop_hud.py` 分析客户端可见运动、零显示与位置稳定区间，
 不将两台机器时钟直接相减，不将 HUD 括号中的 3 秒峰值当作当前速度。

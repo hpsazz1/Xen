@@ -2,6 +2,17 @@
 
 源：用户本地RECOIL-WORKFLOW-001实际采集，诊断版2138c32。
 
+这是历史回归输入；下列来源提交和测量数值描述原采集时点。当前使用者是
+[recoil_wall_analysis_tests.cpp](../../recoil_wall_analysis_tests.cpp) 与
+[wall_capture_run_tests.cpp](../../wall_capture_run_tests.cpp)：前者直接检查生产配准接口，后者用记录图像
+和假设备验证采集、报告及释放流程。已有对应 Release 测试程序时，可从仓库根目录运行：
+
+```powershell
+ctest --test-dir build/nvidia -C Release --output-on-failure -R '^(recoil_wall_analysis_tests|wall_capture_run_tests)$'
+```
+
+其他后端按实际构建目录替换。文档刷新不代表重新采集或执行新的物理验收。
+
 - reference-a.png / shot-a.png：debug-17898242729669805-6，frames/frame-0.png / registration-failure.png。
 - reference.png / shot-b.png：debug-17898242953091647-10，同上两类文件。
 

@@ -1,6 +1,6 @@
 # 构建、发布与开发诊断
 
-[返回 README](../../README.md) · [采集与训练](training.md) · [控制与弹道](controls.md) · [工具与输入评估](tools.md) · [开发与诊断](development.md)
+[返回 README](../../README.md) · [采集与训练](training.md) · [控制与弹道](controls.md) · [身法](movement.md) · [工具与输入评估](tools.md)
 
 本文中的命令均在仓库根目录执行；正式包路径另有说明。界面参数以当前配置校验为准。
 
@@ -13,6 +13,8 @@
 - [报告语义与时间边界](#报告语义与时间边界)
 - [日志与全程归档](#日志与全程归档)
 - [源码与验证](#源码与验证)
+- [辅机 PowerShell 管理](#辅机-powershell-管理)
+- [远程自动调试](#远程自动调试)
 - [无设备界面预览](#无设备界面预览)
 
 ## 依赖与构建
@@ -23,15 +25,21 @@
 ### 环境
 
 - Windows x64
-- Visual Studio 2026 / MSVC v14.51，安装 C++ 桌面开发组件
+- Visual Studio 2026 / MSVC v14.51，安装 C++ 桌面开发组件；这是下列脚本和当前构建验证使用的工具链
 - CMake 4.2 或更高版本（本文 `Visual Studio 18 2026` 生成器所需；项目声明的最低 CMake 版本仍为 3.18）
 - 与目标 Provider 匹配的 ONNX Runtime SDK
 - OpenCV
-- 开启 `BUILD_TESTING`：PowerShell 7，以及能导入 NumPy 和 OpenCV（`cv2`）的 Python 3
-- 可选：CUDA、TensorRT、cuDNN、DirectML、NDI SDK
+- Git：配置与链接后记录提交、工作区状态和 EXE 身份，需要从 Git 检出目录构建
+- 开启 `BUILD_TESTING`：PowerShell 7、系统 Windows PowerShell 5，以及能导入 NumPy 和 OpenCV（`cv2`）的 Python 3；TensorRT 构建的运行库元数据专项另需 Ninja
+- 按后端选择 CUDA、TensorRT、cuDNN、DirectML；启用 NDI 时另需完整 NDI SDK
 
 依赖版本和导入关系以 [CMakeLists.txt](../../CMakeLists.txt) 与实际构建报告为准；不要只替换一个 GPU
 SDK 后沿用旧构建目录。
+
+2026-10-12 对源码 `bea6c94` 使用的 SDK 组合和实际测试范围见[本次构建记录](releases/2026-10-12.md#本地构建与软件测试)。这是已验证环境记录，不是通用最低版本或任意混装兼容性承诺。
+
+解析和部署规则见 [ORT 解析器](../../scripts/resolve_onnxruntime.cmake) 与
+[运行库元数据生成器](../../scripts/runtime_metadata.cmake)。后端归属按选定 SDK 判定，不能只通过修改构建目录名切换。
 
 测试配置会先解析解释器，再用同一个 Python 实际导入 NumPy/`cv2`；缺失或加载失败会明确终止配置。
 需要指定解释器时传入 `-DXEN_PYTHON_EXECUTABLE="C:\path\to\python.exe"`，测试使用该绝对路径。
@@ -44,6 +52,7 @@ $env:OpenCV_DIR = "C:\path\to\opencv\build\x64\vc16\lib"
 $buildDirectory = "build/nvidia" # 按所选 ORT 后端改为 build/directml 或 build/openvino
 
 cmake -S . -B $buildDirectory -G "Visual Studio 18 2026" -A x64 `
+  -DONNXRUNTIME_ROOT="$env:ONNXRUNTIME_ROOT" `
   -DOpenCV_DIR="$env:OpenCV_DIR" `
   -DBUILD_TESTING=ON
 
@@ -74,6 +83,12 @@ clean `PATH` 测试使用配置阶段解析的工具绝对路径，并向子进�
 `--powershell-executable` 指定 PowerShell，无需将工具或 SDK 目录加入测试 PATH。
 VC CRT 从所用 Visual Studio 的官方 Redist 目录解析；可用 `-MsvcRedistRoot` 明确指定，
 不从系统目录补拷 DLL。
+检测模型冒烟及依赖它的 Runtime 回归需要 `-ModelPath`；分割、姿态与 OBB 分别需要对应
+`-SegmentationModelPath/-SegmentationImagePath`、`-PoseModelPath/-PoseImagePath`、
+`-ObbModelPath/-ObbImagePath`。OpenVINO 设备专项通过 `-OpenVinoTestDevice CPU|GPU|NPU`
+选择，并同时提供 `-ModelPath`。脚本每次显式写入这些参数，未传入时不会自动沿用旧测试模型。
+CTest 全部通过仅指本次实际登记的测试；未提供模型、未选择的设备不能写成已验证。
+完整 CTest 还包含真实 Win32/D3D11 窗口专项，需要可用的本地桌面；不能将无桌面环境的跳过记为通过。
 依赖 NDI 图像见证的 Prepare 只接受启用 NDI 且运行库完整的工具目录；未启用时明确拒绝，
 不生成缺少采集能力的半成品任务。
 
@@ -90,7 +105,8 @@ VC CRT 从所用 Visual Studio 的官方 Redist 目录解析；可用 `-MsvcRedi
 后端归属和 Worker 存在性；日常启动不会扫描或哈希整包。完整文件集合与 SHA-256 校验只保留在
 新完整发布、跨机复制、运行库拓扑变化或明确供应链审计边界。
 
-发布目录按用途组织，三个 Worker 和必要工具均来自同一提交：
+完整发布目录按用途组织，三个 Worker 和必要工具取自同一提交；后续差量更新允许继承未变载荷，
+应按 manifest 的各文件来源和本次更新记录判断身份：
 
 ```text
 Xen-unified-<版本>/
@@ -111,8 +127,11 @@ Xen-unified-<版本>/
 已验证 Python 环境保留明确路径。升级时应复核绑定，不能直接搬移 venv 或复制旧 CMake 构建树。
 发布包不包含用户旧弹道 CSV、训练权重或测试 EXE，旧包可保留供回退。
 完整包固定携带同提交的 `tools/source/start_source_context_session.ps1`；根目录 `Start-Xen.cmd` 使用相对路径启动 Launcher，不包含设备凭据。旧机器上自定义的同名封装需单独保存，设备与源端连接信息在各机配置中填写。
-单 Worker 更新来源保存在清单内的 `tools/acceptance/WORKER-UPDATE.json`，不扩展 Launcher
-固定的清单顶层字段。发布回归使用 Launcher 同一生产解析器验证生成结果，再检查传输完整性。
+`tools/acceptance/WORKER-UPDATE.json` 记录最后一批常规 Worker 更新的组件、基包清单哈希和
+继承范围；它会被后续 Worker 批次替换，不能代表三个后端与全部工具的累计构建身份。
+仅资源模式保留原 Worker 构建身份，不重写该记录。逐文件来源以 manifest 为准，
+完整的跨批次交付结论还需保留各批发布结果。该记录不扩展 Launcher 固定的清单顶层字段。
+发布回归使用 Launcher 同一生产解析器验证生成结果，再检查传输完整性。
 
 ## 可执行目标
 
@@ -120,13 +139,26 @@ Xen-unified-<版本>/
 |---|---|---|
 | `xen_app` | `Xen.exe` | 主应用与 Overlay |
 | `xen_launcher` | `XenLauncher.exe` | 正式包 Provider 路由入口 |
+| `xen_source_context` | `xen_source_context.exe` | 源机前台与焦点桥接进程 |
 | `xen_sender` | `XenSender.exe` | DXGI → XUDP 发送端 |
 | `xen_clock_source` | `XenClockSource.exe` | NDI 源机四时间戳旁路；不接触图像或输入设备 |
 | `xen_capture_evidence` | `XenCaptureEvidence.exe` | 不可武装的 Capture/NDI 像素证据录制入口 |
+| `xen_auto_stop_capture` | `XenAutoStopCapture.exe` | 本机 DXGI/HUD 画面取证，不发送输入 |
+| `xen_recoil_calibration` | `xen_recoil_calibration.exe` | 弹道校准准备、校验与有界执行；实际输出须明确授权 |
+| `xen_recoil_tuner` | `xen_recoil_tuner.exe` | 弹道离线优化与评价 |
+| `xen_reference_compare` | `XenReferenceCompare.exe` | 输入轨迹与参考数据的离线比较 |
 | `xen_benchmark` | `XenBenchmark.exe` | 无界面 Runtime 基准 |
+| `camera_motion_benchmark` | `camera_motion_benchmark.exe` | 原图离线背景运动与 Detector/Aim 比较 |
+| `xen_aim_production_red_producer` | `xen_aim_production_red_producer.exe` | 无物理输出能力的 Aim 诊断证据生成 |
 | `xen_mouse_benchmark` | `XenMouseBenchmark.exe` | 鼠标后端性能与协议验证 |
+| `auto_stop_probe` | `auto_stop_probe.exe` | 独立有界 WASD 设备探针；实际输出须明确授权 |
+| `auto_stop_counterpulse` | `auto_stop_counterpulse.exe` | 独立反向脉冲标定；与 Runtime 互斥，实际输出须明确授权 |
 | `xen_mouse_effect_probe` | `XenMouseEffectProbe.exe` | source-frame 驱动的 X-only 实际命令/背景响应证据入口；Physical 需要明确输出确认参数 |
 | `xen_mouse_effect_probe_sequence` | `XenMouseEffectProbeSequence.exe` | 离线生成平衡净零的 A/A2 序列；S1 活性 profile 以固定 source-frame cadence 生成 X-only 回锚挑战，基线保持零命令 |
+| `xen_mouse_effect_probe_composite_seal` | `XenMouseEffectProbeCompositeSeal.exe` | 无设备定时预检与 plan 封存 |
+
+上表列出生产与诊断可执行目标，不表示每个发布包都携带这些工具。测试和界面预览目标另由
+`BUILD_TESTING` 控制；输出名称以 [CMakeLists.txt](../../CMakeLists.txt) 为准。
 
 `XenSender.exe --report PATH` 必须声明至少一个非零退出上限：`--max-frames` 不超过
 200000，或 `--fps × --max-seconds` 的理论样本数不超过 200000；两者都提供时任一安全上限即可。
@@ -141,6 +173,9 @@ Xen-unified-<版本>/
 | [scripts/build_aim_debug.ps1](../../scripts/build_aim_debug.ps1) | 固定 NVIDIA 环境下的 Aim/Runtime 轻量构建 |
 | [scripts/review_run.py](../../scripts/review_run.py) | 读取已有 Run，生成离线复盘报告 |
 | [scripts/publish_release_bundle.ps1](../../scripts/publish_release_bundle.ps1) | 生成隔离 Provider 的正式发布包 |
+| [scripts/publish_worker_update.ps1](../../scripts/publish_worker_update.ps1) | 从已有基包准备单 Worker 继承包或变化载荷 |
+| [scripts/publish_worker_delta.ps1](../../scripts/publish_worker_delta.ps1) | 向既有主辅包应用固定范围差量，逐端保护配置 |
+| [scripts/transfer_release_bundle.ps1](../../scripts/transfer_release_bundle.ps1) | 完整包跨机复制与清单校验 |
 | [scripts/invoke_aim_manual_acceptance.ps1](../../scripts/invoke_aim_manual_acceptance.ps1) | 生成并执行受控 Aim 人工 Run |
 | [scripts/run_ndi_clock_source.ps1](../../scripts/run_ndi_clock_source.ps1) | 在 NDI 源机前台启动时钟旁路；不会访问 KMBOX |
 | [scripts/run_mouse_effect_probe_output_off.ps1](../../scripts/run_mouse_effect_probe_output_off.ps1) | 以零 Mouse 能力排练 probe/source/sidecar/像素绑定 |
@@ -154,8 +189,15 @@ Xen-unified-<版本>/
 
 其余专项入口位于 [scripts/](../../scripts/)。脚本是参数和证据格式的事实源；不要长期维护一次性脚本。
 
-仅更新模型工作区资源时，使用 `publish_worker_delta.ps1 -ModelDataReviewOnly`，固定投递审核脚本、页面、
-训练环境脚本和依赖声明四项资源及清单，保留既有 Worker 构建身份，无需重建二进制。
+差量发布要求显式指定 `PackageRoot`、`DestinationRoot`、`RemotePackageRoot` 和 `Runtime`。
+脚本内置主辅映射约束，使用前核对本机 SSH/SMB 环境和目标路径；不是任意服务器的通用同步命令。
+它逐端保护 `config.ini` 与 `cache/model-workspace/settings.json`，不传输未变化的模型或 DLL。
+常规 Worker 更新校验干净源码、构建身份及每个交付 EXE 的链接记录；发布完整性通过也不能证明
+辅机 Runtime 或真实设备已验收。
+
+仅更新模型工作区资源时，使用 `publish_worker_delta.ps1 -ModelDataReviewOnly`，固定投递
+`model_data_pipeline.py`、`model_data_review.html`、`model_training_environment.py`、
+`model_training_requirements.txt` 四项资源及清单，保留既有 Worker 构建身份，无需重建二进制。
 `-IncludeModelDataReview` 在 Worker 差量中选中同一组资源；这两个既有开关均保持完整依赖组，
 旧包缺少训练环境脚本或依赖声明时一并补入。
 
@@ -318,6 +360,16 @@ F9通过当前键鼠后端监听源机按键，
 
 构建和测试应按变更影响选择受影响目标，真实设备验收独立于自动测试。
 
+仅更新公开文档时，在仓库根目录执行下列 V0 检查；无需重建二进制或重新传输发布包：
+
+```powershell
+py -3 -X utf8 scripts/check_public_docs.py
+git diff --check
+```
+
+检查器只核对 Git 已跟踪的根文档、`assets/` 与 `.github/` Markdown 本地链接及锚点。
+新文档需先纳入 Git 索引；命令语义、外部链接和 `tests/` 内历史证据仍需按实际来源核对。
+
 `app_file_dialog_shutdown_tests` 在独立数据目录调用生产 `wWinMain`，通过真实界面打开文件选择器或
 “文件不存在”提示，再请求主窗退出；关闭前核对实际 picker 线程退出，返回后核对无遗留窗口。
 构建该目标后，使用 `ctest --test-dir <build> -C Release -R '^app_file_dialog_shutdown_(picker|error)$' --output-on-failure`
@@ -347,7 +399,7 @@ F9通过当前键鼠后端监听源机按键，
 ## 辅机 PowerShell 管理
 
 已配置严格主机校验及密钥登录的 SSH 别名可通过
-`scripts/invoke_auxiliary_powershell.ps1 -SshHost xen-aux -ScriptPath <本地脚本路径>`
+`scripts/invoke_auxiliary_powershell.ps1 -SshHost <已配置的SSH别名> -ScriptPath <本地脚本路径>`
 直接执行辅机 PowerShell，收集后返回中文输出，失败时在错误消息中保留远端退出码；管理操作加 `-RequireAdministrator`，
 会在普通用户会话中明确失败。脚本编码只用于传输，不是加密，不得在脚本中写入凭据。
 
@@ -364,11 +416,12 @@ F9通过当前键鼠后端监听源机按键，
 不写入口令或令牌；沿用已有凭据目录和正式工具的物理输出参数。
 
 ```powershell
-$run = 'C:\XenLab\runs\my-debug-run'
-.\scripts\invoke_auxiliary_powershell.ps1 -Mode Start -ScriptPath .\temp\my-task\run.ps1 -RunDirectory $run -TimeoutSeconds 120
-.\scripts\invoke_auxiliary_powershell.ps1 -Mode Status -RunDirectory $run
-.\scripts\invoke_auxiliary_powershell.ps1 -Mode Stop -RunDirectory $run
-.\scripts\invoke_auxiliary_powershell.ps1 -Mode Recover -RunDirectory $run
+$auxiliaryHost = 'your-auxiliary-host' # 替换为已配置的 SSH 别名
+$run = 'C:\path\to\runs\my-debug-run' # 替换为辅机本地的新 Run 目录
+.\scripts\invoke_auxiliary_powershell.ps1 -SshHost $auxiliaryHost -Mode Start -ScriptPath .\temp\my-task\run.ps1 -RunDirectory $run -TimeoutSeconds 120
+.\scripts\invoke_auxiliary_powershell.ps1 -SshHost $auxiliaryHost -Mode Status -RunDirectory $run
+.\scripts\invoke_auxiliary_powershell.ps1 -SshHost $auxiliaryHost -Mode Stop -RunDirectory $run
+.\scripts\invoke_auxiliary_powershell.ps1 -SshHost $auxiliaryHost -Mode Recover -RunDirectory $run
 ```
 
 `ScriptPath` 是主机上的任务脚本；`RunDirectory` 是辅机上的唯一 Run。脚本通过
@@ -464,7 +517,7 @@ ReportLifecycle 与 Runtime，在合成采集和写盘屏障上验证交错；`r
 
 相位检查在已验证的长曲线上复用有序极值索引，窗口仍为闭区间；插值、浮点累计、相等值的先后和轨迹身份不变。短曲线保留扫描且不分配索引。性能比较使用 `recoil_tuner_phase_benchmark` 的完整 optimize 报告与原实现逐位对照，不能只比汇总。合成基准记录完整分位数与内存取舍，不外推为真实闭环性能。
 
-本轮[合成热点验证快照](../../tests/hotspot_performance_20261010.md)记录基准、完整分位数及内存取舍。运动账本固定预留原型没有足够收益，生产实现保持不变。
+[2026-10-10 合成热点验证快照](../../tests/hotspot_performance_20261010.md)记录当时的基准、完整分位数及内存取舍。运动账本固定预留原型没有足够收益，未进入生产实现。
 
 ### 离线工具的 Windows 长路径
 
