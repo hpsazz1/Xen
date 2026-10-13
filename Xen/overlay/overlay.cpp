@@ -4112,13 +4112,13 @@ struct Overlay::Impl {
         }
         if (ImGui::CollapsingHeader("自动整理与批量审核", ImGuiTreeNodeFlags_DefaultOpen)) {
             const bool review_idle = idle && runtime.state == RuntimeState::STOPPED;
-            ImGui::TextWrapped("停止 Runtime 后整理、审核、导入；原图与原始标注不变。");
-            show_help_tooltip("先自动整理重复图与疑难图，再批量看图确认；只有少量问题图需要调整框。停止 Runtime 后操作，不影响原始图片和自动标注。");
+            ImGui::TextWrapped("已有预览可随时打开；停止 Runtime 后整理、选择文件和导入。");
+            show_help_tooltip("先自动整理重复图与疑难图，再批量看图确认。打开已生成预览无需停止 Runtime、采集或后台作业，不影响原始图片和自动标注。");
             workspace_button("自动整理并生成预览", "离线检查完整性、归组重复图并排列疑难样本，生成本地带框预览；不自动判定负样本、不启动训练。可使用训练页指定的离线预标注作对比。", Action::CURATE_REVIEW,
                 review_idle && settings.class_schema_confirmed, actions);
             ImGui::SameLine();
             workspace_button("打开批量预览", "在浏览器打开本地审核页，支持筛选、多选、批量确认与少量改框。完成后导出审核结果JSON；关闭前先导出草稿。", Action::OPEN_REVIEW,
-                review_idle && !settings.review_preview_path.empty(), actions);
+                !settings.review_preview_path.empty(), actions);
             workspace_button("选择审核结果文件", "选择浏览器下载的review-decisions.json，或已有外部审核review.json；选择本身不会导入。", Action::PICK_REVIEW_MANIFEST,
                 review_idle, actions);
             ImGui::SameLine();

@@ -12,6 +12,7 @@ class RecoilStore {
 public:
     explicit RecoilStore(std::filesystem::path directory);
     bool list(std::vector<RecoilStoredProfile>& profiles,std::string& error) const noexcept;
+    bool active_weapons(std::vector<std::string>& weapons,std::string& error) const noexcept;
     bool load(const std::string& file,RecoilProfile& profile,std::string& error) const noexcept;
     bool save_new(const RecoilProfile& profile,std::string& file,std::string& error,
         bool preserve_calibration=false) const noexcept;

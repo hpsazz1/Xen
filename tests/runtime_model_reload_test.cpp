@@ -13,6 +13,7 @@
 #include "runtime/startup_internal.h"
 #include "debug/session_archive.h"
 #include "data_collection/data_collection.h"
+#include "recoil/recoil_store.h"
 
 #include <algorithm>
 #include <atomic>
@@ -717,7 +718,52 @@ int main(int argc, char** argv) {
     expect(runtime.snapshot().recoil_profile_status.find("弹道目录读取失败") != std::string::npos,
            "停止不得把弹道加载错误覆盖成无匹配曲线");
     std::filesystem::remove(invalid_profile_directory);
-    std::filesystem::remove(diagnostic_root);
+
+    // 无关候选和另一武器活动文件损坏，只隔离各自文件，不连带停用可用曲线。
+    const auto isolated_profile_directory = diagnostic_root / "isolated-profiles";
+    std::filesystem::create_directories(isolated_profile_directory);
+    RecoilStore isolated_store(isolated_profile_directory);
+    RecoilProfile valid_profile;
+    valid_profile.id = "runtime_ak47";
+    valid_profile.weapon_id = "ak47";
+    valid_profile.calibration.input_path = "kmbox_net";
+    valid_profile.calibration.sensitivity = 1.0;
+    valid_profile.points = {{0, 0, 0}, {10, 1, 2}};
+    std::string profile_error, valid_file, damaged_file;
+    expect(confirm_recoil_profile(valid_profile, profile_error) &&
+               isolated_store.save_new(valid_profile, valid_file, profile_error, true) &&
+               isolated_store.set_active(valid_profile.weapon_id, valid_file, profile_error),
+           "隔离回归必须保存并启用真实已确认 AK47 曲线：" + profile_error);
+    auto damaged_profile = valid_profile;
+    damaged_profile.id = "runtime_m4a4";
+    damaged_profile.weapon_id = "m4a4";
+    const bool damaged_saved = confirm_recoil_profile(damaged_profile, profile_error) &&
+        isolated_store.save_new(damaged_profile, damaged_file, profile_error, true) &&
+        isolated_store.set_active(damaged_profile.weapon_id, damaged_file, profile_error);
+    expect(damaged_saved, "隔离回归必须先创建另一武器活动引用：" + profile_error);
+    { std::ofstream output(isolated_profile_directory / "broken.json"); output << "{invalid candidate"; }
+    if (damaged_saved) {
+        std::ofstream output(isolated_profile_directory / damaged_file);
+        output << "{invalid active profile";
+    }
+    AppConfig isolated_recoil_config = recoil_failure_config;
+    isolated_recoil_config.recoil.profile_directory = isolated_profile_directory.string();
+    expect(bool(isolated_store.resolve(isolated_recoil_config.recoil, valid_profile.weapon_id, profile_error)),
+           "健康活动曲线必须仍能经生产契约解析：" + profile_error);
+    const bool isolated_started = runtime.start(isolated_recoil_config, no_output_mouse);
+    expect(isolated_started, "损坏候选或其他武器曲线不得阻断 Runtime 启动");
+    if (isolated_started) {
+        expect(wait_until([&] { return runtime.snapshot().processed_frames >= 3; }, 10s),
+               "隔离损坏文件后真实 CPU Detector 必须继续处理 UDP 帧");
+        const auto isolated = runtime.snapshot();
+        expect(isolated.state == RuntimeState::RUNNING && isolated.last_error.empty() &&
+                   isolated.recoil_telemetry_available &&
+                   isolated.recoil_profile_status.find("弹道目录读取失败") == std::string::npos,
+               "损坏文件只能逐武器隔离，健康目录必须启动压枪调度");
+    }
+    runtime.stop();
+    expect(no_output_mouse->moves.load() == 0, "曲线隔离回归不得向假设备输出");
+    std::filesystem::remove_all(diagnostic_root, archive_cleanup_error);
 
     const bool recovered_started = runtime.start(config);
     expect(recovered_started, "禁用桥接后必须能够重新启动 Runtime");

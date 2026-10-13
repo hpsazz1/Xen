@@ -110,8 +110,10 @@ def prepare(source, source_profiles, target, output, data_root, expected_source_
             raise ValueError("原灵敏度无效")
         if type(current.get("revision")) is not int or not 0 < current["revision"] < 2147483647:
             raise ValueError("原修订号无效")
-        if current.get("confirmation_sha256") != confirmation_sha256(current, gsi_weapon):
-            raise ValueError("原曲线缺少有效内容确认，请在编辑器重新确认后再迁移: " + key)
+        # 与生产读取一致：旧确认不因缺少后加的摘要失效；已有摘要仍须匹配实际内容。
+        if ("confirmation_sha256" in current
+                and current["confirmation_sha256"] != confirmation_sha256(current, gsi_weapon)):
+            raise ValueError("原曲线内容与确认摘要不符，请核对实际修改后再迁移: " + key)
         if redirected(source / entry["file"]) or (source / entry["file"]).resolve().parent != source:
             raise ValueError("CSV路径无效")
         raw_csv = (source / entry["file"]).read_bytes()

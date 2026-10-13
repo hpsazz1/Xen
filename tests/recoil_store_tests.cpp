@@ -1,6 +1,7 @@
 #include "recoil/recoil_store.h"
 #include "recoil/recoil_store_internal.h"
 #include <atomic>
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -264,12 +265,20 @@ int main(int argc, char** argv){
         "活动索引解析离散版本");
     expect(store.rollback("ak47",error)&&store.resolve(cfg,"ak47",error)->schema_version==1,
         "离散迁移可回退原累计版本");
+    expect(store.set_active(p.weapon_id,file2,error),"恢复独立武器用于活动错误隔离回归");
     {std::ofstream large(directory/"oversized.json",std::ios::binary);
         large.seekp(16*1024*1024);large.put('\0');}
     expect(!store.load("oversized.json",loaded,error)&&error.find("大小")!=std::string::npos,
         "生产入口仍在解析前拒绝超过16MiB的文件");
     {std::ofstream broken(directory/"broken.json");broken<<"{}";}
     expect(!store.list(profiles,error),"损坏候选显式失败不假成功");
+    std::vector<std::string> active_weapons;
+    expect(store.active_weapons(active_weapons,error)&&
+        std::find(active_weapons.begin(),active_weapons.end(),"ak47")!=active_weapons.end()&&
+        bool(store.resolve(cfg,"ak47",error)),"非活动损坏或超大候选不阻断有效活动曲线");
+    {std::ofstream broken(directory/named_file);broken<<"{}";}
+    expect(store.active_weapons(active_weapons,error)&&!store.resolve(cfg,"ak47",error)&&
+        bool(store.resolve(cfg,p.weapon_id,error)),"损坏活动曲线只影响该武器，其他活动武器仍可解析");
     std::filesystem::remove_all(directory);
     return failures?1:0;
 }

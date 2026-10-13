@@ -5,9 +5,10 @@
 #include <functional>
 
 namespace model_workspace::detail {
-// 每实例测试屏障位于真实模型校验之后、采集提交之前；生产默认不安装。
+// 每实例测试适配：保留生产校验，只替换外部打开动作或设置采集提交屏障。
 struct ActionAdapter {
     std::function<void()> before_collection_start;
+    std::function<bool(const std::filesystem::path&)> open_review;
 };
 }
 #endif

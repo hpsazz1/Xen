@@ -629,17 +629,21 @@ bool Workspace::execute(Action action, Settings& settings,
         if (action == Action::NONE) return true;
         if (action == Action::CANCEL_JOB) { impl_->cancel(); return true; }
         if (action == Action::OPEN_REVIEW || action == Action::PICK_REVIEW_MANIFEST) {
-            check(!runtime_running && !collecting && !impl_->process.valid(),
-                "请先停止Runtime、采集和后台作业，再打开审核工具");
             if (action == Action::OPEN_REVIEW) {
                 const auto preview = checked_path(path_from(settings.review_preview_path));
                 const auto within = preview.lexically_relative(impl_->workspace_root / "jobs");
                 check(!within.empty() && !within.is_absolute() && *within.begin() != L".." &&
                     preview.filename() == L"review.html" && fs::is_regular_file(preview),
                     "请先生成当前工作区的批量预览");
-                check(reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", preview.c_str(),
-                    nullptr, nullptr, SW_SHOWNORMAL)) > 32, "无法打开本地批量预览");
+                const bool opened = impl_->action_adapter.open_review
+                    ? impl_->action_adapter.open_review(preview)
+                    : reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", preview.c_str(),
+                        nullptr, nullptr, SW_SHOWNORMAL)) > 32;
+                check(opened, "无法打开本地批量预览");
             } else {
+                // 原生模态对话框占用 App 主线程；浏览器打开已有预览不受此约束。
+                check(!runtime_running && !collecting && !impl_->process.valid(),
+                    "请先停止Runtime、采集和后台作业，再选择审核结果文件");
                 std::array<wchar_t, 32768> filename{};
                 OPENFILENAMEW dialog{};
                 dialog.lStructSize = sizeof(dialog);

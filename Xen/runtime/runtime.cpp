@@ -457,9 +457,9 @@ struct Runtime::Impl {
             recoil_profiles.clear();
             { std::lock_guard lock(snapshot_mutex); recoil_profile_statuses.clear(); }
             RecoilStore store(std::filesystem::u8path(config.recoil.profile_directory));
-            std::vector<RecoilStoredProfile> profiles;
+            std::vector<std::string> profiles;
             std::string error;
-            if (!store.list(profiles, error)) {
+            if (!store.active_weapons(profiles, error)) {
                 const auto message = "弹道目录读取失败：" + error + "。压枪未启动，采集和检测继续。";
                 {
                     std::lock_guard lock(snapshot_mutex);
@@ -469,8 +469,7 @@ struct Runtime::Impl {
                 // profiles 已清空；不启动调度，不能沿用上一次会话的曲线。
                 return true;
             }
-            for (const auto& entry : profiles) {
-                const auto& id = entry.profile->weapon_id;
+            for (const auto& id : profiles) {
                 { std::lock_guard lock(snapshot_mutex); if (recoil_profile_statuses.contains(id)) continue; }
                 auto resolved = store.resolve(config.recoil, id, error);
                 const auto status = resolved ? id + "：已匹配 " + resolved->id + " / r" + std::to_string(resolved->revision)

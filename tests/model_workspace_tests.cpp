@@ -3,6 +3,7 @@
 #endif
 #include <Windows.h>
 #include "model_workspace/model_workspace.h"
+#include "model_workspace/actions_internal.h"
 #include <nlohmann/json.hpp>
 #include <chrono>
 #include <filesystem>
@@ -132,7 +133,18 @@ int main(int argc, char** argv) try {
     test_tool_paths(root, argv[1]);
     test_job_record_path_boundary(root, argv[1], argv[2]);
     auto collector = std::make_shared<data_collection::Collector>();
-    model_workspace::Workspace workspace(collector);
+    int preview_opens = 0;
+    fs::path opened_preview;
+    bool preview_open_succeeds = true;
+    model_workspace::detail::ActionAdapter adapter;
+    adapter.open_review = [&](const fs::path& path) {
+        ++preview_opens;
+        opened_preview = path;
+        return preview_open_succeeds;
+    };
+    auto adapted_workspace = model_workspace::detail::make_workspace_with_action_adapter(
+        collector, std::move(adapter));
+    auto& workspace = *adapted_workspace;
     model_workspace::Settings settings;
     std::string error;
     expect(workspace.initialize(root, settings, error), "工作区初始化");
@@ -164,6 +176,31 @@ int main(int argc, char** argv) try {
                "自动整理接收可选的离线预测对比输入");
     }
     expect(settings.review_manifest.empty(), "生成预览不能冒充已人工处理的审核结果");
+    const auto generated_preview = settings.review_preview_path;
+    expect(workspace.execute(Action::OPEN_REVIEW, settings, true, false, "") &&
+           preview_opens == 1 && opened_preview == fs::u8path(generated_preview),
+           "Runtime运行时可打开真实作业生成的预览，不触发真实浏览器");
+    expect(settings.review_manifest.empty(), "打开预览不代替审核或导入结果");
+    preview_open_succeeds = false;
+    expect(!workspace.execute(Action::OPEN_REVIEW, settings, true, false, "") &&
+           workspace.poll().message == "无法打开本地批量预览",
+           "浏览器打开失败仍明确报告");
+    preview_open_succeeds = true;
+    const auto invalid_preview_opens = preview_opens;
+    settings.review_preview_path = utf8(root / "review.html");
+    { std::ofstream file(fs::u8path(settings.review_preview_path)); file << "outside jobs"; }
+    expect(!workspace.execute(Action::OPEN_REVIEW, settings, true, false, "") &&
+           preview_opens == invalid_preview_opens,
+           "无关运行门禁解除后仍拒绝工作区作业目录外的预览");
+    settings.review_preview_path = generated_preview + ".missing";
+    expect(!workspace.execute(Action::OPEN_REVIEW, settings, true, false, "") &&
+           preview_opens == invalid_preview_opens,
+           "不存在的预览不能提交浏览器打开");
+    settings.review_preview_path = generated_preview;
+    expect(!workspace.execute(Action::PICK_REVIEW_MANIFEST, settings, true, false, ""),
+           "运行中仍不进入占用主线程的原生文件对话框");
+    expect(!workspace.execute(Action::IMPORT_LABELS, settings, true, false, ""),
+           "打开预览不扩大运行中导入权限");
     settings.prelabels_path.clear();
     expect(!workspace.execute(Action::START_COLLECTION, settings, true, true, ""),
            "GPU帧不静默改CPU采集");
@@ -214,6 +251,10 @@ int main(int argc, char** argv) try {
     };
     expect(workspace.execute(Action::START_COLLECTION, settings, true, false, utf8(model), standalone_collection),
            "已确认相同模型身份可创建采集会话，不启动Runtime");
+    expect(collector->snapshot().active &&
+           workspace.execute(Action::OPEN_REVIEW, settings, true, false, "") &&
+           collector->snapshot().active,
+           "活动采集不阻止打开已有预览，打开也不停止采集");
     expect(workspace.execute(Action::STOP_COLLECTION, settings, false, false, "") &&
            !collector->snapshot().active, "结束采集立即封口");
     expect(!wait(workspace).collection.draining, "主循环轮询完成采集回收后才可重开");
@@ -272,6 +313,9 @@ int main(int argc, char** argv) try {
     expect(!workspace.execute(Action::IMPORT_CANDIDATE, settings, false, false, ""),
            "重复导入不覆盖既有候选");
     expect(workspace.execute(Action::TRAIN, settings, false, false, ""), "取消测试启动");
+    expect(workspace.poll().job_running &&
+           workspace.execute(Action::OPEN_REVIEW, settings, true, false, ""),
+           "后台作业持有进程时仍可打开已有预览");
     const auto job_path = fs::u8path(workspace.poll().job_directory);
     expect(workspace.execute(Action::CANCEL_JOB, settings, false, false, ""), "发送合作取消");
     view = wait(workspace);

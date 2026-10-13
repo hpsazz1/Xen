@@ -109,14 +109,39 @@ class MigrationTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.prepare()
         self.assertFalse(self.plan.exists())
 
-    def test_missing_confirmation_binding_rejects(self):
+    def test_missing_confirmation_binding_preserves_legacy_data_and_migration(self):
+        confirmed = self.prepare()
+        expected = {change["new_file"]: (self.plan / "profiles" / change["new_file"]).read_bytes()
+                    for change in confirmed["changes"]}
+        for change in confirmed["changes"]:
+            path = self.target / change["old_file"]
+            value = json.loads(path.read_bytes())
+            del value["confirmation_sha256"]
+            path.write_bytes(migration.encoded(value))
+        before = {p.name: p.read_bytes() for p in self.target.iterdir()}
+        self.plan = self.root / "legacy-plan"
+        plan = self.prepare()
+        self.assertEqual(before, {p.name: p.read_bytes() for p in self.target.iterdir()})
+        migration.apply(self.plan, self.target)
+        for change in plan["changes"]:
+            self.assertEqual((self.target / change["old_file"]).read_bytes(), before[change["old_file"]])
+            self.assertEqual((self.target / change["new_file"]).read_bytes(), expected[change["new_file"]])
+            if STORE_TEST:
+                for name in (change["old_file"], change["new_file"]):
+                    result = subprocess.run([str(STORE_TEST), "--validate-confirmed-file", str(self.target / name)],
+                                            capture_output=True, timeout=15)
+                    self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
+
+    def test_present_invalid_confirmation_binding_rejects(self):
         path = self.target / "weapon_ak47-r7.json"
         value = json.loads(path.read_bytes())
-        value.pop("confirmation_sha256", None)
-        path.write_bytes(migration.encoded(value))
-        with self.assertRaisesRegex(ValueError, "确认"):
-            self.prepare()
-        self.assertFalse(self.plan.exists())
+        for invalid in (None, "", "0" * 64):
+            with self.subTest(binding=invalid):
+                value["confirmation_sha256"] = invalid
+                path.write_bytes(migration.encoded(value))
+                with self.assertRaisesRegex(ValueError, "确认"):
+                    self.prepare()
+                self.assertFalse(self.plan.exists())
 
     def test_edited_curve_rejects(self):
         path = self.target / "weapon_ak47-r7.json"

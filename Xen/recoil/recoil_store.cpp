@@ -103,6 +103,19 @@ std::string active_key(const Json& value,const std::string& canonical) {
 void report(std::string& error,const std::exception& e)noexcept{try{error=e.what();}catch(...){}}
 }
 RecoilStore::RecoilStore(std::filesystem::path directory):directory_(std::filesystem::absolute(directory).lexically_normal()){}
+bool RecoilStore::active_weapons(std::vector<std::string>& weapons,std::string& error) const noexcept {
+    try {
+        if(reparse(directory_)||(std::filesystem::exists(directory_)&&!std::filesystem::is_directory(directory_)))
+            throw std::runtime_error("曲线目录无效");
+        const auto value=index(directory_);
+        std::vector<std::string> result;
+        for(auto it=value["active"].begin();it!=value["active"].end();++it)
+            result.push_back(canonical_weapon(it.key()));
+        std::sort(result.begin(),result.end());
+        result.erase(std::unique(result.begin(),result.end()),result.end());
+        weapons=std::move(result);error.clear();return true;
+    }catch(const std::exception& e){report(error,e);return false;}catch(...){return false;}
+}
 bool RecoilStore::load(const std::string& file,RecoilProfile& profile,std::string& error) const noexcept {
     try {
         if(!file_name(file)||reparse(directory_))throw std::runtime_error("曲线文件名或目录无效");
