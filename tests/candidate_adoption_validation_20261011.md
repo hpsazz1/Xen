@@ -1,5 +1,7 @@
 # 候选确认与编辑器采用验证
 
+> 2026-10-13 兼容修正：下文为历史验证记录。已测试旧 schema2/3 曲线的 verified=true 在缺摘要时继续有效，无需重复人工确认；已有摘要失配仍表示内容改变。当前规则见 assets/recoil/README.md。旧库仅追加摘要，节点、时序和灵敏度保持不变。
+
 基线 `bfdc4e4ed416ae11dbd9021c1ef6c58026580663`；独立分支 `codex/candidate-adoption-20261011`。
 本轮在 Windows、MSVC 19.51、Release、既有 NVIDIA 构建配置执行；不修改或合并 main，不部署或启动真实设备。
 

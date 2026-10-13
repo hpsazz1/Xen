@@ -18,8 +18,8 @@ py -3 -X utf8 .\tools\recoil\import_recoil_profiles.py --source-directory <用�
 
 仅 `IMPORTED` 与 `SCHEMA_VALID` 候选允许自动归一明确别名。`CALIBRATED` / `ACCEPTED` 若使用需要转换的别名则明确拒绝加载、验证和保存，须以规范 ID 建立新候选并重新校准；不能通过改名沿用旧环境指纹与语义哈希。原规范 ID 及未知自定义 ID 保持原身份，不改写历史文件。
 
-编辑器的 schema2 累计曲线与 schema3 离散曲线使用内容确认：`verified=true` 还须有匹配的
-`confirmation_sha256`，确认绑定版本、武器、灵敏度及节点/事件。旧文件缺少确认摘要或内容变化时
+编辑器的 schema2 累计曲线与 schema3 离散曲线保留已有人工确认：旧文件 `verified=true` 且缺少摘要时兼容读取，不要求重复确认。新保存的文件写入
+`confirmation_sha256`，确认绑定版本、武器、灵敏度及节点/事件。已有摘要但内容变化时
 仍可作为候选编辑，不能直接采用或沿用旧确认；需核对实际内容后重新确认。保存候选与载入候选是两步，
 存在待用测试组导致载入失败时，已保存文件仍保留，当前选择与待用组不会被清除；按界面提示处理后重试。
 
@@ -27,7 +27,7 @@ py -3 -X utf8 .\tools\recoil\import_recoil_profiles.py --source-directory <用�
 
 `import_recoil_profiles.py --discrete-legacy` 输出未确认schema3事件：按旧length裁剪、delay归一到0.1ms、multiple细分和尾步余量、首子步仅等待、绝对计划时刻。默认导入及新采集候选继续保持原累计语义；新导入不会自动确认或启用。
 
-`migrate_legacy_recoil_profiles.py prepare` 仅为已确认且与审计源一致的17条活动 schema2 曲线生成迁移计划；原曲线须有有效内容确认，缺失时先在编辑器核对并重新确认。计划目录须为新的独立目录，不能放入活动曲线目录。`apply` 重新校验原活动曲线、待发布文件及活动索引，保存索引备份和 `previous`、另存离散版本再切换。使用前运行以下只读帮助查看明确输入：
+`migrate_legacy_recoil_profiles.py prepare` 仅为已确认且与审计源一致的17条活动 schema2 曲线生成迁移计划；迁移脚本要求原曲线有内容摘要；已测试旧库可保留全部数据补齐摘要，不必逐条重复确认。计划目录须为新的独立目录，不能放入活动曲线目录。`apply` 重新校验原活动曲线、待发布文件及活动索引，保存索引备份和 `previous`、另存离散版本再切换。使用前运行以下只读帮助查看明确输入：
 
 ```powershell
 py -3 -X utf8 .\tools\recoil\migrate_legacy_recoil_profiles.py --help

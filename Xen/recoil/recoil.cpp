@@ -172,9 +172,9 @@ bool load_recoil_profile(std::string_view input,RecoilProfile& output,std::strin
             if(!canonical.empty())p.weapon_id=canonical;
             if(!validate_recoil_profile(p,error))return false;
             const auto digest=confirmation_digest(p);
-            // 读取只核验已有确认；旧布尔标记、缺失或失配摘要均保留为可编辑候选。
-            if(json.at("verified").get<bool>()&&json.contains("confirmation_sha256")&&
-                json.at("confirmation_sha256").is_string()&&json.at("confirmation_sha256").get<std::string>()==digest) {
+            // 兼容已验证旧曲线；已有摘要仍绑定原内容，不能沿用失配的确认。
+            if(json.at("verified").get<bool>()&&(!json.contains("confirmation_sha256")||
+                (json.at("confirmation_sha256").is_string()&&json.at("confirmation_sha256").get<std::string>()==digest))) {
                 p.state=RecoilProfileState::USER_CONFIRMED;
                 if(!discrete)p.execution_phase_budget_ms=kUserConfirmedPhaseBudgetMs;
                 p.source.sha256=digest;

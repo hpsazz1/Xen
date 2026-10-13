@@ -7,6 +7,7 @@
 #include <iostream>
 #include <new>
 #include <sstream>
+#include <stdexcept>
 #include <string_view>
 #include <nlohmann/json.hpp>
 
@@ -78,6 +79,24 @@ void test_confirmation_is_bound_to_saved_content() {
             "仅调整JSON排版不丢失内容确认");
         expect(store.set_active(candidate.weapon_id,file,error)&&bool(store.resolve(config,candidate.weapon_id,error)),
             "未改内容的确认候选可保存加载采用");
+        auto legacy=original;
+        legacy.erase("confirmation_sha256");
+        write_json(legacy);
+        expect(store.load(file,loaded,error)&&loaded.state==RecoilProfileState::USER_CONFIRMED,
+            "schema2/3旧版verified曲线无需新摘要即可恢复既有确认");
+        expect(store.set_active(candidate.weapon_id,file,error)&&bool(store.resolve(config,candidate.weapon_id,error)),
+            "schema2/3旧版verified曲线可直接采用并解析执行");
+        const auto restored=nlohmann::json::parse(serialize_recoil_profile_storage(loaded));
+        expect(restored["confirmation_sha256"]==original["confirmation_sha256"]&&
+            restored["sensitivity"]==legacy["sensitivity"]&&
+            restored[discrete?"events":"points"]==legacy[discrete?"events":"points"],
+            "旧版确认兼容保留全部曲线采样与灵敏度并生成相同内容摘要");
+        auto unverified_legacy=legacy;
+        unverified_legacy["verified"]=false;
+        write_json(unverified_legacy);
+        expect(store.load(file,loaded,error)&&loaded.state==RecoilProfileState::SCHEMA_VALID&&
+            !store.set_active(candidate.weapon_id,file,error)&&!store.resolve(config,candidate.weapon_id,error),
+            "缺少摘要且verified=false的旧候选仍不可执行");
         for(int mutation=0;mutation<8;++mutation) {
             auto changed=original;
             auto& point=changed[discrete?"events":"points"][discrete?0:1];
@@ -86,15 +105,15 @@ void test_confirmation_is_bound_to_saved_content() {
             if(mutation==2)changed["sensitivity"]=2.0;
             if(mutation==3)changed["id"]="replaced_candidate";
             if(mutation==4)changed["revision"]=100;
-            if(mutation==5)changed.erase("confirmation_sha256");
+            if(mutation==5)changed["confirmation_sha256"]=std::string(64,'0');
             if(mutation==6)changed["weapon_id"]="another_weapon";
             if(mutation==7)changed["verified"]=false;
             write_json(changed);
             const bool loaded_changed=store.load(file,loaded,error);
             expect(loaded_changed&&loaded.state==RecoilProfileState::SCHEMA_VALID&&!loaded.execution_phase_budget_ms,
-                "变更内容或缺少摘要保留可编辑候选但不得沿用旧人工确认");
-            expect(!store.set_active(candidate.weapon_id,file,error),"变更内容或缺少摘要不能采用");
-            expect(!store.resolve(config,candidate.weapon_id,error),"活动文件变更内容或缺少摘要不能解析执行");
+                "变更内容、摘要失配或撤销确认保留可编辑候选但不得沿用旧人工确认");
+            expect(!store.set_active(candidate.weapon_id,file,error),"变更内容、摘要失配或撤销确认不能采用");
+            expect(!store.resolve(config,candidate.weapon_id,error),"活动文件变更内容、摘要失配或撤销确认不能解析执行");
         }
         write_json(original);
         auto changed_in_memory=candidate;changed_in_memory.points.back().y_counts+=1;
@@ -106,6 +125,33 @@ void test_confirmation_is_bound_to_saved_content() {
 }
 }
 int main(int argc, char** argv){
+    // 只读生产解析与序列化；仅输出修复旧安装包所需的摘要，不改写原文件。
+    if(argc==3&&std::string_view(argv[1])=="--validate-legacy-file") {
+        try {
+            std::ifstream stream(std::filesystem::u8path(argv[2]),std::ios::binary);
+            if(!stream)throw std::runtime_error("无法读取旧曲线文件");
+            const std::string text((std::istreambuf_iterator<char>(stream)),{});
+            const auto original=nlohmann::json::parse(text);
+            RecoilProfile loaded,restored;std::string error;
+            if((original.at("schema_version")!=2&&original.at("schema_version")!=3)||
+                !original.at("verified").is_boolean()||!original.at("verified").get<bool>()||
+                original.contains("confirmation_sha256")||!load_recoil_profile(text,loaded,error)||
+                loaded.state!=RecoilProfileState::USER_CONFIRMED)
+                throw std::runtime_error("不是合法已确认且缺少摘要的旧曲线："+error);
+            const auto serialized=serialize_recoil_profile_storage(loaded);
+            const auto stored=nlohmann::json::parse(serialized);
+            auto patched=original;
+            patched["confirmation_sha256"]=stored.at("confirmation_sha256");
+            if(!load_recoil_profile(patched.dump(),restored,error)||
+                restored.state!=RecoilProfileState::USER_CONFIRMED||restored.source.sha256!=loaded.source.sha256)
+                throw std::runtime_error("旧曲线仅追加摘要后的生产解析验证失败："+error);
+            std::cout<<nlohmann::json{{"state","USER_CONFIRMED"},
+                {"confirmation_sha256",stored.at("confirmation_sha256")}}.dump()<<'\n';
+            return 0;
+        } catch(const std::exception& error) {
+            std::cerr<<error.what()<<'\n';return 1;
+        }
+    }
     if(argc==3&&std::string_view(argv[1])=="--validate-confirmed-file") {
         std::ifstream stream(std::filesystem::u8path(argv[2]),std::ios::binary);
         const std::string text((std::istreambuf_iterator<char>(stream)),{});
