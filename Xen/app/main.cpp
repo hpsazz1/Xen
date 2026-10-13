@@ -553,7 +553,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                 auto context = make_debug_context();
                 context.config.keyboard = active_keyboard_config;
                 context.config.keyboard.debug_test_enabled = active_keyboard_config.debug_test_enabled && config.keyboard.debug_test_enabled;
-                app_message = debug_workspace.repeat(context) ? "快捷键测试已提交，等待源端聚焦和键鼠松开。" :
+                app_message = debug_workspace.repeat(context) ? "快捷键测试已提交，等待本组测试的源端就绪条件。" :
                     "快捷键测试未执行：" + debug_workspace.snapshot()->message;
             }
         }

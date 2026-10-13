@@ -5,6 +5,9 @@
 #include "runtime/runtime.h"
 #include "log/log.h"
 #include "recoil/recoil_debug_run.h"
+#include "movement/timeline.h"
+#include "source_context/source_context.h"
+#include <cstdlib>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -68,6 +71,13 @@ std::filesystem::path new_directory(const std::string& root) {
     throw std::runtime_error("不能建立独立结果目录");
 }
 Json request_plan(const Request& request) {
+    if (request.mode == Mode::MOVEMENT_TEST) {
+        movement::timeline::Plan plan;
+        std::string error;
+        if (!movement::timeline::parse_plan(parse_document(request.plan_text),plan,error))
+            throw std::runtime_error(error);
+        return movement::timeline::plan_json(plan);
+    }
     if (request.mode == Mode::FIRE_TEST)
         return make_fire_test_plan({{"shot_hold_ms",request.shot_hold_ms},{"fire_interval_ms",request.fire_interval_ms}});
     if (!request.plan_text.empty()) return validate_debug_plan(parse_document(request.plan_text));
@@ -78,6 +88,7 @@ Json request_plan(const Request& request) {
         {"shot_after_release_ms",18},{"shot_hold_ms",5},{"late_tolerance_ms",5},{"direction",2}});
 }
 Json request_sampling(const Request& request) {
+    if (request.mode == Mode::MOVEMENT_TEST) return Json::object();
     if (request.mode == Mode::FIRE_TEST) {
         SamplingSettings settings; settings.hud_enabled = false;
         return sampling_settings_json(settings); // 原地点射不以其他页面的模型草稿作为准入条件。
@@ -103,7 +114,7 @@ DebugRunMode run_mode(Mode mode) {
 }
 bool recoil_mode(Mode mode) { return mode == Mode::RECOIL_TEST || mode == Mode::RECOIL_CALIBRATE || mode == Mode::RECOIL_CAPTURE; }
 bool single_use_recoil_mode(Mode mode) { return mode == Mode::RECOIL_CALIBRATE || mode == Mode::RECOIL_CAPTURE; }
-bool physical_mode(Mode mode) { return mode == Mode::COUNTERPULSE || mode == Mode::FIRE_TEST || recoil_mode(mode); }
+bool physical_mode(Mode mode) { return mode == Mode::COUNTERPULSE || mode == Mode::FIRE_TEST || mode == Mode::MOVEMENT_TEST || recoil_mode(mode); }
 bool uses_device(Mode mode) { return physical_mode(mode) || mode == Mode::MANUAL_RECORDING; }
 void admit(const Context& context, Mode mode) {
     if (!uses_device(mode)) return;
@@ -203,7 +214,7 @@ struct Session::Impl {
                     if (canceled && s.state == State::PREPARED) {
                         s.state = State::CANCELED; s.prepared_id.clear(); s.message = "准备已取消，已生成文件仅留档";
                     }
-                    if (canceled || s.state == State::FAILED || s.cleanup_unknown) {
+                    if (canceled || s.state == State::CANCELED || s.state == State::FAILED || s.cleanup_unknown) {
                         repeat_plan.store(nullptr); s.repeat_ready = false;
                         s.repeat_unavailable_reason = s.message;
                     }
@@ -215,7 +226,86 @@ struct Session::Impl {
             return false;
         }
     }
+    void run_movement(const Prepared& work) {
+        using namespace movement::timeline;
+        Plan plan; std::string error;
+        if (!parse_plan(work.plan,plan,error)) throw DebugRunFailure(error,true);
+        auto& device = *work.context.device;
+        const auto& config = work.context.config;
+        if (!device.supports_wasd_keyboard() || config.keyboard.emergency_virtual_keys.empty() ||
+            !valid_keyboard_config(config.keyboard))
+            throw DebugRunFailure("身法测试需要方向键能力和有效急停键，未开始输出",true);
+        source_context::SourceContextClient source;
+        auto source_config = config.source_context;
+        char* token = nullptr; std::size_t token_size = 0;
+        if (_dupenv_s(&token,&token_size,"XEN_SOURCE_CONTEXT_TOKEN") == 0 && token) {
+            source_config.token = token; std::free(token);
+        }
+        if (!source_config.enabled || !source.start(source_config))
+            throw DebugRunFailure("源焦点接收器未配置或启动失败，身法未开始输出",true);
+        const auto emergency = [&] {
+            if (canceled.load()) return true;
+            InputSnapshot input;
+            if (!device.poll_input(input) || !input.state_valid) return false;
+            for (int key : config.keyboard.emergency_virtual_keys)
+                if (key > 0 && key < 256 && input.virtual_keys[static_cast<std::size_t>(key)]) {
+                    canceled = true; return true;
+                }
+            return false;
+        };
+        update([](Snapshot& s) { s.state = State::RUNNING;
+            s.message = "等待源端游戏聚焦；允许持续按住WASD，起跳后按方案屏蔽；急停键可取消"; });
+        source_context::SourceContextSnapshot initial;
+        const auto deadline = std::chrono::steady_clock::now() + 15s;
+        bool ready = false;
+        while (!emergency() && std::chrono::steady_clock::now() < deadline) {
+            initial = source.snapshot(); InputSnapshot input;
+            if (initial.available && initial.focused && device.poll_input(input) && input.state_valid) {
+                ready = true; break;
+            }
+            std::this_thread::sleep_for(2ms);
+        }
+        if (!ready) throw DebugRunFailure(canceled.load() ? "身法测试已取消，未开始输出" :
+            "等待源焦点或设备输入超时，未开始输出",true);
+        Callbacks callbacks;
+        callbacks.canceled = emergency;
+        callbacks.permitted = [&] {
+            const auto focus = source.snapshot(); InputSnapshot input;
+            return !canceled.load() && focus.available && focus.focused &&
+                focus.session_id == initial.session_id && focus.control_safety_epoch == initial.control_safety_epoch &&
+                device.poll_input(input) && input.state_valid && config.mouse.allow_send_input;
+        };
+        int published_ms = -50;
+        callbacks.progress = [&](const Progress& p) {
+            if (p.elapsed_ms < published_ms + 25 && p.elapsed_ms < p.total_ms) return;
+            published_ms = p.elapsed_ms;
+            const auto value = std::make_shared<const Json>(Json{{"elapsed_ms",p.elapsed_ms},
+                {"total_ms",p.total_ms},{"sent_dx",p.sent_dx}});
+            update([&](Snapshot& s) { s.live = value; s.message = "身法执行中：" +
+                std::to_string(p.elapsed_ms) + "/" + std::to_string(p.total_ms) + " ms"; });
+        };
+        const auto result = run_plan(device,plan,config.movement,callbacks);
+        Json index{{"schema_version",1},{"mode","movement"},{"prepared_id",work.id},
+            {"code_identity",code_identity()},{"plan",work.plan},
+            {"sensitivity",config.movement.sensitivity},{"yaw_degrees_per_count",config.movement.yaw_degrees_per_count},
+            {"success",result.outcome == Outcome::COMPLETED},{"cleanup_known",result.cleanup_known},
+            {"canceled",result.outcome == Outcome::CANCELED},{"sent_dx",result.sent_dx},
+            {"planned_duration_ms",duration_ms(plan)},{"actual_duration_with_cleanup_ms",result.elapsed_ms},
+            {"error",result.error},{"physical_output",true},{"physical_validation_passed",false}};
+        try { write_document(work.directory/"result-index.json",index); }
+        catch (...) { throw DebugRunFailure("身法结果保存失败",false,result.cleanup_known); }
+        auto completed = std::make_shared<const Json>(std::move(index));
+        update([&](Snapshot& s) {
+            s.result = completed; s.cleanup_unknown = !result.cleanup_known;
+            s.state = s.cleanup_unknown ? State::CLEANUP_UNKNOWN : result.outcome == Outcome::COMPLETED ?
+                State::COMPLETED : result.outcome == Outcome::CANCELED ? State::CANCELED : State::FAILED;
+            s.message = s.cleanup_unknown ? "身法输入释放未确认，禁止新物理任务" :
+                result.outcome == Outcome::COMPLETED ? "身法执行完成并已解除屏蔽；游戏动作效果请结合录像核对" :
+                result.error.empty() ? "身法已取消并清理" : result.error;
+        });
+    }
     void run(Prepared work, bool allow, const std::string& confirmation) {
+        if (work.request.mode == Mode::MOVEMENT_TEST) { run_movement(work); return; }
         if (recoil_mode(work.request.mode)) {
             update([&](Snapshot& s) { s.state=State::RUNNING;s.report_directory=(work.directory/"run").string();
                 s.message="等待源端聚焦并松开键鼠，然后执行一组；紧急停止键可取消"; });
@@ -438,7 +528,7 @@ bool Session::repeat(const Context& context) noexcept {
             return reject("设备或清理状态变化，请重新准备");
         if (!context.config.mouse.allow_send_input || !source->context.config.mouse.allow_send_input)
             return reject("设置中的物理输出未允许，请保存后重新准备");
-        if (recoil_mode(source->request.mode) &&
+        if ((recoil_mode(source->request.mode) || source->request.mode == Mode::MOVEMENT_TEST) &&
             (context.config.keyboard.debug_test_virtual_keys != source->context.config.keyboard.debug_test_virtual_keys ||
              context.config.keyboard.emergency_virtual_keys != source->context.config.keyboard.emergency_virtual_keys))
             return reject("测试键或紧急停止键已改变，请重新准备");
@@ -545,10 +635,12 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
             if (action == Action::LOAD_PLAN || action == Action::LOAD_SAMPLING || action == Action::LOAD_FIRE_SETTINGS) {
                 const auto document = read_document(std::filesystem::u8path(request.load_path));
                 const auto value = action == Action::LOAD_SAMPLING ? sampling_settings_json(parse_sampling_settings(document)) :
-                    action == Action::LOAD_FIRE_SETTINGS ? make_fire_test_plan(document) : validate_debug_plan(document);
+                    action == Action::LOAD_FIRE_SETTINGS ? make_fire_test_plan(document) :
+                    request.mode == Mode::MOVEMENT_TEST ? request_plan([&] { auto r=request; r.plan_text=document.dump(); return r; }()) : validate_debug_plan(document);
                 impl_->update([&](Snapshot& s) { if (action == Action::LOAD_SAMPLING) s.sampling = value; else s.plan = value;
                     if (action == Action::LOAD_SAMPLING) { s.draft_sampling = value; ++s.draft_sampling_revision; }
-                    else { s.draft_plan = value; s.draft_plan_mode = action == Action::LOAD_FIRE_SETTINGS ? Mode::FIRE_TEST : Mode::COUNTERPULSE;
+                    else { s.draft_plan = value; s.draft_plan_mode = action == Action::LOAD_FIRE_SETTINGS ? Mode::FIRE_TEST :
+                        request.mode == Mode::MOVEMENT_TEST ? Mode::MOVEMENT_TEST : Mode::COUNTERPULSE;
                         ++s.draft_plan_revision; }
                     s.state = State::COMPLETED; s.message = "文档已载入，请检查草稿并重新准备"; });
                 return;

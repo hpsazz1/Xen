@@ -408,9 +408,9 @@ add_library(mouse STATIC
 target_include_directories(mouse PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(mouse PUBLIC log PRIVATE user32 ws2_32 shell32 ole32 uuid)
 
-add_library(movement STATIC Xen/movement/movement.cpp)
+add_library(movement STATIC Xen/movement/movement.cpp Xen/movement/timeline.cpp)
 target_include_directories(movement PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
-target_link_libraries(movement PUBLIC mouse PRIVATE log Threads::Threads)
+target_link_libraries(movement PUBLIC mouse nlohmann_json::nlohmann_json PRIVATE log Threads::Threads)
 
 add_library(auto_stop_worker STATIC Xen/auto_stop/auto_stop_worker.cpp)
 target_include_directories(auto_stop_worker PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
@@ -574,7 +574,7 @@ target_compile_definitions(debug_session PRIVATE
     XEN_DEBUG_RUNTIME_ID="${XEN_BUILD_RUNTIME_ID}")
 
 add_library(overlay STATIC
-    Xen/overlay/overlay.cpp Xen/overlay/recoil_panel.cpp Xen/overlay/input_training_panel.cpp Xen/overlay/debug_panel.cpp)
+    Xen/overlay/overlay.cpp Xen/overlay/recoil_panel.cpp Xen/overlay/input_training_panel.cpp Xen/overlay/debug_panel.cpp Xen/overlay/movement_panel.cpp)
 target_include_directories(overlay PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(overlay
     PUBLIC runtime config model_workspace debug_session
@@ -1542,6 +1542,19 @@ if(BUILD_TESTING)
     add_test(NAME mouse_input_report_tests COMMAND test_mouse_input_reports)
 
     add_executable(movement_tests tests/movement_tests.cpp)
+    add_executable(movement_timeline_tests tests/movement_timeline_tests.cpp)
+    add_executable(movement_session_tests tests/movement_session_tests.cpp)
+    target_link_libraries(movement_session_tests PRIVATE debug_session movement ws2_32)
+    add_test(NAME movement_session_tests COMMAND movement_session_tests "${CMAKE_BINARY_DIR}/movement-session-fixtures")
+    set_tests_properties(movement_session_tests PROPERTIES TIMEOUT 30)
+    xen_deploy_runtime_dlls(movement_session_tests OPENCV ORT NDI)
+    target_link_libraries(movement_timeline_tests PRIVATE movement)
+    add_test(NAME movement_timeline_tests COMMAND movement_timeline_tests)
+    xen_deploy_runtime_dlls(movement_timeline_tests)
+    add_executable(movement_panel_tests tests/movement_panel_tests.cpp Xen/overlay/movement_panel.cpp)
+    target_link_libraries(movement_panel_tests PRIVATE debug_session imgui movement)
+    add_test(NAME movement_panel_tests COMMAND movement_panel_tests)
+    xen_deploy_runtime_dlls(movement_panel_tests OPENCV ORT NDI)
     target_link_libraries(movement_tests PRIVATE movement)
     add_test(NAME movement_tests COMMAND movement_tests)
     add_test(NAME movement_pending_cancel_observer_tests COMMAND movement_tests --diagnostic-cancel pending)

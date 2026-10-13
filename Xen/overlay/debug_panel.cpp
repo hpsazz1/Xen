@@ -164,7 +164,7 @@ struct DebugPanel::Impl {
     }
     void sync(const Snapshot* s) {
         if (!s || s->busy) return;
-        if (s->state == State::PREPARED && !edited && prepared_mode == request.mode &&
+        if (s->state == State::PREPARED && !s->plan.contains("actions") && !edited && prepared_mode == request.mode &&
             s->generation > requested_prepare_generation) {
             if (prepared_id != s->prepared_id || bound_prepare_generation != s->generation) {
                 // 准备身份只绑定新的后台结果；旧快照及新任务不能继承前次勾选。
@@ -180,12 +180,12 @@ struct DebugPanel::Impl {
             if (s->draft_plan_mode == Mode::FIRE_TEST) {
                 request.shot_hold_ms = p.value("shot_hold_ms", request.shot_hold_ms);
                 request.fire_interval_ms = p.value("fire_interval_ms", request.fire_interval_ms);
-            } else {
+            } else if (s->draft_plan_mode == Mode::COUNTERPULSE) {
                 counter_plan_text = p.dump(2);
                 if (request.mode == Mode::COUNTERPULSE || request.mode == Mode::DERIVE_PLAN) request.plan_text = counter_plan_text;
                 fields_from_plan(p);
             }
-            changed();
+            if (s->draft_plan_mode == Mode::FIRE_TEST || s->draft_plan_mode == Mode::COUNTERPULSE) changed();
         }
         if (s->draft_sampling_revision != seen_draft_sampling && s->draft_sampling.is_object()) {
             seen_draft_sampling = s->draft_sampling_revision; request.sampling_text = s->draft_sampling.dump(2); changed();

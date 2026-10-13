@@ -11,6 +11,7 @@
 #include "overlay/recoil_panel.h"
 #include "overlay/input_training_panel.h"
 #include "overlay/debug_panel.h"
+#include "overlay/movement_panel.h"
 #include "debug/session_archive.h"
 #include "weapon/weapon_catalog.h"
 
@@ -690,6 +691,7 @@ struct Overlay::Impl {
     RecoilPanel recoil_panel;
     InputTrainingPanel input_training_panel;
     DebugPanel debug_panel;
+    MovementPanel movement_panel;
     int trigger_general_class = 0;
     overlay::detail::HotkeyCaptureState hotkey_capture_state;
     std::array<bool, 256> capture_device_keys{};
@@ -3275,6 +3277,10 @@ struct Overlay::Impl {
         show_help_tooltip("标定与采集新弹道每组都需重新准备；已有弹道验证、急停和射击节奏可按模板重复，无自动循环。离开本页保留模板；编辑实验、切换类型或设备、启动 Runtime 或急停后需重新准备。生产组合效果在辅助页配置后单独验收。");
         if (!hotkey_capture_message.empty()) ImGui::TextWrapped("%s",hotkey_capture_message.c_str());
         if (!ImGui::BeginTabBar("debug_tabs")) return;
+        if (ImGui::BeginTabItem("身法编排")) {
+            movement_panel.render(app_config, debug_snapshot, actions);
+            ImGui::EndTabItem();
+        }
         if (ImGui::BeginTabItem("急停测试")) {
             debug_panel.render_counterpulse(app_config, debug_snapshot, actions);
             ImGui::EndTabItem();
