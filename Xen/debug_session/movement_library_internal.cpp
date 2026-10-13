@@ -23,10 +23,10 @@ std::string utf8(const fs::path& path) {
 movement::timeline::Plan read_plan(const fs::path& path) {
     std::ifstream file(path, std::ios::binary);
     if (!file) throw std::runtime_error("无法打开身法方案");
-    std::string text(1024 * 1024 + 1, '\0');
+    std::string text(16 * 1024 * 1024 + 1, '\0');
     file.read(text.data(), static_cast<std::streamsize>(text.size()));
     text.resize(static_cast<std::size_t>(file.gcount()));
-    if (file.bad() || text.size() > 1024 * 1024) throw std::runtime_error("身法方案读取失败或超过1MiB");
+    if (file.bad() || text.size() > 16 * 1024 * 1024) throw std::runtime_error("身法方案读取失败或超过16MiB");
     std::vector<std::set<std::string>> keys;
     auto document = Json::parse(text, [&](int depth, Json::parse_event_t event, Json& value) {
         if (depth > 32) throw std::runtime_error("方案嵌套过深");

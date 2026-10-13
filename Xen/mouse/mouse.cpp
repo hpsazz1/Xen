@@ -303,6 +303,21 @@ public:
         return output_owner_.held();
     }
 
+    MouseMoveReceipt scroll_wheel(int amount) noexcept override {
+        if (!inner_ || !output_owner_.held()) return {};
+        return inner_->scroll_wheel(amount);
+    }
+    bool begin_movement_trace() noexcept override {
+        return inner_ && output_owner_.held() && inner_->begin_movement_trace();
+    }
+    bool read_movement_trace(MovementTraceBatch& batch) noexcept override {
+        if (!inner_) { batch = {}; return false; }
+        return inner_->read_movement_trace(batch);
+    }
+    void end_movement_trace() noexcept override {
+        if (inner_) inner_->end_movement_trace();
+    }
+
     bool set_movement_report_subscription(bool enabled) noexcept override {
         return inner_ && output_owner_.held() && inner_->set_movement_report_subscription(enabled);
     }

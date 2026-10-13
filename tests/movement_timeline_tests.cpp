@@ -13,7 +13,7 @@ class Fake final : public IMouseController {
 public:
     std::vector<int> keys, mask_bits;
     std::vector<std::string> events;
-    int dx = 0, cleanups = 0, masks = 0, software = 0;
+    int dx = 0, dy = 0, wheels = 0, wheel_calls = 0, cleanups = 0, masks = 0, software = 0;
     int physical = 1;
     bool space = false, ctrl = false, fail_key = false, fail_cleanup = false, fail_move = false;
     bool delay_key = false;
@@ -25,7 +25,10 @@ public:
     bool supports_wasd_keyboard() const noexcept override { return true; }
     bool supports_left_ctrl_key() const noexcept override { return true; }
     MouseMoveReceipt move(const MouseMoveCommand& c) noexcept override {
-        dx += c.dx_counts; MouseMoveReceipt r; r.succeeded = !fail_move; return r;
+        dx += c.dx_counts; dy += c.dy_counts; MouseMoveReceipt r; r.succeeded = !fail_move; return r;
+    }
+    MouseMoveReceipt scroll_wheel(int value) noexcept override {
+        wheels += value; ++wheel_calls; MouseMoveReceipt r; r.succeeded = !fail_move; return r;
     }
     KeyboardReceipt set_wasd_keyboard(std::uint8_t value) noexcept override {
         software = value; keys.push_back(value); events.push_back("keys");
@@ -63,8 +66,57 @@ void json_contract() {
     require(!parse_plan(bad, read, error) && plan_json(read) == original, "非整数时间被接受或破坏原方案");
     bad = j; bad["unexpected"] = true; require(!parse_plan(bad, read, error), "未知字段未拒绝");
     bad = j; bad["actions"][0]["key"] = "ESC"; require(!parse_plan(bad, read, error), "未知键未拒绝");
-    bad = j; bad["schema_version"] = 2; require(!parse_plan(bad, read, error), "未知版本未拒绝");
+    bad = j; bad["schema_version"] = 3; require(!parse_plan(bad, read, error), "未知版本未拒绝");
+    auto legacy = j; legacy["schema_version"] = 1;
+    require(parse_plan(legacy, read, error) && read.actions.size() == 2, "V1方案不兼容");
+    legacy["actions"][0]["physical"] = true;
+    require(!parse_plan(legacy, read, error), "V1未知字段被接受");
     p.actions.push_back(turn(20, 50, 12)); require(!validate_plan(p, error), "旋转重叠未拒绝");
+}
+void recorded_tracks() {
+    Plan p; p.mask.enabled = false;
+    Action physical = key(Key::W, 0, 400); physical.physical = true;
+    Action mask_w{ActionKind::MASK, Key::W, 80, 140};
+    Action mask_a{ActionKind::MASK, Key::A, 120, 180};
+    Action motion{ActionKind::MOVE, Key::W, 0, 400}; motion.dx = 81; motion.dy = -37;
+    Action additive = motion; additive.dx = -21; additive.dy = 7;
+    Action wheel{ActionKind::WHEEL, Key::W, 50, 20}; wheel.wheel = -2;
+    p.actions = {physical, mask_w, mask_a, motion, additive, wheel};
+    auto j = plan_json(p); Plan restored; std::string error;
+    require(parse_plan(j, restored, error) && plan_json(restored) == j, "录制轨道序列化丢失字段");
+    Fake f; bool suppressed = false, resumed = false, independent = false;
+    auto cb = permission(); cb.progress = [&](const Progress& progress) {
+        if (progress.elapsed_ms >= 85 && progress.elapsed_ms < 210) {
+            require(!(f.software & 1), "物理W屏蔽段被重新合成为软件W"); suppressed = true;
+        }
+        if (progress.elapsed_ms >= 225 && progress.elapsed_ms < 290) {
+            require(f.software == 1 && f.masks == 2, "独立W/A屏蔽结束时间错误"); independent = true;
+        }
+        if (progress.elapsed_ms >= 310 && progress.elapsed_ms < 390 && f.software == 1 && f.masks == 0) resumed = true;
+    };
+    const auto result = run_plan(f, restored, scale(), cb);
+    require(result.outcome == Outcome::COMPLETED && suppressed && resumed && independent, "录制屏蔽轨道未正确执行");
+    require(f.dx == 60 && f.dy == -30 && f.wheels == -2 && f.wheel_calls == 1, "录制XY叠加或滚轮次数错误");
+    require(f.cleanups == 1 && f.effective_keys() == 1, "录制完成未归还物理W");
+    Fake canceled; cb = permission(); cb.canceled = [&] { return canceled.masks != 0; };
+    const auto stopped = run_plan(canceled, p, scale(), cb);
+    require(stopped.outcome == Outcome::CANCELED && canceled.cleanups == 1 && canceled.masks == 0,
+        "录制屏蔽轨道取消未清理");
+    p.actions.push_back(key(Key::W, 0, 400));
+    Fake software; cb = permission(); bool software_kept = false;
+    cb.progress = [&](const Progress& progress) {
+        if (progress.elapsed_ms >= 85 && progress.elapsed_ms < 210) {
+            require(software.software == 1, "物理屏蔽错误地屏蔽了软件W轨道"); software_kept = true;
+        }
+    };
+    require(run_plan(software, p, scale(), cb).outcome == Outcome::COMPLETED && software_kept,
+        "物理屏蔽错误地屏蔽了软件W轨道");
+    Plan hidden; hidden.mask.enabled = false;
+    auto hidden_w = key(Key::W, 10, 10); hidden_w.physical = true;
+    hidden.actions = {key(Key::A, 0, 100), hidden_w, {ActionKind::MASK, Key::W, 0, 100}};
+    Fake delayed; delayed.delay_key = true;
+    require(run_plan(delayed, hidden, scale(), permission()).outcome == Outcome::COMPLETED,
+        "完整屏蔽内的短物理轨道被误报为漏发");
 }
 void parallel_union_and_restore() {
     Fake f; Plan p;
@@ -128,7 +180,7 @@ void missed_interval_and_mask_window() {
 }
 int main() {
     try {
-        json_contract(); parallel_union_and_restore(); failures_and_cancel(); missed_interval_and_mask_window();
+        json_contract(); parallel_union_and_restore(); failures_and_cancel(); missed_interval_and_mask_window(); recorded_tracks();
         std::cout << "身法时间轴专项通过\n"; return 0;
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

@@ -570,6 +570,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             }
             if (actions.debug_action != debug_session::Action::NONE) {
                 const bool cancel_or_display = actions.debug_action == debug_session::Action::CANCEL ||
+                    actions.debug_action == debug_session::Action::STOP_MOVEMENT_RECORDING ||
                     actions.debug_action == debug_session::Action::SHOW_HUD || actions.debug_action == debug_session::Action::HIDE_HUD;
                 if (((!report_lifecycle.stopping() && !overlay.background_busy()) || cancel_or_display) && debug_workspace.dispatch(actions.debug_action,
                     actions.debug_request,make_debug_context(),actions.debug_prepared_id,

@@ -18,7 +18,8 @@ enum class Mode { COUNTERPULSE, FIRE_TEST, RECOIL_TEST, RECOIL_CALIBRATE, RECOIL
 enum class Action { NONE, VALIDATE, SAVE_PLAN, PREPARE, START, CANCEL, REEVALUATE,
     HIDE_HUD, SHOW_HUD, LOAD_PLAN, LOAD_SAMPLING, LOAD_FIRE_SETTINGS,
     LOAD_WEAPON_TIMING, SAVE_WEAPON_TIMING, DERIVE_PLAN, DERIVE_DEFAULTS,
-    ENABLE_MOVEMENT_TEST, RUN_MOVEMENT_TEST, LIST_MOVEMENT_PLANS };
+    ENABLE_MOVEMENT_TEST, RUN_MOVEMENT_TEST, LIST_MOVEMENT_PLANS,
+    START_MOVEMENT_RECORDING, STOP_MOVEMENT_RECORDING };
 enum class State { IDLE, WORKING, PREPARED, RUNNING, STOPPING, COMPLETED,
     CANCELED, FAILED, CLEANUP_UNKNOWN };
 
@@ -40,6 +41,7 @@ struct Request {
     bool show_hud = true;
     bool override_sampling = false;
     bool movement_save_as = false;
+    int movement_record_motion_mode = 1;
     std::string movement_library_root = "cache/movement/plans";
 };
 struct MovementSavedPlan { std::string path, name; };
@@ -48,6 +50,9 @@ struct Snapshot {
     bool busy = false, physical = false, hud_visible = false, cleanup_unknown = false;
     bool repeat_ready = false;
     bool movement_test_enabled = false;
+    bool movement_recording = false;
+    std::uint64_t movement_record_events = 0;
+    std::string movement_recording_path;
     std::vector<MovementSavedPlan> movement_saved_plans;
     std::string movement_selected_path;
     std::uint64_t movement_catalog_revision = 0;

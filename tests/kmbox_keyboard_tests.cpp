@@ -436,6 +436,22 @@ void test_all_combinations_and_disabled_output() {
     auto config = config_for(readonly_device.port()); config.allow_send_input = false;
     mouse = create_test_mouse(config);
     expect(mouse->open(), "只读设备可连接");
+    expect(mouse->status() == MouseStatus::DISABLED && mouse->begin_movement_trace(),
+        "物理输出禁用时允许被动身法录制");
+    readonly_device.send_monitor(0, {0x1a, 0x2c});
+    MovementTraceBatch trace_batch;
+    const auto trace_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    do {
+        mouse->read_movement_trace(trace_batch);
+        if (!trace_batch.events.empty()) break;
+        std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < trace_deadline);
+    expect(!trace_batch.gap && trace_batch.events.size() == 1 &&
+        trace_batch.events.front().kind == MovementTraceEvent::Kind::INPUT &&
+        trace_batch.events.front().input.wasd_mask == 1 &&
+        trace_batch.events.front().input.keyboard_usages[1] == 0x2c,
+        "只读录制收到物理W与跳跃，不需要允许输出");
+    mouse->end_movement_trace();
     expect(mouse->set_wasd_keyboard(1).disposition == KeyboardDisposition::REJECTED &&
         mouse->set_wasd_mask(1,true).disposition == KeyboardDisposition::REJECTED,
         "输出禁用时不得发送键盘或屏蔽命令");
@@ -660,6 +676,109 @@ void test_factory_recreation_reconciles_endpoint_keyboard_debt() {
     expect(command(19) == kConnectCommand && command(20) == kMonitorCommand,
         "全部清理 ACK 后删除端点债务，再次重建直接握手和监听");
 }
+void test_movement_trace_includes_physical_and_internal_cleanup() {
+    FakeKmboxDevice device(std::vector<AckMode>(14, AckMode::VALID));
+    auto mouse = create_test_mouse(config_for(device.port()));
+    expect(mouse && mouse->open(), "trace回环设备连接");
+    if (!mouse) return;
+    device.send_monitor(1, {0x1a, 0x14});
+    InputSnapshot input;
+    const auto wait_sequence = [&](std::uint64_t previous) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        do {
+            mouse->poll_input(input);
+            if (input.state_valid && input.sequence > previous) return true;
+            std::this_thread::yield();
+        } while (std::chrono::steady_clock::now() < deadline);
+        return false;
+    };
+    expect(wait_sequence(0), "trace开始前收到物理W");
+    expect(mouse->set_input_report_subscription(true) && mouse->begin_movement_trace(),
+           "独立trace可与原始报告订阅共存");
+    expect(!mouse->begin_movement_trace(), "重复begin拒绝");
+    std::array<std::uint8_t, 20> report{};
+    report[1] = 1; report[2] = 7; report[4] = 0xfe; report[5] = 0xff;
+    report[6] = 1; report[9] = 3; report[10] = 0x1a; report[11] = 0x14;
+    const auto before = input.sequence;
+    device.send_monitor_packet(report);
+    expect(wait_sequence(before), "trace采集原始XY滚轮");
+    const auto ack = [&](KeyboardReceipt receipt) {
+        expect(receipt.disposition == KeyboardDisposition::ACKNOWLEDGED, "trace键盘事务ACK");
+    };
+    ack(mouse->set_wasd_mask(1, true)); ack(mouse->set_wasd_mask(2, true));
+    ack(mouse->set_wasd_keyboard(8)); ack(mouse->set_space_key(true));
+    ack(mouse->set_left_ctrl_key(true));
+    expect(mouse->move({12, -3}).succeeded, "trace软件XY收到ACK");
+    expect(mouse->scroll_wheel(-2).succeeded, "独立滚轮命令收到ACK");
+    ack(mouse->cleanup_wasd_keyboard());
+    mouse->end_movement_trace();
+    MovementTraceBatch batch;
+    expect(mouse->read_movement_trace(batch) && !batch.gap && batch.events.size() == 13,
+           "基线、物理报告、全部内部清理命令均可消费");
+    if (batch.events.size() == 13) {
+        const auto& base = batch.events[0]; const auto& physical = batch.events[1];
+        expect(base.baseline && base.input.wasd_mask == 1 && base.at_ns >= base.input.received_at_steady_ns,
+               "已按住W在录制开始形成基线");
+        expect(!physical.baseline && physical.input.raw_x == 7 && physical.input.raw_y == -2 &&
+               physical.input.raw_wheel == 1 && physical.input.keyboard_modifiers == 1 &&
+               physical.input.mouse_buttons == 0 && physical.input.keyboard_usages[1] == 0,
+               "保留指定身法范围，不录Q和鼠标按钮");
+        expect(batch.events[6].space && batch.events[6].ctrl && batch.events[6].wasd == 8,
+               "软件组合键报告完整");
+        expect(batch.events[7].dx == 12 && batch.events[7].dy == -3 &&
+               batch.events[8].kind == MovementTraceEvent::Kind::WHEEL && batch.events[8].wheel == -2,
+               "软件位移和滚轮分别记录");
+        expect(batch.events[9].kind == MovementTraceEvent::Kind::KEYBOARD &&
+               batch.events[9].wasd == 0 && !batch.events[9].space && !batch.events[9].ctrl &&
+               !batch.events[10].masked && batch.events[10].wasd == 1 &&
+               !batch.events[11].masked && batch.events[11].wasd == 2 &&
+               batch.events[12].kind == MovementTraceEvent::Kind::KEYBOARD,
+               "清理的零软件报告、逐键unmask、最后刷新全部录入");
+        for (std::size_t i = 2; i < batch.events.size(); ++i)
+            expect(batch.events[i].acknowledged && batch.events[i].completed_ns >= batch.events[i].at_ns,
+                   "软件事件保留请求与ACK时刻");
+    }
+    InputReportCursor cursor; InputReportBatch original;
+    expect(mouse->read_input_reports(cursor, original) && original.count == 1 &&
+           original.events[0].mouse_buttons == 1 && original.events[0].keyboard_usages[1] == 0x14,
+           "trace不抢占、不删改既有原始报告订阅");
+    const auto packets = device.packets();
+    expect(packets.size() == 13 && packets[8].size() == 72 &&
+           read_u32_le(packets[8].data() + 12) == 0xffeead38U &&
+           read_u32_le(packets[8].data() + 20) == 0 && read_u32_le(packets[8].data() + 24) == 0 &&
+           read_u32_le(packets[8].data() + 28) == static_cast<std::uint32_t>(-2),
+           "wheel独立命令、长度、零XY与有符号载荷符合协议");
+    expect(mouse->begin_movement_trace(), "正常结束且责任清零后可重录");
+    mouse->close();
+    expect(mouse->read_movement_trace(batch) && batch.gap, "close尾数据可读并明确录制中断");
+    device.finish();
+}
+
+void test_movement_trace_stop_waits_for_unknown_receipt() {
+    FakeKmboxDevice device({AckMode::VALID, AckMode::VALID, AckMode::NONE,
+                           AckMode::VALID, AckMode::VALID});
+    auto mouse = create_test_mouse(config_for(device.port()));
+    expect(mouse && mouse->open() && mouse->begin_movement_trace(), "未知ACK录制开始");
+    if (!mouse) return;
+    KeyboardReceipt receipt;
+    std::thread sender([&] { receipt = mouse->set_wasd_keyboard(1); });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (device.packets().size() < 3 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+    mouse->end_movement_trace();
+    sender.join();
+    MovementTraceBatch batch;
+    expect(receipt.disposition == KeyboardDisposition::APPLICATION_UNKNOWN &&
+           mouse->read_movement_trace(batch) && batch.events.size() == 1 &&
+           !batch.events[0].acknowledged && batch.events[0].wasd == 1 &&
+           batch.events[0].completed_ns >= batch.events[0].at_ns,
+           "stop等待已发命令结束，丢ACK不得漏记或假装已确认");
+    expect(!mouse->begin_movement_trace(), "未清软件责任不能新录制");
+    expect(mouse->cleanup_wasd_keyboard().disposition == KeyboardDisposition::ACKNOWLEDGED,
+           "未知软件键已清理");
+    mouse->close(); device.finish();
+}
+
 void test_event_journal() {
     FakeKmboxDevice device({AckMode::VALID,AckMode::VALID});
     auto mouse = create_test_mouse(config_for(device.port()));
@@ -724,6 +843,8 @@ int main() {
     test_reopen_reconciles_unknown_debt();
     test_factory_recreation_reconciles_endpoint_keyboard_debt();
     test_event_journal();
+    test_movement_trace_includes_physical_and_internal_cleanup();
+    test_movement_trace_stop_waits_for_unknown_receipt();
     test_win32_input_stays_unverified_without_owned_source();
     WSACleanup();
     std::cout << "KMBOX 键盘测试失败数=" << failures << '\n';

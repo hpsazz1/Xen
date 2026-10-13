@@ -11,6 +11,7 @@
 #include "mouse/kmbox_net_internal.h"
 #include "mouse/input_internal.h"
 #include "mouse/input_report_internal.h"
+#include "mouse/movement_trace_internal.h"
 
 #include "log/log.h"
 
@@ -31,6 +32,7 @@ namespace {
 
 constexpr std::uint32_t kConnectCommand = 0xaf3c2828U;
 constexpr std::uint32_t kMouseMoveCommand = 0xaede7345U;
+constexpr std::uint32_t kMouseWheelCommand = 0xffeead38U;
 constexpr std::uint32_t kMouseLeftCommand = 0x9823ae8dU;
 constexpr std::uint32_t kMouseRightCommand = 0x238d8212U;
 constexpr std::uint32_t kMonitorCommand = 0x27388020U;
@@ -298,78 +300,104 @@ public:
         }
     }
 
-    MouseMoveReceipt move(
-            const MouseMoveCommand& command) noexcept override {
+    MouseMoveReceipt move(const MouseMoveCommand& command) noexcept override {
+        return send_motion(command.dx_counts, command.dy_counts, 0, kMouseMoveCommand,
+                           MovementTraceEvent::Kind::MOVE);
+    }
+    MouseMoveReceipt scroll_wheel(int amount) noexcept override {
+        return send_motion(0, 0, amount, kMouseWheelCommand, MovementTraceEvent::Kind::WHEEL);
+    }
+private:
+    MouseMoveReceipt send_motion(int dx, int dy, int wheel, std::uint32_t command_id,
+                                MovementTraceEvent::Kind kind) noexcept {
         std::lock_guard<std::mutex> io_lock(io_mutex_);
-        if (!config_.allow_send_input) {
-            set_error("KMBOX NET 未在配置中显式允许");
-            status_.store(MouseStatus::DISABLED, std::memory_order_release);
-            return {};
-        }
-        if (command.dx_counts == 0 && command.dy_counts == 0) {
-            set_error("鼠标移动命令不能同时为零");
-            status_.store(MouseStatus::INVALID_COMMAND,
-                          std::memory_order_release);
-            return {};
-        }
-        constexpr int kMinMove = std::numeric_limits<std::int16_t>::min();
-        constexpr int kMaxMove = std::numeric_limits<std::int16_t>::max();
-        if (command.dx_counts < kMinMove || command.dx_counts > kMaxMove ||
-            command.dy_counts < kMinMove || command.dy_counts > kMaxMove) {
-            set_error("KMBOX NET 相对位移超出 int16 范围");
-            status_.store(MouseStatus::INVALID_COMMAND,
-                          std::memory_order_release);
-            return {};
-        }
-        if (socket_ == INVALID_SOCKET || !winsock_started_) {
-            set_error("KMBOX NET 尚未连接");
-            status_.store(MouseStatus::CONNECTION_FAILED,
-                          std::memory_order_release);
-            return {};
-        }
-
-        if (button_faulted_) {
-            set_error("KMBOX NET 左键状态未知，移动等待明确释放确认");
-            return {};
-        }
-
-        try {
-            ++sequence_;
-            std::array<std::uint8_t, kMousePacketBytes> packet{};
-            write_header(packet.data(), kMouseMoveCommand, sequence_);
-            // payload 前四项为 button/x/y/wheel，后续十个轨迹点保持为零。
-            write_u32_le(packet.data() + kHeaderBytes, software_buttons_);
-            write_u32_le(packet.data() + kHeaderBytes + 4,
-                         static_cast<std::uint32_t>(command.dx_counts));
-            write_u32_le(packet.data() + kHeaderBytes + 8,
-                         static_cast<std::uint32_t>(command.dy_counts));
-            std::chrono::steady_clock::time_point acknowledged_at{};
-            bool datagram_sent = false;
-            if (!send_and_wait_ack(packet.data(), packet.size(),
-                                   kMouseMoveCommand, sequence_,
-                                   config_.kmbox_command_timeout_ms,
-                                   &acknowledged_at, &datagram_sent)) {
-                // move 同样携带左键状态，按下期间未知响应不能当无副作用失败。
-                if (datagram_sent && software_buttons_) mark_button_debt_locked(true);
+        MovementTraceEvent trace;
+        trace.kind = kind;
+        trace.at_ns = mouse::detail::movement_trace_now_ns();
+        trace.dx = dx;
+        trace.dy = dy;
+        trace.wheel = wheel;
+        const auto result = [&]() noexcept -> MouseMoveReceipt {
+            if (!config_.allow_send_input) {
+                set_error("KMBOX NET 未在配置中显式允许");
+                status_.store(MouseStatus::DISABLED, std::memory_order_release);
                 return {};
             }
-            status_.store(MouseStatus::READY, std::memory_order_release);
-            set_error({});
-            MouseMoveReceipt receipt;
-            receipt.succeeded = true;
-            receipt.protocol_ack_received = true;
-            receipt.protocol_ack_received_at = acknowledged_at;
-            receipt.backend_completed_at =
-                std::chrono::steady_clock::now();
-            return receipt;
-        } catch (...) {
-            set_error("KMBOX NET 发送移动命令时发生未知异常");
-            status_.store(MouseStatus::SEND_FAILED,
-                          std::memory_order_release);
-            return {};
-        }
+            if (dx == 0 && dy == 0 && wheel == 0) {
+                set_error("鼠标位移与滚轮命令不能同时为零");
+                status_.store(MouseStatus::INVALID_COMMAND,
+                              std::memory_order_release);
+                return {};
+            }
+            constexpr int kMinMove = std::numeric_limits<std::int16_t>::min();
+            constexpr int kMaxMove = std::numeric_limits<std::int16_t>::max();
+            if (dx < kMinMove || dx > kMaxMove ||
+                dy < kMinMove || dy > kMaxMove || wheel < kMinMove || wheel > kMaxMove) {
+                set_error("KMBOX NET 相对位移或滚轮超出 int16 范围");
+                status_.store(MouseStatus::INVALID_COMMAND,
+                              std::memory_order_release);
+                return {};
+            }
+            if (socket_ == INVALID_SOCKET || !winsock_started_) {
+                set_error("KMBOX NET 尚未连接");
+                status_.store(MouseStatus::CONNECTION_FAILED,
+                              std::memory_order_release);
+                return {};
+            }
+
+            if (button_faulted_) {
+                set_error("KMBOX NET 左键状态未知，移动等待明确释放确认");
+                return {};
+            }
+
+            try {
+                ++sequence_;
+                std::array<std::uint8_t, kMousePacketBytes> packet{};
+                write_header(packet.data(), command_id, sequence_);
+                // payload 前四项为 button/x/y/wheel，后续十个轨迹点保持为零。
+                write_u32_le(packet.data() + kHeaderBytes, software_buttons_);
+                write_u32_le(packet.data() + kHeaderBytes + 4,
+                             static_cast<std::uint32_t>(dx));
+                write_u32_le(packet.data() + kHeaderBytes + 8,
+                             static_cast<std::uint32_t>(dy));
+                write_u32_le(packet.data() + kHeaderBytes + 12,
+                             static_cast<std::uint32_t>(wheel));
+                std::chrono::steady_clock::time_point acknowledged_at{};
+                bool datagram_sent = false;
+                if (!send_and_wait_ack(packet.data(), packet.size(),
+                                       command_id, sequence_,
+                                       config_.kmbox_command_timeout_ms,
+                                       &acknowledged_at, &datagram_sent)) {
+                    // move 同样携带左键状态，按下期间未知响应不能当无副作用失败。
+                    if (datagram_sent && software_buttons_) mark_button_debt_locked(true);
+                    return {};
+                }
+                status_.store(MouseStatus::READY, std::memory_order_release);
+                set_error({});
+                MouseMoveReceipt receipt;
+                receipt.succeeded = true;
+                receipt.protocol_ack_received = true;
+                receipt.protocol_ack_received_at = acknowledged_at;
+                receipt.backend_completed_at =
+                    std::chrono::steady_clock::now();
+                return receipt;
+            } catch (...) {
+                set_error("KMBOX NET 发送移动命令时发生未知异常");
+                status_.store(MouseStatus::SEND_FAILED,
+                              std::memory_order_release);
+                return {};
+            }
+        }();
+        trace.completed_ns = result.protocol_ack_received
+            ? std::chrono::duration_cast<std::chrono::nanoseconds>(
+                result.protocol_ack_received_at.time_since_epoch()).count()
+            : mouse::detail::movement_trace_now_ns();
+        trace.acknowledged = result.protocol_ack_received;
+        movement_trace_.publish(trace);
+        return result;
     }
 
+public:
     bool supports_wasd_keyboard() const noexcept override { return true; }
     bool supports_left_ctrl_key() const noexcept override { return true; }
     bool supports_left_button() const noexcept override { return true; }
@@ -468,6 +496,34 @@ public:
         std::lock_guard<std::mutex> lock(monitor_mutex_);
         movement_reports_.read(cursor, batch);
         return true;
+    }
+
+    bool begin_movement_trace() noexcept override {
+        std::lock_guard io_lock(io_mutex_);
+        std::lock_guard monitor_lock(monitor_mutex_);
+        const auto device_status = status_.load(std::memory_order_acquire);
+        if ((device_status != MouseStatus::READY && device_status != MouseStatus::DISABLED) ||
+            monitor_stop_.load(std::memory_order_acquire) || monitor_failed_ ||
+            keyboard_dirty_ || owned_masks_ || software_wasd_ || software_space_ ||
+            software_left_ctrl_ || button_dirty_) return false;
+        if (!movement_trace_.begin()) return false;
+        if (monitor_received_ && latest_trace_input_.state_valid) {
+            MovementTraceEvent trace;
+            trace.kind = MovementTraceEvent::Kind::INPUT;
+            trace.at_ns = trace.completed_ns = mouse::detail::movement_trace_now_ns();
+            trace.input = latest_trace_input_;
+            trace.baseline = true;
+            movement_trace_.publish(trace);
+        }
+        return true;
+    }
+    bool read_movement_trace(MovementTraceBatch& batch) noexcept override {
+        return movement_trace_.read(batch);
+    }
+    void end_movement_trace() noexcept override {
+        // 等待已开始的软件命令完成，尾部回执必须包含在停止水位内。
+        std::lock_guard io_lock(io_mutex_);
+        movement_trace_.end();
     }
 
     bool poll_input(InputSnapshot& snapshot) noexcept override {
@@ -607,51 +663,80 @@ private:
     }
     KeyboardReceipt keyboard_locked(std::uint8_t mask, bool space = false,
                                     bool left_ctrl = false) noexcept {
-        if (mask > 15 || !config_.allow_send_input || socket_ == INVALID_SOCKET)
-            return {KeyboardDisposition::REJECTED};
-        constexpr std::uint32_t command = 0x123c2c2fU;
-        std::array<std::uint8_t, 28> packet{};
-        write_header(packet.data(), command, ++sequence_);
-        // HID modifier bit 0；不复制 monitor 的物理修饰键，不安装 Ctrl 屏蔽。
-        packet[16] = left_ctrl ? 0x01 : 0x00;
-        std::size_t index = 18;
-        for (std::uint8_t bit = 1; bit <= 8; bit <<= 1)
-            if (mask & bit) packet[index++] = wasd_usage(bit);
-        if (space) packet[index++] = 0x2c; // USB HID Keyboard Spacebar；不是滚轮。
-        // 先登记潜在责任；分配失败时拒绝发送，不能让新 owner 遗忘已发出的报告。
-        if (!save_keyboard_debt_locked({true, owned_masks_}))
-            return {KeyboardDisposition::REJECTED};
-        auto result = keyboard_packet_locked(packet.data(), packet.size(), command);
-        if (result.datagram_sent) {
-            keyboard_dirty_ = true;
-            software_wasd_ = mask;
-            software_space_ = space;
-            software_left_ctrl_ = left_ctrl;
-        }
-        if (result.disposition == KeyboardDisposition::ACKNOWLEDGED && mask == 0 && !space && !left_ctrl)
-            keyboard_dirty_ = false;
-        // 已有条目的更新不分配；若记账失败，发送前的保守责任仍保留在端点表中。
-        save_keyboard_debt_locked({keyboard_dirty_, owned_masks_});
-        return result;
+        MovementTraceEvent trace;
+        trace.kind = MovementTraceEvent::Kind::KEYBOARD;
+        trace.wasd = mask;
+        trace.space = space;
+        trace.ctrl = left_ctrl;
+        trace.at_ns = mouse::detail::movement_trace_now_ns();
+        const auto receipt = [&]() noexcept -> KeyboardReceipt {
+            if (mask > 15 || !config_.allow_send_input || socket_ == INVALID_SOCKET)
+                return {KeyboardDisposition::REJECTED};
+            constexpr std::uint32_t command = 0x123c2c2fU;
+            std::array<std::uint8_t, 28> packet{};
+            write_header(packet.data(), command, ++sequence_);
+            // HID modifier bit 0；不复制 monitor 的物理修饰键，不安装 Ctrl 屏蔽。
+            packet[16] = left_ctrl ? 0x01 : 0x00;
+            std::size_t index = 18;
+            for (std::uint8_t bit = 1; bit <= 8; bit <<= 1)
+                if (mask & bit) packet[index++] = wasd_usage(bit);
+            if (space) packet[index++] = 0x2c; // USB HID Keyboard Spacebar；不是滚轮。
+            // 先登记潜在责任；分配失败时拒绝发送，不能让新 owner 遗忘已发出的报告。
+            if (!save_keyboard_debt_locked({true, owned_masks_}))
+                return {KeyboardDisposition::REJECTED};
+            auto result = keyboard_packet_locked(packet.data(), packet.size(), command);
+            if (result.datagram_sent) {
+                keyboard_dirty_ = true;
+                software_wasd_ = mask;
+                software_space_ = space;
+                software_left_ctrl_ = left_ctrl;
+            }
+            if (result.disposition == KeyboardDisposition::ACKNOWLEDGED && mask == 0 && !space && !left_ctrl)
+                keyboard_dirty_ = false;
+            // 已有条目的更新不分配；若记账失败，发送前的保守责任仍保留在端点表中。
+            save_keyboard_debt_locked({keyboard_dirty_, owned_masks_});
+            return result;
+        }();
+        trace.acknowledged = receipt.disposition == KeyboardDisposition::ACKNOWLEDGED;
+        trace.completed_ns = trace.acknowledged
+            ? std::chrono::duration_cast<std::chrono::nanoseconds>(
+                receipt.protocol_ack_received_at.time_since_epoch()).count()
+            : mouse::detail::movement_trace_now_ns();
+        movement_trace_.publish(trace);
+        return receipt;
     }
     KeyboardReceipt mask_locked(std::uint8_t key, bool masked) noexcept {
-        const auto usage = wasd_usage(key);
-        if (!usage || !config_.allow_send_input || socket_ == INVALID_SOCKET)
-            return {KeyboardDisposition::REJECTED};
-        // 只解除本端点 owner 可能安装的屏蔽，包括前任遗留责任；禁止全局解除屏蔽。
-        if (!masked && !(owned_masks_ & key)) return {KeyboardDisposition::REJECTED};
-        const std::uint32_t command = masked ? 0x23234343U : 0x23344343U;
-        std::array<std::uint8_t, 16> packet{};
-        write_header(packet.data(), command, ++sequence_);
-        write_u32_le(packet.data() + 4, static_cast<std::uint32_t>(usage) << 8);
-        if (masked && !save_keyboard_debt_locked(
-                {keyboard_dirty_, static_cast<std::uint8_t>(owned_masks_ | key)}))
-            return {KeyboardDisposition::REJECTED};
-        auto result = keyboard_packet_locked(packet.data(), packet.size(), command);
-        if (masked && result.datagram_sent) owned_masks_ |= key;
-        if (!masked && result.disposition == KeyboardDisposition::ACKNOWLEDGED) owned_masks_ &= ~key;
-        save_keyboard_debt_locked({keyboard_dirty_, owned_masks_});
-        return result;
+        MovementTraceEvent trace;
+        trace.kind = MovementTraceEvent::Kind::MASK;
+        trace.wasd = key;
+        trace.masked = masked;
+        trace.at_ns = mouse::detail::movement_trace_now_ns();
+        const auto receipt = [&]() noexcept -> KeyboardReceipt {
+            const auto usage = wasd_usage(key);
+            if (!usage || !config_.allow_send_input || socket_ == INVALID_SOCKET)
+                return {KeyboardDisposition::REJECTED};
+            // 只解除本端点 owner 可能安装的屏蔽，包括前任遗留责任；禁止全局解除屏蔽。
+            if (!masked && !(owned_masks_ & key)) return {KeyboardDisposition::REJECTED};
+            const std::uint32_t command = masked ? 0x23234343U : 0x23344343U;
+            std::array<std::uint8_t, 16> packet{};
+            write_header(packet.data(), command, ++sequence_);
+            write_u32_le(packet.data() + 4, static_cast<std::uint32_t>(usage) << 8);
+            if (masked && !save_keyboard_debt_locked(
+                    {keyboard_dirty_, static_cast<std::uint8_t>(owned_masks_ | key)}))
+                return {KeyboardDisposition::REJECTED};
+            auto result = keyboard_packet_locked(packet.data(), packet.size(), command);
+            if (masked && result.datagram_sent) owned_masks_ |= key;
+            if (!masked && result.disposition == KeyboardDisposition::ACKNOWLEDGED) owned_masks_ &= ~key;
+            save_keyboard_debt_locked({keyboard_dirty_, owned_masks_});
+            return result;
+        }();
+        trace.acknowledged = receipt.disposition == KeyboardDisposition::ACKNOWLEDGED;
+        trace.completed_ns = trace.acknowledged
+            ? std::chrono::duration_cast<std::chrono::nanoseconds>(
+                receipt.protocol_ack_received_at.time_since_epoch()).count()
+            : mouse::detail::movement_trace_now_ns();
+        movement_trace_.publish(trace);
+        return receipt;
     }
     KeyboardReceipt cleanup_keyboard_locked() noexcept {
         KeyboardReceipt result{KeyboardDisposition::ACKNOWLEDGED};
@@ -856,6 +941,7 @@ private:
         }
         {
             std::lock_guard<std::mutex> lock(monitor_mutex_);
+            movement_trace_.end(true);
             wasd_subscribed_ = false;
             ++wasd_epoch_;
             wasd_sequence_ = 0;
@@ -906,6 +992,7 @@ private:
                 if (!monitor_stop_.load(std::memory_order_acquire)) {
                     std::lock_guard<std::mutex> lock(monitor_mutex_);
                     monitor_failed_ = true;
+                    movement_trace_.end(true);
                     input_reports_.fail(std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now().time_since_epoch()).count());
                     movement_reports_.fail(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -978,13 +1065,25 @@ private:
                 std::lock_guard<std::mutex> lock(monitor_mutex_);
                 observation.monitor_sequence_before = monitor_sequence_;
                 // 与既有状态parser/observer独立，外来IP不污染训练会话。
-                if ((input_reports_.subscribed() || movement_reports_.subscribed()) &&
-                    observation.source_ip_matches_configured_device) {
+                if (observation.source_ip_matches_configured_device) {
                     const auto report = mouse::detail::parse_input_report(
                         std::span<const std::uint8_t>(packet.data(), static_cast<std::size_t>(received)),
                         observation.received_at_steady_ns, observation.source_endpoint_valid);
                     input_reports_.publish(report);
                     movement_reports_.publish(report);
+                    MovementTraceEvent trace;
+                    trace.kind = MovementTraceEvent::Kind::INPUT;
+                    trace.at_ns = trace.completed_ns = report.received_at_steady_ns;
+                    trace.input = report;
+                    // 只保留用户选定的身法范围，不归档其他按键或鼠标按钮。
+                    trace.input.mouse_buttons = 0;
+                    trace.input.keyboard_modifiers &= 0x01;
+                    for (auto& usage : trace.input.keyboard_usages)
+                        if (usage != 0x1a && usage != 0x04 && usage != 0x16 &&
+                            usage != 0x07 && usage != 0x2c) usage = 0;
+                    trace.input.raw_report = {};
+                    latest_trace_input_ = trace.input;
+                    movement_trace_.publish(trace);
                 }
                 if (observation.accepted_as_monitor_state) {
                     mouse_buttons_ = packet[1];
@@ -1053,6 +1152,8 @@ private:
     mutable std::mutex monitor_mutex_;
     mouse::detail::InputReportBuffer input_reports_;
     mouse::detail::MovementReportBuffer movement_reports_;
+    mouse::detail::MovementTraceBuffer<> movement_trace_;
+    InputReportEvent latest_trace_input_;
     std::array<bool, 256> keyboard_keys_{};
     std::uint8_t mouse_buttons_ = 0;
     bool wasd_subscribed_ = false;

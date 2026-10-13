@@ -408,7 +408,7 @@ add_library(mouse STATIC
 target_include_directories(mouse PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(mouse PUBLIC log PRIVATE user32 ws2_32 shell32 ole32 uuid)
 
-add_library(movement STATIC Xen/movement/movement.cpp Xen/movement/timeline.cpp)
+add_library(movement STATIC Xen/movement/movement.cpp Xen/movement/timeline.cpp Xen/movement/recording.cpp)
 target_include_directories(movement PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(movement PUBLIC mouse nlohmann_json::nlohmann_json PRIVATE log Threads::Threads)
 
@@ -1542,6 +1542,13 @@ if(BUILD_TESTING)
     add_test(NAME mouse_input_report_tests COMMAND test_mouse_input_reports)
 
     add_executable(movement_tests tests/movement_tests.cpp)
+    add_executable(movement_trace_tests tests/movement_trace_tests.cpp)
+    target_include_directories(movement_trace_tests PRIVATE ${PROJECT_SOURCE_DIR}/Xen)
+    add_test(NAME movement_trace_tests COMMAND movement_trace_tests)
+    add_executable(movement_recording_tests tests/movement_recording_tests.cpp)
+    target_link_libraries(movement_recording_tests PRIVATE movement)
+    add_test(NAME movement_recording_tests COMMAND movement_recording_tests)
+    xen_deploy_runtime_dlls(movement_recording_tests)
     add_executable(movement_timeline_tests tests/movement_timeline_tests.cpp)
     add_executable(movement_library_tests tests/movement_library_tests.cpp Xen/debug_session/movement_library_internal.cpp)
     target_link_libraries(movement_library_tests PRIVATE movement)

@@ -20,12 +20,35 @@ int integer(const nlohmann::json& j) {
     if (!j.is_number_integer() || j < -1 || j > kMaxTime) throw std::runtime_error("毫秒数或整数参数超出范围");
     return j.get<int>();
 }
+int counts(const nlohmann::json& j) {
+    if (!j.is_number_integer() || j < -1000000 || j > 1000000) throw std::runtime_error("位移或滚轮参数超过1000000 counts");
+    return j.get<int>();
+}
 int mask_start(const Plan& p) {
     if (p.mask.start_ms >= 0) return p.mask.start_ms;
     int start = kMaxTime;
     for (const auto& a : p.actions)
         if (a.kind == ActionKind::KEY && a.key == Key::SPACE) start = std::min(start, a.start_ms);
     return start;
+}
+bool fully_masked(const Plan& p, const Action& key) {
+    if (!key.physical || static_cast<unsigned>(key.key) >= 4) return false;
+    std::vector<std::pair<int, int>> intervals;
+    const int bit = 1 << static_cast<unsigned>(key.key);
+    if (p.mask.enabled && (p.mask.wasd & bit)) {
+        const int begin = mask_start(p);
+        intervals.emplace_back(begin, p.mask.duration_ms ? begin + p.mask.duration_ms : duration_ms(p));
+    }
+    for (const auto& a : p.actions)
+        if (a.kind == ActionKind::MASK && a.key == key.key) intervals.emplace_back(a.start_ms, a.start_ms + a.duration_ms);
+    std::sort(intervals.begin(), intervals.end());
+    int covered = key.start_ms;
+    for (const auto& interval : intervals) {
+        if (interval.first > covered) break;
+        covered = std::max(covered, interval.second);
+        if (covered >= key.start_ms + key.duration_ms) return true;
+    }
+    return false;
 }
 }
 int duration_ms(const Plan& p) noexcept {
@@ -40,7 +63,7 @@ bool validate_plan(const Plan& p, std::string& error) noexcept {
         error.clear();
         if (p.name.empty() || p.name.size() > 256 || p.map.size() > 256 || p.location.size() > 256 || p.notes.size() > 4096)
             throw std::runtime_error("名称不能为空，名称/地图/点位最多256字节，说明最多4096字节");
-        if (p.actions.empty() || p.actions.size() > 256) throw std::runtime_error("方案需要1至256个动作");
+        if (p.actions.empty() || p.actions.size() > 16384) throw std::runtime_error("方案需要1至16384个动作");
         for (std::size_t i = 0; i < p.actions.size(); ++i) {
             const auto& a = p.actions[i];
             if (a.start_ms < 0 || a.duration_ms < 1 || a.start_ms > kMaxTime || a.duration_ms > kMaxTime - a.start_ms)
@@ -55,6 +78,13 @@ bool validate_plan(const Plan& p, std::string& error) noexcept {
                     if (b.kind == ActionKind::TURN && a.start_ms < b.start_ms + b.duration_ms && b.start_ms < a.start_ms + a.duration_ms)
                         throw std::runtime_error("鼠标旋转动作不能重叠");
                 }
+            } else if (a.kind == ActionKind::MASK) {
+                if (static_cast<unsigned>(a.key) >= 4) throw std::runtime_error("屏蔽动作只支持WASD");
+            } else if (a.kind == ActionKind::MOVE) {
+                if (std::abs(static_cast<long long>(a.dx)) > 1000000 || std::abs(static_cast<long long>(a.dy)) > 1000000)
+                    throw std::runtime_error("单次位移超过1000000 counts");
+            } else if (a.kind == ActionKind::WHEEL) {
+                if (!a.wheel || a.wheel < -127 || a.wheel > 127) throw std::runtime_error("单次滚轮必须为-127至127个刻度且非零");
             } else throw std::runtime_error("不支持的动作类型");
         }
         if (p.mask.wasd < 0 || p.mask.wasd > 15 || p.mask.start_ms < -1 || p.mask.start_ms > kMaxTime ||
@@ -70,17 +100,22 @@ bool validate_plan(const Plan& p, std::string& error) noexcept {
 bool parse_plan(const nlohmann::json& j, Plan& out, std::string& error) noexcept {
     try {
         fields(j, {"schema_version", "name", "map", "location", "notes", "actions", "mask"});
-        if (integer(j.at("schema_version")) != 1) throw std::runtime_error("不支持的方案版本");
+        const int version = integer(j.at("schema_version"));
+        if (version != 1 && version != 2) throw std::runtime_error("不支持的方案版本");
         Plan p;
         p.name = j.at("name").get<std::string>(); p.map = j.at("map").get<std::string>();
         p.location = j.at("location").get<std::string>(); p.notes = j.at("notes").get<std::string>();
         const auto& list = j.at("actions");
-        if (!list.is_array() || list.size() > 256) throw std::runtime_error("动作必须是最多256项的数组");
+        if (!list.is_array() || list.size() > 16384) throw std::runtime_error("动作必须是最多16384项的数组");
         for (const auto& item : list) {
             Action a;
             const auto type = item.at("type").get<std::string>();
-            if (type == "key") {
-                fields(item, {"type", "key", "start_ms", "duration_ms"});
+            if (type == "key" || (version == 2 && type == "mask")) {
+                if (version == 2 && type == "key" && item.contains("physical")) {
+                    fields(item, {"type", "key", "start_ms", "duration_ms", "physical"});
+                    a.physical = item.at("physical").get<bool>();
+                } else fields(item, {"type", "key", "start_ms", "duration_ms"});
+                if (type == "mask") a.kind = ActionKind::MASK;
                 const auto key = item.at("key").get<std::string>();
                 const auto found = std::find(kKeys.begin(), kKeys.end(), key);
                 if (found == kKeys.end()) throw std::runtime_error("不支持的按键名称");
@@ -90,6 +125,12 @@ bool parse_plan(const nlohmann::json& j, Plan& out, std::string& error) noexcept
                 a.kind = ActionKind::TURN;
                 if (!item.at("angle_degrees").is_number()) throw std::runtime_error("角度必须是数字");
                 a.angle_degrees = item.at("angle_degrees").get<double>();
+            } else if (version == 2 && type == "move") {
+                fields(item, {"type", "dx", "dy", "start_ms", "duration_ms"});
+                a.kind = ActionKind::MOVE; a.dx = counts(item.at("dx")); a.dy = counts(item.at("dy"));
+            } else if (version == 2 && type == "wheel") {
+                fields(item, {"type", "wheel", "start_ms", "duration_ms"});
+                a.kind = ActionKind::WHEEL; a.wheel = counts(item.at("wheel"));
             } else throw std::runtime_error("不支持的动作类型");
             a.start_ms = integer(item.at("start_ms")); a.duration_ms = integer(item.at("duration_ms"));
             p.actions.push_back(a);
@@ -107,11 +148,15 @@ nlohmann::json plan_json(const Plan& p) {
     auto actions = nlohmann::json::array();
     for (const auto& a : p.actions) {
         nlohmann::json item{{"start_ms", a.start_ms}, {"duration_ms", a.duration_ms}};
-        if (a.kind == ActionKind::KEY) { item["type"] = "key"; item["key"] = kKeys[static_cast<unsigned>(a.key)]; }
-        else { item["type"] = "turn"; item["angle_degrees"] = a.angle_degrees; }
+        if (a.kind == ActionKind::KEY || a.kind == ActionKind::MASK) {
+            item["type"] = a.kind == ActionKind::KEY ? "key" : "mask"; item["key"] = kKeys[static_cast<unsigned>(a.key)];
+            if (a.kind == ActionKind::KEY && a.physical) item["physical"] = true;
+        } else if (a.kind == ActionKind::TURN) { item["type"] = "turn"; item["angle_degrees"] = a.angle_degrees; }
+        else if (a.kind == ActionKind::MOVE) { item["type"] = "move"; item["dx"] = a.dx; item["dy"] = a.dy; }
+        else { item["type"] = "wheel"; item["wheel"] = a.wheel; }
         actions.push_back(std::move(item));
     }
-    return {{"schema_version", 1}, {"name", p.name}, {"map", p.map}, {"location", p.location}, {"notes", p.notes},
+    return {{"schema_version", 2}, {"name", p.name}, {"map", p.map}, {"location", p.location}, {"notes", p.notes},
         {"actions", actions}, {"mask", {{"enabled", p.mask.enabled}, {"wasd", p.mask.wasd},
             {"start_ms", p.mask.start_ms}, {"duration_ms", p.mask.duration_ms}}}};
 }
@@ -128,6 +173,7 @@ Result run_plan(IMouseController& device, const Plan& p, const movement::Config&
             throw std::runtime_error("灵敏度和每count角度必须为有限正数");
         if (!device.supports_wasd_keyboard()) throw std::runtime_error("设备不支持身法键盘输出");
         std::vector<int> sent(p.actions.size(), 0);
+        std::vector<int> sent_y(p.actions.size(), 0);
         std::vector<bool> seen(p.actions.size(), false);
         for (const auto& a : p.actions) {
             if (a.kind == ActionKind::TURN && std::abs(a.angle_degrees / degrees_per_count) > 1000000)
@@ -147,15 +193,18 @@ Result run_plan(IMouseController& device, const Plan& p, const movement::Config&
         const auto begin = Clock::now();
         const int total = duration_ms(p), mask_begin = mask_start(p);
         const int mask_end = p.mask.duration_ms ? mask_begin + p.mask.duration_ms : total;
-        int keys = 0; bool space = false, ctrl = false, masked = false;
+        int keys = 0, masked = 0; bool space = false, ctrl = false;
         for (;;) {
             if (!allowed()) { result.outcome = Outcome::CANCELED; result.error = "身法执行已取消或输出许可撤回"; break; }
             const double elapsed = std::chrono::duration<double, std::milli>(Clock::now() - begin).count();
-            const bool want_mask = p.mask.enabled && p.mask.wasd && elapsed >= mask_begin && elapsed < mask_end;
-            if (!masked && want_mask && elapsed < total) {
-                for (int bit = 1; bit <= 8; bit <<= 1) if (p.mask.wasd & bit)
+            int want_mask = p.mask.enabled && elapsed >= mask_begin && elapsed < mask_end ? p.mask.wasd : 0;
+            for (const auto& a : p.actions)
+                if (a.kind == ActionKind::MASK && elapsed >= a.start_ms && elapsed < a.start_ms + a.duration_ms)
+                    want_mask |= 1 << static_cast<unsigned>(a.key);
+            if ((want_mask & ~masked) && elapsed < total) {
+                for (int bit = 1; bit <= 8; bit <<= 1) if (want_mask & ~masked & bit)
                     command([&] { return device.set_wasd_mask(static_cast<std::uint8_t>(bit), true); });
-                masked = true;
+                masked |= want_mask;
             }
             int want_keys = 0; bool want_space = false, want_ctrl = false;
             for (std::size_t i = 0; i < p.actions.size(); ++i) {
@@ -165,10 +214,13 @@ Result run_plan(IMouseController& device, const Plan& p, const movement::Config&
                     (keys & (1 << static_cast<unsigned>(a.key))) != 0;
                 // 完整落在其他同键持有段内的短动作已由并集满足，不制造误报。
                 if (elapsed >= a.start_ms + a.duration_ms && already_held) seen[i] = true;
+                // 原始物理轨道可完整处于屏蔽内，此时没有任何应发出的按下区间。
+                if (elapsed >= a.start_ms + a.duration_ms && !seen[i] && fully_masked(p, a)) seen[i] = true;
                 if (elapsed >= a.start_ms + a.duration_ms && !seen[i] && !already_held)
                     throw std::runtime_error("调度或设备确认延迟导致整个按键区间被错过，已停止");
                 if (elapsed < a.start_ms || elapsed >= a.start_ms + a.duration_ms) continue;
                 seen[i] = true;
+                if (a.physical && static_cast<unsigned>(a.key) < 4 && (want_mask & (1 << static_cast<unsigned>(a.key)))) continue;
                 if (a.key == Key::SPACE) want_space = true;
                 else if (a.key == Key::CTRL) want_ctrl = true;
                 else want_keys |= 1 << static_cast<unsigned>(a.key);
@@ -177,25 +229,38 @@ Result run_plan(IMouseController& device, const Plan& p, const movement::Config&
             if (space != want_space) { command([&] { return device.set_space_key(want_space); }); space = want_space; }
             if (ctrl != want_ctrl) { command([&] { return device.set_left_ctrl_key(want_ctrl); }); ctrl = want_ctrl; }
             // 先更新/释放这一时刻的软件键，再归还物理直通；不制造已结束方向的短暂叠加。
-            if (masked && !want_mask && elapsed < total) {
-                for (int bit = 1; bit <= 8; bit <<= 1) if (p.mask.wasd & bit)
+            if ((masked & ~want_mask) && elapsed < total) {
+                for (int bit = 1; bit <= 8; bit <<= 1) if (masked & ~want_mask & bit)
                     command([&] { return device.set_wasd_mask(static_cast<std::uint8_t>(bit), false); });
-                masked = false;
+                masked = want_mask;
                 command([&] { return device.set_wasd_keyboard(static_cast<std::uint8_t>(keys)); });
             }
             bool turns_done = true;
             for (std::size_t i = 0; i < p.actions.size(); ++i) {
                 const auto& a = p.actions[i];
-                if (a.kind != ActionKind::TURN) continue;
-                const double fraction = std::clamp((elapsed - a.start_ms) / a.duration_ms, 0.0, 1.0);
-                const int target = static_cast<int>(std::llround(a.angle_degrees / degrees_per_count * fraction));
-                const int delta = std::clamp(target - sent[i], -32767, 32767);
-                if (delta) {
-                    if (!allowed()) { result.outcome = Outcome::CANCELED; throw std::runtime_error("身法执行已取消或输出许可撤回"); }
-                    if (!device.move({delta, 0})) throw std::runtime_error("身法鼠标发送失败");
-                    sent[i] += delta; result.sent_dx += delta;
+                if (a.kind == ActionKind::WHEEL) {
+                    if (!seen[i] && elapsed >= a.start_ms) {
+                        if (!allowed()) { result.outcome = Outcome::CANCELED; throw std::runtime_error("身法执行已取消或输出许可撤回"); }
+                        if (!device.scroll_wheel(a.wheel)) throw std::runtime_error("身法滚轮发送失败");
+                        seen[i] = true;
+                    }
+                    turns_done = turns_done && seen[i];
+                    continue;
                 }
-                turns_done = turns_done && sent[i] == static_cast<int>(std::llround(a.angle_degrees / degrees_per_count));
+                if (a.kind != ActionKind::TURN && a.kind != ActionKind::MOVE) continue;
+                const double fraction = std::clamp((elapsed - a.start_ms) / a.duration_ms, 0.0, 1.0);
+                const double full_x = a.kind == ActionKind::TURN ? a.angle_degrees / degrees_per_count : a.dx;
+                const int full_y = a.kind == ActionKind::MOVE ? a.dy : 0;
+                const int target = static_cast<int>(std::llround(full_x * fraction));
+                const int target_y = static_cast<int>(std::llround(full_y * fraction));
+                const int delta = std::clamp(target - sent[i], -32767, 32767);
+                const int delta_y = std::clamp(target_y - sent_y[i], -32767, 32767);
+                if (delta || delta_y) {
+                    if (!allowed()) { result.outcome = Outcome::CANCELED; throw std::runtime_error("身法执行已取消或输出许可撤回"); }
+                    if (!device.move({delta, delta_y})) throw std::runtime_error("身法鼠标发送失败");
+                    sent[i] += delta; sent_y[i] += delta_y; result.sent_dx += delta;
+                }
+                turns_done = turns_done && sent[i] == static_cast<int>(std::llround(full_x)) && sent_y[i] == full_y;
             }
             if (callbacks.progress) callbacks.progress({static_cast<int>(std::min(elapsed, static_cast<double>(total))), total, result.sent_dx});
             if (elapsed >= total && turns_done) { result.outcome = Outcome::COMPLETED; break; }

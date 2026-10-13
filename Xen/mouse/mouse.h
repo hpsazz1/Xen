@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 enum class MouseBackend {
     WIN32_SEND_INPUT,
@@ -182,6 +183,22 @@ struct InputReportBatch {
     std::uint64_t final_sequence = 0;
 };
 
+// 录制本机收到的输入与软件请求；回执只证明协议响应，不证明游戏执行。
+struct MovementTraceEvent {
+    enum class Kind { INPUT, MOVE, WHEEL, KEYBOARD, MASK };
+    Kind kind = Kind::INPUT;
+    std::int64_t at_ns = 0, completed_ns = 0;
+    InputReportEvent input;
+    int dx = 0, dy = 0, wheel = 0;
+    std::uint8_t wasd = 0;
+    bool space = false, ctrl = false, masked = false, acknowledged = false;
+    bool baseline = false;
+};
+struct MovementTraceBatch {
+    std::vector<MovementTraceEvent> events;
+    bool gap = false;
+};
+
 class IMouseController {
 public:
     virtual ~IMouseController() = default;
@@ -192,6 +209,8 @@ public:
     virtual bool open() noexcept = 0;
     virtual MouseMoveReceipt move(
         const MouseMoveCommand& command) noexcept = 0;
+    // 设备滚轮单位，不隐式转换成跳跃键；不支持的后端明确失败。
+    virtual MouseMoveReceipt scroll_wheel(int) noexcept { return {}; }
     // 非阻塞取得与当前鼠标输出后端绑定的物理键鼠状态；只有 state_valid
     // 快照可改变键态，status 只描述链路，不得被调用方猜测为全释放。
     virtual bool poll_input(InputSnapshot& snapshot) noexcept = 0;
@@ -229,6 +248,12 @@ public:
         batch = {}; return false;
     }
     virtual void close() noexcept = 0;
+    // 被动独立录制，不占用输入订阅；结束后仍可消费队尾，gap 表示本机记录不完整。
+    virtual bool begin_movement_trace() noexcept { return false; }
+    virtual bool read_movement_trace(MovementTraceBatch& batch) noexcept {
+        batch = {}; return false;
+    }
+    virtual void end_movement_trace() noexcept {}
     virtual MouseStatus status() const noexcept = 0;
     virtual std::string last_error() const = 0;
 

@@ -5,6 +5,7 @@
 #include <misc/cpp/imgui_stdlib.h>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <string>
 
 namespace {
@@ -32,15 +33,18 @@ bool text_field(const char* label, std::string& value, const char* help) {
     const bool changed = ImGui::InputText(label, &value);
     tip(help); return changed;
 }
-const char* action_label(const TimelineAction& action) {
+std::string action_label(const TimelineAction& action) {
     if (action.kind == ActionKind::TURN) return action.angle_degrees < 0 ? "鼠标左转" : "鼠标右转";
+    if (action.kind == ActionKind::MOVE) return "鼠标位移";
+    if (action.kind == ActionKind::WHEEL) return "滚轮";
+    const std::string prefix = action.kind == ActionKind::MASK ? "屏蔽 " : action.physical ? "物理 " : "软件 ";
     switch (action.key) {
-    case Key::W: return "W";
-    case Key::A: return "A";
-    case Key::S: return "S";
-    case Key::D: return "D";
-    case Key::SPACE: return "空格 / 跳跃";
-    case Key::CTRL: return "Left Ctrl / 蹲";
+    case Key::W: return prefix + "W";
+    case Key::A: return prefix + "A";
+    case Key::S: return prefix + "S";
+    case Key::D: return prefix + "D";
+    case Key::SPACE: return prefix + "空格";
+    case Key::CTRL: return prefix + "Ctrl";
     }
     return "未知";
 }
@@ -55,12 +59,12 @@ void timeline(const Plan& plan) {
         for (std::size_t i = 0; i < plan.actions.size(); ++i) {
             const auto& action = plan.actions[i];
             const auto origin = ImGui::GetCursorScreenPos();
-            ImGui::Text("%zu. %s", i + 1, action_label(action));
+            ImGui::Text("%zu. %s", i + 1, action_label(action).c_str());
             const float start = std::clamp(static_cast<float>(action.start_ms) / duration, 0.f, 1.f);
             const float end = std::clamp(static_cast<float>(static_cast<double>(action.start_ms) + action.duration_ms) / duration, 0.f, 1.f);
             draw->AddRectFilled({origin.x + label_width, origin.y}, {origin.x + label_width + width, origin.y + 16}, ImGui::GetColorU32(ImGuiCol_FrameBg));
             draw->AddRectFilled({origin.x + label_width + width * start, origin.y},
-                {origin.x + label_width + width * std::max(start, end), origin.y + 16},
+                {origin.x + label_width + std::max(width * start + 2.f, width * end), origin.y + 16},
                 ImGui::GetColorU32(action.kind == ActionKind::TURN ? ImGuiCol_PlotLines : ImGuiCol_ButtonHovered));
         }
     }
@@ -94,6 +98,7 @@ struct MovementPanel::Impl {
     }
     void send(Action action, OverlayActions& actions, bool save_as = false) {
         if (action != Action::CANCEL && action != Action::LOAD_PLAN && action != Action::LIST_MOVEMENT_PLANS &&
+            action != Action::START_MOVEMENT_RECORDING && action != Action::STOP_MOVEMENT_RECORDING &&
             !update_request()) return;
         request.movement_save_as = save_as;
         actions.debug_action = action;
@@ -163,7 +168,7 @@ struct MovementPanel::Impl {
         }
         plan = std::move(copy); request.load_path.clear(); error.clear(); changed(actions);
     }
-    void editor(OverlayActions& actions) {
+    void editor(OverlayActions& actions, const movement::Config& config) {
         bool change = text_field("方案名称", plan.name, "独立方案文件的名称，不修改原旋转跳或大跳配置。");
         change |= text_field("地图（可选）", plan.map, "仅保存地图标注；本阶段不自动识别地图或角色位置。");
         change |= text_field("点位（可选）", plan.location, "保存点位名称；每次测试前由用户对齐位置和朝向。");
@@ -172,28 +177,38 @@ struct MovementPanel::Impl {
             plan.actions.push_back({}); change = true;
         }
         int remove = -1, duplicate = -1;
-        if (ImGui::BeginTable("movement_actions", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable)) {
+        if (ImGui::BeginTable("movement_actions", 5,
+                ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY, {0, 360})) {
+            ImGui::TableSetupScrollFreeze(0, 1);
             ImGui::TableSetupColumn("动作"); ImGui::TableSetupColumn("开始 / ms");
-            ImGui::TableSetupColumn("时长 / ms"); ImGui::TableSetupColumn("角度 / 度");
+            ImGui::TableSetupColumn("时长 / ms"); ImGui::TableSetupColumn("动作参数");
             ImGui::TableSetupColumn("编辑"); ImGui::TableHeadersRow();
-            const char* types[]{"W", "A", "S", "D", "空格 / 跳跃", "Left Ctrl / 蹲", "鼠标左转", "鼠标右转"};
+            const char* types[]{"W", "A", "S", "D", "空格 / 跳跃", "Left Ctrl / 蹲", "鼠标左转", "鼠标右转", "屏蔽 W", "屏蔽 A", "屏蔽 S", "屏蔽 D", "鼠标位移", "滚轮"};
             for (std::size_t i = 0; i < plan.actions.size(); ++i) {
                 auto& action = plan.actions[i];
                 ImGui::PushID(static_cast<int>(i)); ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0);
-                int kind = action.kind == ActionKind::TURN ? (action.angle_degrees < 0 ? 6 : 7) : static_cast<int>(action.key);
+                int kind = action.kind == ActionKind::TURN ? (action.angle_degrees < 0 ? 6 : 7) :
+                    action.kind == ActionKind::MASK ? 8 + static_cast<int>(action.key) :
+                    action.kind == ActionKind::MOVE ? 12 : action.kind == ActionKind::WHEEL ? 13 : static_cast<int>(action.key);
                 ImGui::SetNextItemWidth(-1);
-                if (ImGui::Combo("##action", &kind, types, 8)) {
-                    action.kind = kind < 6 ? ActionKind::KEY : ActionKind::TURN;
+                if (ImGui::Combo("##action", &kind, types, 14)) {
+                    action.kind = kind < 6 ? ActionKind::KEY : kind < 8 ? ActionKind::TURN : kind < 12 ? ActionKind::MASK : kind == 12 ? ActionKind::MOVE : ActionKind::WHEEL;
                     if (kind < 6) action.key = static_cast<Key>(kind);
-                    else action.angle_degrees = (kind == 6 ? -1 : 1) * std::max(1.0, std::abs(action.angle_degrees));
+                    else if (kind < 8) action.angle_degrees = (kind == 6 ? -1 : 1) * std::max(1.0, std::abs(action.angle_degrees));
+                    else if (kind < 12) action.key = static_cast<Key>(kind - 8);
+                    if (action.kind != ActionKind::KEY) action.physical = false;
+                    if (action.kind == ActionKind::WHEEL) { action.duration_ms = 1; if (!action.wheel) action.wheel = 1; }
+                    else if (action.duration_ms <= 0) action.duration_ms = 100;
+                    if (action.kind == ActionKind::MOVE && !action.dx && !action.dy) action.dx = 1;
                     change = true;
                 }
-                tip("不同按键和鼠标可并行；同一按键重叠视为持续按住。两段鼠标旋转不能重叠。");
+                tip("按键、屏蔽和鼠标可并行。物理按键轨道在同键屏蔽区间内不输出，软件按键照常执行。");
                 ImGui::TableSetColumnIndex(1); ImGui::SetNextItemWidth(-1);
                 change |= ImGui::InputInt("##start", &action.start_ms, 0, 0);
                 tip("相对脚本启动的毫秒数；修改本行不会移动其他动作。");
                 ImGui::TableSetColumnIndex(2); ImGui::SetNextItemWidth(-1);
-                change |= ImGui::InputInt("##duration", &action.duration_ms, 0, 0);
+                if (action.kind == ActionKind::WHEEL) ImGui::TextDisabled("瞬时事件");
+                else change |= ImGui::InputInt("##duration", &action.duration_ms, 0, 0);
                 tip("按住或旋转的持续毫秒数，必须大于零；中间留空可实现连续点按。");
                 ImGui::TableSetColumnIndex(3); ImGui::SetNextItemWidth(-1);
                 if (action.kind == ActionKind::TURN) {
@@ -202,7 +217,31 @@ struct MovementPanel::Impl {
                         action.angle_degrees = (kind == 6 ? -1 : 1) * std::abs(angle); change = true;
                     }
                     tip("水平旋转目标角度；使用共享灵敏度与 m_yaw 换算，实际角度需游戏内核对。");
-                } else ImGui::TextDisabled("—");
+                } else if (action.kind == ActionKind::MOVE) {
+                    change |= ImGui::InputInt("X##dx", &action.dx, 0, 0);
+                    ImGui::SetNextItemWidth(-1);
+                    change |= ImGui::InputInt("Y##dy", &action.dy, 0, 0);
+                    tip("此区间的鼠标计数总量；按时长分配，不是屏幕像素或游戏角度。");
+                    const double degrees_per_count = config.sensitivity * config.yaw_degrees_per_count;
+                    const bool angle_valid = std::isfinite(degrees_per_count) && degrees_per_count > 0;
+                    double angle = angle_valid ? action.dx * degrees_per_count : 0;
+                    ImGui::BeginDisabled(!angle_valid);
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::InputDouble("水平角度##move_angle", &angle, 0, 0, "%.3f") && std::isfinite(angle)) {
+                        action.dx = static_cast<int>(std::clamp(std::round(angle / degrees_per_count),
+                            static_cast<double>(std::numeric_limits<int>::min()),
+                            static_cast<double>(std::numeric_limits<int>::max())));
+                        change = true;
+                    }
+                    ImGui::EndDisabled();
+                    tip("按共享灵敏度和 m_yaw 换算为整数 X 计数；负数左转、正数右转。实际转角需游戏内核对，Y 保留原始计数。");
+                } else if (action.kind == ActionKind::WHEEL) {
+                    change |= ImGui::InputInt("档数##wheel", &action.wheel, 0, 0);
+                    tip("有符号滚轮档数，在开始时刻发送一次，不模拟按住。");
+                } else if (action.kind == ActionKind::KEY) {
+                    change |= ImGui::Checkbox("物理轨道", &action.physical);
+                    tip("来自录制的物理按键。回放时扣除同键屏蔽区间；取消勾选后作为软件按键执行。");
+                } else ImGui::TextDisabled("物理屏蔽");
                 ImGui::TableSetColumnIndex(4);
                 if (button("复制", "复制当前动作及其时间，之后可分别修改。")) duplicate = static_cast<int>(i);
                 ImGui::SameLine();
@@ -250,8 +289,28 @@ void MovementPanel::render(const AppConfig& config, const Snapshot* snapshot, Ov
         auto& ui = *impl_;
         ui.sync(snapshot, actions);
         const bool busy = snapshot && snapshot->busy;
+        const bool recording = snapshot && snapshot->movement_recording;
+        ImGui::TextWrapped("录制可同时保留人工操作、原身法软件动作和屏蔽区间。录原快捷身法时，先启动 Runtime，再开始录制并执行身法。");
+        ImGui::BeginDisabled(recording || busy);
+        const char* motion_modes[]{"只存原始记录", "按相对位移解释", "按累计坐标解释"};
+        ImGui::SetNextItemWidth(230);
+        ImGui::Combo("录制鼠标解释", &ui.request.movement_record_motion_mode, motion_modes, 3);
+        ImGui::EndDisabled();
+        tip("原始 XY 语义尚未实机标定。选择相对或累计时按该解释生成可修改的方案；原始数据始终保留。只存原始记录不会生成回放方案。");
+        ImGui::TextWrapped("鼠标原始值尚未实机标定：按所选解释生成编辑稿，原始数据始终保留；只存原始记录不生成回放方案。");
+        if (!recording) {
+            if (button("开始录制", "被动录制，不启动 Runtime，不要求当前草稿有效。录制结束后可继续编辑生成的方案。", !busy))
+                ui.send(Action::START_MOVEMENT_RECORDING, actions);
+        } else {
+            if (button("停止录制并生成方案", "停止采集并保存记录；根据鼠标解释选项生成编辑稿。不会停止原 Runtime。"))
+                ui.send(Action::STOP_MOVEMENT_RECORDING, actions);
+            ImGui::SameLine(); ImGui::Text("已录制 %llu 个事件", static_cast<unsigned long long>(snapshot->movement_record_events));
+        }
+        if (snapshot && !snapshot->movement_recording_path.empty())
+            ImGui::TextWrapped("录制文件：%s", snapshot->movement_recording_path.c_str());
+        ImGui::Separator();
         ImGui::TextWrapped("手动编排并行动作，保存为独立方案；每次执行前请对齐站位与朝向。修改只影响下次测试，当前执行使用启动时的参数。");
-        ImGui::BeginDisabled(busy && snapshot->state == debug_session::State::WORKING);
+        ImGui::BeginDisabled(recording || (busy && snapshot->state == debug_session::State::WORKING));
         if (ImGui::CollapsingHeader("原旋转跳与大跳预设")) {
             const auto& move = config.movement;
             ImGui::TextWrapped("原辅助页继续保留物理跳跃触发、A/D 选侧和固定 A→D 大跳逻辑。下面只复制参数为主动发送空格的自定义脚本。");
@@ -262,31 +321,31 @@ void MovementPanel::render(const AppConfig& config, const Snapshot* snapshot, Ov
             ImGui::SameLine();
             if (button("复制大跳", "复制当前 A→D 时长、转角及可选定时蹲；不修改原预设。")) ui.copy_preset(move, false, false, actions);
         }
-        ui.editor(actions);
+        ui.editor(actions, config.movement);
         ImGui::EndDisabled();
         if (!ui.error.empty()) ImGui::TextWrapped("方案错误：%s", ui.error.c_str());
         ImGui::Separator();
-        ui.library(snapshot, actions, busy);
-        if (button("校验方案", "仅校验时间轴及参数，不输出设备。", !busy)) ui.send(Action::VALIDATE, actions);
+        ui.library(snapshot, actions, busy || recording);
+        if (button("校验方案", "仅校验时间轴及参数，不输出设备。", !busy && !recording)) ui.send(Action::VALIDATE, actions);
         ImGui::SameLine();
-        if (button("保存方案", "保存当前修改；已选方案直接更新，新方案自动保存到方案库，无需填写路径。", !busy)) ui.send(Action::SAVE_PLAN, actions);
+        if (button("保存方案", "保存当前修改；已选方案直接更新，新方案自动保存到方案库，无需填写路径。", !busy && !recording)) ui.send(Action::SAVE_PLAN, actions);
         ImGui::SameLine();
-        if (button("另存新方案", "将当前草稿保存为新文件，保留原方案。", !busy)) ui.send(Action::SAVE_PLAN, actions, true);
+        if (button("另存新方案", "将当前草稿保存为新文件，保留原方案。", !busy && !recording)) ui.send(Action::SAVE_PLAN, actions, true);
         ImGui::Text("共享灵敏度 %.3f；m_yaw %.6f", config.movement.sensitivity, config.movement.yaw_degrees_per_count);
         tip("换算参数在辅助 / 身法修改；脚本目标角度不等于游戏已实际完成的转角。");
         const bool enabled = snapshot && snapshot->movement_test_enabled;
         if (!enabled) {
-            if (button("启用身法测试", "允许本页后续测试输出；启用本身不执行动作。改参、保存和载入后无需重新启用，End 或关闭测试会撤销。", !busy))
+            if (button("启用身法测试", "允许本页后续测试输出；启用本身不执行动作。改参、保存和载入后无需重新启用，End 或关闭测试会撤销。", !busy && !recording))
                 ui.send(Action::ENABLE_MOVEMENT_TEST, actions);
         } else {
             ImGui::TextUnformatted("身法测试已启用：修改后可直接测试或使用全局测试键。");
-            if (button("测试一次", "按最新有效草稿执行一次；运行期间改参用于下一次，忙碌不排队，End 急停。", !busy))
+            if (button("测试一次", "按最新有效草稿执行一次；运行期间改参用于下一次，忙碌不排队，End 急停。", !busy && !recording))
                 ui.send(Action::RUN_MOVEMENT_TEST, actions);
         }
         ImGui::SameLine();
         if (button("关闭身法测试", "取消当前测试并撤销后续输出授权，释放脚本输入、恢复物理按键；清理未确认时保留故障。", busy || enabled))
             ui.send(Action::CANCEL, actions);
-        if (!ui.catalog_requested && !busy && actions.debug_action == Action::NONE) {
+        if (!ui.catalog_requested && !busy && !recording && actions.debug_action == Action::NONE) {
             ui.catalog_requested = true;
             ui.send(Action::LIST_MOVEMENT_PLANS, actions);
         }

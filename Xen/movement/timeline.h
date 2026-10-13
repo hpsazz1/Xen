@@ -7,7 +7,7 @@
 
 // 调试编辑器和后续地图入口共用的数据与同步执行契约；调用方负责设备独占和线程。
 namespace movement::timeline {
-enum class ActionKind { KEY, TURN };
+enum class ActionKind { KEY, TURN, MASK, MOVE, WHEEL };
 enum class Key { W, A, S, D, SPACE, CTRL };
 struct Action {
     ActionKind kind = ActionKind::KEY;
@@ -15,6 +15,8 @@ struct Action {
     int start_ms = 0;
     int duration_ms = 100;
     double angle_degrees = 25.0; // 负数左转，正数右转。
+    bool physical = false; // 录制物理按键轨道，先扣除同键屏蔽区间再合并软件轨道。
+    int dx = 0, dy = 0, wheel = 0;
 };
 struct Mask {
     bool enabled = true;

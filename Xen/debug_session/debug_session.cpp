@@ -6,6 +6,7 @@
 #include "log/log.h"
 #include "recoil/recoil_debug_run.h"
 #include "movement/timeline.h"
+#include "movement/recording.h"
 #include "debug_session/movement_library_internal.h"
 #include "source_context/source_context.h"
 #include <cstdlib>
@@ -26,8 +27,8 @@ using namespace std::chrono_literals;
 constexpr std::size_t kDocumentLimit = 1024 * 1024;
 std::atomic_uint64_t next_id{0};
 
-Json parse_document(const std::string& text) {
-    if (text.size() > kDocumentLimit) throw std::runtime_error("文档超过1MiB限制");
+Json parse_document(const std::string& text, std::size_t limit = kDocumentLimit) {
+    if (text.size() > limit) throw std::runtime_error("文档超过大小限制");
     std::vector<std::set<std::string>> keys;
     auto callback = [&](int depth, Json::parse_event_t event, Json& value) {
         if (depth > 32) throw std::runtime_error("文档嵌套过深");
@@ -42,14 +43,14 @@ Json parse_document(const std::string& text) {
 Json code_identity() {
     return {{"commit",XEN_DEBUG_BUILD_COMMIT},{"dirty",XEN_DEBUG_BUILD_DIRTY},{"runtime",XEN_DEBUG_RUNTIME_ID}};
 }
-Json read_document(const std::filesystem::path& path) {
+Json read_document(const std::filesystem::path& path, std::size_t limit = kDocumentLimit) {
     std::ifstream file(path, std::ios::binary);
     if (!file) throw std::runtime_error("无法打开所选文档");
-    std::string text(kDocumentLimit + 1, '\0');
+    std::string text(limit + 1, '\0');
     file.read(text.data(), static_cast<std::streamsize>(text.size()));
     text.resize(static_cast<std::size_t>(file.gcount()));
     if (text.starts_with("\xef\xbb\xbf")) text.erase(0, 3);
-    return parse_document(text);
+    return parse_document(text, limit);
 }
 void write_document(const std::filesystem::path& path, const Json& value) {
     auto temporary = path;
@@ -75,7 +76,7 @@ Json request_plan(const Request& request) {
     if (request.mode == Mode::MOVEMENT_TEST) {
         movement::timeline::Plan plan;
         std::string error;
-        if (!movement::timeline::parse_plan(parse_document(request.plan_text),plan,error))
+        if (!movement::timeline::parse_plan(parse_document(request.plan_text,16*1024*1024),plan,error))
             throw std::runtime_error(error);
         return movement::timeline::plan_json(plan);
     }
@@ -152,6 +153,7 @@ struct Session::Impl {
     };
     std::optional<Prepared> prepared;
     std::optional<Context> movement_binding;
+    std::atomic_bool movement_record_stop{false};
     std::atomic<std::shared_ptr<const Prepared>> repeat_plan;
     std::atomic_uint64_t repeat_revision{0};
     void replace_hud(std::shared_ptr<CounterpulseHud> next = {}) {
@@ -212,7 +214,7 @@ struct Session::Impl {
                     });
                 }
                 update([&](Snapshot& s) { if (s.generation == current) {
-                    s.busy = false;
+                    s.busy = false; s.movement_recording = false;
                     if (canceled && s.state == State::PREPARED) {
                         s.state = State::CANCELED; s.prepared_id.clear(); s.message = "准备已取消，已生成文件仅留档";
                     }
@@ -227,6 +229,74 @@ struct Session::Impl {
             update([](Snapshot& s) { s.state = State::FAILED; s.busy = false; s.message = "后台任务创建失败"; });
             return false;
         }
+    }
+    void record_movement(const Request& request, const Context& context) {
+        using Clock = std::chrono::steady_clock;
+        const auto now_ns = [] { return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count(); };
+        auto& device = *context.device;
+        const auto directory = new_directory(request.output_root);
+        const auto begin = now_ns();
+        if (!device.begin_movement_trace()) throw std::runtime_error("录制未启动：设备不支持录制、已有录制或身法动作尚未释放，请在动作前开始");
+        struct EndTrace { IMouseController& device; bool active=true; ~EndTrace(){if(active)device.end_movement_trace();} } guard{device};
+        update([&](Snapshot& s) { s.movement_recording=true; s.movement_record_events=0;
+            s.movement_recording_path.clear(); s.report_directory=directory.string();
+            s.message="正在录制身法：执行人工操作或原Long Jump，动作结束后停止录制"; });
+        std::vector<MovementTraceEvent> events;
+        events.reserve(8192);
+        bool gap=false;
+        const auto consume = [&] {
+            MovementTraceBatch batch;
+            if (!device.read_movement_trace(batch)) { gap=true; return std::size_t{0}; }
+            gap = gap || batch.gap;
+            if (events.size()+batch.events.size()>131072) { gap=true; return std::size_t{0}; }
+            events.insert(events.end(),batch.events.begin(),batch.events.end());
+            return batch.events.size();
+        };
+        auto next_update=Clock::now();
+        while(!movement_record_stop && !canceled && now_ns()-begin<60000000000LL) {
+            consume();
+            if(gap)break;
+            if(device.status()!=MouseStatus::READY && device.status()!=MouseStatus::DISABLED){gap=true;break;}
+            if(Clock::now()>=next_update) {
+                update([&](Snapshot& s){s.movement_record_events=events.size();});
+                next_update=Clock::now()+100ms;
+            }
+            std::this_thread::sleep_for(2ms);
+        }
+        device.end_movement_trace(); guard.active=false;
+        const auto end=now_ns();
+        // end等待在途命令退出后固定尾部，再排空已观察事实。
+        while(consume()!=0) {}
+        gap=gap || canceled || end-begin>60000000000LL;
+        auto trace=movement::recording::trace_json(events,begin,end,gap,request.movement_record_motion_mode);
+        trace["code_identity"]=code_identity();
+        trace["sensitivity"]=context.config.movement.sensitivity;
+        trace["yaw_degrees_per_count"]=context.config.movement.yaw_degrees_per_count;
+        const auto path=directory/"movement-recording.json";
+        write_document(path,trace);
+        auto derived=movement::recording::derive(events,begin,end,gap,request.movement_record_motion_mode);
+        std::string saved;
+        Json plan;
+        if(derived.complete) {
+            plan=movement::timeline::plan_json(derived.plan);
+            write_document(directory/"plan.json",plan);
+            saved=detail::save_movement_plan(plan,{},true,request.movement_library_root);
+        }
+        const auto catalog=detail::list_movement_plans(request.movement_library_root,request.output_root);
+        update([&](Snapshot& s) {
+            const auto utf8=path.u8string();
+            s.movement_recording_path.assign(reinterpret_cast<const char*>(utf8.data()),utf8.size());
+            s.movement_record_events=events.size();
+            s.movement_saved_plans.clear();
+            for(const auto& entry:catalog)s.movement_saved_plans.push_back({entry.path,entry.name});
+            ++s.movement_catalog_revision;
+            s.state=canceled?State::CANCELED:State::COMPLETED;
+            s.message=derived.complete?"录制已保存到方案库并载入编辑器；鼠标按所选解释派生，请核对后测试":derived.error;
+            if(derived.complete) {
+                s.movement_selected_path=saved; s.draft_plan=plan;
+                s.draft_plan_mode=Mode::MOVEMENT_TEST; ++s.draft_plan_revision;
+            }
+        });
     }
     void run_movement(const Prepared& work) {
         using namespace movement::timeline;
@@ -589,6 +659,10 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
     const std::string& prepared_id, bool allow_physical_output, const std::string& confirmation) noexcept {
     try {
         if (action == Action::CANCEL) { cancel(); return true; }
+        if (action == Action::STOP_MOVEMENT_RECORDING) {
+            if (!snapshot()->movement_recording) return false;
+            impl_->movement_record_stop=true; return true;
+        }
         if (action == Action::SHOW_HUD || action == Action::HIDE_HUD) {
             if (impl_->shutting_down) return false;
             const bool desired = action == Action::SHOW_HUD;
@@ -606,6 +680,17 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
         if (action == Action::NONE) return false;
         if (impl_->shutting_down || busy()) return reject("已有任务执行或正在关闭，本次请求未执行");
         poll();
+        if (action == Action::START_MOVEMENT_RECORDING) {
+            if (request.mode!=Mode::MOVEMENT_TEST || request.movement_record_motion_mode<0 || request.movement_record_motion_mode>2)
+                return reject("身法录制参数无效");
+            if (!context.input_recording_idle || !context.device || !context.device->output_owner_exclusive() ||
+                context.config.mouse.backend!=MouseBackend::KMBOX_NET ||
+                (context.device->status()!=MouseStatus::READY && context.device->status()!=MouseStatus::DISABLED))
+                return reject("请连接KMBOX NET并结束其他输入录制");
+            invalidate_repeat("身法录制中，回放测试已关闭");
+            impl_->prepared.reset(); impl_->movement_record_stop=false;
+            return impl_->launch(State::RUNNING,false,[this,request,context]{impl_->record_movement(request,context);});
+        }
         if (action == Action::ENABLE_MOVEMENT_TEST) {
             if (request.mode != Mode::MOVEMENT_TEST) return reject("只有身法页面可以启用身法测试");
             admit(context,request.mode);
@@ -709,7 +794,8 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
                 return;
             }
             if (action == Action::LOAD_PLAN || action == Action::LOAD_SAMPLING || action == Action::LOAD_FIRE_SETTINGS) {
-                const auto document = read_document(std::filesystem::u8path(request.load_path));
+                const auto document = read_document(std::filesystem::u8path(request.load_path),
+                    request.mode == Mode::MOVEMENT_TEST ? 16*1024*1024 : kDocumentLimit);
                 const auto value = action == Action::LOAD_SAMPLING ? sampling_settings_json(parse_sampling_settings(document)) :
                     action == Action::LOAD_FIRE_SETTINGS ? make_fire_test_plan(document) :
                     request.mode == Mode::MOVEMENT_TEST ? request_plan([&] { auto r=request; r.plan_text=document.dump(); return r; }()) : validate_debug_plan(document);

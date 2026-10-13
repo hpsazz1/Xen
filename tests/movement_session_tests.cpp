@@ -131,6 +131,41 @@ public:
         ++cleanups; return set_wasd_keyboard(0);
     }
 };
+// 只提供录制事实；所有物理输出方法仍继承计数fake，任何调用都将使断言失败。
+class TraceDevice final : public FakeDevice {
+public:
+    bool incomplete = false;
+    std::atomic_int begins{0}, ends{0}, delivered{0};
+    bool begin_movement_trace() noexcept override { ++begins; delivered = 0; return true; }
+    void end_movement_trace() noexcept override { ++ends; }
+    bool read_movement_trace(MovementTraceBatch& batch) noexcept override {
+        batch = {};
+        const int step = delivered.load();
+        if (step >= 7) return true;
+        MovementTraceEvent event;
+        event.at_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        event.completed_ns = event.at_ns;
+        event.acknowledged = true;
+        if (step == 0 || step == 1 || step == 6) {
+            event.kind = MovementTraceEvent::Kind::INPUT;
+            event.input.state_valid = true;
+            event.input.received_at_steady_ns = event.at_ns;
+            event.baseline = step == 0;
+            event.input.wasd_mask = step == 1 ? 1 : 0;
+        } else if (step == 2 || step == 5) {
+            event.kind = MovementTraceEvent::Kind::MASK;
+            event.wasd = 1; event.masked = step == 2;
+        } else {
+            event.kind = MovementTraceEvent::Kind::KEYBOARD;
+            event.wasd = step == 3 ? 2 : 0;
+        }
+        try { batch.events.push_back(event); } catch (...) { return false; }
+        batch.gap = incomplete && step == 2;
+        ++delivered;
+        return true;
+    }
+};
 Context context_for(const std::shared_ptr<FakeDevice>& device = {}) {
     Context context;
     context.device = device;
@@ -411,6 +446,66 @@ void test_enabled_edit_and_cancel(const std::filesystem::path& root) {
         !session.repeat(context) && device->downs == 3, "急停键变化未撤销身法会话");
     require(!focus.failed && device->touches == 0, "会话测试误触非方案设备操作或源fixture失败");
 }
+void test_passive_recording(const std::filesystem::path& root, bool incomplete) {
+    auto device = std::make_shared<TraceDevice>();
+    device->incomplete = incomplete;
+    auto context = context_for(device);
+    auto request = request_for(root / (incomplete ? "record-incomplete" : "record-complete"));
+    request.movement_record_motion_mode = 1;
+    Session session;
+    require(session.dispatch(Action::ENABLE_MOVEMENT_TEST, request, context) &&
+        session.snapshot()->movement_test_enabled, "录制前启用fixture失败");
+    // 正在运行原身法时亦可被动录制；不需要启用软件物理输出或有效编辑草稿。
+    context.runtime_idle = false;
+    context.config.mouse.allow_send_input = false;
+    request.plan_text = "录制不应解析已有草稿";
+    require(session.dispatch(Action::START_MOVEMENT_RECORDING, request, context),
+        "Runtime运行中拒绝了被动录制");
+    require(!session.snapshot()->movement_test_enabled && !session.snapshot()->repeat_ready,
+        "开始录制未撤销回放授权");
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (session.busy() && device->delivered < 7 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(1ms);
+    if (!incomplete) {
+        require(device->delivered == 7 && session.snapshot()->movement_recording && session.busy(),
+            "未收到完整录制输入或录制意外结束");
+        require(!session.dispatch(Action::START_MOVEMENT_RECORDING, request, context),
+            "录制期间接受了第二个录制任务");
+        require(session.dispatch(Action::STOP_MOVEMENT_RECORDING, request, context),
+            "忙碌时不能停止被动录制");
+    }
+    wait_idle(session);
+    const auto result = session.snapshot();
+    require(!result->movement_recording && !result->busy && !result->movement_test_enabled &&
+        !result->repeat_ready && !result->cleanup_unknown && device->begins == 1 && device->ends == 1,
+        "停止后录制生命周期或输出授权未清理");
+    require(device->touches == 0, "被动录制调用了输入订阅或设备输出清理");
+    require(!result->movement_recording_path.empty(), "录制未公布原始记录文件");
+    const auto trace = read_json(std::filesystem::u8path(result->movement_recording_path));
+    require(trace.at("gap").get<bool>() == incomplete && !trace.at("game_validation_passed").get<bool>() &&
+        !trace.at("events").empty(), "原始轨迹缺失或误报真实验收");
+    if (incomplete) {
+        require(result->draft_plan_revision == 0 && result->movement_selected_path.empty() &&
+            result->movement_saved_plans.empty(), "不完整轨迹发布了可执行方案");
+    } else {
+        require(result->draft_plan_revision == 1 && result->draft_plan_mode == Mode::MOVEMENT_TEST &&
+            !result->movement_selected_path.empty() && !result->movement_saved_plans.empty(),
+            "停止录制未将方案保存入库并发布编辑草稿");
+        require(read_json(std::filesystem::u8path(result->movement_selected_path)) == result->draft_plan,
+            "方案库内容与录制生成草稿不一致");
+        movement::timeline::Plan plan; std::string error;
+        require(movement::timeline::parse_plan(result->draft_plan, plan, error), "录制方案不可解析");
+        bool physical_w = false, software_a = false, mask_w = false;
+        for (const auto& action : plan.actions) {
+            physical_w |= action.kind == movement::timeline::ActionKind::KEY && action.physical && action.key == movement::timeline::Key::W;
+            software_a |= action.kind == movement::timeline::ActionKind::KEY && !action.physical && action.key == movement::timeline::Key::A;
+            mask_w |= action.kind == movement::timeline::ActionKind::MASK && action.key == movement::timeline::Key::W;
+        }
+        require(physical_w && software_a && mask_w, "录制丢失物理、软件或屏蔽轨道");
+    }
+    require(!session.dispatch(Action::STOP_MOVEMENT_RECORDING, request, context),
+        "完成后仍接受重复停止录制");
+}
 }
 int main(int argc, char** argv) {
     WSADATA data{};
@@ -429,6 +524,8 @@ int main(int argc, char** argv) {
         test_source_lifecycle(root, true);
         test_enabled_edit_and_cancel(root);
         test_edit_while_running(root);
+        test_passive_recording(root, false);
+        test_passive_recording(root, true);
         std::cout << "身法会话测试通过（合成设备，未执行真实输出）\n";
         return 0;
     } catch (const std::exception& error) {
