@@ -16,6 +16,7 @@ struct OverlayActions {
     debug_session::Action debug_action = debug_session::Action::NONE;
     debug_session::Request debug_request;
     bool debug_plan_edited = false;
+    bool movement_draft_changed = false;
     std::string debug_prepared_id;
     bool debug_allow_physical_output = false;
     std::string debug_confirmation;

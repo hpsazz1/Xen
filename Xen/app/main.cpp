@@ -539,13 +539,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                 !snapshot.trigger.faulted && !snapshot.output_armed && !debug_workspace.snapshot()->cleanup_unknown;
             return context;
         };
+        if (actions.movement_draft_changed)
+            debug_workspace.update_movement_draft(actions.debug_request,make_debug_context());
         if (emergency_pressed || actions.training_stop_requested || actions.stop_requested) {
             if (emergency_pressed || actions.stop_requested) report_lifecycle.cancel_restart();
             debug_workspace.cancel();
             // 停止同时撤销文件处理后的准备意图，后台结果回迁不能恢复下一步。
             overlay.cancel_background();
         }
-        if (keyboard_routing.debug_test_pressed && !emergency_pressed && !actions.stop_requested &&
+        if (keyboard_routing.debug_test_pressed && actions.debug_action == debug_session::Action::NONE &&
+            !emergency_pressed && !actions.stop_requested &&
             !runtime_toggle_pressed && !actions.start_requested && !overlay.close_requested()) {
             if (report_lifecycle.stopping() || overlay.background_busy()) {
                 app_message = "后台停止或弹道任务未结束，本次测试快捷键忽略，不排队。";

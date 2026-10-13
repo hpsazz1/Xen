@@ -6,6 +6,7 @@
 #include "log/log.h"
 #include "recoil/recoil_debug_run.h"
 #include "movement/timeline.h"
+#include "debug_session/movement_library_internal.h"
 #include "source_context/source_context.h"
 #include <cstdlib>
 #include <atomic>
@@ -150,6 +151,7 @@ struct Session::Impl {
         std::uint64_t repeat_revision = 0;
     };
     std::optional<Prepared> prepared;
+    std::optional<Context> movement_binding;
     std::atomic<std::shared_ptr<const Prepared>> repeat_plan;
     std::atomic_uint64_t repeat_revision{0};
     void replace_hud(std::shared_ptr<CounterpulseHud> next = {}) {
@@ -215,7 +217,7 @@ struct Session::Impl {
                         s.state = State::CANCELED; s.prepared_id.clear(); s.message = "准备已取消，已生成文件仅留档";
                     }
                     if (canceled || s.state == State::CANCELED || s.state == State::FAILED || s.cleanup_unknown) {
-                        repeat_plan.store(nullptr); s.repeat_ready = false;
+                        repeat_plan.store(nullptr); s.repeat_ready = false; s.movement_test_enabled = false;
                         s.repeat_unavailable_reason = s.message;
                     }
                 } });
@@ -497,19 +499,49 @@ void Session::invalidate_repeat(const std::string& reason) noexcept {
     ++impl_->repeat_revision;
     impl_->repeat_plan.store(nullptr);
     try { impl_->update([&](Snapshot& s) {
-        s.repeat_ready = false;
+        s.repeat_ready = false; s.movement_test_enabled = false;
         s.repeat_unavailable_reason = reason.empty() ? "测试模板已失效，请重新准备" : reason;
     }); } catch (...) {}
 }
-bool Session::repeat(const Context& context) noexcept {
+bool Session::update_movement_draft(const Request& request, const Context& context) noexcept {
+    if (!snapshot()->movement_test_enabled || impl_->shutting_down || request.mode != Mode::MOVEMENT_TEST) return false;
+    try {
+        const auto& binding = impl_->movement_binding;
+        if (!binding || binding->device != context.device || !context.runtime_idle || !context.input_recording_idle ||
+            !context.cleanup_known || !context.config.mouse.allow_send_input ||
+            binding->config.keyboard.debug_test_virtual_keys != context.config.keyboard.debug_test_virtual_keys ||
+            binding->config.keyboard.emergency_virtual_keys != context.config.keyboard.emergency_virtual_keys) {
+            invalidate_repeat("身法测试运行环境已改变，请重新启用"); return false;
+        }
+        const auto revision = ++impl_->repeat_revision;
+        impl_->repeat_plan.store(nullptr);
+        // 先撤掉旧草稿；解析失败也不能执行上一次有效参数。
+        impl_->update([](Snapshot& s) { s.repeat_ready = false; s.repeat_unavailable_reason = "身法草稿无效，请修正参数"; });
+        const auto plan = request_plan(request);
+        Impl::Prepared work{request,context,plan,Json::object(),"movement-session-" + std::to_string(revision),{}};
+        work.repeat_revision = revision;
+        impl_->repeat_plan.store(std::make_shared<const Impl::Prepared>(std::move(work)));
+        impl_->update([&](Snapshot& s) {
+            if (s.movement_test_enabled) {
+                s.repeat_ready = true; s.repeat_unavailable_reason.clear();
+                if (!s.busy) s.message = "身法测试已启用，修改参数后可直接测试";
+            } else impl_->repeat_plan.store(nullptr);
+        });
+        return snapshot()->movement_test_enabled;
+    } catch (...) { return false; }
+}
+bool Session::repeat(const Context& context) noexcept { return run_repeat(context,true); }
+bool Session::run_repeat(const Context& context, bool keyboard_trigger) noexcept {
     try {
         const auto reject = [&](const char* message) {
             impl_->update([&](Snapshot& s) { s.message = message; }); return false;
         };
         if (impl_->shutting_down) return reject("应用正在关闭，快捷键测试未执行");
         if (busy()) return reject("已有调试任务正在执行，本次快捷键忽略，不排队");
-        if (!context.config.keyboard.debug_test_enabled) return reject("调试测试快捷键开关未启用");
+        if (keyboard_trigger && !context.config.keyboard.debug_test_enabled) return reject("调试测试快捷键开关未启用");
         const auto source = impl_->repeat_plan.load();
+        if (!keyboard_trigger && (!source || source->request.mode != Mode::MOVEMENT_TEST || !snapshot()->movement_test_enabled))
+            return reject("请先启用身法测试并修正当前参数");
         if (!source || source->repeat_revision != impl_->repeat_revision.load() || !physical_mode(source->request.mode)) {
             const auto current=snapshot();
             // 无许可重按不能覆盖上组失败；保留原始原因供用户决定如何重新准备。
@@ -535,12 +567,12 @@ bool Session::repeat(const Context& context) noexcept {
         auto work = *source;
         if(single_use_recoil_mode(work.request.mode))invalidate_repeat("本次标定或采集许可已使用，请完成本组后重新准备");
         impl_->prepared.reset();
-        return impl_->launch(State::RUNNING,true,[this,work = std::move(work)]() mutable {
+        return impl_->launch(State::RUNNING,true,[this,work = std::move(work),keyboard_trigger]() mutable {
             work.directory = new_directory(work.request.output_root);
             const auto parent_id = work.id;
             work.id = work.directory.filename().string();
             write_document(work.directory / "prepare.json",{{"schema_version",1},{"prepared_id",work.id},
-                {"repeat_of",parent_id},{"trigger","USER_HOTKEY"},{"code_identity",code_identity()},
+                {"repeat_of",parent_id},{"trigger",keyboard_trigger ? "USER_HOTKEY" : "USER_BUTTON"},{"code_identity",code_identity()},
                 {"plan",work.plan},{"sampling",work.sampling},{"physical_output",true}});
             write_document(work.directory / "plan.json",work.plan);
             write_document(work.directory / "sampling-settings.json",work.sampling);
@@ -574,6 +606,21 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
         if (action == Action::NONE) return false;
         if (impl_->shutting_down || busy()) return reject("已有任务执行或正在关闭，本次请求未执行");
         poll();
+        if (action == Action::ENABLE_MOVEMENT_TEST) {
+            if (request.mode != Mode::MOVEMENT_TEST) return reject("只有身法页面可以启用身法测试");
+            admit(context,request.mode);
+            if (snapshot()->cleanup_unknown || !context.config.mouse.allow_send_input)
+                return reject("设备清理未确认或设置中的物理输出未允许");
+            invalidate_repeat("已切换到身法测试");
+            impl_->prepared.reset(); impl_->movement_binding = context;
+            impl_->update([](Snapshot& s) { s.movement_test_enabled = true; });
+            update_movement_draft(request,context);
+            return true;
+        }
+        if (action == Action::RUN_MOVEMENT_TEST) {
+            if (!update_movement_draft(request,context)) return reject("请启用身法测试并修正当前草稿");
+            return run_repeat(context,false);
+        }
         if (action == Action::START) {
             if (!impl_->prepared || snapshot()->state != State::PREPARED || prepared_id != impl_->prepared->id)
                 return reject("准备身份已失效，请重新准备后启动");
@@ -592,11 +639,40 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
             });
         }
         if (snapshot()->cleanup_unknown && uses_device(request.mode)) return false;
-        impl_->prepared.reset();
-        invalidate_repeat("新任务正在准备；旧测试模板已失效");
+        const bool movement_document = request.mode == Mode::MOVEMENT_TEST &&
+            (action == Action::LIST_MOVEMENT_PLANS || action == Action::LOAD_PLAN ||
+             action == Action::SAVE_PLAN || action == Action::VALIDATE);
+        if (!movement_document) {
+            impl_->prepared.reset();
+            invalidate_repeat("新任务正在准备；旧测试模板已失效");
+        } else if (action == Action::LOAD_PLAN) {
+            // 载入期间不留旧参数兜底；页面接收载入草稿后更新下一次测试。
+            ++impl_->repeat_revision; impl_->repeat_plan.store(nullptr);
+            impl_->update([](Snapshot& s) { s.repeat_ready = false; s.repeat_unavailable_reason = "等待载入身法方案"; });
+        }
         const auto repeat_revision = impl_->repeat_revision.load();
         impl_->update([](Snapshot& s) { s.prepared_id.clear(); });
         return impl_->launch(State::WORKING,false,[this,action,request,context,repeat_revision] {
+            const auto refresh_movement_library = [&](const std::string& selected) {
+                const auto entries = detail::list_movement_plans(request.movement_library_root,request.output_root);
+                impl_->update([&](Snapshot& s) {
+                    s.movement_saved_plans.clear();
+                    for (const auto& entry : entries) s.movement_saved_plans.push_back({entry.path,entry.name});
+                    s.movement_selected_path = selected; ++s.movement_catalog_revision;
+                });
+            };
+            if (request.mode == Mode::MOVEMENT_TEST && action == Action::LIST_MOVEMENT_PLANS) {
+                refresh_movement_library(request.load_path);
+                impl_->update([](Snapshot& s) { s.state = State::COMPLETED; s.message = "已刷新身法方案列表"; });
+                return;
+            }
+            if (request.mode == Mode::MOVEMENT_TEST && action == Action::SAVE_PLAN) {
+                const auto plan = request_plan(request);
+                const auto path = detail::save_movement_plan(plan,request.load_path,request.movement_save_as,request.movement_library_root);
+                refresh_movement_library(path);
+                impl_->update([&](Snapshot& s) { s.state = State::COMPLETED; s.message = "身法方案已保存，可从下拉框重新选择"; });
+                return;
+            }
             if (action == Action::SAVE_WEAPON_TIMING) {
                 auto catalog = weapon::default_timing_catalog();
                 std::string error;
@@ -643,6 +719,10 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
                         request.mode == Mode::MOVEMENT_TEST ? Mode::MOVEMENT_TEST : Mode::COUNTERPULSE;
                         ++s.draft_plan_revision; }
                     s.state = State::COMPLETED; s.message = "文档已载入，请检查草稿并重新准备"; });
+                if (request.mode == Mode::MOVEMENT_TEST) {
+                    refresh_movement_library(request.load_path);
+                    impl_->update([](Snapshot& s) { s.message = "身法方案已载入，修改后可直接测试或保存"; });
+                }
                 return;
             }
             auto effective = request;

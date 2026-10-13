@@ -563,7 +563,7 @@ add_library(debug_runner STATIC Xen/auto_stop_probe/debug_runner.cpp
 target_include_directories(debug_runner PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(debug_runner PUBLIC config mouse capture source_context input_training nlohmann_json::nlohmann_json
     PRIVATE user32 gdi32)
-add_library(debug_session STATIC Xen/debug_session/debug_session.cpp Xen/recoil/recoil_debug_run.cpp
+add_library(debug_session STATIC Xen/debug_session/debug_session.cpp Xen/debug_session/movement_library_internal.cpp Xen/recoil/recoil_debug_run.cpp
     Xen/recoil_tuner/wall_capture_run.cpp)
 target_include_directories(debug_session PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(debug_session PUBLIC runtime weapon nlohmann_json::nlohmann_json
@@ -1543,6 +1543,10 @@ if(BUILD_TESTING)
 
     add_executable(movement_tests tests/movement_tests.cpp)
     add_executable(movement_timeline_tests tests/movement_timeline_tests.cpp)
+    add_executable(movement_library_tests tests/movement_library_tests.cpp Xen/debug_session/movement_library_internal.cpp)
+    target_link_libraries(movement_library_tests PRIVATE movement)
+    add_test(NAME movement_library_tests COMMAND movement_library_tests "${PROJECT_SOURCE_DIR}/temp/XEN-MOVEMENT-EDITOR-20261014-001/movement-library-fixtures")
+    xen_deploy_runtime_dlls(movement_library_tests)
     add_executable(movement_session_tests tests/movement_session_tests.cpp)
     target_link_libraries(movement_session_tests PRIVATE debug_session movement ws2_32)
     add_test(NAME movement_session_tests COMMAND movement_session_tests "${CMAKE_BINARY_DIR}/movement-session-fixtures")

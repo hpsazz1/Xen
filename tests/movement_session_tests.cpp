@@ -8,6 +8,7 @@
 #include "debug_session/debug_session.h"
 #include "movement/timeline.h"
 #include "source_context/source_context_internal.h"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -118,12 +119,12 @@ private:
 class RecordingDevice final : public FakeDevice {
 public:
     FocusFixture* revoke_on_down = nullptr;
-    int downs = 0, cleanups = 0;
+    std::atomic_int downs{0}, cleanups{0}, last_down_mask{0};
     bool poll_input(InputSnapshot& input) noexcept override {
         input = {}; input.status = InputMonitorStatus::READY; input.state_valid = true; return true;
     }
     KeyboardReceipt set_wasd_keyboard(std::uint8_t mask) noexcept override {
-        if (mask) { ++downs; if (revoke_on_down) revoke_on_down->foreground = false; }
+        if (mask) { last_down_mask = mask; ++downs; if (revoke_on_down) revoke_on_down->foreground = false; }
         KeyboardReceipt receipt; receipt.disposition = KeyboardDisposition::ACKNOWLEDGED; return receipt;
     }
     KeyboardReceipt cleanup_wasd_keyboard() noexcept override {
@@ -160,6 +161,7 @@ Request request_for(const std::filesystem::path& root) {
     request.mode = Mode::MOVEMENT_TEST;
     request.show_hud = false;
     request.output_root = utf8(root);
+    request.movement_library_root = utf8(root / "movement-library");
     request.plan_text = example_plan().dump();
     // 其他页的损坏草稿不应影响身法校验或准备。
     request.sampling_text = "不是采样JSON";
@@ -178,10 +180,13 @@ void test_documents(const std::filesystem::path& root) {
     require(session.snapshot()->plan == example_plan() && session.snapshot()->sampling.empty(),
         "校验丢失并行动作或混入采样参数");
     submit(session, Action::SAVE_PLAN, request, context, State::COMPLETED);
-    const auto directory = std::filesystem::u8path(session.snapshot()->report_directory);
-    require(read_json(directory / "plan.json") == example_plan(), "独立文件没有保存完整方案");
-    require(!read_json(directory / "prepare.json").at("physical_output").get<bool>(), "保存产生输出许可");
-    request.load_path = utf8(directory / "plan.json");
+    const auto saved = session.snapshot()->movement_selected_path;
+    require(!saved.empty() && read_json(std::filesystem::u8path(saved)) == example_plan(), "独立文件没有保存完整方案");
+    require(!session.snapshot()->movement_test_enabled && !session.snapshot()->repeat_ready, "保存产生输出许可");
+    const auto catalog = session.snapshot();
+    require(std::any_of(catalog->movement_saved_plans.begin(), catalog->movement_saved_plans.end(),
+        [&](const auto& item) { return item.path == saved; }), "保存后未刷新方案目录");
+    request.load_path = saved;
     submit(session, Action::LOAD_PLAN, request, context, State::COMPLETED);
     const auto imported = session.snapshot();
     require(imported->draft_plan == example_plan() && imported->draft_plan_mode == Mode::MOVEMENT_TEST &&
@@ -289,7 +294,8 @@ void test_source_lifecycle(const std::filesystem::path& root, bool revoke) {
     plan.actions = {{movement::timeline::ActionKind::KEY, movement::timeline::Key::W, 0, revoke ? 2000 : 300}};
     request.plan_text = movement::timeline::plan_json(plan).dump();
     Session session;
-    submit(session, Action::PREPARE, request, context, State::PREPARED);
+    require(session.dispatch(Action::ENABLE_MOVEMENT_TEST, request, context) && session.snapshot()->movement_test_enabled,
+        "源焦点生命周期启用失败");
     require(session.repeat(context), "源焦点生命周期快捷键启动失败");
     wait_idle(session);
     const auto result = session.snapshot();
@@ -302,9 +308,108 @@ void test_source_lifecycle(const std::filesystem::path& root, bool revoke) {
     require(device->downs == 1 && device->cleanups == 1 && device->touches == 0,
         "身法生命周期没有恰好按下与清理一次，或误触其他设备方法");
     if (revoke) {
-        require(!result->repeat_ready && !session.repeat(context), "失焦取消仍保留快捷键重复许可");
+        require(!result->movement_test_enabled && !result->repeat_ready && !session.repeat(context) &&
+            !session.update_movement_draft(request, context), "失焦取消仍保留会话或快捷键重复许可");
         require(device->downs == 1, "失焦后重复快捷键产生额外按下");
-    } else require(result->repeat_ready, "正常完成错误撤销冻结快捷键模板");
+    } else require(result->movement_test_enabled && result->repeat_ready, "正常完成错误撤销身法会话");
+}
+void test_edit_while_running(const std::filesystem::path& root) {
+    FocusFixture focus;
+    auto device = std::make_shared<RecordingDevice>();
+    auto context = context_for(device);
+    context.config.source_context = focus.config;
+    auto request = request_for(root / "edit-while-running");
+    movement::timeline::Plan plan;
+    plan.name = "运行中编辑"; plan.mask.enabled = false;
+    plan.actions = {{movement::timeline::ActionKind::KEY, movement::timeline::Key::W, 0, 1500}};
+    const auto original = movement::timeline::plan_json(plan);
+    request.plan_text = original.dump();
+    Session session;
+    require(session.dispatch(Action::ENABLE_MOVEMENT_TEST, request, context) &&
+        session.dispatch(Action::RUN_MOVEMENT_TEST, request, context), "运行中编辑测试未启动");
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (device->downs.load() == 0 && session.busy() && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+    require(device->downs == 1 && session.busy(), "未观察到长动作开始");
+    plan.actions[0].key = movement::timeline::Key::A;
+    plan.actions[0].duration_ms = 50;
+    request.plan_text = movement::timeline::plan_json(plan).dump();
+    require(session.update_movement_draft(request, context), "运行中无法更新下一次草稿");
+    require(!session.repeat(context) && !session.dispatch(Action::RUN_MOVEMENT_TEST, request, context),
+        "运行中接受了额外触发");
+    wait_idle(session);
+    auto result = session.snapshot();
+    require(result->state == State::COMPLETED && result->movement_test_enabled &&
+        read_json(std::filesystem::u8path(result->report_directory) / "plan.json") == original &&
+        device->downs == 1 && device->cleanups == 1 && device->last_down_mask == 1 && !session.busy(),
+        "当前执行被新草稿改变或繁忙触发进入队列");
+    require(session.repeat(context), "运行期间更新的草稿未供下一次使用");
+    wait_idle(session);
+    result = session.snapshot();
+    require(result->state == State::COMPLETED &&
+        read_json(std::filesystem::u8path(result->report_directory) / "plan.json") == movement::timeline::plan_json(plan) &&
+        device->downs == 2 && device->cleanups == 2 && device->last_down_mask == 2,
+        "下一次执行未采用新草稿");
+    require(!focus.failed && device->touches == 0, "运行中编辑测试误触设备操作或源fixture失败");
+}
+void test_enabled_edit_and_cancel(const std::filesystem::path& root) {
+    FocusFixture focus;
+    auto device = std::make_shared<RecordingDevice>();
+    auto context = context_for(device);
+    context.config.source_context = focus.config;
+    auto request = request_for(root / "enabled-edit");
+    movement::timeline::Plan plan;
+    plan.name = "连续编辑测试"; plan.mask.enabled = false;
+    plan.actions = {{movement::timeline::ActionKind::KEY, movement::timeline::Key::W, 0, 40}};
+    request.plan_text = movement::timeline::plan_json(plan).dump();
+    Session session;
+    require(!session.dispatch(Action::RUN_MOVEMENT_TEST, request, context) && device->downs == 0,
+        "未启用时直接测试仍产生按下");
+    require(session.dispatch(Action::ENABLE_MOVEMENT_TEST, request, context) &&
+        session.snapshot()->movement_test_enabled && session.snapshot()->repeat_ready,
+        "一次启用没有建立身法测试会话");
+    submit(session, Action::SAVE_PLAN, request, context, State::COMPLETED);
+    require(session.snapshot()->movement_test_enabled && session.snapshot()->repeat_ready,
+        "保存方案错误撤销已启用的会话");
+    require(session.dispatch(Action::RUN_MOVEMENT_TEST, request, context), "启用后按钮直测失败");
+    wait_idle(session);
+    require(session.snapshot()->state == State::COMPLETED && session.snapshot()->movement_test_enabled &&
+        device->downs == 1 && device->cleanups == 1, "完成后没有保留会话或清理次数错误");
+
+    plan.actions[0].key = movement::timeline::Key::A;
+    plan.actions[0].duration_ms = 75;
+    request.plan_text = movement::timeline::plan_json(plan).dump();
+    require(session.update_movement_draft(request, context) && session.repeat(context),
+        "改参后必须重新启用才能热键测试");
+    wait_idle(session);
+    const auto second = session.snapshot();
+    require(second->state == State::COMPLETED && second->movement_test_enabled &&
+        read_json(std::filesystem::u8path(second->report_directory) / "plan.json") == movement::timeline::plan_json(plan) &&
+        device->downs == 2 && device->cleanups == 2, "第二次测试未采用当前草稿或未清理");
+
+    request.plan_text = "无效草稿";
+    require(!session.update_movement_draft(request, context) && session.snapshot()->movement_test_enabled &&
+        !session.snapshot()->repeat_ready && !session.repeat(context) &&
+        !session.dispatch(Action::RUN_MOVEMENT_TEST, request, context) && device->downs == 2,
+        "无效草稿仍可执行上一版有效方案");
+    plan.actions[0].duration_ms = 55;
+    request.plan_text = movement::timeline::plan_json(plan).dump();
+    require(session.dispatch(Action::RUN_MOVEMENT_TEST, request, context), "修正草稿后要求重复启用");
+    wait_idle(session);
+    require(session.snapshot()->state == State::COMPLETED && device->downs == 3 && device->cleanups == 3,
+        "修正后的直接测试失败");
+    session.cancel();
+    require(!session.snapshot()->movement_test_enabled && !session.snapshot()->repeat_ready &&
+        !session.update_movement_draft(request, context) && !session.repeat(context) &&
+        !session.dispatch(Action::RUN_MOVEMENT_TEST, request, context) && device->downs == 3,
+        "取消后草稿更新或启动复活了输出许可");
+
+    require(session.dispatch(Action::ENABLE_MOVEMENT_TEST, request, context), "明确重新启用失败");
+    auto changed_context = context;
+    changed_context.config.keyboard.emergency_virtual_keys = {0x24};
+    require(!session.update_movement_draft(request, changed_context) && !session.snapshot()->movement_test_enabled &&
+        !session.repeat(context) && device->downs == 3, "急停键变化未撤销身法会话");
+    require(!focus.failed && device->touches == 0, "会话测试误触非方案设备操作或源fixture失败");
 }
 }
 int main(int argc, char** argv) {
@@ -322,6 +427,8 @@ int main(int argc, char** argv) {
         test_cancel_prepare(root);
         test_source_lifecycle(root, false);
         test_source_lifecycle(root, true);
+        test_enabled_edit_and_cancel(root);
+        test_edit_while_running(root);
         std::cout << "身法会话测试通过（合成设备，未执行真实输出）\n";
         return 0;
     } catch (const std::exception& error) {

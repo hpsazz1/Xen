@@ -3272,9 +3272,9 @@ struct Overlay::Impl {
             ImGui::EndTable();
         }
         ImGui::EndDisabled();
-        ImGui::TextWrapped("停止运行后准备测试，再点击启动或按测试键；每次执行一组。");
+        ImGui::TextWrapped("停止运行后测试，每次执行一组；身法编排启用一次后，改参可直接测试。");
         ImGui::TextDisabled("准备与重复测试说明");
-        show_help_tooltip("标定与采集新弹道每组都需重新准备；已有弹道验证、急停和射击节奏可按模板重复，无自动循环。离开本页保留模板；编辑实验、切换类型或设备、启动 Runtime 或急停后需重新准备。生产组合效果在辅助页配置后单独验收。");
+        show_help_tooltip("身法编排启用后使用最新有效草稿，改参、保存和载入无需重新启用。标定与采集新弹道每组都需重新准备；已有弹道验证、急停和射击节奏可按模板重复，编辑后需重新准备。切换设备、启动 Runtime 或急停会撤销测试许可，无自动循环。生产组合效果在辅助页配置后单独验收。");
         if (!hotkey_capture_message.empty()) ImGui::TextWrapped("%s",hotkey_capture_message.c_str());
         if (!ImGui::BeginTabBar("debug_tabs")) return;
         if (ImGui::BeginTabItem("身法编排")) {

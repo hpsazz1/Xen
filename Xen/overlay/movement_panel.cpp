@@ -71,34 +71,41 @@ void timeline(const Plan& plan) {
 struct MovementPanel::Impl {
     Plan plan;
     Request request;
-    std::string error, prepared_id;
-    bool edited = true, allow = false;
-    std::uint64_t seen_draft = 0, prepare_generation = 0, bound_generation = 0;
+    std::string error;
+    bool initialized = false, catalog_requested = false;
+    std::uint64_t seen_draft = 0, seen_catalog = 0;
 
     Impl() {
         request.mode = Mode::MOVEMENT_TEST;
         request.output_root = "cache/debug";
         plan.actions.push_back({ActionKind::KEY, Key::SPACE, 0, 40, 0});
     }
-    void changed(OverlayActions& actions) {
-        edited = true; allow = false; prepared_id.clear();
-        actions.debug_plan_edited = true;
+    bool update_request() {
+        request.plan_text.clear();
+        if (!movement::timeline::validate_plan(plan, error)) return false;
+        request.plan_text = movement::timeline::plan_json(plan).dump(2);
+        error.clear();
+        return true;
     }
-    void send(Action action, OverlayActions& actions, const Snapshot* snapshot) {
-        if (action != Action::CANCEL && action != Action::LOAD_PLAN) {
-            if (!movement::timeline::validate_plan(plan, error)) return;
-            request.plan_text = movement::timeline::plan_json(plan).dump(2);
-        }
+    void changed(OverlayActions& actions) {
+        update_request();
+        actions.movement_draft_changed = true;
+        actions.debug_request = request;
+    }
+    void send(Action action, OverlayActions& actions, bool save_as = false) {
+        if (action != Action::CANCEL && action != Action::LOAD_PLAN && action != Action::LIST_MOVEMENT_PLANS &&
+            !update_request()) return;
+        request.movement_save_as = save_as;
         actions.debug_action = action;
         actions.debug_request = request;
-        if (action == Action::PREPARE) {
-            edited = false; allow = false; prepared_id.clear();
-            prepare_generation = snapshot ? snapshot->generation : 0;
-            actions.debug_plan_edited = true;
-        }
     }
     void sync(const Snapshot* snapshot, OverlayActions& actions) {
-        if (!snapshot || snapshot->busy) return;
+        if (!initialized) { initialized = true; changed(actions); }
+        if (!snapshot) return;
+        if (snapshot->movement_catalog_revision != seen_catalog) {
+            seen_catalog = snapshot->movement_catalog_revision;
+            request.load_path = snapshot->movement_selected_path;
+        }
         if (snapshot->draft_plan_revision != seen_draft && snapshot->draft_plan_mode == Mode::MOVEMENT_TEST) {
             seen_draft = snapshot->draft_plan_revision;
             Plan loaded;
@@ -106,12 +113,36 @@ struct MovementPanel::Impl {
                 plan = std::move(loaded); changed(actions);
             }
         }
-        if (!edited && snapshot->state == State::PREPARED && snapshot->generation == prepare_generation + 1 &&
-            snapshot->plan.is_object() && snapshot->plan.contains("actions") &&
-            snapshot->plan == Json::parse(request.plan_text) &&
-            snapshot->generation != bound_generation) {
-            prepared_id = snapshot->prepared_id; bound_generation = snapshot->generation; allow = false;
+    }
+    void library(const Snapshot* snapshot, OverlayActions& actions, bool busy) {
+        const char* selected = "未保存的新方案";
+        if (snapshot) {
+            for (const auto& item : snapshot->movement_saved_plans)
+                if (item.path == request.load_path) { selected = item.name.c_str(); break; }
         }
+        ImGui::BeginDisabled(busy);
+        ImGui::SetNextItemWidth(std::max(100.f, ImGui::GetContentRegionAvail().x * .7f));
+        if (ImGui::BeginCombo("已保存方案", selected)) {
+            if (snapshot) {
+                for (const auto& item : snapshot->movement_saved_plans) {
+                    ImGui::PushID(item.path.c_str());
+                    if (ImGui::Selectable(item.name.c_str(), item.path == request.load_path)) {
+                        send(Action::LOAD_PLAN, actions);
+                        // 只提交目标，成功载入后再由目录快照更新当前保存路径。
+                        actions.debug_request.load_path = item.path;
+                    }
+                    tip(item.path.c_str());
+                    ImGui::PopID();
+                }
+                if (snapshot->movement_saved_plans.empty()) ImGui::TextDisabled("暂无方案，编辑后点击保存方案。");
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::EndDisabled();
+        tip("选择后自动载入，可继续修改并保存；同名方案可通过悬浮路径区分。运行期间不切换方案。");
+        ImGui::SameLine();
+        if (button("刷新方案", "后台刷新已保存方案列表，也兼容读取此前调试目录保存的身法方案。", !busy))
+            send(Action::LIST_MOVEMENT_PLANS, actions);
     }
     void copy_preset(const movement::Config& config, bool spin, bool right, OverlayActions& actions) {
         Plan copy;
@@ -130,7 +161,7 @@ struct MovementPanel::Impl {
             if (config.large_ctrl_enabled)
                 copy.actions.push_back({ActionKind::KEY, Key::CTRL, config.large_ctrl_delay_ms, config.large_ctrl_hold_ms, 0});
         }
-        plan = std::move(copy); error.clear(); changed(actions);
+        plan = std::move(copy); request.load_path.clear(); error.clear(); changed(actions);
     }
     void editor(OverlayActions& actions) {
         bool change = text_field("方案名称", plan.name, "独立方案文件的名称，不修改原旋转跳或大跳配置。");
@@ -219,7 +250,8 @@ void MovementPanel::render(const AppConfig& config, const Snapshot* snapshot, Ov
         auto& ui = *impl_;
         ui.sync(snapshot, actions);
         const bool busy = snapshot && snapshot->busy;
-        ImGui::TextWrapped("手动编排并行动作，保存为独立方案；每次执行前请对齐站位与朝向。修改只影响下次准备。");
+        ImGui::TextWrapped("手动编排并行动作，保存为独立方案；每次执行前请对齐站位与朝向。修改只影响下次测试，当前执行使用启动时的参数。");
+        ImGui::BeginDisabled(busy && snapshot->state == debug_session::State::WORKING);
         if (ImGui::CollapsingHeader("原旋转跳与大跳预设")) {
             const auto& move = config.movement;
             ImGui::TextWrapped("原辅助页继续保留物理跳跃触发、A/D 选侧和固定 A→D 大跳逻辑。下面只复制参数为主动发送空格的自定义脚本。");
@@ -231,33 +263,33 @@ void MovementPanel::render(const AppConfig& config, const Snapshot* snapshot, Ov
             if (button("复制大跳", "复制当前 A→D 时长、转角及可选定时蹲；不修改原预设。")) ui.copy_preset(move, false, false, actions);
         }
         ui.editor(actions);
+        ImGui::EndDisabled();
         if (!ui.error.empty()) ImGui::TextWrapped("方案错误：%s", ui.error.c_str());
         ImGui::Separator();
-        if (text_field("方案文件路径", ui.request.load_path, "输入独立 JSON 文件路径，再点击载入；文件读取在后台完成。")) ui.changed(actions);
-        if (button("载入方案", "后台载入独立方案文件并替换当前草稿。", !busy && !ui.request.load_path.empty())) ui.send(Action::LOAD_PLAN, actions, snapshot);
-        if (text_field("保存及结果根目录", ui.request.output_root, "保存新计划和测试报告的根目录；后台创建独立目录，不覆盖旧方案。")) ui.changed(actions);
-        if (button("校验方案", "仅校验时间轴及参数，不输出设备。", !busy)) ui.send(Action::VALIDATE, actions, snapshot);
+        ui.library(snapshot, actions, busy);
+        if (button("校验方案", "仅校验时间轴及参数，不输出设备。", !busy)) ui.send(Action::VALIDATE, actions);
         ImGui::SameLine();
-        if (button("保存新方案", "后台保存当前独立方案，保留旧文件。", !busy)) ui.send(Action::SAVE_PLAN, actions, snapshot);
+        if (button("保存方案", "保存当前修改；已选方案直接更新，新方案自动保存到方案库，无需填写路径。", !busy)) ui.send(Action::SAVE_PLAN, actions);
         ImGui::SameLine();
-        if (button("准备测试", "冻结当前方案与共享灵敏度；编辑后重新准备。此按钮不发送输入。", !busy)) ui.send(Action::PREPARE, actions, snapshot);
+        if (button("另存新方案", "将当前草稿保存为新文件，保留原方案。", !busy)) ui.send(Action::SAVE_PLAN, actions, true);
         ImGui::Text("共享灵敏度 %.3f；m_yaw %.6f", config.movement.sensitivity, config.movement.yaw_degrees_per_count);
         tip("换算参数在辅助 / 身法修改；脚本目标角度不等于游戏已实际完成的转角。");
-        const bool ready = snapshot && !busy && snapshot->state == State::PREPARED && !ui.edited &&
-            !ui.prepared_id.empty() && ui.prepared_id == snapshot->prepared_id && snapshot->generation == ui.bound_generation;
-        ImGui::BeginDisabled(!ready);
-        ImGui::Checkbox("允许本次真实物理输出", &ui.allow);
-        ImGui::EndDisabled();
-        tip("授权当前已准备方案；修改或重新准备后清除。启动需设备与输入状态正常，物理 WASD 可以持续按住。");
-        if (button("启动本次测试", "执行一次已准备方案；忙碌不排队。也可使用全局调试测试键，End 急停。", ready && ui.allow)) {
-            ui.send(Action::START, actions, snapshot);
-            actions.debug_prepared_id = ui.prepared_id;
-            actions.debug_allow_physical_output = ui.allow;
-            actions.debug_confirmation = physical_confirmation();
-            ui.edited = true; ui.allow = false;
+        const bool enabled = snapshot && snapshot->movement_test_enabled;
+        if (!enabled) {
+            if (button("启用身法测试", "允许本页后续测试输出；启用本身不执行动作。改参、保存和载入后无需重新启用，End 或关闭测试会撤销。", !busy))
+                ui.send(Action::ENABLE_MOVEMENT_TEST, actions);
+        } else {
+            ImGui::TextUnformatted("身法测试已启用：修改后可直接测试或使用全局测试键。");
+            if (button("测试一次", "按最新有效草稿执行一次；运行期间改参用于下一次，忙碌不排队，End 急停。", !busy))
+                ui.send(Action::RUN_MOVEMENT_TEST, actions);
         }
         ImGui::SameLine();
-        if (button("停止测试", "请求取消并释放脚本输入、恢复物理按键；清理未确认时保留故障。", busy)) ui.send(Action::CANCEL, actions, snapshot);
+        if (button("关闭身法测试", "取消当前测试并撤销后续输出授权，释放脚本输入、恢复物理按键；清理未确认时保留故障。", busy || enabled))
+            ui.send(Action::CANCEL, actions);
+        if (!ui.catalog_requested && !busy && actions.debug_action == Action::NONE) {
+            ui.catalog_requested = true;
+            ui.send(Action::LIST_MOVEMENT_PLANS, actions);
+        }
         if (snapshot && !snapshot->message.empty()) ImGui::TextWrapped("任务反馈：%s", snapshot->message.c_str());
         ImGui::TextWrapped("全局测试键与执行结果沿用调试模块。计时完成只证明命令执行，实际身法效果需本地游戏核对。");
     } catch (...) {
