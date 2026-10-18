@@ -7,7 +7,7 @@
 
 namespace debug_session::detail {
 struct SavedMovementPlan { std::string path, name; };
-// 只扫描方案库与旧调试目录的一层；坏文件不影响其他方案。路径统一使用 UTF-8。
+// 只扫描显式保存的方案库；保留旧参数兼容调用，不枚举调试快照。路径使用 UTF-8。
 std::vector<SavedMovementPlan> list_movement_plans(
     const std::string& library_root = "cache/movement/plans",
     const std::string& legacy_root = "cache/debug");

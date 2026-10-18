@@ -52,23 +52,16 @@ void append_plan(std::vector<SavedMovementPlan>& result, const fs::path& path, c
     } catch (const std::exception&) { /* 单个坏文件不阻断方案下拉列表。 */ }
 }
 }
-std::vector<SavedMovementPlan> list_movement_plans(const std::string& library_root, const std::string& legacy_root) {
+std::vector<SavedMovementPlan> list_movement_plans(const std::string& library_root, const std::string&) {
     std::vector<SavedMovementPlan> result;
-    const auto library = fs::u8path(library_root), legacy = fs::u8path(legacy_root);
+    const auto library = fs::u8path(library_root);
     if (fs::exists(library)) {
         for (const auto& entry : fs::directory_iterator(library)) {
             if (entry.path().extension() == ".json")
                 append_plan(result, entry.path(), "方案库/" + utf8(entry.path().filename()));
         }
     }
-    if (fs::exists(legacy)) {
-        for (const auto& entry : fs::directory_iterator(legacy)) {
-            std::error_code error;
-            if (entry.is_symlink(error) || !entry.is_directory(error) ||
-                !utf8(entry.path().filename()).starts_with("debug-")) continue;
-            append_plan(result, entry.path() / "plan.json", "历史/" + utf8(entry.path().filename()));
-        }
-    }
+    // 测试/录制目录只作证据，不能自动变成用户显式保存的方案。
     std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) { return a.name < b.name; });
     return result;
 }

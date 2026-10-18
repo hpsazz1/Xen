@@ -146,7 +146,7 @@ struct MovementPanel::Impl {
         ImGui::EndDisabled();
         tip("选择后自动载入，可继续修改并保存；同名方案可通过悬浮路径区分。运行期间不切换方案。");
         ImGui::SameLine();
-        if (button("刷新方案", "后台刷新已保存方案列表，也兼容读取此前调试目录保存的身法方案。", !busy))
+        if (button("刷新方案", "只列出主动保存的方案；测试记录和录制草稿不会加入列表。", !busy))
             send(Action::LIST_MOVEMENT_PLANS, actions);
     }
     void copy_preset(const movement::Config& config, bool spin, bool right, OverlayActions& actions) {
@@ -166,7 +166,7 @@ struct MovementPanel::Impl {
             if (config.large_ctrl_enabled)
                 copy.actions.push_back({ActionKind::KEY, Key::CTRL, config.large_ctrl_delay_ms, config.large_ctrl_hold_ms, 0});
         }
-        plan = std::move(copy); request.load_path.clear(); error.clear(); changed(actions);
+        plan = std::move(copy); error.clear(); changed(actions);
     }
     void editor(OverlayActions& actions, const movement::Config& config) {
         bool change = text_field("方案名称", plan.name, "独立方案文件的名称，不修改原旋转跳或大跳配置。");
@@ -302,7 +302,7 @@ void MovementPanel::render(const AppConfig& config, const Snapshot* snapshot, Ov
             if (button("开始录制", "被动录制，不启动 Runtime，不要求当前草稿有效。录制结束后可继续编辑生成的方案。", !busy))
                 ui.send(Action::START_MOVEMENT_RECORDING, actions);
         } else {
-            if (button("停止录制并生成方案", "停止采集并保存记录；根据鼠标解释选项生成编辑稿。不会停止原 Runtime。"))
+            if (button("停止录制并生成方案", "停止采集并保留原始记录；生成当前草稿，点击保存才写入方案文件。不会停止原 Runtime。"))
                 ui.send(Action::STOP_MOVEMENT_RECORDING, actions);
             ImGui::SameLine(); ImGui::Text("已录制 %llu 个事件", static_cast<unsigned long long>(snapshot->movement_record_events));
         }

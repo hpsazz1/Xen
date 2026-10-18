@@ -58,7 +58,7 @@ void run(const fs::path& root) {
     write(fs::u8path(library) / "bad.json", "bad json");
     auto invalid = document; invalid["actions"][0]["key"] = "ESC";
     write(fs::u8path(library) / "invalid.json", invalid.dump());
-    require(list_movement_plans(library, legacy).size() == 3, "坏文件或扫描层级隔离失败");
+    require(list_movement_plans(library, legacy).size() == 2, "调试历史被错误列为已保存方案");
     auto edited = document; edited["name"] = "已修改";
     const auto imported = save_movement_plan(edited, utf8(old_path), false, library);
     require(imported != utf8(old_path) && read(utf8(old_path)) == document && read(imported) == edited,

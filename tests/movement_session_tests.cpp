@@ -207,11 +207,20 @@ void submit(Session& session, Action action, const Request& request, const Conte
     wait_idle(session);
     require(session.snapshot()->state == expected, "会话结果状态不符合预期");
 }
+std::size_t file_count(const std::filesystem::path& root) {
+    if (!std::filesystem::exists(root)) return 0;
+    std::size_t count = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(root))
+        if (entry.is_regular_file()) ++count;
+    return count;
+}
 void test_documents(const std::filesystem::path& root) {
     Session session;
     auto request = request_for(root / "documents");
     const auto context = context_for();
+    const auto files_before_validate = file_count(std::filesystem::u8path(request.output_root));
     submit(session, Action::VALIDATE, request, context, State::COMPLETED);
+    require(file_count(std::filesystem::u8path(request.output_root)) == files_before_validate, "校验创建了持久化文件");
     require(session.snapshot()->plan == example_plan() && session.snapshot()->sampling.empty(),
         "校验丢失并行动作或混入采样参数");
     submit(session, Action::SAVE_PLAN, request, context, State::COMPLETED);
@@ -222,6 +231,19 @@ void test_documents(const std::filesystem::path& root) {
     require(std::any_of(catalog->movement_saved_plans.begin(), catalog->movement_saved_plans.end(),
         [&](const auto& item) { return item.path == saved; }), "保存后未刷新方案目录");
     request.load_path = saved;
+    const auto saved_count = file_count(std::filesystem::u8path(request.movement_library_root));
+    auto edited = example_plan(); edited["name"] = "同一方案改参";
+    request.plan_text = edited.dump();
+    submit(session, Action::SAVE_PLAN, request, context, State::COMPLETED);
+    require(session.snapshot()->movement_selected_path == saved && read_json(std::filesystem::u8path(saved)) == edited &&
+        file_count(std::filesystem::u8path(request.movement_library_root)) == saved_count, "保存当前方案新建了文件");
+    request.movement_save_as = true;
+    submit(session, Action::SAVE_PLAN, request, context, State::COMPLETED);
+    require(session.snapshot()->movement_selected_path != saved &&
+        file_count(std::filesystem::u8path(request.movement_library_root)) == saved_count + 1, "另存未生成独立方案");
+    request.movement_save_as = false;
+    request.plan_text = example_plan().dump();
+    submit(session, Action::SAVE_PLAN, request, context, State::COMPLETED);
     submit(session, Action::LOAD_PLAN, request, context, State::COMPLETED);
     const auto imported = session.snapshot();
     require(imported->draft_plan == example_plan() && imported->draft_plan_mode == Mode::MOVEMENT_TEST &&
@@ -243,6 +265,9 @@ void test_documents(const std::filesystem::path& root) {
     submit(session, Action::PREPARE, request, context, State::PREPARED);
     require(!session.snapshot()->repeat_ready && !session.snapshot()->prepared_id.empty(),
         "无设备准备应保留审阅身份但不开放快捷键");
+    const auto prepared_directory = std::filesystem::u8path(session.snapshot()->report_directory);
+    require(std::filesystem::exists(prepared_directory / "movement-run-plan.json") &&
+        !std::filesystem::exists(prepared_directory / "plan.json"), "准备报告被保存为可载入方案");
     session.cancel();
     require(session.snapshot()->state == State::CANCELED && session.snapshot()->prepared_id.empty(),
         "取消未撤销准备身份");
@@ -298,7 +323,7 @@ void test_frozen_and_missing_source(const std::filesystem::path& root) {
     wait_idle(session);
     const auto repeated = session.snapshot();
     const auto directory = std::filesystem::u8path(repeated->report_directory);
-    require(read_json(directory / "plan.json") == example_plan() &&
+    require(read_json(directory / "movement-run-plan.json") == example_plan() &&
         read_json(directory / "prepare.json").at("repeat_of") == repeat_parent,
         "快捷键没有复制冻结方案与来源身份");
     require(repeated->state == State::FAILED && !repeated->cleanup_unknown,
@@ -375,14 +400,14 @@ void test_edit_while_running(const std::filesystem::path& root) {
     wait_idle(session);
     auto result = session.snapshot();
     require(result->state == State::COMPLETED && result->movement_test_enabled &&
-        read_json(std::filesystem::u8path(result->report_directory) / "plan.json") == original &&
+        read_json(std::filesystem::u8path(result->report_directory) / "movement-run-plan.json") == original &&
         device->downs == 1 && device->cleanups == 1 && device->last_down_mask == 1 && !session.busy(),
         "当前执行被新草稿改变或繁忙触发进入队列");
     require(session.repeat(context), "运行期间更新的草稿未供下一次使用");
     wait_idle(session);
     result = session.snapshot();
     require(result->state == State::COMPLETED &&
-        read_json(std::filesystem::u8path(result->report_directory) / "plan.json") == movement::timeline::plan_json(plan) &&
+        read_json(std::filesystem::u8path(result->report_directory) / "movement-run-plan.json") == movement::timeline::plan_json(plan) &&
         device->downs == 2 && device->cleanups == 2 && device->last_down_mask == 2,
         "下一次执行未采用新草稿");
     require(!focus.failed && device->touches == 0, "运行中编辑测试误触设备操作或源fixture失败");
@@ -406,6 +431,10 @@ void test_enabled_edit_and_cancel(const std::filesystem::path& root) {
     submit(session, Action::SAVE_PLAN, request, context, State::COMPLETED);
     require(session.snapshot()->movement_test_enabled && session.snapshot()->repeat_ready,
         "保存方案错误撤销已启用的会话");
+    request.load_path = session.snapshot()->movement_selected_path;
+    const auto saved_path = request.load_path;
+    const auto saved_plan = read_json(std::filesystem::u8path(saved_path));
+    const auto library_count = file_count(std::filesystem::u8path(request.movement_library_root));
     require(session.dispatch(Action::RUN_MOVEMENT_TEST, request, context), "启用后按钮直测失败");
     wait_idle(session);
     require(session.snapshot()->state == State::COMPLETED && session.snapshot()->movement_test_enabled &&
@@ -419,9 +448,14 @@ void test_enabled_edit_and_cancel(const std::filesystem::path& root) {
     wait_idle(session);
     const auto second = session.snapshot();
     require(second->state == State::COMPLETED && second->movement_test_enabled &&
-        read_json(std::filesystem::u8path(second->report_directory) / "plan.json") == movement::timeline::plan_json(plan) &&
+        read_json(std::filesystem::u8path(second->report_directory) / "movement-run-plan.json") == movement::timeline::plan_json(plan) &&
         device->downs == 2 && device->cleanups == 2, "第二次测试未采用当前草稿或未清理");
 
+    require(file_count(std::filesystem::u8path(request.movement_library_root)) == library_count &&
+        read_json(std::filesystem::u8path(saved_path)) == saved_plan &&
+        session.snapshot()->movement_selected_path == saved_path &&
+        !std::filesystem::exists(std::filesystem::u8path(second->report_directory) / "plan.json"),
+        "编辑或测试持久化了草稿或改变了当前方案");
     request.plan_text = "无效草稿";
     require(!session.update_movement_draft(request, context) && session.snapshot()->movement_test_enabled &&
         !session.snapshot()->repeat_ready && !session.repeat(context) &&
@@ -453,6 +487,11 @@ void test_passive_recording(const std::filesystem::path& root, bool incomplete) 
     auto request = request_for(root / (incomplete ? "record-incomplete" : "record-complete"));
     request.movement_record_motion_mode = 1;
     Session session;
+    submit(session, Action::SAVE_PLAN, request, context, State::COMPLETED);
+    const auto selected_path = session.snapshot()->movement_selected_path;
+    const auto original_plan = read_json(std::filesystem::u8path(selected_path));
+    const auto saved_count = file_count(std::filesystem::u8path(request.movement_library_root));
+    const auto catalog_revision = session.snapshot()->movement_catalog_revision;
     require(session.dispatch(Action::ENABLE_MOVEMENT_TEST, request, context) &&
         session.snapshot()->movement_test_enabled, "录制前启用fixture失败");
     // 正在运行原身法时亦可被动录制；不需要启用软件物理输出或有效编辑草稿。
@@ -484,15 +523,16 @@ void test_passive_recording(const std::filesystem::path& root, bool incomplete) 
     const auto trace = read_json(std::filesystem::u8path(result->movement_recording_path));
     require(trace.at("gap").get<bool>() == incomplete && !trace.at("game_validation_passed").get<bool>() &&
         !trace.at("events").empty(), "原始轨迹缺失或误报真实验收");
+    require(result->movement_selected_path == selected_path && result->movement_catalog_revision == catalog_revision &&
+        file_count(std::filesystem::u8path(request.movement_library_root)) == saved_count &&
+        read_json(std::filesystem::u8path(selected_path)) == original_plan &&
+        !std::filesystem::exists(std::filesystem::u8path(result->report_directory) / "plan.json"),
+        "录制自动保存方案、改变选中路径或覆盖原方案");
     if (incomplete) {
-        require(result->draft_plan_revision == 0 && result->movement_selected_path.empty() &&
-            result->movement_saved_plans.empty(), "不完整轨迹发布了可执行方案");
+        require(result->draft_plan_revision == 0, "不完整轨迹发布了可执行方案");
     } else {
         require(result->draft_plan_revision == 1 && result->draft_plan_mode == Mode::MOVEMENT_TEST &&
-            !result->movement_selected_path.empty() && !result->movement_saved_plans.empty(),
-            "停止录制未将方案保存入库并发布编辑草稿");
-        require(read_json(std::filesystem::u8path(result->movement_selected_path)) == result->draft_plan,
-            "方案库内容与录制生成草稿不一致");
+            !result->draft_plan.empty(), "停止录制未发布可修改草稿");
         movement::timeline::Plan plan; std::string error;
         require(movement::timeline::parse_plan(result->draft_plan, plan, error), "录制方案不可解析");
         bool physical_w = false, software_a = false, mask_w = false;

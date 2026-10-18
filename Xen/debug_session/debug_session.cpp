@@ -275,25 +275,17 @@ struct Session::Impl {
         const auto path=directory/"movement-recording.json";
         write_document(path,trace);
         auto derived=movement::recording::derive(events,begin,end,gap,request.movement_record_motion_mode);
-        std::string saved;
         Json plan;
-        if(derived.complete) {
-            plan=movement::timeline::plan_json(derived.plan);
-            write_document(directory/"plan.json",plan);
-            saved=detail::save_movement_plan(plan,{},true,request.movement_library_root);
-        }
-        const auto catalog=detail::list_movement_plans(request.movement_library_root,request.output_root);
+        if(derived.complete) plan=movement::timeline::plan_json(derived.plan);
+        // 原始记录保留为证据；派生方案只替换当前草稿，显式保存才写入方案库。
         update([&](Snapshot& s) {
             const auto utf8=path.u8string();
             s.movement_recording_path.assign(reinterpret_cast<const char*>(utf8.data()),utf8.size());
             s.movement_record_events=events.size();
-            s.movement_saved_plans.clear();
-            for(const auto& entry:catalog)s.movement_saved_plans.push_back({entry.path,entry.name});
-            ++s.movement_catalog_revision;
             s.state=canceled?State::CANCELED:State::COMPLETED;
-            s.message=derived.complete?"录制已保存到方案库并载入编辑器；鼠标按所选解释派生，请核对后测试":derived.error;
+            s.message=derived.complete?"录制已生成当前草稿，尚未保存方案；鼠标按所选解释派生，请核对后测试":derived.error;
             if(derived.complete) {
-                s.movement_selected_path=saved; s.draft_plan=plan;
+                s.draft_plan=plan;
                 s.draft_plan_mode=Mode::MOVEMENT_TEST; ++s.draft_plan_revision;
             }
         });
@@ -644,7 +636,7 @@ bool Session::run_repeat(const Context& context, bool keyboard_trigger) noexcept
             write_document(work.directory / "prepare.json",{{"schema_version",1},{"prepared_id",work.id},
                 {"repeat_of",parent_id},{"trigger",keyboard_trigger ? "USER_HOTKEY" : "USER_BUTTON"},{"code_identity",code_identity()},
                 {"plan",work.plan},{"sampling",work.sampling},{"physical_output",true}});
-            write_document(work.directory / "plan.json",work.plan);
+            write_document(work.directory / (work.request.mode == Mode::MOVEMENT_TEST ? "movement-run-plan.json" : "plan.json"),work.plan);
             write_document(work.directory / "sampling-settings.json",work.sampling);
             impl_->update([&](Snapshot& s) { s.prepared_id = work.id; s.report_directory = work.directory.string(); });
             impl_->run(work,true,physical_confirmation());
@@ -860,7 +852,7 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
                 {"code_identity",code_identity()},
                 {"parent_run",effective.input_path},{"physical_output",false},{"state","PREPARED_NOT_LAUNCHED"}};
             write_document(directory / "prepare.json",task);
-            if (!plan.empty()) write_document(directory / "plan.json",plan);
+            if (!plan.empty()) write_document(directory / (effective.mode == Mode::MOVEMENT_TEST ? "movement-run-plan.json" : "plan.json"),plan);
             write_document(directory / "sampling-settings.json",sampling);
             impl_->update([&](Snapshot& s) { s.report_directory = directory.string(); });
             if (action == Action::SAVE_PLAN) {
