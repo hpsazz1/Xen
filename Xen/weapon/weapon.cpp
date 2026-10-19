@@ -136,7 +136,8 @@ bool http_body_length(std::string_view header, std::size_t limit, std::size_t& l
     } catch (...) { return false; }
 }
 
-WeaponSnapshot parse_payload(std::string_view body, const GsiConfig& config, std::int64_t local_utc_ms) noexcept {
+WeaponSnapshot parse_payload(std::string_view body, const GsiConfig& config, std::int64_t local_utc_ms, MapSnapshot* map) noexcept {
+    if (map) *map = {};
     WeaponSnapshot result;
     result.status = Status::INVALID_PAYLOAD;
     try {
@@ -174,6 +175,21 @@ WeaponSnapshot parse_payload(std::string_view body, const GsiConfig& config, std
         const auto difference = source_ms > local_utc_ms ? source_ms - local_utc_ms : local_utc_ms - source_ms;
         if (difference > config.max_clock_skew_ms) { result.status = Status::CLOCK_REJECTED; return result; }
         result.provider_timestamp_seconds = static_cast<std::uint64_t>(timestamp);
+        // 在武器死亡/非 playing 分支之前读取地图，二者不共享有效性。
+        if (map) {
+            map->provider_timestamp_seconds = result.provider_timestamp_seconds;
+            map->status = Status::UNAVAILABLE;
+            if (json.contains("map") && json["map"].is_object() &&
+                json["map"].contains("name") && json["map"]["name"].is_string()) {
+                const auto& name = json["map"]["name"].get_ref<const std::string&>();
+                if (!name.empty() && name.size() <= 256 && std::none_of(name.begin(), name.end(),
+                        [](unsigned char c) { return c < 32 || c == 127; })) {
+                    map->map_name = name;
+                    map->valid = true;
+                    map->status = Status::READY;
+                }
+            }
+        }
         result.player_playing = player.contains("activity") && player["activity"].is_string() && player["activity"] == "playing";
         if (player.contains("state") && player["state"].is_object()) result.player_health = integer(player["state"], "health");
         if (!result.player_playing || !result.player_health || *result.player_health == 0) {
@@ -232,6 +248,8 @@ WeaponSnapshot parse_payload(std::string_view body, const GsiConfig& config, std
 }
 
 void GsiState::reset() noexcept {
+    invalidate_map(Status::UNAVAILABLE);
+    seen_maps_.clear();
     current_ = {}; timestamp_ = 0; last_now_ = {}; timestamp_deadline_ = {}; seen_states_.clear();
     if (epoch_ != std::numeric_limits<std::uint64_t>::max()) ++epoch_;
     if (recoil_safety_epoch_ != std::numeric_limits<std::uint64_t>::max()) ++recoil_safety_epoch_;
@@ -241,7 +259,8 @@ void GsiState::reset() noexcept {
 Status GsiState::ingest(std::string_view body, const GsiConfig& config,
                       Clock::time_point now, std::int64_t local_utc_ms) noexcept {
     try {
-        auto incoming = parse_payload(body, config, local_utc_ms);
+        MapSnapshot incoming_map;
+        auto incoming = parse_payload(body, config, local_utc_ms, &incoming_map);
         if (epoch_ == 0) epoch_ = 1;
         if (recoil_safety_epoch_ == 0) recoil_safety_epoch_ = 1;
         if (control_safety_epoch_ == 0) control_safety_epoch_ = 1;
@@ -249,6 +268,7 @@ Status GsiState::ingest(std::string_view body, const GsiConfig& config,
         if (now < last_now_ || epoch_ == std::numeric_limits<std::uint64_t>::max() ||
             control_safety_epoch_ == std::numeric_limits<std::uint64_t>::max() ||
             recoil_safety_epoch_ == std::numeric_limits<std::uint64_t>::max() || revision_ == std::numeric_limits<std::uint64_t>::max()) {
+            invalidate_map(Status::COUNTER_EXHAUSTED);
             current_.valid = false; current_.status = Status::COUNTER_EXHAUSTED; return current_.status;
         }
         last_now_ = now;
@@ -259,7 +279,10 @@ Status GsiState::ingest(std::string_view body, const GsiConfig& config,
                 timestamp_ = ts;
                 timestamp_deadline_ = now + std::chrono::milliseconds(config.ttl_ms);
                 seen_states_.clear();
+                seen_maps_.clear();
             }
+            incoming_map.valid_until = timestamp_deadline_;
+            publish_map(std::move(incoming_map), now);
             const auto key = fingerprint(incoming);
             if (std::find(seen_states_.begin(), seen_states_.end(), key) != seen_states_.end()) {
                 // 同秒策略回退既可能是真实变化也可能是旧包；不再沿用中间阵营或准备态。
@@ -279,6 +302,7 @@ Status GsiState::ingest(std::string_view body, const GsiConfig& config,
             incoming.valid_until = timestamp_deadline_;
             if (now >= timestamp_deadline_) { incoming.valid = false; incoming.status = Status::EXPIRED; }
         }
+        if (!incoming.provider_timestamp_seconds) invalidate_map(incoming.status);
         const auto ordinary_state = [](const WeaponSnapshot& snapshot) {
             return snapshot.identity_match && snapshot.player_playing && snapshot.player_health &&
                 ((snapshot.status == Status::READY && snapshot.valid) || snapshot.status == Status::RELOADING || snapshot.status == Status::EMPTY ||
@@ -325,8 +349,44 @@ Status GsiState::ingest(std::string_view body, const GsiConfig& config,
         incoming.received_at = now;
         current_ = std::move(incoming);
         return current_.status;
-    } catch (...) { current_.valid = false; current_.status = Status::INVALID_PAYLOAD; return current_.status; }
+    } catch (...) { invalidate_map(Status::INVALID_PAYLOAD); current_.valid = false; current_.status = Status::INVALID_PAYLOAD; return current_.status; }
 }
+void GsiState::invalidate_map(Status status) const noexcept {
+    if (map_.valid && map_.context_epoch != std::numeric_limits<std::uint64_t>::max()) ++map_.context_epoch;
+    map_.valid = false;
+    map_.map_name.clear();
+    map_.status = status;
+}
+
+void GsiState::publish_map(MapSnapshot incoming, Clock::time_point now) {
+    // 即使消费者未读取过期帧，也必须保留断开再恢复的上下文边界。
+    if (map_.valid && (now < map_.received_at || now >= map_.valid_until)) invalidate_map(Status::EXPIRED);
+    if (now >= incoming.valid_until) { invalidate_map(Status::EXPIRED); return; }
+    const auto key = incoming.valid ? incoming.map_name : std::string{};
+    const bool seen = std::find(seen_maps_.begin(), seen_maps_.end(), key) != seen_maps_.end();
+    if (seen) {
+        // 同秒回到已见地图无法与重放区分，撤销而不重新解释旧请求。
+        if (incoming.valid != map_.valid || incoming.map_name != map_.map_name) invalidate_map(Status::DUPLICATE);
+        return;
+    }
+    if (seen_maps_.size() >= 128) { invalidate_map(Status::INVALID_PAYLOAD); return; }
+    seen_maps_.push_back(key);
+    if (!incoming.valid) { invalidate_map(incoming.status); return; }
+    auto epoch = map_.context_epoch;
+    if (!map_.valid || map_.map_name != incoming.map_name) {
+        if (epoch != std::numeric_limits<std::uint64_t>::max()) ++epoch;
+    }
+    if (epoch == std::numeric_limits<std::uint64_t>::max()) { invalidate_map(Status::COUNTER_EXHAUSTED); return; }
+    incoming.context_epoch = epoch;
+    incoming.received_at = now;
+    map_ = std::move(incoming);
+}
+
+MapSnapshot GsiState::map_snapshot(Clock::time_point now) const {
+    if (map_.valid && (now < map_.received_at || now >= map_.valid_until)) invalidate_map(Status::EXPIRED);
+    return map_;
+}
+
 WeaponSnapshot GsiState::snapshot(Clock::time_point now) const {
     auto result = current_;
     if (result.valid && (now < result.received_at || now >= result.valid_until)) { result.valid = false; result.status = Status::EXPIRED; }
@@ -452,5 +512,6 @@ void GsiReceiver::stop() noexcept {
     std::lock_guard lock(impl_->mutex); impl_->state.reset();
 }
 WeaponSnapshot GsiReceiver::snapshot() const { std::lock_guard lock(impl_->mutex); return impl_->state.snapshot(Clock::now()); }
+MapSnapshot GsiReceiver::map_snapshot() const { std::lock_guard lock(impl_->mutex); return impl_->state.map_snapshot(Clock::now()); }
 std::string GsiReceiver::last_error() const { std::lock_guard lock(impl_->mutex); return impl_->error; }
 } // namespace weapon

@@ -8,14 +8,19 @@ namespace weapon::detail {
 inline constexpr std::size_t kMaximumHeaders = 8192;
 bool http_body_length(std::string_view header, std::size_t limit, std::size_t& length) noexcept;
 WeaponSnapshot parse_payload(std::string_view body, const GsiConfig& config,
-                             std::int64_t local_utc_ms) noexcept;
+                             std::int64_t local_utc_ms, MapSnapshot* map = nullptr) noexcept;
 class GsiState final {
 public:
     void reset() noexcept;
     Status ingest(std::string_view body, const GsiConfig& config,
                   Clock::time_point now, std::int64_t local_utc_ms) noexcept;
     WeaponSnapshot snapshot(Clock::time_point now) const;
+    MapSnapshot map_snapshot(Clock::time_point now) const;
 private:
+    void invalidate_map(Status status) const noexcept;
+    void publish_map(MapSnapshot incoming, Clock::time_point now);
+    mutable MapSnapshot map_;
+    std::vector<std::string> seen_maps_;
     WeaponSnapshot current_;
     std::uint64_t epoch_ = 0, revision_ = 0, timestamp_ = 0;
     std::uint64_t recoil_safety_epoch_ = 0, control_safety_epoch_ = 0;

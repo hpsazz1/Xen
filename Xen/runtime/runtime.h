@@ -369,7 +369,8 @@ struct RuntimeSnapshot {
 
 class Runtime {
 public:
-    Runtime();
+    // App 注入共享来源时只读取快照；独立入口仍自行管理接收器。
+    explicit Runtime(std::shared_ptr<weapon::GsiReceiver> shared_gsi = {});
     ~Runtime();
 
     Runtime(const Runtime&) = delete;

@@ -31,6 +31,16 @@ struct GsiConfig {
     int max_clock_skew_ms = 5000;
 };
 
+// 地图身份独立于玩家生命、活动状态和所持武器；仅用于语音方案上下文。
+struct MapSnapshot {
+    bool valid = false;
+    Status status = Status::UNAVAILABLE;
+    std::string map_name;
+    std::uint64_t context_epoch = 0;
+    std::optional<std::uint64_t> provider_timestamp_seconds;
+    Clock::time_point received_at{}, valid_until{};
+};
+
 struct WeaponSnapshot {
     bool valid = false;
     bool identity_match = false;
@@ -78,6 +88,7 @@ public:
     bool start(const GsiConfig& config) noexcept;
     void stop() noexcept;
     WeaponSnapshot snapshot() const;
+    MapSnapshot map_snapshot() const;
     std::string last_error() const;
 private:
     struct Impl;

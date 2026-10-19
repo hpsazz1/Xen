@@ -11,7 +11,7 @@ namespace config::detail {
 
 enum class HotkeyTarget {
     NONE, RUNTIME_TOGGLE, AIM_HOLD, EMERGENCY, AUTO_STOP, AUTO_STOP_RELEASE,
-    TRIGGER, DEBUG_TEST, ANOMALY_MARK, MOVEMENT_SPIN, MOVEMENT_LARGE
+    TRIGGER, DEBUG_TEST, ANOMALY_MARK, MOVEMENT_SPIN, MOVEMENT_LARGE, VOICE
 };
 
 struct HotkeyBindingView {
@@ -25,7 +25,8 @@ inline auto hotkey_bindings(const AppConfig& config) noexcept {
     using Target = HotkeyTarget;
     const auto& keyboard = config.keyboard;
     const auto& move = config.movement;
-    return std::array<HotkeyBindingView, 10>{{
+    return std::array<HotkeyBindingView, 11>{{
+        {Target::VOICE, keyboard.voice_virtual_keys, true},
         {Target::RUNTIME_TOGGLE, keyboard.runtime_toggle_virtual_keys, true},
         {Target::AIM_HOLD, keyboard.aim_hold_virtual_keys, true},
         {Target::EMERGENCY, keyboard.emergency_virtual_keys, true},

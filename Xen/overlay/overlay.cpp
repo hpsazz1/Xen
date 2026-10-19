@@ -3749,6 +3749,8 @@ struct Overlay::Impl {
                 return &app_config.keyboard.debug_test_virtual_keys;
             case HotkeyBindingTarget::ANOMALY_MARK:
                 return &app_config.keyboard.anomaly_mark_virtual_keys;
+            case HotkeyBindingTarget::VOICE:
+                return &app_config.keyboard.voice_virtual_keys;
             case HotkeyBindingTarget::AUTO_STOP_RELEASE:
                 return &app_config.auto_stop.release_virtual_keys;
             case HotkeyBindingTarget::AUTO_STOP:
@@ -3913,6 +3915,11 @@ struct Overlay::Impl {
                 "由当前键鼠后端监听源端按键，默认F9；每次按下标记归档前后各30秒，不改变武装或发送输入。不能与其他功能键共用；Esc清空，保存后生效。",
                 HotkeyBindingTarget::ANOMALY_MARK,
                 app_config.keyboard.anomaly_mark_virtual_keys, key_active);
+            render_hotkey_row(
+                "语音选择（按住）", "##voice_virtual_keys",
+                "由当前键鼠后端监听；按住说话、松开选择当前地图的已保存身法，不执行动作。默认未绑定，不与其他已启用功能共键；Esc清空，保存后生效。主机语音工具及候选准备完成后才开始收音。",
+                HotkeyBindingTarget::VOICE,
+                app_config.keyboard.voice_virtual_keys, key_active);
             ImGui::EndTable();
         }
         if (!hotkey_capture_message.empty()) {

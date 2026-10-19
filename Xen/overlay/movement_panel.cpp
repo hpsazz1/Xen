@@ -82,6 +82,7 @@ struct MovementPanel::Impl {
     Impl() {
         request.mode = Mode::MOVEMENT_TEST;
         request.output_root = "cache/debug";
+        plan.voice_command = plan.name;
         plan.actions.push_back({ActionKind::KEY, Key::SPACE, 0, 40, 0});
     }
     bool update_request() {
@@ -105,7 +106,7 @@ struct MovementPanel::Impl {
         actions.debug_request = request;
     }
     void sync(const Snapshot* snapshot, OverlayActions& actions) {
-        if (!initialized) { initialized = true; changed(actions); }
+        if (!initialized) { initialized = true; update_request(); }
         if (!snapshot) return;
         if (snapshot->movement_catalog_revision != seen_catalog) {
             seen_catalog = snapshot->movement_catalog_revision;
@@ -115,7 +116,7 @@ struct MovementPanel::Impl {
             seen_draft = snapshot->draft_plan_revision;
             Plan loaded;
             if (movement::timeline::parse_plan(snapshot->draft_plan, loaded, error)) {
-                plan = std::move(loaded); changed(actions);
+                plan = std::move(loaded); update_request();
             }
         }
     }
@@ -152,6 +153,7 @@ struct MovementPanel::Impl {
     void copy_preset(const movement::Config& config, bool spin, bool right, OverlayActions& actions) {
         Plan copy;
         copy.name = spin ? "旋转跳副本" : "大跳副本";
+        copy.voice_command = copy.name;
         copy.notes = "主动发送空格的固定方向时间轴；原辅助页的物理跳跃触发与方向选择保持不变。";
         copy.actions.push_back({ActionKind::KEY, Key::SPACE, 0, 40, 0});
         const int start = config.jump_delay_ms;
@@ -168,9 +170,13 @@ struct MovementPanel::Impl {
         }
         plan = std::move(copy); error.clear(); changed(actions);
     }
-    void editor(OverlayActions& actions, const movement::Config& config) {
+    void editor(OverlayActions& actions, const movement::Config& config, const Snapshot* snapshot) {
         bool change = text_field("方案名称", plan.name, "独立方案文件的名称，不修改原旋转跳或大跳配置。");
-        change |= text_field("地图（可选）", plan.map, "仅保存地图标注；本阶段不自动识别地图或角色位置。");
+        change |= text_field("地图（可选）", plan.map, "语音候选仅匹配当前 GSI 地图标识；旧地图备注保留，手动方案不受地图限制。");
+        if (button("使用当前地图", "将有效 GSI 地图填入草稿，保存后才发布语音绑定。", snapshot && snapshot->movement_map.valid)) {
+            plan.map = snapshot->movement_map.map_name; change = true;
+        }
+        change |= text_field("语音口令", plan.voice_command, "同一地图内口令必须唯一；清空可作为手动方案保存，未保存修改不会发布。");
         change |= text_field("点位（可选）", plan.location, "保存点位名称；每次测试前由用户对齐位置和朝向。");
         change |= text_field("起始说明", plan.notes, "记录起始朝向、站位和人工准备步骤；不参与设备执行。");
         if (button("添加动作", "添加独立动作；时间从脚本启动起算，与其他行可以重叠。")) {
@@ -321,7 +327,7 @@ void MovementPanel::render(const AppConfig& config, const Snapshot* snapshot, Ov
             ImGui::SameLine();
             if (button("复制大跳", "复制当前 A→D 时长、转角及可选定时蹲；不修改原预设。")) ui.copy_preset(move, false, false, actions);
         }
-        ui.editor(actions, config.movement);
+        ui.editor(actions, config.movement, snapshot);
         ImGui::EndDisabled();
         if (!ui.error.empty()) ImGui::TextWrapped("方案错误：%s", ui.error.c_str());
         ImGui::Separator();

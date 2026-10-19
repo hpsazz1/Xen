@@ -66,9 +66,16 @@ void json_contract() {
     require(!parse_plan(bad, read, error) && plan_json(read) == original, "非整数时间被接受或破坏原方案");
     bad = j; bad["unexpected"] = true; require(!parse_plan(bad, read, error), "未知字段未拒绝");
     bad = j; bad["actions"][0]["key"] = "ESC"; require(!parse_plan(bad, read, error), "未知键未拒绝");
-    bad = j; bad["schema_version"] = 3; require(!parse_plan(bad, read, error), "未知版本未拒绝");
-    auto legacy = j; legacy["schema_version"] = 1;
+    bad = j; bad["schema_version"] = 4; require(!parse_plan(bad, read, error), "未知版本未拒绝");
+    bad = j; bad.erase("voice_command"); require(!parse_plan(bad, read, error), "V3缺少口令字段未拒绝");
+    bad = j; bad["voice_command"] = 12; require(!parse_plan(bad, read, error), "非文本口令未拒绝");
+    bad = j; bad["voice_command"] = std::string(257, 'a');
+    require(!parse_plan(bad, read, error), "超长口令未拒绝");
+    auto voiced = j; voiced["voice_command"] = "跳箱"; voiced["map"] = "de_dust2";
+    require(parse_plan(voiced, read, error) && plan_json(read) == voiced, "地图口令往返丢失或动作变化");
+    auto legacy = j; legacy["schema_version"] = 1; legacy.erase("voice_command");
     require(parse_plan(legacy, read, error) && read.actions.size() == 2, "V1方案不兼容");
+    require(read.voice_command.empty(), "V1口令未清空");
     legacy["actions"][0]["physical"] = true;
     require(!parse_plan(legacy, read, error), "V1未知字段被接受");
     p.actions.push_back(turn(20, 50, 12)); require(!validate_plan(p, error), "旋转重叠未拒绝");
@@ -84,6 +91,12 @@ void recorded_tracks() {
     p.actions = {physical, mask_w, mask_a, motion, additive, wheel};
     auto j = plan_json(p); Plan restored; std::string error;
     require(parse_plan(j, restored, error) && plan_json(restored) == j, "录制轨道序列化丢失字段");
+    auto legacy = j; legacy["schema_version"] = 2; legacy.erase("voice_command");
+    restored.voice_command = "旧口令";
+    require(parse_plan(legacy, restored, error) && restored.voice_command.empty() && plan_json(restored) == j,
+        "V2动作升级丢失或口令未清空");
+    legacy["voice_command"] = "未声明的新字段";
+    require(!parse_plan(legacy, restored, error), "V2意外接受新字段");
     Fake f; bool suppressed = false, resumed = false, independent = false;
     auto cb = permission(); cb.progress = [&](const Progress& progress) {
         if (progress.elapsed_ms >= 85 && progress.elapsed_ms < 210) {

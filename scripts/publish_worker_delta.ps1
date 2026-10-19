@@ -19,6 +19,7 @@
     [switch]$IncludeModelDataReview,
     [switch]$ModelDataReviewOnly,
     [switch]$IncludeAimTools,
+    [switch]$IncludeVoiceTools,
     [switch]$AimToolsOnly,
     [string]$SourceContextExecutable = '',
     [string]$SshIdentityFile = (Join-Path $env:USERPROFILE '.ssh\xen_foxos_ed25519'),
@@ -28,6 +29,9 @@
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if ($IncludeVoiceTools -and ($ModelDataReviewOnly -or $AimToolsOnly)) {
+    throw '仅工具模式不能混入语音工具。'
+}
 if ($ModelDataReviewOnly -and $IncludeCaptureTools) { throw '仅审核资源模式不能更新采集工具。' }
 if ($ModelDataReviewOnly -and $IncludeClockSource) { throw '仅审核资源模式不能更新时钟源工具。' }
 if ($ModelDataReviewOnly) { $IncludeModelDataReview = $true }
@@ -103,7 +107,7 @@ try {
         -IncludeHudAcceptanceScript:$IncludeHudAcceptanceScript `
         -IncludeSoakAcceptanceTools:$IncludeSoakAcceptanceTools `
         -IncludeModelDataReview:$IncludeModelDataReview -ModelDataReviewOnly:$ModelDataReviewOnly `
-        -IncludeAimTools:$IncludeAimTools -AimToolsOnly:$AimToolsOnly
+        -IncludeAimTools:$IncludeAimTools -AimToolsOnly:$AimToolsOnly -IncludeVoiceTools:$IncludeVoiceTools
     $ownedStages.Add([pscustomobject]@{ parent = (Split-Path -Parent $localRoot); name = $stageName })
     $null = Resolve-XenDirectChildPath $localRoot $stageName '移入主机包前暂存'
     [IO.Directory]::Move($generated, $localStage)
@@ -114,6 +118,11 @@ try {
     if ($IncludeAimTools) {
         $relativeFiles += @('tools/invoke_aim_manual_acceptance.ps1', 'tools/aim_report.ps1',
             'tools/aim_control_diagnostics.ps1', 'tools/aim_fixed_scene_analysis.ps1')
+    }
+    if ($IncludeVoiceTools) {
+        $relativeFiles += @('client.py', 'requirements.txt', 'install.ps1', 'start.ps1',
+            'empty_keywords.txt', 'README.md', 'LICENSES.md', 'prepare_model.py') |
+            ForEach-Object { "tools/voice-switch/$_" }
     }
     if ($IncludeLauncher) { $relativeFiles += 'XenLauncher.exe' }
     if ($IncludeRecoilTools) {

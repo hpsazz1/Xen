@@ -573,6 +573,10 @@ target_compile_definitions(debug_session PRIVATE
     XEN_DEBUG_BUILD_DIRTY=${XEN_BUILD_GIT_DIRTY}
     XEN_DEBUG_RUNTIME_ID="${XEN_BUILD_RUNTIME_ID}")
 
+add_library(voice_switch STATIC Xen/voice_switch/voice_switch.cpp Xen/voice_switch/controller.cpp)
+target_include_directories(voice_switch PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
+target_link_libraries(voice_switch PUBLIC debug_session nlohmann_json::nlohmann_json PRIVATE ws2_32)
+
 add_library(overlay STATIC
     Xen/overlay/overlay.cpp Xen/overlay/recoil_panel.cpp Xen/overlay/input_training_panel.cpp Xen/overlay/debug_panel.cpp Xen/overlay/movement_panel.cpp)
 target_include_directories(overlay PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
@@ -627,7 +631,7 @@ add_custom_target(model_workspace_tools
     VERBATIM)
 add_dependencies(xen_app model_workspace_tools)
 target_link_libraries(xen_app PRIVATE
-    overlay app_input app_startup runtime xen_debug config crash log app_release)
+    overlay app_input app_startup runtime xen_debug config crash log app_release voice_switch)
 if(WIN32)
     xen_deploy_runtime_dlls(xen_app OPENCV ORT NDI)
 endif()
@@ -1555,6 +1559,15 @@ if(BUILD_TESTING)
     add_test(NAME movement_library_tests COMMAND movement_library_tests "${PROJECT_SOURCE_DIR}/temp/XEN-MOVEMENT-EDITOR-20261014-001/movement-library-fixtures")
     xen_deploy_runtime_dlls(movement_library_tests)
     add_executable(movement_session_tests tests/movement_session_tests.cpp)
+    add_executable(voice_switch_tests tests/voice_switch_tests.cpp)
+    add_test(NAME voice_switch_client_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" -X utf8 -B "${PROJECT_SOURCE_DIR}/tests/voice_switch_client_tests.py")
+    target_link_libraries(voice_switch_tests PRIVATE voice_switch ws2_32)
+    add_test(NAME voice_switch_tests COMMAND voice_switch_tests)
+    xen_deploy_runtime_dlls(voice_switch_tests OPENCV ORT NDI)
+    add_executable(voice_controller_tests tests/voice_controller_tests.cpp)
+    target_link_libraries(voice_controller_tests PRIVATE voice_switch ws2_32)
+    add_test(NAME voice_controller_tests COMMAND voice_controller_tests "${CMAKE_BINARY_DIR}/voice-controller-fixtures")
+    xen_deploy_runtime_dlls(voice_controller_tests OPENCV ORT NDI)
     target_link_libraries(movement_session_tests PRIVATE debug_session movement ws2_32)
     add_test(NAME movement_session_tests COMMAND movement_session_tests "${CMAKE_BINARY_DIR}/movement-session-fixtures")
     set_tests_properties(movement_session_tests PROPERTIES TIMEOUT 30)

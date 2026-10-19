@@ -804,6 +804,7 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"keyboard", "runtime_toggle_virtual_keys"},
         {"keyboard", "debug_test_virtual_keys"},
         {"keyboard", "anomaly_mark_virtual_keys"},
+        {"keyboard", "voice_virtual_keys"},
     };
     for (const auto& key : kOptionalListKeys) {
         if (has_strict_int_list(ini, key, true)) continue;
@@ -1557,6 +1558,7 @@ bool load_app_config(const std::string& path,
         };
         candidate.keyboard.debug_test_enabled = ini.GetBoolValue("keyboard", "debug_test_enabled", false);
         candidate.keyboard.debug_test_virtual_keys = load_virtual_keys("debug_test_virtual_keys", "debug_test_virtual_key", {});
+        candidate.keyboard.voice_virtual_keys = load_virtual_keys("voice_virtual_keys", "voice_virtual_keys", {});
         candidate.keyboard.aim_hold_virtual_keys = load_virtual_keys(
             "aim_hold_virtual_keys", "aim_hold_virtual_key",
             candidate.keyboard.aim_hold_virtual_keys);
@@ -1855,6 +1857,7 @@ ConfigWriteResult save_config_file(const std::string& path,
         ini.SetBoolValue("keyboard", "debug_test_enabled", config.keyboard.debug_test_enabled);
         ini.SetValue("keyboard", "debug_test_virtual_keys", format_int_list(config.keyboard.debug_test_virtual_keys).c_str());
         ini.SetValue("keyboard", "anomaly_mark_virtual_keys", format_int_list(config.keyboard.anomaly_mark_virtual_keys).c_str());
+        ini.SetValue("keyboard", "voice_virtual_keys", format_int_list(config.keyboard.voice_virtual_keys).c_str());
         ini.SetValue(
             "keyboard", "aim_hold_virtual_keys",
             format_int_list(config.keyboard.aim_hold_virtual_keys).c_str());

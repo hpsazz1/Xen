@@ -81,6 +81,32 @@ void run(const fs::path& root) {
     require(rejected && read(first) == document, "替换失败破坏原方案");
     for (const auto& entry : fs::directory_iterator(fs::u8path(library)))
         require(entry.path().extension() != ".tmp", "失败后残留临时文件");
+
+    auto voiced = document;
+    voiced["map"] = "de_dust2"; voiced["voice_command"] = "跳箱";
+    const auto bound = save_movement_plan(voiced, "", false, library);
+    require(save_movement_plan(voiced, bound, false, library) == bound, "更新自身误报口令冲突");
+    const auto before = list_movement_plans(library, legacy);
+    bool structured = false;
+    for (const auto& entry : before)
+        if (entry.path == bound) structured = entry.map == "de_dust2" && entry.voice_command == "跳箱";
+    require(structured, "目录未提供结构化地图及口令");
+    for (const bool save_as : {false, true}) {
+        rejected = false;
+        try { save_movement_plan(voiced, save_as ? bound : first, save_as, library); }
+        catch (const std::exception& e) { rejected = std::string(e.what()).find("中文方案") != std::string::npos; }
+        require(rejected && read(bound) == voiced && read(first) == document &&
+            list_movement_plans(library, legacy).size() == before.size(),
+            "口令冲突未拒绝、未指出方案或改变了正式库");
+    }
+    auto other_map = voiced; other_map["map"] = "de_mirage";
+    require(read(save_movement_plan(other_map, bound, true, library)) == other_map, "跨地图同口令被拒绝");
+    auto manual = voiced; manual["voice_command"] = "";
+    require(read(save_movement_plan(manual, bound, true, library)) == manual && read(bound) == voiced,
+        "清空口令另存失败或改写原方案");
+    auto legacy_plan = document; legacy_plan["schema_version"] = 2; legacy_plan.erase("voice_command");
+    const auto migrated = save_movement_plan(legacy_plan, "", false, library);
+    require(read(migrated) == document, "旧格式保存未保留动作及空口令");
 }
 }
 int main(int argc, char** argv) {

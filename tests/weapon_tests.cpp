@@ -330,7 +330,7 @@ int main() {
     expect(denied.ingest(bad.dump(), config, start + 100ms, utc + 100) == Status::DUPLICATE &&
            denied.snapshot(start + 100ms).revision == 1 && denied.snapshot(start + 100ms).valid_until == first.valid_until,
            "旧auth字段变化不能绕过去重或续命");
-    // 已移除的目录地图字段不再参与武器指纹，也不改变通用 GSI 控制状态。
+    // 地图独立发布，不参与武器指纹或改变通用 GSI 控制状态。
     GsiState map_ignored;
     auto map_payload = full;
     map_payload["map"]["name"] = "de_dust2";
@@ -340,14 +340,79 @@ int main() {
     const auto map_first = map_ignored.snapshot(start);
     map_payload["map"]["name"] = "de_inferno";
     expect(map_ignored.ingest(map_payload.dump(), config, start + 1ms, utc + 1) == Status::DUPLICATE,
-           "同秒仅变更已移除的目录地图字段不产生新武器状态");
+           "同秒仅变更地图名称不产生新武器状态");
     const auto map_second = map_ignored.snapshot(start + 1ms);
     expect(map_second.valid && map_second.team == Team::CT && map_second.game_phase == GamePhase::ACTIVE &&
                map_second.revision == map_first.revision && map_second.valid_until == map_first.valid_until &&
                map_second.source_epoch == map_first.source_epoch && map_second.team_epoch == map_first.team_epoch &&
                map_second.control_safety_epoch == map_first.control_safety_epoch &&
                map_second.recoil_safety_epoch == map_first.recoil_safety_epoch,
-           "忽略地图名称变化不续期、不改变武器或控制安全代际");
+           "地图名称变化不续期、不改变武器或控制安全代际");
+    const auto independent_map = map_ignored.map_snapshot(start + 1ms);
+    expect(independent_map.valid && independent_map.map_name == "de_inferno" && independent_map.context_epoch == 2,
+           "同秒换图独立发布，不被武器去重吞掉");
+    expect(independent_map.valid_until == map_first.valid_until, "地图复用同秒首次接收期限");
+    map_payload["player"]["weapons"]["weapon_0"] = {{"name", "weapon_knife"}, {"type", "Knife"}, {"state", "active"}};
+    map_ignored.ingest(map_payload.dump(), config, start + 2ms, utc + 2);
+    expect(map_ignored.map_snapshot(start + 2ms).context_epoch == independent_map.context_epoch &&
+           map_ignored.map_snapshot(start + 2ms).valid, "持道具不撤销地图或改变上下文");
+    map_payload["player"]["state"]["health"] = 0;
+    map_ignored.ingest(map_payload.dump(), config, start + 3ms, utc + 3);
+    expect(map_ignored.map_snapshot(start + 3ms).valid && !map_ignored.snapshot(start + 3ms).valid,
+           "死亡保留地图但不放宽武器有效性");
+    map_payload["player"]["activity"] = "textinput";
+    map_payload["map"]["name"] = "de_nuke";
+    map_ignored.ingest(map_payload.dump(), config, start + 4ms, utc + 4);
+    const auto inactive_map = map_ignored.map_snapshot(start + 4ms);
+    expect(inactive_map.valid && inactive_map.map_name == "de_nuke" &&
+           inactive_map.context_epoch > independent_map.context_epoch, "非playing仍能发布同秒地图变化");
+    map_payload["map"]["name"] = "de_inferno";
+    map_ignored.ingest(map_payload.dump(), config, start + 5ms, utc + 5);
+    const auto replay_map = map_ignored.map_snapshot(start + 5ms);
+    expect(!replay_map.valid && replay_map.context_epoch > inactive_map.context_epoch,
+           "同秒已见地图回退撤销上下文，不能回滚为旧地图");
+    map_payload["provider"]["timestamp"] = 1700000001;
+    map_ignored.ingest(map_payload.dump(), config, start + 1s, utc + 1000);
+    const auto restored_map = map_ignored.map_snapshot(start + 1s);
+    expect(restored_map.valid && restored_map.context_epoch > replay_map.context_epoch,
+           "新时间窗重新建立地图上下文");
+    auto old_map = map_payload; old_map["provider"]["timestamp"] = 1700000000; old_map["map"]["name"] = "de_mirage";
+    map_ignored.ingest(old_map.dump(), config, start + 1100ms, utc + 1100);
+    expect(map_ignored.map_snapshot(start + 1100ms).context_epoch == restored_map.context_epoch &&
+           map_ignored.map_snapshot(start + 1100ms).map_name == restored_map.map_name,
+           "乱序旧秒不能覆盖地图");
+    const auto expired_map = map_ignored.map_snapshot(start + 3500ms);
+    expect(!expired_map.valid && expired_map.status == Status::EXPIRED &&
+           expired_map.context_epoch > restored_map.context_epoch, "TTL到期读取立即撤销地图上下文");
+    expect(map_ignored.map_snapshot(start + 3501ms).context_epoch == expired_map.context_epoch,
+           "重复读取过期地图不反复推进上下文");
+    map_payload["provider"]["timestamp"] = 1700000004;
+    map_ignored.ingest(map_payload.dump(), config, start + 4s, utc + 4000);
+    const auto resumed_map = map_ignored.map_snapshot(start + 4s);
+    expect(resumed_map.valid && resumed_map.context_epoch > expired_map.context_epoch,
+           "TTL之后同地图恢复建立新上下文");
+    auto missing_map = map_payload; missing_map.erase("map");
+    map_ignored.ingest(missing_map.dump(), config, start + 4001ms, utc + 4001);
+    const auto absent_map = map_ignored.map_snapshot(start + 4001ms);
+    expect(!absent_map.valid && absent_map.context_epoch > resumed_map.context_epoch,
+           "缺地图不继承上一地图，立即持久撤销");
+    map_payload["provider"]["timestamp"] = 1700000005;
+    map_ignored.ingest(map_payload.dump(), config, start + 5s, utc + 5000);
+    const auto before_reset_map = map_ignored.map_snapshot(start + 5s);
+    map_ignored.reset();
+    expect(!map_ignored.map_snapshot(start + 5001ms).valid &&
+           map_ignored.map_snapshot(start + 5001ms).context_epoch > before_reset_map.context_epoch,
+           "监听器停止或重建撤销地图上下文");
+    GsiState silent_expiry;
+    silent_expiry.ingest(map_payload.dump(), config, start, utc + 5000);
+    const auto before_silent_expiry = silent_expiry.map_snapshot(start);
+    map_payload["provider"]["timestamp"] = 1700000009;
+    silent_expiry.ingest(map_payload.dump(), config, start + 4s, utc + 9000);
+    expect(silent_expiry.map_snapshot(start + 4s).context_epoch > before_silent_expiry.context_epoch,
+           "未读取过期帧也不能复用过期前地图上下文");
+    map_payload["provider"]["timestamp"] = 1700000001;
+    silent_expiry.ingest(map_payload.dump(), config, start + 4001ms, utc + 9001);
+    expect(!silent_expiry.map_snapshot(start + 4001ms).valid, "墙钟拒绝同时撤销地图");
     // 只测试纯解码/时间状态，不start接收器、不监听、不访问游戏或设备。
     return failures == 0 ? 0 : 1;
 }

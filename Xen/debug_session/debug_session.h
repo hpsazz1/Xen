@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -44,7 +45,7 @@ struct Request {
     int movement_record_motion_mode = 1;
     std::string movement_library_root = "cache/movement/plans";
 };
-struct MovementSavedPlan { std::string path, name; };
+struct MovementSavedPlan { std::string path, name, map, voice_command; };
 struct Snapshot {
     State state = State::IDLE;
     bool busy = false, physical = false, hud_visible = false, cleanup_unknown = false;
@@ -56,6 +57,10 @@ struct Snapshot {
     std::vector<MovementSavedPlan> movement_saved_plans;
     std::string movement_selected_path;
     std::uint64_t movement_catalog_revision = 0;
+    Json movement_current, movement_baseline;
+    weapon::MapSnapshot movement_map;
+    bool movement_voice_selected = false;
+    std::uint64_t movement_voice_epoch = 0;
     // 与普通进度消息分离，热键拒绝不能覆盖准备失败或失效原因。
     std::string repeat_unavailable_reason;
     bool hud_requested = false;
@@ -77,6 +82,7 @@ struct Context {
     AppConfig config;
     std::shared_ptr<IMouseController> device;
     bool runtime_idle = false, input_recording_idle = false, cleanup_known = false;
+    weapon::MapSnapshot map;
 };
 
 class Session {
@@ -94,7 +100,11 @@ public:
     // 仅显式启用的前台按下沿调用；繁忙不排队，每次从冻结模板创建独立Run。
     bool repeat(const Context& context) noexcept;
     // 仅同步已启用身法会话的最新草稿，无文件IO和设备输出；无效草稿撤下旧模板。
-    bool update_movement_draft(const Request&, const Context&) noexcept;
+    bool update_movement_draft(const Request&, const Context&, bool manual = true) noexcept;
+    void update_map(const weapon::MapSnapshot&) noexcept;
+    // 文件解析异步完成，App 在本帧停止/热键处理之后复核再提交。
+    bool select_voice(const Request&, const Context&) noexcept;
+    std::optional<bool> finish_voice(const Context&, bool still_current) noexcept;
     void invalidate_repeat(const std::string& reason = "测试模板已失效（参数或运行上下文变化），请重新准备") noexcept;
     // 原始输入面板沿用Runtime的记录/回看接口；开始、停止与归档等待均不占UI线程。
     bool record_inputs(Runtime& runtime, const std::string& root,

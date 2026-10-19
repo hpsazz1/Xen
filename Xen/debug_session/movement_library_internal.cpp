@@ -48,7 +48,8 @@ void append_plan(std::vector<SavedMovementPlan>& result, const fs::path& path, c
         std::string name = plan.name;
         if (!plan.map.empty()) name += " / " + plan.map;
         if (!plan.location.empty()) name += " / " + plan.location;
-        result.push_back({utf8(fs::absolute(path).lexically_normal()), name + " [" + suffix + "]"});
+        result.push_back({utf8(fs::absolute(path).lexically_normal()), name + " [" + suffix + "]",
+            plan.map, plan.voice_command});
     } catch (const std::exception&) { /* 单个坏文件不阻断方案下拉列表。 */ }
 }
 }
@@ -82,6 +83,14 @@ std::string save_movement_plan(const Json& document, const std::string& selected
             fs::is_regular_file(selected, code) && fs::equivalent(selected.parent_path(), root, code)) {
             read_plan(selected);
             destination = selected;
+        }
+    }
+    if (!plan.voice_command.empty()) {
+        for (const auto& entry : list_movement_plans(utf8(root))) {
+            std::error_code code;
+            if (!destination.empty() && fs::equivalent(fs::u8path(entry.path), destination, code)) continue;
+            if (entry.map == plan.map && entry.voice_command == plan.voice_command)
+                throw std::runtime_error("同地图语音口令与方案冲突：" + entry.name);
         }
     }
     wchar_t temporary_name[MAX_PATH]{};

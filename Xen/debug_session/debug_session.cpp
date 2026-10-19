@@ -156,6 +156,9 @@ struct Session::Impl {
     std::atomic_bool movement_record_stop{false};
     std::atomic<std::shared_ptr<const Prepared>> repeat_plan;
     std::atomic_uint64_t repeat_revision{0};
+    std::future<Json> voice_load;
+    Request voice_request;
+    std::uint64_t voice_revision = 0, voice_epoch = 0;
     void replace_hud(std::shared_ptr<CounterpulseHud> next = {}) {
         std::shared_ptr<CounterpulseHud> previous;
         { std::lock_guard lock(hud_mutex); previous = hud.exchange(std::move(next)); }
@@ -276,7 +279,18 @@ struct Session::Impl {
         write_document(path,trace);
         auto derived=movement::recording::derive(events,begin,end,gap,request.movement_record_motion_mode);
         Json plan;
-        if(derived.complete) plan=movement::timeline::plan_json(derived.plan);
+        if(derived.complete) {
+            Json previous = view.load()->movement_current;
+            try { if (!request.plan_text.empty()) previous = request_plan(request); } catch (...) {}
+            if (previous.is_object()) {
+                derived.plan.map = previous.value("map",std::string{});
+                derived.plan.voice_command = previous.value("voice_command",std::string{});
+                derived.plan.name = previous.value("name",derived.plan.name);
+                derived.plan.notes = previous.value("notes",derived.plan.notes);
+                derived.plan.location = previous.value("location",derived.plan.location);
+            }
+            plan=movement::timeline::plan_json(derived.plan);
+        }
         // 原始记录保留为证据；派生方案只替换当前草稿，显式保存才写入方案库。
         update([&](Snapshot& s) {
             const auto utf8=path.u8string();
@@ -286,6 +300,7 @@ struct Session::Impl {
             s.message=derived.complete?"录制已生成当前草稿，尚未保存方案；鼠标按所选解释派生，请核对后测试":derived.error;
             if(derived.complete) {
                 s.draft_plan=plan;
+                s.movement_current=plan; s.movement_voice_selected=false;
                 s.draft_plan_mode=Mode::MOVEMENT_TEST; ++s.draft_plan_revision;
             }
         });
@@ -503,6 +518,7 @@ Session::~Session() {
 }
 std::shared_ptr<const Snapshot> Session::snapshot() const noexcept { return impl_->view.load(); }
 bool Session::busy() const noexcept {
+    if (impl_->voice_load.valid()) return true;
     if (impl_->busy()) return true;
     if (!impl_->shutting_down) return false;
     std::lock_guard lock(impl_->hud_mutex);
@@ -510,6 +526,7 @@ bool Session::busy() const noexcept {
 }
 void Session::poll() noexcept {
     try {
+        if (impl_->shutting_down) finish_voice(Context{},false);
         if (impl_->worker.valid() && impl_->worker.wait_for(0ms) == std::future_status::ready) impl_->worker.get();
         {
             std::lock_guard lock(impl_->hud_mutex);
@@ -562,12 +579,21 @@ void Session::invalidate_repeat(const std::string& reason) noexcept {
     impl_->repeat_plan.store(nullptr);
     try { impl_->update([&](Snapshot& s) {
         s.repeat_ready = false; s.movement_test_enabled = false;
+        s.movement_voice_selected = false;
         s.repeat_unavailable_reason = reason.empty() ? "测试模板已失效，请重新准备" : reason;
     }); } catch (...) {}
 }
-bool Session::update_movement_draft(const Request& request, const Context& context) noexcept {
-    if (!snapshot()->movement_test_enabled || impl_->shutting_down || request.mode != Mode::MOVEMENT_TEST) return false;
+bool Session::update_movement_draft(const Request& request, const Context& context, bool manual) noexcept {
+    if (impl_->shutting_down || request.mode != Mode::MOVEMENT_TEST) return false;
     try {
+        const auto plan = request_plan(request);
+        const bool changed = snapshot()->movement_current != plan;
+        if (manual && changed) ++impl_->repeat_revision;
+        impl_->update([&](Snapshot& s) {
+            s.movement_current = plan;
+            if (manual && changed) s.movement_voice_selected = false;
+        });
+        if (!snapshot()->movement_test_enabled) return false;
         const auto& binding = impl_->movement_binding;
         if (!binding || binding->device != context.device || !context.runtime_idle || !context.input_recording_idle ||
             !context.cleanup_known || !context.config.mouse.allow_send_input ||
@@ -579,7 +605,6 @@ bool Session::update_movement_draft(const Request& request, const Context& conte
         impl_->repeat_plan.store(nullptr);
         // 先撤掉旧草稿；解析失败也不能执行上一次有效参数。
         impl_->update([](Snapshot& s) { s.repeat_ready = false; s.repeat_unavailable_reason = "身法草稿无效，请修正参数"; });
-        const auto plan = request_plan(request);
         Impl::Prepared work{request,context,plan,Json::object(),"movement-session-" + std::to_string(revision),{}};
         work.repeat_revision = revision;
         impl_->repeat_plan.store(std::make_shared<const Impl::Prepared>(std::move(work)));
@@ -590,6 +615,67 @@ bool Session::update_movement_draft(const Request& request, const Context& conte
             } else impl_->repeat_plan.store(nullptr);
         });
         return snapshot()->movement_test_enabled;
+    } catch (...) {
+        ++impl_->repeat_revision; impl_->repeat_plan.store(nullptr);
+        try { impl_->update([](Snapshot& s) { s.movement_current = Json(); s.movement_voice_selected = false;
+            s.repeat_ready = false; s.repeat_unavailable_reason = "身法草稿无效，请修正参数"; }); } catch (...) {}
+        return false;
+    }
+}
+void Session::update_map(const weapon::MapSnapshot& map) noexcept {
+    try {
+        const auto prior = snapshot();
+        if (prior->movement_map.context_epoch == map.context_epoch && prior->movement_map.valid == map.valid) return;
+        if (prior->movement_voice_selected && (!map.valid || prior->movement_voice_epoch != map.context_epoch)) {
+            ++impl_->repeat_revision; impl_->repeat_plan.store(nullptr);
+            impl_->update([](Snapshot& s) { s.repeat_ready = false; s.repeat_unavailable_reason = "语音方案的地图已失效，请重新选择"; });
+        }
+        impl_->update([&](Snapshot& s) { s.movement_map = map; });
+    } catch (...) {}
+}
+bool Session::select_voice(const Request& request, const Context& context) noexcept {
+    try {
+        const auto s = snapshot();
+        if (busy() || impl_->shutting_down || !s->movement_test_enabled || !context.map.valid ||
+            s->movement_current != s->movement_baseline || !context.runtime_idle || !context.input_recording_idle ||
+            !context.cleanup_known || !context.config.mouse.allow_send_input) return false;
+        admit(context, Mode::MOVEMENT_TEST);
+        impl_->voice_request = request;
+        impl_->voice_revision = impl_->repeat_revision.load();
+        impl_->voice_epoch = context.map.context_epoch;
+        impl_->voice_load = std::async(std::launch::async, [request] {
+            auto r = request;
+            r.plan_text = read_document(std::filesystem::u8path(request.load_path),16*1024*1024).dump();
+            return request_plan(r);
+        });
+        return true;
+    } catch (...) { return false; }
+}
+std::optional<bool> Session::finish_voice(const Context& context, bool still_current) noexcept {
+    if (!impl_->voice_load.valid() || impl_->voice_load.wait_for(0ms) != std::future_status::ready) return {};
+    try {
+        const auto plan = impl_->voice_load.get();
+        const auto s = snapshot();
+        const auto& binding = impl_->movement_binding;
+        if (!still_current || impl_->shutting_down || !s->movement_test_enabled ||
+            impl_->voice_revision != impl_->repeat_revision.load() || !context.map.valid ||
+            impl_->voice_epoch != context.map.context_epoch || plan.value("map",std::string{}) != context.map.map_name ||
+            !context.runtime_idle || !context.input_recording_idle || !context.cleanup_known ||
+            !context.config.mouse.allow_send_input || !binding || binding->device != context.device ||
+            binding->config.keyboard.debug_test_virtual_keys != context.config.keyboard.debug_test_virtual_keys ||
+            binding->config.keyboard.emergency_virtual_keys != context.config.keyboard.emergency_virtual_keys ||
+            s->movement_current != s->movement_baseline) return false;
+        admit(context, Mode::MOVEMENT_TEST);
+        auto request = impl_->voice_request; request.plan_text = plan.dump();
+        if (!update_movement_draft(request,context,false)) return false;
+        impl_->update([&](Snapshot& next) {
+            next.draft_plan = plan; next.draft_plan_mode = Mode::MOVEMENT_TEST; ++next.draft_plan_revision;
+            next.movement_baseline = plan; next.movement_current = plan;
+            next.movement_selected_path = request.load_path; ++next.movement_catalog_revision;
+            next.movement_voice_selected = true; next.movement_voice_epoch = context.map.context_epoch;
+            next.message = "语音方案已载入，下一次测试使用当前方案";
+        });
+        return true;
     } catch (...) { return false; }
 }
 bool Session::repeat(const Context& context) noexcept { return run_repeat(context,true); }
@@ -600,6 +686,9 @@ bool Session::run_repeat(const Context& context, bool keyboard_trigger) noexcept
         };
         if (impl_->shutting_down) return reject("应用正在关闭，快捷键测试未执行");
         if (busy()) return reject("已有调试任务正在执行，本次快捷键忽略，不排队");
+        if (snapshot()->movement_voice_selected && (!context.map.valid ||
+            context.map.context_epoch != snapshot()->movement_voice_epoch))
+            return reject("语音方案地图已失效，请重新选择");
         if (keyboard_trigger && !context.config.keyboard.debug_test_enabled) return reject("调试测试快捷键开关未启用");
         const auto source = impl_->repeat_plan.load();
         if (!keyboard_trigger && (!source || source->request.mode != Mode::MOVEMENT_TEST || !snapshot()->movement_test_enabled))
@@ -728,13 +817,17 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
             impl_->update([](Snapshot& s) { s.repeat_ready = false; s.repeat_unavailable_reason = "等待载入身法方案"; });
         }
         const auto repeat_revision = impl_->repeat_revision.load();
+        if (request.mode == Mode::MOVEMENT_TEST && action == Action::SAVE_PLAN) {
+            const auto current = request_plan(request);
+            impl_->update([&](Snapshot& s) { s.movement_current = current; });
+        }
         impl_->update([](Snapshot& s) { s.prepared_id.clear(); });
         return impl_->launch(State::WORKING,false,[this,action,request,context,repeat_revision] {
             const auto refresh_movement_library = [&](const std::string& selected) {
                 const auto entries = detail::list_movement_plans(request.movement_library_root,request.output_root);
                 impl_->update([&](Snapshot& s) {
                     s.movement_saved_plans.clear();
-                    for (const auto& entry : entries) s.movement_saved_plans.push_back({entry.path,entry.name});
+                    for (const auto& entry : entries) s.movement_saved_plans.push_back({entry.path,entry.name,entry.map,entry.voice_command});
                     s.movement_selected_path = selected; ++s.movement_catalog_revision;
                 });
             };
@@ -745,9 +838,15 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
             }
             if (request.mode == Mode::MOVEMENT_TEST && action == Action::SAVE_PLAN) {
                 const auto plan = request_plan(request);
-                const auto path = detail::save_movement_plan(plan,request.load_path,request.movement_save_as,request.movement_library_root);
+                std::string path;
+                try { path = detail::save_movement_plan(plan,request.load_path,request.movement_save_as,request.movement_library_root); }
+                catch (const std::exception& error) {
+                    impl_->update([&](Snapshot& s) { s.state = State::COMPLETED; s.message = error.what(); });
+                    return;
+                }
                 refresh_movement_library(path);
-                impl_->update([&](Snapshot& s) { s.state = State::COMPLETED; s.message = "身法方案已保存，可从下拉框重新选择"; });
+                impl_->update([&](Snapshot& s) { s.movement_baseline = plan;
+                    s.state = State::COMPLETED; s.message = "身法方案已保存，可从下拉框重新选择"; });
                 return;
             }
             if (action == Action::SAVE_WEAPON_TIMING) {
@@ -798,6 +897,10 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
                         ++s.draft_plan_revision; }
                     s.state = State::COMPLETED; s.message = "文档已载入，请检查草稿并重新准备"; });
                 if (request.mode == Mode::MOVEMENT_TEST) {
+                    impl_->update([&](Snapshot& s) { s.movement_baseline = value; s.movement_current = value;
+                        s.movement_voice_selected = false; });
+                    auto loaded = request; loaded.plan_text = value.dump();
+                    update_movement_draft(loaded,context,false);
                     refresh_movement_library(request.load_path);
                     impl_->update([](Snapshot& s) { s.message = "身法方案已载入，修改后可直接测试或保存"; });
                 }

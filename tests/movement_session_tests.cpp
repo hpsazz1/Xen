@@ -480,6 +480,90 @@ void test_enabled_edit_and_cancel(const std::filesystem::path& root) {
         !session.repeat(context) && device->downs == 3, "急停键变化未撤销身法会话");
     require(!focus.failed && device->touches == 0, "会话测试误触非方案设备操作或源fixture失败");
 }
+bool finish_voice(Session& session, const Context& context, bool current = true) {
+    const auto deadline = std::chrono::steady_clock::now() + 8s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (const auto result = session.finish_voice(context, current)) return *result;
+        std::this_thread::sleep_for(1ms);
+    }
+    throw std::runtime_error("语音载入未在限时内结束");
+}
+void test_voice_selection(const std::filesystem::path& root) {
+    auto device = std::make_shared<FakeDevice>();
+    auto context = context_for(device);
+    context.map.valid = true; context.map.map_name = "de_dust2"; context.map.context_epoch = 11;
+    auto request = request_for(root / ("voice-selection-" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())));
+    auto first = example_plan(); first["map"] = context.map.map_name; first["voice_command"] = "跳箱";
+    request.plan_text = first.dump();
+    Session session;
+    submit(session, Action::SAVE_PLAN, request, context, State::COMPLETED);
+    const auto first_path = session.snapshot()->movement_selected_path;
+    require(session.snapshot()->movement_current == first && session.snapshot()->movement_baseline == first,
+        "手动保存未建立内容基线");
+    auto second = first; second["name"] = "第二方案"; second["voice_command"] = "转身";
+    second["actions"][0]["duration_ms"] = 220;
+    request.plan_text = second.dump(); request.movement_save_as = true;
+    submit(session, Action::SAVE_PLAN, request, context, State::COMPLETED);
+    const auto second_path = session.snapshot()->movement_selected_path;
+    request.movement_save_as = false; request.load_path = first_path;
+    require(!session.select_voice(request, context), "未启用测试不得接受语音选择");
+    require(session.dispatch(Action::ENABLE_MOVEMENT_TEST, request, context), "语音测试启用失败");
+    session.update_map(context.map);
+    require(session.select_voice(request, context), "干净已保存草稿应接受语音选择");
+    require(!session.select_voice(request, context) && !session.repeat(context), "载入期间不得排队第二选择或执行");
+    require(finish_voice(session, context), "页面关闭时语音选择未成功");
+    auto snapshot = session.snapshot();
+    require(snapshot->repeat_ready && snapshot->movement_test_enabled && snapshot->movement_voice_selected &&
+        snapshot->draft_plan == first && snapshot->movement_current == first && snapshot->movement_baseline == first &&
+        snapshot->movement_selected_path == first_path, "语音成功未原子发布草稿、基线与热键模板");
+    request.load_path = second_path;
+    require(session.select_voice(request, context) && finish_voice(session, context), "语音载入后错误保持脏状态");
+    const auto selected = session.snapshot()->draft_plan;
+    request.load_path = first_path;
+    require(session.select_voice(request, context), "换图拒绝fixture未开始");
+    ++context.map.context_epoch; context.map.map_name = "de_mirage";
+    session.update_map(context.map);
+    require(!finish_voice(session, context) && session.snapshot()->draft_plan == selected &&
+        session.snapshot()->movement_test_enabled && !session.snapshot()->repeat_ready && !session.repeat(context),
+        "换图迟到载入覆盖草稿、关闭测试或旧语音模板仍可执行");
+    auto manual = second; manual["notes"] = "手动接管"; request.plan_text = manual.dump();
+    require(session.update_movement_draft(request, context) && !session.snapshot()->movement_voice_selected &&
+        session.snapshot()->repeat_ready, "实际编辑不能手动接管并恢复模板");
+    require(!session.select_voice(request, context), "未保存编辑不得被语音覆盖");
+    request.load_path = second_path;
+    submit(session, Action::SAVE_PLAN, request, context, State::COMPLETED);
+    require(session.snapshot()->movement_baseline == manual, "手动保存未清除脏状态");
+    context.map.map_name = "de_dust2"; ++context.map.context_epoch; session.update_map(context.map);
+    request.load_path = first_path;
+    require(session.select_voice(request, context), "编辑竞态fixture未开始");
+    auto edited = manual; edited["notes"] = "载入期间新编辑"; request.plan_text = edited.dump();
+    require(session.update_movement_draft(request, context), "载入期间手动编辑未接管");
+    require(!finish_voice(session, context) && session.snapshot()->movement_current == edited,
+        "迟到语音覆盖新编辑");
+    request.plan_text = manual.dump(); session.update_movement_draft(request, context);
+    require(session.select_voice(request, context), "急停竞态fixture未开始");
+    session.cancel("语音回归急停");
+    require(!finish_voice(session, context) && !session.snapshot()->movement_test_enabled &&
+        !session.snapshot()->repeat_ready && session.snapshot()->movement_current == manual,
+        "急停后迟到语音回写或恢复许可");
+    require(session.dispatch(Action::ENABLE_MOVEMENT_TEST, request, context), "重启测试失败");
+    require(session.select_voice(request, context) && !finish_voice(session, context, false),
+        "已取消目录上下文仍提交语音载入");
+    auto denied = context; denied.runtime_idle = false;
+    require(!session.select_voice(request, denied), "Runtime繁忙仍接受语音选择");
+    denied = context; denied.input_recording_idle = false;
+    require(!session.select_voice(request, denied), "输入录制中仍接受语音选择");
+    const auto before_device_change = session.snapshot();
+    require(session.select_voice(request, context), "设备变化竞态fixture未开始");
+    auto changed_device = context; changed_device.device = std::make_shared<FakeDevice>();
+    require(!finish_voice(session, changed_device) &&
+        session.snapshot()->movement_current == before_device_change->movement_current &&
+        session.snapshot()->movement_baseline == before_device_change->movement_baseline &&
+        session.snapshot()->draft_plan == before_device_change->draft_plan,
+        "设备变化导致失败语音部分写入草稿或基线");
+    require(device->touches == 0, "语音选择专项触碰了设备操作");
+}
 void test_passive_recording(const std::filesystem::path& root, bool incomplete) {
     auto device = std::make_shared<TraceDevice>();
     device->incomplete = incomplete;
@@ -564,6 +648,7 @@ int main(int argc, char** argv) {
         test_source_lifecycle(root, true);
         test_enabled_edit_and_cancel(root);
         test_edit_while_running(root);
+        test_voice_selection(root);
         test_passive_recording(root, false);
         test_passive_recording(root, true);
         std::cout << "身法会话测试通过（合成设备，未执行真实输出）\n";

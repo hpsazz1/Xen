@@ -1,4 +1,5 @@
 #include "config/config.h"
+#include "config/hotkey_config_internal.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -2045,6 +2046,45 @@ void test_legacy_movement_f9_anomaly_migration() {
     std::error_code ignored;std::filesystem::remove_all(directory,ignored);
 }
 
+void test_voice_hotkey() {
+    using namespace config::detail;
+    AppConfig source;
+    expect(source.keyboard.voice_virtual_keys.empty(), "语音键默认必须未绑定");
+    configure_test_kmbox(source);
+    source.gsi.enabled = true;
+    source.keyboard.voice_virtual_keys = {'J', 'K'};
+    const auto directory = make_temp_test_directory("voice_hotkey");
+    const auto path = directory / "config.ini";
+    std::string error;
+    AppConfig loaded;
+    expect(save_app_config(path.string(), source, error) && load_app_config(path.string(), loaded, error) &&
+        loaded.keyboard.voice_virtual_keys == source.keyboard.voice_virtual_keys, "语音键配置往返失败：" + error);
+    expect(write_file_bytes(path, "[detector]\nmodel_path=model.onnx\n[keyboard]\n"), "写入旧配置失败");
+    expect(load_app_config(path.string(), loaded, error) && loaded.keyboard.voice_virtual_keys.empty(),
+        "旧配置不得自动启用语音键");
+    source.keyboard.debug_test_enabled = true; source.keyboard.debug_test_virtual_keys = {0x79};
+    source.auto_stop.enabled = true; source.auto_stop.activation_virtual_key = 'L';
+    source.auto_stop.release_virtual_keys = {'M'};
+    source.trigger.enabled = true; source.trigger.hold_virtual_key = 'N';
+    source.movement.enabled = source.movement.spin_enabled = source.movement.large_enabled = true;
+    source.movement.spin_trigger = source.movement.large_trigger = movement::Trigger::KEY;
+    source.movement.spin_virtual_key = 'O'; source.movement.large_virtual_key = 'P';
+    for (const auto& binding : hotkey_bindings(source)) {
+        if (binding.target == HotkeyTarget::VOICE) continue;
+        for (const int key : binding.keys) {
+            auto conflict = source; conflict.keyboard.voice_virtual_keys = {key};
+            expect(hotkey_binding_conflicts(conflict, HotkeyTarget::VOICE, key) &&
+                hotkey_binding_conflicts(conflict, binding.target, key) &&
+                !validate_app_config(conflict, error), "语音键必须与统一占用表内每项双向互斥");
+        }
+    }
+    source.keyboard.voice_virtual_keys = {0};
+    expect(!validate_app_config(source, error), "无效语音键必须拒绝");
+    source.keyboard.voice_virtual_keys = {'J', 'J'};
+    expect(!validate_app_config(source, error), "重复语音键必须拒绝");
+    std::error_code ignored; std::filesystem::remove_all(directory, ignored);
+}
+
 int main(int argc, char** argv) {
     // 发布工具复用生产序列化，导出代码默认值；不创建任何设备或运行时。
     if (argc == 3 && std::string(argv[1]) == "--write-default-config") {
@@ -2054,6 +2094,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     test_utf8_config_path();
+    test_voice_hotkey();
     test_runtime_diagnostics_preference();
     test_legacy_movement_f9_anomaly_migration();
     test_movement_config();

@@ -61,8 +61,9 @@ int duration_ms(const Plan& p) noexcept {
 bool validate_plan(const Plan& p, std::string& error) noexcept {
     try {
         error.clear();
-        if (p.name.empty() || p.name.size() > 256 || p.map.size() > 256 || p.location.size() > 256 || p.notes.size() > 4096)
-            throw std::runtime_error("名称不能为空，名称/地图/点位最多256字节，说明最多4096字节");
+        if (p.name.empty() || p.name.size() > 256 || p.map.size() > 256 || p.location.size() > 256 ||
+            p.voice_command.size() > 256 || p.notes.size() > 4096)
+            throw std::runtime_error("名称不能为空，名称/地图/点位/口令最多256字节，说明最多4096字节");
         if (p.actions.empty() || p.actions.size() > 16384) throw std::runtime_error("方案需要1至16384个动作");
         for (std::size_t i = 0; i < p.actions.size(); ++i) {
             const auto& a = p.actions[i];
@@ -99,19 +100,22 @@ bool validate_plan(const Plan& p, std::string& error) noexcept {
 }
 bool parse_plan(const nlohmann::json& j, Plan& out, std::string& error) noexcept {
     try {
-        fields(j, {"schema_version", "name", "map", "location", "notes", "actions", "mask"});
         const int version = integer(j.at("schema_version"));
-        if (version != 1 && version != 2) throw std::runtime_error("不支持的方案版本");
+        if (version != 1 && version != 2 && version != 3) throw std::runtime_error("不支持的方案版本");
+        if (version == 3)
+            fields(j, {"schema_version", "name", "map", "location", "notes", "voice_command", "actions", "mask"});
+        else fields(j, {"schema_version", "name", "map", "location", "notes", "actions", "mask"});
         Plan p;
         p.name = j.at("name").get<std::string>(); p.map = j.at("map").get<std::string>();
+        if (version == 3) p.voice_command = j.at("voice_command").get<std::string>();
         p.location = j.at("location").get<std::string>(); p.notes = j.at("notes").get<std::string>();
         const auto& list = j.at("actions");
         if (!list.is_array() || list.size() > 16384) throw std::runtime_error("动作必须是最多16384项的数组");
         for (const auto& item : list) {
             Action a;
             const auto type = item.at("type").get<std::string>();
-            if (type == "key" || (version == 2 && type == "mask")) {
-                if (version == 2 && type == "key" && item.contains("physical")) {
+            if (type == "key" || (version >= 2 && type == "mask")) {
+                if (version >= 2 && type == "key" && item.contains("physical")) {
                     fields(item, {"type", "key", "start_ms", "duration_ms", "physical"});
                     a.physical = item.at("physical").get<bool>();
                 } else fields(item, {"type", "key", "start_ms", "duration_ms"});
@@ -125,10 +129,10 @@ bool parse_plan(const nlohmann::json& j, Plan& out, std::string& error) noexcept
                 a.kind = ActionKind::TURN;
                 if (!item.at("angle_degrees").is_number()) throw std::runtime_error("角度必须是数字");
                 a.angle_degrees = item.at("angle_degrees").get<double>();
-            } else if (version == 2 && type == "move") {
+            } else if (version >= 2 && type == "move") {
                 fields(item, {"type", "dx", "dy", "start_ms", "duration_ms"});
                 a.kind = ActionKind::MOVE; a.dx = counts(item.at("dx")); a.dy = counts(item.at("dy"));
-            } else if (version == 2 && type == "wheel") {
+            } else if (version >= 2 && type == "wheel") {
                 fields(item, {"type", "wheel", "start_ms", "duration_ms"});
                 a.kind = ActionKind::WHEEL; a.wheel = counts(item.at("wheel"));
             } else throw std::runtime_error("不支持的动作类型");
@@ -156,7 +160,8 @@ nlohmann::json plan_json(const Plan& p) {
         else { item["type"] = "wheel"; item["wheel"] = a.wheel; }
         actions.push_back(std::move(item));
     }
-    return {{"schema_version", 2}, {"name", p.name}, {"map", p.map}, {"location", p.location}, {"notes", p.notes},
+    return {{"schema_version", 3}, {"name", p.name}, {"map", p.map}, {"location", p.location}, {"notes", p.notes},
+        {"voice_command", p.voice_command},
         {"actions", actions}, {"mask", {{"enabled", p.mask.enabled}, {"wasd", p.mask.wasd},
             {"start_ms", p.mask.start_ms}, {"duration_ms", p.mask.duration_ms}}}};
 }

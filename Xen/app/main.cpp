@@ -17,6 +17,8 @@
 #include "overlay/overlay.h"
 #include "runtime/runtime.h"
 #include "model_workspace/model_workspace.h"
+#include "voice_switch/voice_switch.h"
+#include "voice_switch/controller.h"
 
 #include <Windows.h>
 
@@ -69,6 +71,13 @@ bool same_mouse_config(const MouseConfig& first,
            first.makcu_baud_rate == second.makcu_baud_rate &&
            first.makcu_connect_timeout_ms == second.makcu_connect_timeout_ms &&
            first.makcu_command_timeout_ms == second.makcu_command_timeout_ms;
+}
+
+bool same_gsi_config(const weapon::GsiConfig& a, const weapon::GsiConfig& b) noexcept {
+    return a.enabled == b.enabled && a.bind_address == b.bind_address && a.port == b.port &&
+        a.allowed_peer_ipv4 == b.allowed_peer_ipv4 && a.ttl_ms == b.ttl_ms &&
+        a.request_timeout_ms == b.request_timeout_ms && a.max_body_bytes == b.max_body_bytes &&
+        a.max_clock_skew_ms == b.max_clock_skew_ms;
 }
 
 } // namespace
@@ -195,7 +204,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         LOG_ERROR("app", "崩溃诊断安装失败");
     }
 
-    Runtime runtime;
+    auto shared_gsi = std::make_shared<weapon::GsiReceiver>();
+    auto active_gsi_config = config.gsi;
+    if (active_gsi_config.enabled && !shared_gsi->start(active_gsi_config)) append_message(app_message, "GSI 接收失败：" + shared_gsi->last_error());
+    Runtime runtime(shared_gsi);
     auto data_collector = std::make_shared<data_collection::Collector>();
     runtime.set_data_collector(data_collector);
     model_workspace::Workspace model_workspace(data_collector);
@@ -242,6 +254,22 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     std::vector<RuntimePipelineSample> pending_debug_samples;
     Overlay overlay;
     debug_session::Session debug_workspace;
+    voice_switch::Server voice_server;
+    voice_switch::Controller voice_controller(voice_server,debug_workspace);
+    const auto configure_voice = [&] {
+        voice_controller.cancel();
+        voice_server.stop();
+        if (!active_keyboard_config.voice_virtual_keys.empty()) {
+            voice_switch::Config voice_config;
+            voice_config.bind_address = active_gsi_config.bind_address;
+            voice_config.allowed_peer_ipv4 = active_gsi_config.allowed_peer_ipv4;
+            if (!voice_server.start(voice_config))
+                append_message(app_message,"语音通道未启动：" + voice_server.snapshot().error);
+        }
+    };
+    configure_voice();
+    debug_session::Request catalog_request; catalog_request.mode = debug_session::Mode::MOVEMENT_TEST;
+    debug_workspace.dispatch(debug_session::Action::LIST_MOVEMENT_PLANS,catalog_request,{});
     if (!startup_boundary.observe_overlay_initialization(
             overlay.init(config.ui))) {
         LOG_ERROR("app", "Overlay 初始化失败");
@@ -382,6 +410,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             return;
         }
         AppConfig runtime_config = config;
+        runtime_config.gsi = active_gsi_config;
         if (!resolve_detector_config(runtime_config.detector)) {
             app_message = model_error;
             return;
@@ -426,6 +455,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     };
 
     while (overlay.pump_messages(true)) {
+        debug_workspace.update_map(shared_gsi->map_snapshot());
         debug_workspace.set_theme(config.ui.theme);
         debug_workspace.poll();
         report_lifecycle.poll(debug_workspace.busy(), stop_runtime_session, collect_report_result);
@@ -527,9 +557,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         const auto make_debug_context = [&] {
             debug_session::Context context;
             context.config = config;
+            context.config.gsi = active_gsi_config;
             // 已打开设备的参数才是事实；未保存草稿不能冒充连接已重配。
             context.config.mouse = active_input_config;
             context.device = input_device;
+            context.map = shared_gsi->map_snapshot();
             context.runtime_idle = !report_lifecycle.stopping() &&
                 (snapshot.state == RuntimeState::STOPPED || snapshot.state == RuntimeState::FAILED);
             context.input_recording_idle = !snapshot.training ||
@@ -650,13 +682,21 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                 app_message = "意图被安全门拒绝。";
             }
         }
-        const bool device_change_requires_stop = !same_mouse_config(active_input_config, config.mouse) &&
+        const bool device_change_requires_stop = (!same_mouse_config(active_input_config, config.mouse) ||
+            !same_gsi_config(active_gsi_config,config.gsi)) &&
             (runtime.snapshot().state != RuntimeState::STOPPED || report_lifecycle.finishing());
         if (actions.save_config_requested && (report_lifecycle.stopping() || debug_workspace.busy() || overlay.background_busy() || device_change_requires_stop)) {
             app_message = "请先结束后台调试与弹道任务，再保存或切换设备配置。";
         } else if (actions.save_config_requested && !overlay.close_requested()) {
             // 保存草稿不要求模型文件已经到位；实际启动/应用模型时再解析存在性。
             if (save_current_config(config_error)) {
+                voice_controller.cancel();
+                if (!same_gsi_config(active_gsi_config,config.gsi)) {
+                    shared_gsi->stop(); active_gsi_config = config.gsi;
+                    if (active_gsi_config.enabled && !shared_gsi->start(active_gsi_config))
+                        append_message(app_message,"GSI 接收失败：" + shared_gsi->last_error());
+                    debug_workspace.update_map(shared_gsi->map_snapshot());
+                }
                 const bool cross_runtime_restart =
                     release_environment.managed &&
                     app::detail::runtime_for_backend(config.detector.backend) !=
@@ -728,10 +768,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                 } else {
                     app_message = "配置已保存，但快捷键重载失败。";
                 }
+                configure_voice();
             } else {
                 app_message = config_error;
             }
         }
+        voice_controller.tick(make_debug_context(),keyboard_poll,active_keyboard_config,
+            emergency_pressed || actions.stop_requested || actions.training_stop_requested ||
+            actions.start_requested || runtime_toggle_pressed || actions.save_config_requested ||
+            actions.debug_action == debug_session::Action::CANCEL || overlay.close_requested() ||
+            report_lifecycle.busy() || report_lifecycle.stop_pending() || overlay.background_busy(),
+            actions.hotkey_capture_consumed);
         // 本轮键盘与界面停止/急停优先，不能先自动重启再清除刚收到的急停。
         const auto restart_target = report_lifecycle.take_restart(debug_workspace.busy() || overlay.background_busy() ||
                 model_workspace.poll().job_running,
@@ -745,6 +792,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
 
     // 渲染失败和系统退出同样经过屏障；不可先关闭后台仍使用的设备或日志。
+    voice_controller.cancel();
+    voice_server.stop();
     debug_workspace.request_shutdown();
     overlay.cancel_background();
     for (;;) {
@@ -757,6 +806,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         MsgWaitForMultipleObjectsEx(0, nullptr, 16, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
     }
     runtime.stop();
+    shared_gsi->stop();
     model_workspace.shutdown();
     if (!report_finalization.failed()) finish_debug_report();
     if (report_finalization.failed()) LOG_WARN("app", "退出时仍有未保存报告，内存数据无法保留到下次启动: {}", report_finalization.error());

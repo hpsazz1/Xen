@@ -49,8 +49,8 @@ void interactions() {
         io.AddMouseButtonEvent(0, false); return frame();
     };
     auto actions = frame();
-    expect(actions.debug_action == debug_session::Action::LIST_MOVEMENT_PLANS && actions.movement_draft_changed,
-        "首次显示必须异步查询方案库并发布草稿，不输出设备");
+    expect(actions.debug_action == debug_session::Action::LIST_MOVEMENT_PLANS && !actions.movement_draft_changed,
+        "首次显示只查询方案库，自动初始化不得伪装手动编辑");
     actions = frame();
     expect(actions.debug_action == debug_session::Action::NONE, "普通帧不重复扫描方案库");
     actions = click("启用身法测试");
@@ -85,7 +85,11 @@ void interactions() {
     snapshot.movement_saved_plans = {{"cache/movement/plans/one.json", loaded.name}};
     snapshot.movement_catalog_revision = 1;
     snapshot.movement_selected_path = snapshot.movement_saved_plans.front().path;
-    actions = frame(); expect(actions.movement_draft_changed && !actions.debug_plan_edited, "载入身法方案只更新草稿，不撤销启用");
+    actions = frame(); expect(!actions.movement_draft_changed && !actions.debug_plan_edited,
+        "载入同步不得伪装手动编辑或撤销语音来源");
+    snapshot.movement_voice_selected = true;
+    ++snapshot.draft_plan_revision; ++snapshot.movement_catalog_revision;
+    actions = frame(); expect(!actions.movement_draft_changed, "语音草稿及目录自动同步不得手动接管");
     actions = click("测试一次");
     expect(actions.debug_action == debug_session::Action::RUN_MOVEMENT_TEST &&
         debug_session::Json::parse(actions.debug_request.plan_text) == snapshot.draft_plan, "载入后可直接测试完整新草稿");

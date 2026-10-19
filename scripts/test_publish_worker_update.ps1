@@ -9,6 +9,8 @@ $captureToolNames = @('XenSender.exe', 'XenCaptureEvidence.exe', 'XenAutoStopCap
 $sharedSourceToolNames = $captureToolNames + @('XenClockSource.exe')
 $modelReviewNames = @('model_data_pipeline.py', 'model_data_review.html',
     'model_training_environment.py', 'model_training_requirements.txt')
+$voiceToolNames = @('client.py', 'requirements.txt', 'install.ps1', 'start.ps1',
+    'empty_keywords.txt', 'README.md', 'LICENSES.md', 'prepare_model.py')
 $script:passed = 0
 function Assert-UpdateTest([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw "FAIL: $Message" }
@@ -56,6 +58,10 @@ try {
     & $git -C $sourceRoot init --quiet
     if ($LASTEXITCODE -ne 0) { throw 'fixture git init failed' }
     Write-UpdateFixture (Join-Path $sourceRoot 'fixture.txt') 'worker source'
+    foreach ($tool in $voiceToolNames) {
+        Write-UpdateFixture (Join-Path $sourceRoot "tools/voice_switch/$tool") "updated-$tool"
+    }
+    & $git -C $sourceRoot add tools
     foreach ($tool in ($modelReviewNames + @(
         'invoke_aim_manual_acceptance.ps1', 'aim_report.ps1', 'aim_control_diagnostics.ps1', 'aim_fixed_scene_analysis.ps1'))) {
         Write-UpdateFixture (Join-Path $sourceRoot "scripts/$tool") "updated-$tool"
@@ -349,6 +355,7 @@ try {
     $deltaParameters.IncludeClockSource = $true
     $deltaParameters.IncludeRecoilMigrationScripts = $true
     $deltaParameters.IncludeSoakAcceptanceTools = $true
+    $deltaParameters.IncludeVoiceTools = $true
     $legacyReview = @{ BasePackagePath = $baseRoot; Runtime = 'nvidia'; RepositoryRoot = $sourceRoot
         GitExecutable = $git; OutputDirectory = (Join-Path $runRoot 'legacy-review-only');
         ChangesOnly = $true; ModelDataReviewOnly = $true }
@@ -411,10 +418,17 @@ try {
     # 锁住未选 Worker，证明差量生成不会读取或重哈希继承二进制。
     $inheritedGuard = [IO.File]::Open((Join-Path $baseRoot 'runtimes/directml/Xen.exe'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
     try { & $publisher @deltaParameters } finally { $inheritedGuard.Dispose() }
-    Assert-UpdateTest (@(Get-ChildItem -LiteralPath $deltaOutput -Recurse -File).Count -eq 21) '差量只生成选定Worker/工具、模型四资源、长稳依赖、来源证据和清单'
+    Assert-UpdateTest (@(Get-ChildItem -LiteralPath $deltaOutput -Recurse -File).Count -eq (21 + $voiceToolNames.Count)) '差量只生成选定Worker/工具、模型四资源、语音固定资源、长稳依赖、来源证据和清单'
     $captureEvidence = Get-Content -LiteralPath (Join-Path $deltaOutput $evidenceRelative) -Raw | ConvertFrom-Json
     Assert-UpdateTest (-not $captureEvidence.inherited_payload_hashes_verified) '采集工具差量不虚称继承文件已重哈希'
     $captureManifest = Get-Content -LiteralPath (Join-Path $deltaOutput 'manifest.json') -Raw | ConvertFrom-Json
+    foreach ($tool in $voiceToolNames) {
+        $relative = "tools/voice-switch/$tool"
+        $record = @($captureManifest.files | Where-Object { $_.path -ceq $relative })
+        Assert-UpdateTest ((Get-Content -LiteralPath (Join-Path $deltaOutput $relative) -Raw) -ceq "updated-$tool") "语音工具来自源码 $tool"
+        Assert-UpdateTest ($record.Count -eq 1 -and $record[0].runtime -ceq '' -and
+            $record[0].sha256 -ieq (Get-FileHash -LiteralPath (Join-Path $deltaOutput $relative)).Hash) "语音工具清单共享归属及SHA $tool"
+    }
     foreach ($tool in $sharedSourceToolNames) {
         $relative = "tools/source/$tool"
         $sourcePath = (Get-Item -LiteralPath (Join-Path $buildRoot "Release/$tool")).FullName
@@ -453,6 +467,11 @@ try {
         $deltaEntries += [ordered]@{ path = $relative; old_sha256 = $oldHash
             new_sha256 = (Get-FileHash -LiteralPath (Join-Path $deltaStage $relative)).Hash.ToLowerInvariant() }
     }
+    foreach ($tool in $voiceToolNames) {
+        $relative = "tools/voice-switch/$tool"
+        $deltaEntries += [ordered]@{ path = $relative; old_sha256 = ''
+            new_sha256 = (Get-FileHash -LiteralPath (Join-Path $deltaStage $relative)).Hash.ToLowerInvariant() }
+    }
     $protected = @()
     foreach ($relative in @('config.ini', 'cache/model-workspace/settings.json')) {
         $protected += [ordered]@{ path = $relative; sha256 = (Get-FileHash -LiteralPath (Join-Path $baseRoot $relative)).Hash.ToLowerInvariant() }
@@ -462,6 +481,14 @@ try {
     $apply = Join-Path $PSScriptRoot 'apply_worker_delta.ps1'
     $packetPath = Join-Path $deltaStage 'delta.json'
     $goodPacket = [IO.File]::ReadAllText($packetPath)
+    $incompleteVoice = $goodPacket | ConvertFrom-Json
+    $incompleteVoice.files = @($incompleteVoice.files | Where-Object { $_.path -cne 'tools/voice-switch/client.py' })
+    Write-UpdateFixture $packetPath ($incompleteVoice | ConvertTo-Json -Depth 10)
+    $voiceRejected = $false
+    try { & $apply -PackageRoot $baseRoot -StageName $deltaName -CheckOnly }
+    catch { $voiceRejected = $_.Exception.Message -match '语音主机工具必须包含完整固定文件组' }
+    Assert-UpdateTest $voiceRejected '应用差量拒绝缺失语音依赖组'
+    Write-UpdateFixture $packetPath $goodPacket
     $badPacket = $goodPacket | ConvertFrom-Json
     $badPacket.files += [pscustomobject]@{ path='tools/acceptance/arbitrary.ps1'; old_sha256=''; new_sha256=('0'*64) }
     Write-UpdateFixture $packetPath ($badPacket | ConvertTo-Json -Depth 10)
@@ -566,6 +593,19 @@ try {
     $forbiddenAim.OutputDirectory = Join-Path $runRoot 'aim-with-clock'
     $forbiddenAim.IncludeClockSource = $true
     Assert-UpdateReject $forbiddenAim '仅Aim工具模式拒绝混入时钟源工具'
+    foreach ($mode in @('AimToolsOnly', 'ModelDataReviewOnly')) {
+        $mixedVoice = $parameters.Clone(); $mixedVoice.ChangesOnly = $true
+        $mixedVoice[$mode] = $true; $mixedVoice.IncludeVoiceTools = $true
+        $mixedVoice.OutputDirectory = Join-Path $runRoot "voice-$mode"
+        Assert-UpdateReject $mixedVoice '仅工具模式拒绝混入语音工具'
+        $remoteMixed = @{ PackageRoot = 'unused'; Runtime = 'nvidia'; DestinationRoot = 'unused';
+            RemotePackageRoot = 'unused'; IncludeVoiceTools = $true }
+        $remoteMixed[$mode] = $true
+        $rejected = $false
+        try { & (Join-Path $PSScriptRoot 'publish_worker_delta.ps1') @remoteMixed }
+        catch { $rejected = $_.Exception.Message -match '仅工具模式不能混入语音工具' }
+        Assert-UpdateTest $rejected '差量入口接触网络前拒绝混合语音工具模式'
+    }
     $deltaMixedRejected = $false
     try {
         & (Join-Path $PSScriptRoot 'publish_worker_delta.ps1') -PackageRoot 'unused' -Runtime nvidia `

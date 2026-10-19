@@ -63,7 +63,8 @@ struct Runtime::Impl {
     std::atomic<std::shared_ptr<movement::Worker>> movement_worker;
     bool movement_start_failed = false;
     source_context::SourceContextClient source_context_client;
-    weapon::GsiReceiver gsi_receiver;
+    std::shared_ptr<weapon::GsiReceiver> gsi_receiver = std::make_shared<weapon::GsiReceiver>();
+    bool owns_gsi = true;
     std::atomic<std::shared_ptr<RecoilWorker>> recoil_worker;
     std::optional<RecoilArchiveConfig> recoil_archive_config;
     std::atomic<std::shared_ptr<RecoilBatchArchive>> recoil_archive;
@@ -351,7 +352,7 @@ struct Runtime::Impl {
                     [this, timing_catalog] {
                         if (!config.gsi.enabled) return AutoStopWeaponContext{};
                         // 可被急停及扳机线程同时读取；使用不可变快照，不维护可变闭包。
-                        const auto current = gsi_receiver.snapshot();
+                        const auto current = gsi_receiver->snapshot();
                         return runtime::detail::auto_stop_weapon_context(current,
                             config.auto_stop.cycle_enabled, timing_catalog.get(), weapon::Clock::now());
                     });
@@ -382,9 +383,9 @@ struct Runtime::Impl {
                 }
             }
         if (config.gsi.enabled) {
-            if (!gsi_receiver.start(config.gsi)) {
-                const auto error = "GSI 接收未启动：" + gsi_receiver.last_error() +
-                    "。采集和检测继续；依赖武器或阵营身份的能力等待有效状态。修复后停止并重新启动 Runtime。";
+            if (owns_gsi ? !gsi_receiver->start(config.gsi) : !gsi_receiver->last_error().empty()) {
+                const auto error = "GSI 接收未启动：" + gsi_receiver->last_error() +
+                    "。采集和检测继续；依赖武器或阵营身份的能力等待有效状态。修复配置后重新启动应用。";
                 {
                     std::lock_guard lock(snapshot_mutex);
                     current_snapshot.gsi_error = error;
@@ -431,7 +432,7 @@ struct Runtime::Impl {
                 },
                 [this](std::uint64_t id) { if (auto stop = auto_stop_worker.load()) stop->cancel(id); },
                 [this, timing_catalog, context = runtime::detail::TriggerWeaponContext{}]() mutable {
-                    const auto current = gsi_receiver.snapshot();
+                    const auto current = gsi_receiver->snapshot();
                     const auto now = TriggerClock::now();
                     auto result = context.update(current, *timing_catalog, now);
                     result.source_context_epoch = source_context_client.snapshot().control_safety_epoch;
@@ -486,7 +487,7 @@ struct Runtime::Impl {
                 [this, previous_weapon = std::string{}, previous_epoch = std::uint64_t{0}, generation = std::uint64_t{1},
                     focus_session = std::uint64_t{0}]() mutable {
                     RecoilInput input;
-                    const auto weapon = gsi_receiver.snapshot();
+                    const auto weapon = gsi_receiver->snapshot();
                     const auto focus = source_context_client.snapshot();
                     if (weapon.canonical_id != previous_weapon || weapon.source_epoch != previous_epoch) {
                         previous_weapon = weapon.canonical_id; previous_epoch = weapon.source_epoch; ++generation;
@@ -818,7 +819,7 @@ struct Runtime::Impl {
         runtime::detail::AimWeaponSessionGate aim_weapon_session;
         const auto sample_aim_weapon_session = [this, &aim_weapon_session] {
             // 函数实参不保证从左到右求值；必须先读状态，再取用于有效期检查的时间。
-            const auto current_weapon = config.gsi.enabled ? gsi_receiver.snapshot() : weapon::WeaponSnapshot{};
+            const auto current_weapon = config.gsi.enabled ? gsi_receiver->snapshot() : weapon::WeaponSnapshot{};
             const auto source = config.source_context.enabled ? source_context_client.snapshot() :
                 source_context::SourceContextSnapshot{};
             return aim_weapon_session.update(current_weapon, config.gsi.enabled, source, config.source_context.enabled,
@@ -1128,7 +1129,7 @@ struct Runtime::Impl {
                 if (startup_adapter.before_collection_offer)
                     startup_adapter.before_collection_offer(frame_detector_generation, profile.detector.status);
                 const auto collection_weapon = config.gsi.enabled
-                    ? gsi_receiver.snapshot() : weapon::WeaponSnapshot{};
+                    ? gsi_receiver->snapshot() : weapon::WeaponSnapshot{};
                 data_collector->offer(*frame, preview_detections,
                     profile.detector.status, frame_detector_generation,
                     runtime::detail::collection_game_context_allowed(config.gsi.enabled,
@@ -1284,7 +1285,7 @@ struct Runtime::Impl {
         }
         {
             std::lock_guard lock(snapshot_mutex);
-            current_snapshot.weapon_snapshot = gsi_receiver.snapshot();
+            current_snapshot.weapon_snapshot = gsi_receiver->snapshot();
             if (config.recoil.enabled && current_snapshot.recoil_telemetry_available) {
                 const auto& id = current_snapshot.weapon_snapshot.canonical_id;
                 const auto found = recoil_profile_statuses.find(id);
@@ -1292,7 +1293,7 @@ struct Runtime::Impl {
                     found == recoil_profile_statuses.end() ? id + "：无匹配曲线" : found->second;
             }
         }
-        gsi_receiver.stop();
+        if (owns_gsi) gsi_receiver->stop();
         source_context_client.stop();
         if (auto worker = auto_stop_worker.exchange(
                 std::shared_ptr<AutoStopWorker>{})) {
@@ -1341,7 +1342,8 @@ const char* DetectorReloadStateName(DetectorReloadState state) noexcept {
     return "UNKNOWN";
 }
 
-Runtime::Runtime() : impl_(std::make_unique<Impl>()) {
+Runtime::Runtime(std::shared_ptr<weapon::GsiReceiver> shared_gsi) : impl_(std::make_unique<Impl>()) {
+    if (shared_gsi) { impl_->gsi_receiver = std::move(shared_gsi); impl_->owns_gsi = false; }
     Log::register_module("runtime", LogLevel::INFO);
 }
 
@@ -1825,7 +1827,7 @@ RuntimeSnapshot Runtime::snapshot() const noexcept {
         }
         result.source_context = impl_->source_context_client.snapshot();
         if (impl_->recoil_worker.load() || impl_->trigger_worker.load() || result.state == RuntimeState::RUNNING)
-            result.weapon_snapshot = impl_->gsi_receiver.snapshot();
+            result.weapon_snapshot = impl_->gsi_receiver->snapshot();
         if (auto recoil = impl_->recoil_worker.load()) {
             result.recoil = recoil->snapshot(); result.recoil_telemetry_available = true;
             const auto& weapon_id = result.weapon_snapshot.canonical_id;

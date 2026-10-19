@@ -25,7 +25,7 @@ struct Mask {
     int duration_ms = 0; // 0：持续到动作结束。
 };
 struct Plan {
-    std::string name = "新身法方案", map, location, notes;
+    std::string name = "新身法方案", map, location, notes, voice_command;
     std::vector<Action> actions;
     Mask mask;
 };
