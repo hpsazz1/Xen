@@ -12,6 +12,7 @@ namespace {
 constexpr int kMaxTime = 60000;
 constexpr std::array<const char*, 6> kKeys{"W", "A", "S", "D", "SPACE", "CTRL"};
 bool ack(const KeyboardReceipt& r) { return r.disposition == KeyboardDisposition::ACKNOWLEDGED; }
+bool ack(const ButtonReceipt& r) { return r.disposition == ButtonDisposition::ACKNOWLEDGED; }
 void fields(const nlohmann::json& j, std::initializer_list<const char*> allowed) {
     if (!j.is_object() || j.size() != allowed.size()) throw std::runtime_error("方案字段缺失或包含未知字段");
     for (auto name : allowed) if (!j.contains(name)) throw std::runtime_error("方案缺少必要字段");
@@ -86,6 +87,10 @@ bool validate_plan(const Plan& p, std::string& error) noexcept {
                     throw std::runtime_error("单次位移超过1000000 counts");
             } else if (a.kind == ActionKind::WHEEL) {
                 if (!a.wheel || a.wheel < -127 || a.wheel > 127) throw std::runtime_error("单次滚轮必须为-127至127个刻度且非零");
+            } else if (a.kind == ActionKind::BUTTON) {
+                if (a.button != Button::LEFT && a.button != Button::RIGHT)
+                    throw std::runtime_error("按钮只支持鼠标左键和右键");
+                if (a.physical) throw std::runtime_error("鼠标按钮暂不支持物理录制轨道");
             } else throw std::runtime_error("不支持的动作类型");
         }
         if (p.mask.wasd < 0 || p.mask.wasd > 15 || p.mask.start_ms < -1 || p.mask.start_ms > kMaxTime ||
@@ -135,6 +140,11 @@ bool parse_plan(const nlohmann::json& j, Plan& out, std::string& error) noexcept
             } else if (version >= 2 && type == "wheel") {
                 fields(item, {"type", "wheel", "start_ms", "duration_ms"});
                 a.kind = ActionKind::WHEEL; a.wheel = counts(item.at("wheel"));
+            } else if (version >= 3 && type == "button") {
+                fields(item, {"type", "button", "start_ms", "duration_ms"});
+                const auto button = item.at("button").get<std::string>();
+                if (button != "left" && button != "right") throw std::runtime_error("不支持的鼠标按钮");
+                a.kind = ActionKind::BUTTON; a.button = button == "left" ? Button::LEFT : Button::RIGHT;
             } else throw std::runtime_error("不支持的动作类型");
             a.start_ms = integer(item.at("start_ms")); a.duration_ms = integer(item.at("duration_ms"));
             p.actions.push_back(a);
@@ -157,6 +167,7 @@ nlohmann::json plan_json(const Plan& p) {
             if (a.kind == ActionKind::KEY && a.physical) item["physical"] = true;
         } else if (a.kind == ActionKind::TURN) { item["type"] = "turn"; item["angle_degrees"] = a.angle_degrees; }
         else if (a.kind == ActionKind::MOVE) { item["type"] = "move"; item["dx"] = a.dx; item["dy"] = a.dy; }
+        else if (a.kind == ActionKind::BUTTON) { item["type"] = "button"; item["button"] = a.button == Button::LEFT ? "left" : "right"; }
         else { item["type"] = "wheel"; item["wheel"] = a.wheel; }
         actions.push_back(std::move(item));
     }
@@ -169,6 +180,7 @@ nlohmann::json plan_json(const Plan& p) {
 Result run_plan(IMouseController& device, const Plan& p, const movement::Config& scale, const Callbacks& callbacks) noexcept {
     Result result;
     bool debt = false;
+    std::array<bool, 2> button_debt{};
     const auto run_begin = std::chrono::steady_clock::now();
     try {
         if (!validate_plan(p, result.error)) return result;
@@ -185,6 +197,8 @@ Result run_plan(IMouseController& device, const Plan& p, const movement::Config&
                 throw std::runtime_error("单次旋转超过1000000 counts，请检查灵敏度");
             if (a.kind == ActionKind::KEY && a.key == Key::CTRL && !device.supports_left_ctrl_key())
                 throw std::runtime_error("设备不支持Left Ctrl");
+            if (a.kind == ActionKind::BUTTON && !device.supports_left_button())
+                throw std::runtime_error("设备不支持鼠标按钮输出");
         }
         const auto allowed = [&] {
             return callbacks.permitted && callbacks.permitted() && (!callbacks.canceled || !callbacks.canceled());
@@ -194,11 +208,19 @@ Result run_plan(IMouseController& device, const Plan& p, const movement::Config&
             debt = true;
             if (!ack(operation())) throw std::runtime_error("身法键盘操作未确认");
         };
+        const auto button_command = [&](unsigned button, bool down) {
+            if (!allowed()) { result.outcome = Outcome::CANCELED; throw std::runtime_error("身法执行已取消或输出许可撤回"); }
+            // 未确认的按下同样承担释放责任，且左右按钮各自清理。
+            button_debt[button] = true;
+            const auto receipt = button == 0 ? device.set_left_button(down) : device.set_right_button(down);
+            if (!ack(receipt)) throw std::runtime_error("鼠标按钮操作未确认");
+        };
         using Clock = std::chrono::steady_clock;
         const auto begin = Clock::now();
         const int total = duration_ms(p), mask_begin = mask_start(p);
         const int mask_end = p.mask.duration_ms ? mask_begin + p.mask.duration_ms : total;
         int keys = 0, masked = 0; bool space = false, ctrl = false;
+        std::array<bool, 2> buttons{};
         for (;;) {
             if (!allowed()) { result.outcome = Outcome::CANCELED; result.error = "身法执行已取消或输出许可撤回"; break; }
             const double elapsed = std::chrono::duration<double, std::milli>(Clock::now() - begin).count();
@@ -233,6 +255,45 @@ Result run_plan(IMouseController& device, const Plan& p, const movement::Config&
             if (keys != want_keys) { command([&] { return device.set_wasd_keyboard(static_cast<std::uint8_t>(want_keys)); }); keys = want_keys; }
             if (space != want_space) { command([&] { return device.set_space_key(want_space); }); space = want_space; }
             if (ctrl != want_ctrl) { command([&] { return device.set_left_ctrl_key(want_ctrl); }); ctrl = want_ctrl; }
+            // 跳跃与蹲姿先更新，再处理同一时刻的松鼠标；不把双键投掷顺序交给列表排列。
+            std::array<bool, 2> want_buttons{};
+            const double button_elapsed = elapsed;
+            for (std::size_t i = 0; i < p.actions.size(); ++i) {
+                const auto& a = p.actions[i];
+                if (a.kind != ActionKind::BUTTON) continue;
+                const auto button = static_cast<unsigned>(a.button);
+                if (button_elapsed >= a.start_ms + a.duration_ms && buttons[button]) seen[i] = true;
+                if (button_elapsed >= a.start_ms + a.duration_ms && !seen[i])
+                    throw std::runtime_error("调度或设备确认延迟导致整个鼠标按钮区间被错过，已停止");
+                if (button_elapsed < a.start_ms || button_elapsed >= a.start_ms + a.duration_ms) continue;
+                seen[i] = true; want_buttons[button] = true;
+            }
+            std::array<unsigned, 2> button_order{0, 1};
+            const auto release_at = [&](unsigned button) {
+                if (!buttons[button] || want_buttons[button]) return kMaxTime + 1;
+                int end = 0;
+                for (const auto& a : p.actions)
+                    if (a.kind == ActionKind::BUTTON && static_cast<unsigned>(a.button) == button &&
+                        a.start_ms + a.duration_ms <= elapsed)
+                        end = std::max(end, a.start_ms + a.duration_ms);
+                return end;
+            };
+            // 一轮可能跨过两个释放时刻；按配方结束时间释放，不能按按钮编号颠倒先后。
+            std::stable_sort(button_order.begin(), button_order.end(), [&](unsigned a, unsigned b) {
+                return release_at(a) < release_at(b);
+            });
+            for (unsigned button : button_order)
+                if (buttons[button] != want_buttons[button]) {
+                    if (want_buttons[button]) {
+                        const double now = std::chrono::duration<double, std::milli>(Clock::now() - begin).count();
+                        const bool still_active = std::any_of(p.actions.begin(), p.actions.end(), [&](const Action& a) {
+                            return a.kind == ActionKind::BUTTON && static_cast<unsigned>(a.button) == button &&
+                                now >= a.start_ms && now < a.start_ms + a.duration_ms;
+                        });
+                        if (!still_active) throw std::runtime_error("设备确认延迟导致鼠标按钮区间被错过，已停止");
+                    }
+                    button_command(button, want_buttons[button]); buttons[button] = want_buttons[button];
+                }
             // 先更新/释放这一时刻的软件键，再归还物理直通；不制造已结束方向的短暂叠加。
             if ((masked & ~want_mask) && elapsed < total) {
                 for (int bit = 1; bit <= 8; bit <<= 1) if (masked & ~want_mask & bit)
@@ -274,10 +335,16 @@ Result run_plan(IMouseController& device, const Plan& p, const movement::Config&
         }
     } catch (const std::exception& e) { result.error = e.what(); }
       catch (...) { result.error = "身法执行发生未知异常"; }
-    if (debt) {
-        result.cleanup_known = ack(device.cleanup_wasd_keyboard());
-        if (!result.cleanup_known) { result.outcome = Outcome::FAILED; result.error = "身法清理未确认，禁止再次输出"; }
-    }
+    // 即使取消或一侧释放失败，也尝试另一侧；不再查询已撤销的输出许可。
+    for (unsigned button = 0; button < button_debt.size(); ++button)
+        if (button_debt[button]) {
+            const bool released = ack(button == 0 ? device.set_left_button(false) : device.set_right_button(false));
+            result.cleanup_known = released && result.cleanup_known;
+        }
+    if (button_debt[0] || button_debt[1])
+        result.cleanup_known = result.cleanup_known && !device.left_button_cleanup_required() && !device.left_button_faulted();
+    if (debt) result.cleanup_known = ack(device.cleanup_wasd_keyboard()) && result.cleanup_known;
+    if (!result.cleanup_known) { result.outcome = Outcome::FAILED; result.error = "身法清理未确认，禁止再次输出"; }
     result.elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - run_begin).count();
     return result;
 }

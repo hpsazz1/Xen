@@ -162,11 +162,27 @@ void interactions() {
     loaded.actions.push_back(move);
     auto wheel = mask; wheel.kind = movement::timeline::ActionKind::WHEEL; wheel.duration_ms = 1; wheel.wheel = -1;
     loaded.actions.push_back(wheel);
+    auto left = mask; left.kind = movement::timeline::ActionKind::BUTTON;
+    left.button = movement::timeline::Button::LEFT; loaded.actions.push_back(left);
+    auto right = left; right.button = movement::timeline::Button::RIGHT; loaded.actions.push_back(right);
+    loaded.notes = "测试源：setpos -520.25 378 160;setang 1 -89 0；后续中文说明；quit";
     snapshot.draft_plan = movement::timeline::plan_json(loaded); ++snapshot.draft_plan_revision; frame();
     actions = click("校验方案");
     expect(actions.debug_action == debug_session::Action::VALIDATE &&
         debug_session::Json::parse(actions.debug_request.plan_text) == snapshot.draft_plan,
-        "屏蔽、位移、瞬时滚轮和物理来源必须可完整载入编辑器");
+        "屏蔽、位移、瞬时滚轮、左右按钮和物理来源必须可完整载入编辑器");
+    std::string copied;
+    auto& clipboard_io = ImGui::GetIO();
+    const auto old_set_clipboard = clipboard_io.SetClipboardTextFn;
+    void* old_clipboard_data = clipboard_io.ClipboardUserData;
+    clipboard_io.ClipboardUserData = &copied;
+    clipboard_io.SetClipboardTextFn = [](void* data, const char* value) { *static_cast<std::string*>(data) = value; };
+    actions = click("复制定位指令");
+    expect(copied == "setpos -520.25 378 160;setang 1 -89 0" &&
+        !actions.movement_draft_changed && actions.debug_action == debug_session::Action::NONE,
+        "复制只包含定位瞄角数字，不混入备注或后续命令、不启动输出或改变草稿");
+    clipboard_io.SetClipboardTextFn = old_set_clipboard;
+    clipboard_io.ClipboardUserData = old_clipboard_data;
     actions = click("物理轨道", 0);
     movement::timeline::Plan edited; std::string error;
     expect(actions.movement_draft_changed && movement::timeline::parse_plan(

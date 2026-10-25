@@ -1,5 +1,8 @@
 #include "movement/timeline.h"
 #include <nlohmann/json.hpp>
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <chrono>
 #include <iostream>
 #include <stdexcept>
@@ -17,6 +20,9 @@ public:
     int physical = 1;
     bool space = false, ctrl = false, fail_key = false, fail_cleanup = false, fail_move = false;
     bool delay_key = false;
+    bool button_supported = true, left = false, right = false;
+    bool fail_button_down = false, fail_button_up = false, shared_button_fault = false;
+    int left_ups = 0, right_ups = 0;
     bool open() noexcept override { return true; }
     void close() noexcept override {}
     MouseStatus status() const noexcept override { return MouseStatus::READY; }
@@ -24,6 +30,22 @@ public:
     bool poll_input(InputSnapshot&) noexcept override { return false; }
     bool supports_wasd_keyboard() const noexcept override { return true; }
     bool supports_left_ctrl_key() const noexcept override { return true; }
+    bool supports_left_button() const noexcept override { return button_supported; }
+    bool left_button_faulted() const noexcept override { return shared_button_fault; }
+    ButtonReceipt set_left_button(bool down) noexcept override {
+        events.push_back(down ? "left_down" : "left_up");
+        if (!down) ++left_ups;
+        left = down;
+        return {((down && fail_button_down) || (!down && fail_button_up)) ?
+            ButtonDisposition::APPLICATION_UNKNOWN : ButtonDisposition::ACKNOWLEDGED};
+    }
+    ButtonReceipt set_right_button(bool down) noexcept override {
+        events.push_back(down ? "right_down" : "right_up");
+        if (!down) ++right_ups;
+        right = down;
+        return {((down && fail_button_down) || (!down && fail_button_up)) ?
+            ButtonDisposition::APPLICATION_UNKNOWN : ButtonDisposition::ACKNOWLEDGED};
+    }
     MouseMoveReceipt move(const MouseMoveCommand& c) noexcept override {
         dx += c.dx_counts; dy += c.dy_counts; MouseMoveReceipt r; r.succeeded = !fail_move; return r;
     }
@@ -54,6 +76,9 @@ public:
 };
 Action key(Key value, int start, int duration) { return {ActionKind::KEY, value, start, duration, 25}; }
 Action turn(int start, int duration, double angle) { return {ActionKind::TURN, Key::W, start, duration, angle}; }
+Action button(Button value, int start, int duration) {
+    Action a; a.kind = ActionKind::BUTTON; a.button = value; a.start_ms = start; a.duration_ms = duration; return a;
+}
 Callbacks permission() { return {[] { return true; }, {}, {}}; }
 movement::Config scale() { movement::Config c; c.sensitivity = 1; c.yaw_degrees_per_count = 0.1; return c; }
 void json_contract() {
@@ -190,10 +215,108 @@ void missed_interval_and_mask_window() {
     require(r.outcome == Outcome::COMPLETED && restored_during_action, "独立屏蔽结束未刷新物理状态");
     require(f.mask_bits == std::vector<int>({1, 1}), "屏蔽范围错误");
 }
+void button_contract_and_jump_order() {
+    Plan p; p.mask.enabled = false;
+    p.actions = {button(Button::RIGHT, 0, 80), button(Button::LEFT, 0, 80), key(Key::SPACE, 80, 40)};
+    auto j = plan_json(p); Plan parsed; std::string error;
+    require(parse_plan(j, parsed, error) && plan_json(parsed) == j, "按钮方案往返丢失");
+    auto bad = j; bad["actions"][0]["button"] = "middle";
+    require(!parse_plan(bad, parsed, error), "未知鼠标按钮未拒绝");
+    bad = j; bad["actions"][0]["physical"] = true;
+    require(!parse_plan(bad, parsed, error), "按钮物理字段未拒绝");
+    bad = j; bad["schema_version"] = 2; bad.erase("voice_command");
+    require(!parse_plan(bad, parsed, error), "旧版本意外接受新按钮动作");
+    Fake f; const auto result = run_plan(f, p, scale(), permission());
+    require(result.outcome == Outcome::COMPLETED && result.cleanup_known && !f.left && !f.right,
+        "双键跳投未完成或未释放");
+    const auto jump = std::find(f.events.begin(), f.events.end(), "space_down");
+    const auto left_up = std::find(f.events.begin(), f.events.end(), "left_up");
+    const auto right_up = std::find(f.events.begin(), f.events.end(), "right_up");
+    require(jump != f.events.end() && jump < left_up && jump < right_up, "松按钮先于同刻跳跃");
+    require(f.left_ups == 2 && f.right_ups == 2 && f.cleanups == 1, "双键未分别承担最终释放责任");
+    Fake unsupported; unsupported.button_supported = false;
+    const auto rejected = run_plan(unsupported, p, scale(), permission());
+    require(rejected.outcome == Outcome::FAILED && unsupported.events.empty(), "不支持按钮的设备仍输出");
 }
-int main() {
+void button_failure_cleanup_and_missed_interval() {
+    Plan p; p.mask.enabled = false;
+    p.actions = {button(Button::LEFT, 0, 80), button(Button::RIGHT, 0, 80)};
+    Fake canceled; auto cb = permission(); cb.canceled = [&] { return canceled.left && canceled.right; };
+    auto r = run_plan(canceled, p, scale(), cb);
+    require(r.outcome == Outcome::CANCELED && r.cleanup_known && canceled.left_ups == 1 && canceled.right_ups == 1,
+        "取消未释放所有已尝试按钮");
+    Fake unknown; unknown.fail_button_down = true;
+    r = run_plan(unknown, p, scale(), permission());
+    require(r.outcome == Outcome::FAILED && r.cleanup_known && unknown.left_ups == 1 && unknown.right_ups == 0,
+        "按钮按下ACK未知未清理或清理无关按钮");
+    Fake dirty; dirty.fail_button_up = true;
+    r = run_plan(dirty, p, scale(), permission());
+    require(r.outcome == Outcome::FAILED && !r.cleanup_known && dirty.right_ups == 1 && dirty.left_ups >= 1,
+        "一侧清理失败跳过另一侧或假报已释放");
+    Fake shared; shared.shared_button_fault = true;
+    r = run_plan(shared, p, scale(), permission());
+    require(r.outcome == Outcome::FAILED && !r.cleanup_known, "共享按钮故障被单侧ACK掩盖");
+    Fake delayed; delayed.delay_key = true;
+    p.actions = {key(Key::A, 0, 100), button(Button::LEFT, 10, 1)};
+    r = run_plan(delayed, p, scale(), permission());
+    require(r.outcome == Outcome::FAILED && r.error.find("错过") != std::string::npos && delayed.left_ups == 0,
+        "完整短按钮区间错过仍被当作成功");
+    Fake at_start; at_start.delay_key = true;
+    p.actions = {key(Key::A, 0, 100), button(Button::LEFT, 0, 1)};
+    r = run_plan(at_start, p, scale(), permission());
+    require(r.outcome == Outcome::FAILED && at_start.left_ups == 0 && !at_start.left,
+        "键盘ACK跨过按钮区间仍补发过期按下");
+    Fake covered; p.actions = {button(Button::LEFT, 0, 100), button(Button::LEFT, 10, 1)};
+    cb = permission(); bool slept = false;
+    cb.progress = [&](const Progress&) { if (!slept) { slept = true; std::this_thread::sleep_for(std::chrono::milliseconds(30)); } };
+    r = run_plan(covered, p, scale(), cb);
+    require(r.outcome == Outcome::COMPLETED && std::count(covered.events.begin(), covered.events.end(), "left_down") == 1,
+        "重叠按钮区间未按并集执行");
+    Fake ordered; p.actions = {button(Button::LEFT, 0, 80), button(Button::RIGHT, 0, 40)};
+    cb = permission(); slept = false;
+    cb.progress = [&](const Progress&) {
+        if (!slept) { slept = true; std::this_thread::sleep_for(std::chrono::milliseconds(100)); }
+    };
+    r = run_plan(ordered, p, scale(), cb);
+    const auto right_up = std::find(ordered.events.begin(), ordered.events.end(), "right_up");
+    const auto left_up = std::find(ordered.events.begin(), ordered.events.end(), "left_up");
+    require(r.outcome == Outcome::COMPLETED && right_up != ordered.events.end() && right_up < left_up,
+        "同轮跨过两个结束时刻后颠倒了先松右键再松左键的配方顺序");
+}
+void validate_directory(const std::filesystem::path& directory) {
+    require(std::filesystem::is_directory(directory), "方案目录不存在");
+    std::size_t count = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+        if (entry.path().extension() != ".json" || entry.path().filename() == "manifest.json") continue;
+        require(entry.is_regular_file() && !entry.is_symlink(), "方案必须为普通文件");
+        require(entry.file_size() <= 16 * 1024 * 1024, "方案文件超过16MiB");
+        std::ifstream input(entry.path(), std::ios::binary);
+        require(static_cast<bool>(input), "无法读取方案文件");
+        try {
+            nlohmann::json document; input >> document;
+            Plan parsed, restored; std::string error;
+            if (!parse_plan(document, parsed, error)) throw std::runtime_error(error);
+            const auto canonical = plan_json(parsed);
+            if (!parse_plan(canonical, restored, error)) throw std::runtime_error(error);
+            require(plan_json(restored) == canonical, "方案往返不一致");
+        } catch (const std::exception& e) {
+            throw std::runtime_error(entry.path().filename().string() + ": " + e.what());
+        }
+        ++count;
+    }
+    require(count > 0, "方案目录没有待校验JSON");
+    std::cout << "方案目录生产解析及往返通过：" << count << " 条；未执行任何方案\n";
+}
+}
+int main(int argc, char** argv) {
     try {
+        if (argc != 1) {
+            require(argc == 3 && std::string(argv[1]) == "--validate-directory", "用法：--validate-directory PATH");
+            validate_directory(std::filesystem::u8path(argv[2]));
+            return 0;
+        }
         json_contract(); parallel_union_and_restore(); failures_and_cancel(); missed_interval_and_mask_window(); recorded_tracks();
+        button_contract_and_jump_order(); button_failure_cleanup_and_missed_interval();
         std::cout << "身法时间轴专项通过\n"; return 0;
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

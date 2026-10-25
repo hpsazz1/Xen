@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <regex>
 #include <string>
 
 namespace {
@@ -13,6 +14,7 @@ using namespace debug_session;
 using movement::timeline::Plan;
 using movement::timeline::ActionKind;
 using movement::timeline::Key;
+using movement::timeline::Button;
 using TimelineAction = movement::timeline::Action;
 
 void tip(const char* text) {
@@ -34,6 +36,7 @@ bool text_field(const char* label, std::string& value, const char* help) {
     tip(help); return changed;
 }
 std::string action_label(const TimelineAction& action) {
+    if (action.kind == ActionKind::BUTTON) return action.button == Button::LEFT ? "鼠标左键" : "鼠标右键";
     if (action.kind == ActionKind::TURN) return action.angle_degrees < 0 ? "鼠标左转" : "鼠标右转";
     if (action.kind == ActionKind::MOVE) return "鼠标位移";
     if (action.kind == ActionKind::WHEEL) return "滚轮";
@@ -47,6 +50,16 @@ std::string action_label(const TimelineAction& action) {
     case Key::CTRL: return prefix + "Ctrl";
     }
     return "未知";
+}
+std::string console_command(const std::string& notes) {
+    // 只提取六个数字组成的定位命令，不把备注中的后续文本或其他命令复制到控制台。
+    static const std::regex expression([] {
+        const std::string number = R"([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)";
+        return "\\bsetpos[ \\t]+" + number + "[ \\t]+" + number + "[ \\t]+" + number +
+            "[ \\t]*;[ \\t]*setang[ \\t]+" + number + "[ \\t]+" + number + "[ \\t]+" + number;
+    }());
+    std::smatch match;
+    return std::regex_search(notes, match, expression) ? match.str() : std::string{};
 }
 void timeline(const Plan& plan) {
     const int duration = movement::timeline::duration_ms(plan);
@@ -179,6 +192,14 @@ struct MovementPanel::Impl {
         change |= text_field("语音口令", plan.voice_command, "同一地图内口令必须唯一；清空可作为手动方案保存，未保存修改不会发布。");
         change |= text_field("点位（可选）", plan.location, "保存点位名称；每次测试前由用户对齐位置和朝向。");
         change |= text_field("起始说明", plan.notes, "记录起始朝向、站位和人工准备步骤；不参与设备执行。");
+        auto command = console_command(plan.notes);
+        if (!command.empty()) {
+            ImGui::SetNextItemWidth(std::max(100.f, ImGui::GetContentRegionAvail().x * .7f));
+            ImGui::InputText("定位与瞄角指令", &command, ImGuiInputTextFlags_ReadOnly);
+            tip("从起始说明提取的 setpos/setang；复制到游戏练习控制台自行定位，程序不会执行定位或调整准星。");
+            if (button("复制定位指令", "只复制当前配方的精确坐标和瞄角；关闭控制台、确认站位后再按测试键执行当前动作。"))
+                ImGui::SetClipboardText(command.c_str());
+        }
         if (button("添加动作", "添加独立动作；时间从脚本启动起算，与其他行可以重叠。")) {
             plan.actions.push_back({}); change = true;
         }
@@ -189,19 +210,21 @@ struct MovementPanel::Impl {
             ImGui::TableSetupColumn("动作"); ImGui::TableSetupColumn("开始 / ms");
             ImGui::TableSetupColumn("时长 / ms"); ImGui::TableSetupColumn("动作参数");
             ImGui::TableSetupColumn("编辑"); ImGui::TableHeadersRow();
-            const char* types[]{"W", "A", "S", "D", "空格 / 跳跃", "Left Ctrl / 蹲", "鼠标左转", "鼠标右转", "屏蔽 W", "屏蔽 A", "屏蔽 S", "屏蔽 D", "鼠标位移", "滚轮"};
+            const char* types[]{"W", "A", "S", "D", "空格 / 跳跃", "Left Ctrl / 蹲", "鼠标左转", "鼠标右转", "屏蔽 W", "屏蔽 A", "屏蔽 S", "屏蔽 D", "鼠标位移", "滚轮", "鼠标左键", "鼠标右键"};
             for (std::size_t i = 0; i < plan.actions.size(); ++i) {
                 auto& action = plan.actions[i];
                 ImGui::PushID(static_cast<int>(i)); ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0);
                 int kind = action.kind == ActionKind::TURN ? (action.angle_degrees < 0 ? 6 : 7) :
                     action.kind == ActionKind::MASK ? 8 + static_cast<int>(action.key) :
-                    action.kind == ActionKind::MOVE ? 12 : action.kind == ActionKind::WHEEL ? 13 : static_cast<int>(action.key);
+                    action.kind == ActionKind::MOVE ? 12 : action.kind == ActionKind::WHEEL ? 13 :
+                    action.kind == ActionKind::BUTTON ? (action.button == Button::LEFT ? 14 : 15) : static_cast<int>(action.key);
                 ImGui::SetNextItemWidth(-1);
-                if (ImGui::Combo("##action", &kind, types, 14)) {
-                    action.kind = kind < 6 ? ActionKind::KEY : kind < 8 ? ActionKind::TURN : kind < 12 ? ActionKind::MASK : kind == 12 ? ActionKind::MOVE : ActionKind::WHEEL;
+                if (ImGui::Combo("##action", &kind, types, 16)) {
+                    action.kind = kind < 6 ? ActionKind::KEY : kind < 8 ? ActionKind::TURN : kind < 12 ? ActionKind::MASK : kind == 12 ? ActionKind::MOVE : kind == 13 ? ActionKind::WHEEL : ActionKind::BUTTON;
                     if (kind < 6) action.key = static_cast<Key>(kind);
                     else if (kind < 8) action.angle_degrees = (kind == 6 ? -1 : 1) * std::max(1.0, std::abs(action.angle_degrees));
                     else if (kind < 12) action.key = static_cast<Key>(kind - 8);
+                    else if (kind >= 14) action.button = kind == 14 ? Button::LEFT : Button::RIGHT;
                     if (action.kind != ActionKind::KEY) action.physical = false;
                     if (action.kind == ActionKind::WHEEL) { action.duration_ms = 1; if (!action.wheel) action.wheel = 1; }
                     else if (action.duration_ms <= 0) action.duration_ms = 100;
@@ -247,6 +270,9 @@ struct MovementPanel::Impl {
                 } else if (action.kind == ActionKind::KEY) {
                     change |= ImGui::Checkbox("物理轨道", &action.physical);
                     tip("来自录制的物理按键。回放时扣除同键屏蔽区间；取消勾选后作为软件按键执行。");
+                } else if (action.kind == ActionKind::BUTTON) {
+                    ImGui::TextDisabled("按住后释放");
+                    tip("起点按下、时长结束释放；左键和右键可重叠以组合投法。时序是待人工调试的方案参数，不能代替游戏落点验证。");
                 } else ImGui::TextDisabled("物理屏蔽");
                 ImGui::TableSetColumnIndex(4);
                 if (button("复制", "复制当前动作及其时间，之后可分别修改。")) duplicate = static_cast<int>(i);
