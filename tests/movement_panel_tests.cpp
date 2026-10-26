@@ -326,10 +326,11 @@ int main() {
     unsigned char* pixels; int width, height; io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
     interactions();
     grenade_interactions();
+    for (const auto mode : {debug_session::Mode::MOVEMENT_TEST, debug_session::Mode::GRENADE_TEST})
     for (const ImVec2 size : {ImVec2{620, 480}, ImVec2{820, 600}}) {
-        io.DisplaySize = size; MovementPanel panel;
+        io.DisplaySize = size; MovementPanel panel(mode);
         ImGui::NewFrame(); ImGui::SetNextWindowSize(size);
-        ImGui::Begin("身法窄窗口回归", nullptr, ImGuiWindowFlags_NoSavedSettings);
+        ImGui::Begin(mode == debug_session::Mode::GRENADE_TEST ? "道具窄窗口回归" : "身法窄窗口回归", nullptr, ImGuiWindowFlags_NoSavedSettings);
         OverlayActions actions; AppConfig config; panel.render(config, nullptr, actions);
         expect(actions.debug_action == debug_session::Action::LIST_MOVEMENT_PLANS, "首次浏览仅查询方案库");
         ImGui::End(); ImGui::Render();

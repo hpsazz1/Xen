@@ -3275,7 +3275,7 @@ struct Overlay::Impl {
         ImGui::EndDisabled();
         ImGui::TextWrapped("停止运行后测试，每次执行一组；身法编排与道具测试各自启用，F11只执行最后明确启用的页面。");
         ImGui::TextDisabled("准备与重复测试说明");
-        show_help_tooltip("身法编排启用后使用最新有效草稿，改参、保存和载入无需重新启用。标定与采集新弹道每组都需重新准备；已有弹道验证、急停和射击节奏可按模板重复，编辑后需重新准备。切换设备、启动 Runtime 或急停会撤销测试许可，无自动循环。生产组合效果在辅助页配置后单独验收。");
+        show_help_tooltip("身法编排或道具测试明确启用后，F11使用该页最新有效草稿；浏览另一页不会接管，启用另一页才切换。标定与采集新弹道每组都需重新准备；已有弹道验证、急停和射击节奏可按模板重复，编辑后需重新准备。切换设备、启动 Runtime 或急停会撤销测试许可，无自动循环。生产组合效果在辅助页配置后单独验收。");
         if (!hotkey_capture_message.empty()) ImGui::TextWrapped("%s",hotkey_capture_message.c_str());
         if (!ImGui::BeginTabBar("debug_tabs")) return;
         if (ImGui::BeginTabItem("身法编排")) {
