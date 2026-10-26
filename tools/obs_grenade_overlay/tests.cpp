@@ -70,5 +70,10 @@ int main() {
     check(model.update(selection, reference, catalog, "http://host:5015").visible, "idle之后首个人工选择显示");
     check(xen_obs::percent_encode("a&b\" c") == "a%26b%22%20c", "浏览器查询参数保持数据边界");
     check(!xen_obs::valid_plan_id("../a.json") && !xen_obs::valid_plan_id("C:\\a.json"), "拒绝路径充当方案ID");
+    const auto relative_page = std::filesystem::relative(std::filesystem::path(__FILE__));
+    const auto page_url = xen_obs::file_url(relative_page);
+    check(page_url.starts_with("file:///") && page_url.size() > 10 && page_url[9] == ':' &&
+          page_url.find("/../") == std::string::npos && page_url.ends_with("/tools/obs_grenade_overlay/tests.cpp"),
+          "OBS相对资源路径必须转换为带盘符的绝对文件URL");
     return failures ? 1 : 0;
 }

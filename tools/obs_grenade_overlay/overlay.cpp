@@ -177,8 +177,7 @@ public:
         char* html_path = obs_module_file("reference.html");
         if (!html_path) throw std::runtime_error("缺少reference.html");
         std::string path = html_path; bfree(html_path);
-        std::replace(path.begin(), path.end(), '\\', '/');
-        page_url_ = "file:///" + xen_obs::percent_encode(path, true);
+        page_url_ = xen_obs::file_url(std::filesystem::path(wide(path)));
 
         HMODULE instance = nullptr;
         GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -194,7 +193,7 @@ public:
             0, 0, kWidth, kHeight, nullptr, nullptr, instance_, this);
         if (!window) throw std::runtime_error("OBS提示窗口创建失败");
         handle_.store(window);
-        SetLayeredWindowAttributes(window, 0, 245, LWA_ALPHA);
+        SetLayeredWindowAttributes(window, 0, 230, LWA_ALPHA);
         obs_data_t* browser_settings = obs_data_create();
         obs_data_set_bool(browser_settings, "is_local_file", false);
         obs_data_set_string(browser_settings, "url", (page_url_ + "?payload=%7B%7D").c_str());
@@ -212,7 +211,7 @@ public:
         gs_init_data graphics{};
         graphics.window.hwnd = window; graphics.cx = kWidth; graphics.cy = kHeight;
         graphics.format = GS_BGRA; graphics.zsformat = GS_ZS_NONE; graphics.num_backbuffers = 2;
-        display_ = obs_display_create(&graphics, 0xFFFFFFFF);
+        display_ = obs_display_create(&graphics, 0xFF181818);
         if (!display_) throw std::runtime_error("OBS提示GPU显示创建失败");
         obs_display_add_draw_callback(display_, draw, this);
         obs_display_set_enabled(display_, false);

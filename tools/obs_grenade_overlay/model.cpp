@@ -27,6 +27,12 @@ bool valid_plan_id(std::string_view value) {
         value.find_first_of("/\\\r\n") == std::string_view::npos && value.find("..") == std::string_view::npos;
 }
 
+std::string file_url(const std::filesystem::path& path) {
+    // OBS默认模块目录是相对工作目录的路径；浏览器file URL必须含真实盘符。
+    const auto utf8 = std::filesystem::canonical(path).generic_u8string();
+    return "file:///" + percent_encode(std::string(utf8.begin(), utf8.end()), true);
+}
+
 void Model::reset() { seen_request_.clear(); display_request_.clear(); initialized_ = false; displayed_ = false; }
 
 View Model::update(const Json& selection, const Json& reference, const Json& catalog,

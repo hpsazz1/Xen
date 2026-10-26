@@ -1,6 +1,6 @@
 # OBS 道具桌面提示
 
-由 OBS 插件在主机右上角显示站位与瞄点参考。卡片使用 OBS Browser Source 和 libobs 绘制，配色为白底、深色文字与蓝色标记；窗口属于 OBS 进程，不需要旧 Python 双图窗口。
+由 OBS 插件在主机右上角显示站位与瞄点参考。卡片使用 OBS Browser Source 和 libobs 绘制，采用 Codex 暗色背景 #181818、白字和蓝色标记，窗口约 90% 不透明；窗口属于 OBS 进程，不需要旧 Python 双图窗口。
 
 OBS 原有中央 320×320 画布继续专门通过 NDI 传给辅机；提示源由插件私有持有，不加入主场景，也不改变现有裁剪、NDI 输出或投掷动作。
 
@@ -14,7 +14,9 @@ OBS 原有中央 320×320 画布继续专门通过 NDI 传给辅机；提示源�
 pwsh -NoProfile -File scripts/build_obs_grenade_overlay.ps1 -ObsRoot 'D:\SteamLibrary\steamapps\common\OBS Studio Beta' -SdkRoot 'E:\Xen-deps\obs-studio-32.1.0-rc4-sdk'
 ```
 
-安装时关闭目标 OBS，然后给同一命令追加 `-Install`。脚本不停止进程，不修改现有场景、NDI 配置或已有插件设置；替换本插件旧文件时保留 `.previous` 副本。插件放在目标 OBS 的 `obs-plugins/64bit` 和 `data/obs-plugins/xen-grenade-overlay`。
+安装时关闭目标 OBS，然后给同一命令追加 `-Install`。脚本不停止进程，不修改现有场景、NDI 配置或已有插件设置；替换本插件旧文件时保留 `.previous` 副本。插件放在目标 OBS 的 `obs-plugins/64bit` 和 `data/obs-plugins/xen-grenade-overlay`。直接启动 obs64.exe 时，工作目录使用其所在的 `bin/64bit`，避免 OBS 找不到语言资源。
+
+OBS 模块资源路径可能是相对路径；插件先解析实际文件路径，再生成浏览器文件 URL，避免桌面窗口只有底色。
 
 SDK 头文件固定为 OBS 官方 `32.1.0-rc4`（提交 `b7bc979a659a40775904a489eeb0ed9e871e066b`）。导入库由实际目标 OBS DLL 的公开导出生成，只用于此本地 ABI，不冒称官方 SDK 发布包。复用现有 nlohmann/json 头文件；不引入 Qt SDK，不重新构建 Xen Worker。
 

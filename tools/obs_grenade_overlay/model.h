@@ -3,6 +3,7 @@
 #define XEN_OBS_GRENADE_MODEL_H
 
 #include <nlohmann/json.hpp>
+#include <filesystem>
 #include <string>
 #include <string_view>
 
@@ -26,6 +27,7 @@ private:
 };
 
 std::string percent_encode(std::string_view value, bool file_path = false);
+std::string file_url(const std::filesystem::path& path);
 bool valid_plan_id(std::string_view value);
 }
 #endif

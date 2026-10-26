@@ -5,19 +5,19 @@
 <meta name="viewport" content="width=344, initial-scale=1">
 <title>Xen 道具参考</title>
 <style>
-  :root { color-scheme:light; --surface:#fff; --ink:#1a1c1f; --accent:#3a83f7; --muted:#626973; }
+  :root { color-scheme:dark; --surface:#181818; --ink:#fff; --accent:#3a83f7; --muted:#b5b5bc; }
   * { box-sizing:border-box; }
   html,body { width:344px; height:576px; margin:0; overflow:hidden; background:transparent; }
   body { color:var(--ink); font:13px/1.4 "Segoe UI","Microsoft YaHei UI",sans-serif; }
   .card { width:344px; height:576px; padding:12px; display:flex; flex-direction:column; gap:10px;
-    background:rgba(255,255,255,.97); box-shadow:inset 0 0 0 1px rgba(26,28,31,.08); }
+    background:var(--surface); box-shadow:inset 0 0 0 1px rgba(255,255,255,.12); }
   header { display:flex; align-items:center; justify-content:space-between; gap:8px; height:24px; flex:none; }
   h1 { margin:0; font-size:16px; font-weight:600; line-height:24px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .state { flex:none; padding:2px 7px; color:#2468cb; background:#edf4ff; border-radius:5px; font-size:11px; line-height:18px; }
+  .state { flex:none; padding:2px 7px; color:#8bb8ff; background:#243653; border-radius:5px; font-size:11px; line-height:18px; }
   section { flex:none; }
   h2 { display:flex; align-items:center; justify-content:space-between; margin:0 0 6px; color:var(--muted); font-size:12px; font-weight:500; line-height:18px; }
-  .annotation { color:#7a8088; font-size:11px; }
-  .frame { position:relative; width:320px; height:180px; overflow:hidden; border-radius:7px; background:#f0f3f7; }
+  .annotation { color:#a4a4ad; font-size:11px; }
+  .frame { position:relative; width:320px; height:180px; overflow:hidden; border-radius:7px; background:#252529; }
   .frame img,.frame svg { position:absolute; inset:0; display:block; width:100%; height:100%; }
   .frame img { object-fit:contain; }
   .frame svg { pointer-events:none; }
