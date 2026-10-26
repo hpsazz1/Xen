@@ -176,6 +176,7 @@ struct Session::Impl {
     std::uint64_t voice_revision = 0, voice_epoch = 0, voice_grenade_epoch = 0;
     std::atomic_uint64_t grenade_epoch{0};
     std::atomic_bool grenade_operation{false};
+    std::atomic_bool grenade_assisted_operation{false};
     struct AlignedGrenade {
         std::uint64_t epoch = 0, repeat_revision = 0;
         std::string reference_revision;
@@ -237,7 +238,8 @@ struct Session::Impl {
         }
     }
     bool busy() const { return view.load()->busy || (worker.valid() && worker.wait_for(0ms) != std::future_status::ready); }
-    template<class F> bool launch(State state, bool physical, F&& fn, bool retain_timeline = false) {
+    template<class F> bool launch(State state, bool physical, F&& fn, bool retain_timeline = false,
+                                 bool assisted_grenade = false) {
         if (busy()) return false;
         if (worker.valid()) {
             if (worker.wait_for(0ms) != std::future_status::ready) return false;
@@ -245,6 +247,7 @@ struct Session::Impl {
         }
         canceled = false;
         grenade_operation = retain_timeline;
+        grenade_assisted_operation = assisted_grenade;
         const auto current = ++generation;
         update([&](Snapshot& s) { s.state = state; s.busy = true; s.physical = physical;
             // generation与结果同次发布，不能让新准备代次携带上一次完成结果。
@@ -282,10 +285,12 @@ struct Session::Impl {
                     }
                 } });
                 grenade_operation = false;
+                grenade_assisted_operation = false;
             });
             return true;
         } catch (...) {
             grenade_operation = false;
+            grenade_assisted_operation = false;
             update([](Snapshot& s) { s.state = State::FAILED; s.busy = false; s.message = "后台任务创建失败"; });
             return false;
         }
@@ -701,7 +706,9 @@ void Session::update_map(const weapon::MapSnapshot& map) noexcept {
     try {
         const auto prior = snapshot();
         if (prior->movement_map.context_epoch == map.context_epoch && prior->movement_map.valid == map.valid) return;
-        impl_->invalidate_grenade("地图上下文已变化，请重新选择道具");
+        // 地图刷新只撤销已有图像引导，不连带打断人工F11时间线。
+        if (prior->grenade_guidance_state != "hidden" || impl_->grenade_assisted_operation.load())
+            impl_->invalidate_grenade("地图上下文已变化，请重新选择道具");
         if (prior->movement_voice_selected && (!map.valid || prior->movement_voice_epoch != map.context_epoch)) {
             ++impl_->repeat_revision; impl_->repeat_plan.store(nullptr);
             impl_->update([](Snapshot& s) { s.repeat_ready = false; s.repeat_unavailable_reason = "语音方案的地图已失效，请重新选择"; });
@@ -780,7 +787,8 @@ void Session::cancel_grenade(const std::string& reason) noexcept {
 void Session::maintain_grenade(const Context& context, bool input_healthy) noexcept {
     try {
         const auto s = snapshot();
-        if (s->grenade_guidance_state == "hidden" && !impl_->grenade_operation.load()) return;
+        // F11人工试投先隐藏引导，不依赖图像辅助开关、GSI或参考图。
+        if (s->grenade_guidance_state == "hidden" && !impl_->grenade_assisted_operation.load()) return;
         if (!s->movement_test_enabled || s->movement_test_mode != Mode::GRENADE_TEST ||
             !context.config.keyboard.grenade_assist_enabled || !input_healthy || !context.runtime_idle ||
             !context.input_recording_idle || !context.cleanup_known || !context.config.mouse.allow_send_input ||
@@ -851,7 +859,7 @@ bool Session::align_grenade(const Context& context) noexcept {
                 impl_->guidance("failed",error.what(),{},epoch);
                 impl_->update([&](Snapshot& next){if(impl_->grenade_epoch.load()==epoch){next.state=State::FAILED;next.message=error.what();}});
             }
-        },true);
+        },true,true);
     } catch (const std::exception& error) {
         try { impl_->update([&](Snapshot& s){s.message=error.what();}); } catch (...) {}
         return false;
@@ -927,7 +935,7 @@ bool Session::throw_grenade(const Context& context) noexcept {
                 throw DebugRunFailure(error.what(),!entered_execution,
                     execution_returned && !snapshot()->cleanup_unknown);
             }
-        },true);
+        },true,true);
     } catch (const std::exception& error) {
         try { impl_->update([&](Snapshot& s){s.message=error.what();}); } catch (...) {}
         return false;

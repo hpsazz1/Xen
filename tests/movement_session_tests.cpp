@@ -135,6 +135,34 @@ public:
         ++cleanups; return set_wasd_keyboard(0);
     }
 };
+class GrenadeDevice final : public FakeDevice {
+public:
+    std::atomic_int pulls{0}, jumps{0}, walks{0}, cleanups{0};
+    bool supports_left_button() const noexcept override { return true; }
+    bool poll_input(InputSnapshot& input) noexcept override {
+        input = {}; input.status = InputMonitorStatus::READY; input.state_valid = true;
+        return true;
+    }
+    ButtonReceipt set_left_button(bool down) noexcept override {
+        if (down) ++pulls;
+        ButtonReceipt result; result.disposition = ButtonDisposition::ACKNOWLEDGED; return result;
+    }
+    KeyboardReceipt set_space_key(bool down) noexcept override {
+        if (down) ++jumps;
+        KeyboardReceipt result; result.disposition = KeyboardDisposition::ACKNOWLEDGED; return result;
+    }
+    KeyboardReceipt set_wasd_keyboard(std::uint8_t keys) noexcept override {
+        if (keys & 1) ++walks;
+        KeyboardReceipt result; result.disposition = KeyboardDisposition::ACKNOWLEDGED; return result;
+    }
+    KeyboardReceipt set_wasd_mask(std::uint8_t, bool) noexcept override {
+        KeyboardReceipt result; result.disposition = KeyboardDisposition::ACKNOWLEDGED; return result;
+    }
+    KeyboardReceipt cleanup_wasd_keyboard() noexcept override {
+        ++cleanups;
+        KeyboardReceipt result; result.disposition = KeyboardDisposition::ACKNOWLEDGED; return result;
+    }
+};
 // 只提供录制事实；所有物理输出方法仍继承计数fake，任何调用都将使断言失败。
 class TraceDevice final : public FakeDevice {
 public:
@@ -710,6 +738,51 @@ void test_grenade_worker_cancel(const std::filesystem::path& root) {
     }
     require(!focus.failed,"worker取消源fixture失败");
 }
+void test_manual_grenade_with_app_maintenance(const std::filesystem::path& root) {
+    FocusFixture focus;
+    for (const bool change_map : {false,true}) {
+        auto device = std::make_shared<GrenadeDevice>();
+        auto context = context_for(device);
+        context.config.source_context = focus.config;
+        // 人工F11没有参考图，也没有启用图像辅助；仍应完成已保存动作。
+        auto request = request_for(root / (change_map ? "manual-grenade-map" : "manual-grenade-maintain"));
+        request.mode = Mode::GRENADE_TEST;
+        request.plan_text = Json{{"schema_version",3},{"name","T1 VIP烟"},{"map","de_mirage"},
+            {"location","Window"},{"notes","仅合成设备回归"},{"voice_command",""},
+            {"mask",{{"enabled",true},{"wasd",15},{"start_ms",0},{"duration_ms",0}}},
+            {"actions",Json::array({
+                {{"type","button"},{"button","left"},{"start_ms",0},{"duration_ms",1000}},
+                {{"type","key"},{"key","SPACE"},{"start_ms",1000},{"duration_ms",40}},
+                {{"type","key"},{"key","W"},{"start_ms",1000},{"duration_ms",100}}})}}.dump();
+        Session session;
+        require(session.dispatch(Action::ENABLE_MOVEMENT_TEST,request,context),"人工跳投启用失败");
+        require(session.repeat(context),"人工F11跳投未启动");
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        bool maintained = false, map_changed = false;
+        while (session.busy() && std::chrono::steady_clock::now() < deadline) {
+            session.poll();
+            if (device->pulls > 0) {
+                if (change_map && !map_changed) {
+                    context.map.valid = true; context.map.map_name = "de_mirage";
+                    context.map.context_epoch = 42;
+                    session.update_map(context.map);
+                    map_changed = true;
+                }
+                session.maintain_grenade(context,true);
+                maintained = true;
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+        wait_idle(session);
+        const auto state = session.snapshot();
+        require(maintained && (!change_map || map_changed),"回归没有覆盖拉烟后的App维护调用");
+        require(state->state == State::COMPLETED && device->pulls == 1 && device->jumps == 1 &&
+            device->walks == 1 && device->cleanups == 1 && state->result && state->result->at("success") == true,
+            "人工F11在拉烟后被图像辅助维护/GSI连带取消，SPACE/W没有完整执行");
+        require(!state->cleanup_unknown && !focus.failed && device->touches == 0,
+            "人工跳投回归清理失败或调用了未模拟输出");
+    }
+}
 void test_passive_recording(const std::filesystem::path& root, bool incomplete) {
     auto device = std::make_shared<TraceDevice>();
     device->incomplete = incomplete;
@@ -798,6 +871,7 @@ int main(int argc, char** argv) {
         test_grenade_domain_isolation(root);
         test_grenade_guidance(root);
         test_grenade_worker_cancel(root);
+        test_manual_grenade_with_app_maintenance(root);
         test_passive_recording(root, false);
         test_passive_recording(root, true);
         std::cout << "身法会话测试通过（合成设备，未执行真实输出）\n";
