@@ -26,6 +26,7 @@ struct Controller::Impl {
     std::uint64_t guidance_revision = 0;
     bool guidance_sent = false;
     bool menu_selection = false;
+    bool owns_load = false;
     std::uint64_t last_menu_id = 0;
     std::vector<int> keys;
     enum class Phase { IDLE, RECORDING, WAITING, LOADING } phase = Phase::IDLE;
@@ -58,8 +59,7 @@ struct Controller::Impl {
         const auto network = server.snapshot();
         const bool changed_connection = network.connected != connected || network.connection_epoch != connection;
         if (changed_connection) {
-            if (connected && (!network.connected || network.connection_epoch != connection))
-                session.cancel_grenade("主机语音连接已断开，本次道具操作取消");
+            // 语音为可选入口；断线不能撤销手机选择或正在进行的道具操作。
             phase = Phase::IDLE; ready = false; release_required = true; recognition_enabled = false;
             connected = network.connected; connection = network.connection_epoch;
             guidance_sent = false;
@@ -136,8 +136,10 @@ struct Controller::Impl {
         if (phase != Phase::IDLE && std::chrono::steady_clock::now() >= deadline) finish(false,"语音请求超时");
         // 停止、手动编辑及地图变化先决定 still_current，再让 Session 提交异步结果。
         const bool may_commit = phase == Phase::LOADING && !unavailable && current(context);
-        if (const auto completed = session.finish_voice(context, may_commit); completed && phase == Phase::LOADING)
-            finish(*completed, *completed ? "" : "方案载入未完成或上下文已变化");
+        if (owns_load) if (const auto completed = session.finish_voice(context, may_commit)) {
+            owns_load=false;
+            if(phase==Phase::LOADING) finish(*completed, *completed ? "" : "方案载入未完成或上下文已变化");
+        }
         for (const auto& incoming : server.poll()) {
             if (incoming.connection_epoch != connection) continue;
             const auto message = Json::parse(incoming.body);
@@ -150,26 +152,9 @@ struct Controller::Impl {
             }
             if (type == "catalog_select") {
                 const auto request_id = message.value("id",std::uint64_t{});
-                if (!message.contains("id") || !message["id"].is_number_unsigned() || request_id <= last_menu_id) continue;
-                last_menu_id = request_id;
                 const auto selected_id = message.value("plan_id",std::string{});
-                const auto selected = paths.find(selected_id);
-                const auto reject = [&](const char* reason) {
-                    send({{"type","catalog_result"},{"id",request_id},{"ok",false},{"reason",reason},{"plan_id",selected_id}});
-                };
-                if (input_unavailable || phase != Phase::IDLE || mode != debug_session::Mode::GRENADE_TEST ||
-                    !context.map.valid || !ready || refreshing || refresh_pending || selected == paths.end() ||
-                    message.value("map",std::string{}) != map_name ||
-                    message.value("epoch",std::uint64_t{}) != map_epoch ||
-                    message.value("revision",std::uint64_t{}) != revision) {
-                    reject("清单已变化或当前状态不允许切换方案"); continue;
-                }
-                debug_session::Request request; request.mode = mode; request.load_path = selected->second;
-                if (!session.select_voice(request,context)) { reject("当前状态不允许切换方案"); continue; }
-                menu_selection = true; id = request_id; plan_id = selected_id;
-                round_map = map_name; round_epoch = map_epoch; round_revision = revision;
-                deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-                phase = Phase::LOADING;
+                send({{"type","catalog_result"},{"id",request_id},{"ok",false},
+                    {"reason","主机清单已停用，请在手机网页选择"},{"plan_id",selected_id}});
                 continue;
             }
             if (menu_selection || phase == Phase::IDLE || message.value("id",std::uint64_t{}) != id) continue;
@@ -190,6 +175,7 @@ struct Controller::Impl {
             debug_session::Request request;
             request.mode = mode; request.load_path = selected->second;
             if (!session.select_voice(request,context)) { finish(false,"当前状态不允许切换方案"); continue; }
+            owns_load=true;
             phase = Phase::LOADING;
         }
         if (input_unavailable) return;
@@ -197,12 +183,7 @@ struct Controller::Impl {
         for (const int key : keys) if (key < 1 || key > 255 || input.capture_virtual_keys[static_cast<std::size_t>(key)]) released = false;
         if (released) release_required = false;
         for (const auto& event : input.events) {
-            if (event.type == KeyboardEventType::GRENADE_MENU && event.active) {
-                if (phase == Phase::IDLE && connected && ready && !refreshing && !refresh_pending &&
-                    context.map.valid && mode == debug_session::Mode::GRENADE_TEST)
-                    send({{"type","catalog_show"},{"map",map_name},{"epoch",map_epoch},{"revision",revision}});
-                continue;
-            }
+            if (event.type == KeyboardEventType::GRENADE_MENU) continue;
             if (event.type != KeyboardEventType::VOICE_HOLD_CHANGED) continue;
             if (keys.empty() || !recognition_enabled) continue;
             if (!event.active) {
@@ -230,6 +211,9 @@ void Controller::cancel() noexcept { try { impl_->cancel(); } catch (...) { impl
 void Controller::tick(const debug_session::Context& context, const KeyboardPollResult& input,
                       const KeyboardConfig& config, bool blocked, bool capture) noexcept {
     try { impl_->tick(context,input,config,blocked,capture); }
-    catch (...) { cancel(); (void)impl_->session.finish_voice(context,false); }
+    catch (...) {
+        cancel();
+        if(impl_->owns_load && impl_->session.finish_voice(context,false).has_value()) impl_->owns_load=false;
+    }
 }
 }

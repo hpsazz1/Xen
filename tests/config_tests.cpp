@@ -2094,31 +2094,31 @@ void test_grenade_assist_hotkeys() {
     source.gsi.enabled = true;
     expect(!source.keyboard.grenade_assist_enabled && source.keyboard.voice_virtual_keys.empty(),
         "旧配置和代码默认不占用语音或启用道具辅助");
-    expect(source.keyboard.grenade_menu_virtual_keys == std::vector<int>{VK_RIGHT} &&
+    expect(source.keyboard.grenade_menu_virtual_keys.empty() &&
         source.keyboard.grenade_align_virtual_keys == std::vector<int>{VK_UP} &&
         source.keyboard.grenade_throw_virtual_keys == std::vector<int>{VK_DOWN} &&
         source.keyboard.grenade_cancel_virtual_keys == std::vector<int>{VK_LEFT},
-        "默认草稿使用方向区右清单、上对齐、下投掷、左取消");
+        "默认草稿只使用上对齐、下投掷、左取消，不占用右键");
     std::string error;
     source.keyboard.voice_virtual_keys = {'V'};
     expect(enable_grenade_assist_hotkeys(source, true, error) &&
         source.keyboard.grenade_assist_enabled && source.keyboard.voice_virtual_keys == std::vector<int>{'V'} &&
-        source.keyboard.grenade_menu_virtual_keys == std::vector<int>{VK_RIGHT},
-        "明确启用方向布局应设置右键清单，保留不冲突的可选语音键");
+        source.keyboard.grenade_menu_virtual_keys.empty(),
+        "明确启用三键布局应保留可选语音，右键不再绑定清单");
     source.keyboard.voice_virtual_keys = {VK_RIGHT};
-    expect(enable_grenade_assist_hotkeys(source, true, error) && source.keyboard.voice_virtual_keys.empty(),
-        "旧右键语音应在明确应用清单布局时清除，不依赖麦克风");
+    expect(enable_grenade_assist_hotkeys(source, true, error) && source.keyboard.voice_virtual_keys == std::vector<int>{VK_RIGHT},
+        "启用道具三键不应修改用户独立选择的右键语音");
     source.keyboard.voice_virtual_keys = {VK_RIGHT, 'V'};
     expect(enable_grenade_assist_hotkeys(source, true, error) &&
-        source.keyboard.voice_virtual_keys == std::vector<int>{'V'},
-        "转换清单只移除冲突右键，不清空其他可选语音绑定");
+        source.keyboard.voice_virtual_keys == std::vector<int>{VK_RIGHT, 'V'},
+        "启用道具三键完整保留可选语音绑定");
     auto conflict = source;
     conflict.keyboard.grenade_assist_enabled = false;
     conflict.keyboard.voice_virtual_keys = {'V'};
-    conflict.keyboard.runtime_toggle_virtual_keys = {VK_RIGHT};
+    conflict.keyboard.runtime_toggle_virtual_keys = {VK_UP};
     expect(!enable_grenade_assist_hotkeys(conflict, true, error) && !error.empty() &&
         !conflict.keyboard.grenade_assist_enabled && conflict.keyboard.voice_virtual_keys == std::vector<int>{'V'} &&
-        conflict.keyboard.runtime_toggle_virtual_keys == std::vector<int>{VK_RIGHT},
+        conflict.keyboard.runtime_toggle_virtual_keys == std::vector<int>{VK_UP},
         "默认布局冲突必须整体拒绝并保留原配置");
     source.keyboard.voice_virtual_keys = {'V'};
     source.keyboard.grenade_menu_virtual_keys = {VK_NUMPAD6};
@@ -2128,9 +2128,9 @@ void test_grenade_assist_hotkeys() {
     source.keyboard.grenade_assist_enabled = false;
     expect(enable_grenade_assist_hotkeys(source, false, error) &&
         source.keyboard.voice_virtual_keys == std::vector<int>{'V'} &&
-        source.keyboard.grenade_menu_virtual_keys == std::vector<int>{VK_NUMPAD6} &&
+        source.keyboard.grenade_menu_virtual_keys.empty() &&
         source.keyboard.grenade_align_virtual_keys == std::vector<int>{VK_NUMPAD8},
-        "普通启用开关必须保留数字区自定义布局");
+        "普通启用保留数字区三键，同时清除旧菜单绑定");
     const auto directory = make_temp_test_directory("grenade_hotkeys");
     const auto path = directory / "config.ini";
     AppConfig loaded;
@@ -2140,14 +2140,18 @@ void test_grenade_assist_hotkeys() {
         loaded.keyboard.grenade_align_virtual_keys == source.keyboard.grenade_align_virtual_keys &&
         loaded.keyboard.grenade_throw_virtual_keys == source.keyboard.grenade_throw_virtual_keys &&
         loaded.keyboard.grenade_cancel_virtual_keys == source.keyboard.grenade_cancel_virtual_keys,
-        "道具辅助启用与四向数字区配置须完整往返：" + error);
+        "道具辅助启用与三键数字区配置须完整往返：" + error);
     expect(write_file_bytes(path, "[detector]\nmodel_path=model.onnx\n[keyboard]\nvoice_virtual_keys=86\n") &&
         load_app_config(path.string(), loaded, error) && !loaded.keyboard.grenade_assist_enabled &&
         loaded.keyboard.voice_virtual_keys == std::vector<int>{'V'} &&
-        loaded.keyboard.grenade_menu_virtual_keys == std::vector<int>{VK_RIGHT}, "旧配置载入不得改动语音或启用道具");
-    const std::array targets{HotkeyTarget::GRENADE_MENU, HotkeyTarget::GRENADE_ALIGN, HotkeyTarget::GRENADE_THROW, HotkeyTarget::GRENADE_CANCEL};
+        loaded.keyboard.grenade_menu_virtual_keys.empty(), "旧配置载入不得改动语音或启用道具");
+    for (const auto* retired : {"39", "102", "106,oops"}) {
+        expect(write_file_bytes(path, std::string("[detector]\nmodel_path=model.onnx\n[keyboard]\ngrenade_menu_virtual_keys=") + retired + "\n") &&
+            load_app_config(path.string(), loaded, error) && loaded.keyboard.grenade_menu_virtual_keys.empty(),
+            "旧菜单字段必须被忽略，不阻止启动或重新占用按键：" + error);
+    }
+    const std::array targets{HotkeyTarget::GRENADE_ALIGN, HotkeyTarget::GRENADE_THROW, HotkeyTarget::GRENADE_CANCEL};
     const auto binding_for = [](AppConfig& value, HotkeyTarget target) -> std::vector<int>& {
-        if (target == HotkeyTarget::GRENADE_MENU) return value.keyboard.grenade_menu_virtual_keys;
         if (target == HotkeyTarget::GRENADE_ALIGN) return value.keyboard.grenade_align_virtual_keys;
         if (target == HotkeyTarget::GRENADE_THROW) return value.keyboard.grenade_throw_virtual_keys;
         return value.keyboard.grenade_cancel_virtual_keys;
@@ -2167,7 +2171,7 @@ void test_grenade_assist_hotkeys() {
                 auto candidate = source; binding_for(candidate, target) = {key};
                 expect(hotkey_binding_conflicts(candidate, target, key) &&
                     hotkey_binding_conflicts(candidate, occupied.target, key) && !validate_app_config(candidate, error),
-                    "四个道具键须与每个启用功能双向互斥");
+                    "三个道具键须与每个启用功能双向互斥");
             }
         }
         auto candidate = source; candidate.keyboard.grenade_assist_enabled = false;
@@ -2183,7 +2187,7 @@ void test_grenade_assist_hotkeys() {
             expect(!validate_app_config(candidate, error), "启停状态均拒绝道具组内重复键");
         }
     }
-    for (const auto* value : {"grenade_assist_enabled=unknown", "grenade_menu_virtual_keys=106,oops", "grenade_align_virtual_keys=104,oops",
+    for (const auto* value : {"grenade_assist_enabled=unknown", "grenade_align_virtual_keys=104,oops",
                               "grenade_throw_virtual_keys=oops", "grenade_cancel_virtual_keys=100.5"}) {
         expect(write_file_bytes(path, std::string("[detector]\nmodel_path=model.onnx\n[keyboard]\n") + value + '\n') &&
             !load_app_config(path.string(), loaded, error), "道具开关和键值必须严格类型校验");

@@ -2,6 +2,7 @@
 #define GRENADE_ALIGNMENT_H
 
 #include "config/config.h"
+#include "source_context/source_context.h"
 
 #include <atomic>
 #include <chrono>
@@ -47,11 +48,19 @@ struct Result {
     bool emergency_stop = false;
 };
 
+// Runtime运行时借用原始ROI和同源焦点；空值沿用停止态独立采集。
+// 借用的生命周期由Session持有，不创建第二个NDI接收器。
+struct SharedStream {
+    std::function<CaptureStatus(CapturedFrame&)> grab;
+    std::function<source_context::SourceContextSnapshot()> source;
+};
+
 // 同步有界任务，由Session独占调度；复用已有Mouse，不创建或关闭设备。
 // verify_only只取新帧验证，不输出。permitted须可并发读取，每次输出前复核。
 Result run(const Reference& reference, const AppConfig& config,
            std::shared_ptr<IMouseController> device, std::atomic_bool& canceled,
-           bool verify_only = false, std::function<bool()> permitted = {}) noexcept;
+           bool verify_only = false, std::function<bool()> permitted = {},
+           SharedStream stream = {}) noexcept;
 }
 
 #endif

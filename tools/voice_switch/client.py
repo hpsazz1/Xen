@@ -19,10 +19,10 @@ import time
 import wave
 
 try:
-    from .guidance import GuidanceState, GuidanceWindow
+    from .guidance import GuidanceState
     from .reference_assets import DEFAULT_ROOT
 except ImportError:
-    from guidance import GuidanceState, GuidanceWindow
+    from guidance import GuidanceState
     from reference_assets import DEFAULT_ROOT
 
 
@@ -126,23 +126,8 @@ class Controller:
         if kind == "guidance":
             self.guidance.handle(message)
             return
-        if kind == "catalog_show":
-            catalog = self.catalog
-            if (catalog and catalog.domain == "grenade" and (message.get("map"), message.get("epoch"),
-                    message.get("revision")) == (catalog.map, catalog.epoch, catalog.revision)):
-                self.display({"type": "catalog_show", "map": catalog.map, "epoch": catalog.epoch,
-                              "revision": catalog.revision, "entries": catalog.entries,
-                              "generation": self.ui_generation})
-            return
-        if kind == "catalog_result":
-            if not unsigned(message.get("id")):
-                raise ValueError("清单回执编号无效")
-            pending = self.menu_pending
-            if pending is None or message.get("id") != pending["id"]:
-                return
-            self.menu_pending = None
-            if message.get("ok") is not True or message.get("plan_id") != pending["plan_id"]:
-                self.display({"type": "catalog_error", "message": message.get("reason", "方案载入未确认")})
+        if kind in ("catalog_show", "catalog_result"):
+            # 手机页已接管方案选择；兼容旧服务端消息，但不弹出主机菜单。
             return
         if kind == "catalog":
             map_name = message.get("map")
@@ -255,28 +240,10 @@ class Controller:
         self.pump_audio()
         if self.round and self.clock() >= self.round.deadline:
             self.fail("capture_timeout" if self.round.phase == "capture" else "result_timeout")
-        if self.menu_pending and self.clock() >= self.menu_pending["deadline"]:
-            self.menu_pending = None
-            self.display({"type": "catalog_error", "message": "选择回执超时，请重新打开清单核对"})
 
     def handle_ui(self, message):
-        if message.get("type") != "catalog_pick":
-            return
-        catalog = self.catalog
-        if (self.menu_pending or self.round or not catalog or catalog.domain != "grenade"
-                or message.get("generation") != self.ui_generation
-                or (message.get("map"), message.get("epoch"), message.get("revision"))
-                != (catalog.map, catalog.epoch, catalog.revision)
-                or not any(item["id"] == message.get("plan_id") for item in catalog.entries)):
-            self.display({"type": "catalog_error", "message": "清单已变化或当前请求忙碌，请重新打开"})
-            return
-        if self.menu_next_id >= 2**64 - 1:
-            return
-        self.menu_next_id += 1
-        request = {"type": "catalog_select", "id": self.menu_next_id, "map": catalog.map,
-                   "epoch": catalog.epoch, "revision": catalog.revision, "plan_id": message["plan_id"]}
-        self.menu_pending = {**request, "deadline": self.clock() + 8.0}
-        self.send(request)
+        # 旧窗口进程残留的点击不能重新接管手机选择。
+        return
 
 
 class SherpaEngine:
@@ -428,13 +395,12 @@ class Tones:
 
 
 def run(host, port, model, reference_root=DEFAULT_ROOT, corner="right", voice=False):
-    # 默认目录模式完全不导入音频/模型依赖；用户显式 --voice 才启用收音。
+    # 手机承担目录和双图显示；本客户端不创建GUI，显式 --voice 才启用收音。
     if voice:
         import sounddevice
         engine, tones, audio = SherpaEngine(model), Tones(), Microphone()
     else:
         engine, tones, audio = None, lambda ok: None, Microphone()
-    guidance = GuidanceWindow(reference_root, corner)
     controller = None
     try:
         while True:
@@ -446,7 +412,7 @@ def run(host, port, model, reference_root=DEFAULT_ROOT, corner="right", voice=Fa
                         if len(payload) > MAX_LINE:
                             raise ValueError("发送帧超过 64 KiB")
                         connection.sendall(payload + b"\n")
-                    controller = Controller(engine, audio, send, tones, guidance=guidance.publish, voice_enabled=voice)
+                    controller = Controller(engine, audio, send, tones, voice_enabled=voice)
                     parser = JsonLines()
                     LOG.info("已连接辅机，等待目录")
                     while True:
@@ -457,8 +423,6 @@ def run(host, port, model, reference_root=DEFAULT_ROOT, corner="right", voice=Fa
                             for message in parser.feed(data):
                                 controller.handle(message)
                         controller.tick()
-                        for message in guidance.poll():
-                            controller.handle_ui(message)
             except (OSError, ValueError, RuntimeError):
                 LOG.exception("连接不可用，三秒后重新连接；不重放旧请求")
                 if controller:
@@ -468,18 +432,17 @@ def run(host, port, model, reference_root=DEFAULT_ROOT, corner="right", voice=Fa
         if controller:
             controller.disconnected()
         audio.stop()
-        guidance.close()
         if voice:
             tones.queue.join()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Xen 道具清单与参考图；--voice 可选语音，Ctrl+C 退出")
+    parser = argparse.ArgumentParser(description="Xen 可选语音客户端；清单与参考图在手机显示，Ctrl+C 退出")
     parser.add_argument("--host", required=True, help="辅机地址")
     parser.add_argument("--port", type=int, default=5014)
     parser.add_argument("--model", type=Path, default=Path(__file__).resolve().parent / "model")
-    parser.add_argument("--references", type=Path, default=DEFAULT_ROOT, help="本机道具双图资源根目录")
-    parser.add_argument("--corner", choices=("left", "right"), default="right", help="双图提示窗左上或右上")
+    parser.add_argument("--references", type=Path, default=DEFAULT_ROOT, help=argparse.SUPPRESS)
+    parser.add_argument("--corner", choices=("left", "right"), default="right", help=argparse.SUPPRESS)
     parser.add_argument("--voice", action="store_true", help="显式启用本地语音模型和麦克风依赖")
     args = parser.parse_args()
     log_directory = Path(__file__).resolve().parent / "logs"

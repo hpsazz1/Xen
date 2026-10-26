@@ -412,6 +412,11 @@ void test_latest_frame_queue() {
            "消费者持有的帧内容应正确");
 
     publish(queue, 2, 20);
+    {
+        const auto peeked = queue.peek_latest();
+        expect(peeked && peeked->timing.sequence == 2,
+               "道具旁路应借用当前完整帧");
+    }
     publish(queue, 3, 30);
     expect(queue.overwritten_frames() == 1,
            "消费者落后时只统计被覆盖的未消费帧");
@@ -434,6 +439,7 @@ void test_latest_frame_queue() {
         stopped_slot->timing.sequence = 4;
     }
     queue.stop();
+    expect(!queue.peek_latest(), "停止后不得借用上一代画面");
     if (stopped_slot) {
         expect(queue.publish(stopped_slot) ==
                    runtime::detail::FramePublishResult::STOPPED,
@@ -558,6 +564,12 @@ void test_safety_gate() {
            "辅助许可不能错误依赖 Aim 按住键");
     gate.set_hold(true);
     expect(gate.can_dispatch(), "物理武装且按住热键时允许派发");
+    gate.set_grenade_suspended(true);
+    expect(gate.output_armed() && gate.hold_active() && !gate.can_dispatch() &&
+               !gate.can_dispatch_auxiliary() && !gate.can_dispatch_recoil(),
+           "道具借用关闭所有生产输出，但保留用户武装与按键事实");
+    gate.set_grenade_suspended(false);
+    expect(gate.can_dispatch(), "正常归还恢复现有许可");
     gate.block_visual_output();
     expect(gate.visual_output_blocked() && gate.output_armed() && !gate.emergency_stopped() &&
            gate.can_dispatch_recoil() && !gate.can_dispatch_auxiliary() && !gate.can_dispatch(),

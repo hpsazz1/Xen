@@ -376,6 +376,8 @@ public:
         std::uint64_t last_sequence,
         const std::atomic<bool>& stop_requested,
         std::uint64_t* overwritten_frames_at_consume = nullptr) noexcept;
+    // 旁路借用不推进Pipeline消费水位；调用方只短持引用并自行复制CPU像素。
+    std::shared_ptr<const CapturedFrame> peek_latest() const noexcept;
     void stop() noexcept;
     void reset() noexcept;
     std::uint64_t overwritten_frames() const noexcept;
@@ -475,6 +477,8 @@ public:
     void set_hold(bool active) noexcept;
     void emergency_stop() noexcept;
     void block_visual_output() noexcept;
+    void set_grenade_suspended(bool suspended) noexcept;
+    bool grenade_suspended() const noexcept;
     bool reset_emergency() noexcept;
     bool can_dispatch() const noexcept;
     // 辅助请求不依赖 Aim 按住键，但仍必须经过同一全局武装与输入门。
@@ -492,6 +496,7 @@ private:
     std::atomic<bool> hold_active_{false};
     std::atomic<bool> emergency_stopped_{false};
     std::atomic<bool> visual_output_blocked_{false};
+    std::atomic<bool> grenade_suspended_{false};
 };
 
 } // namespace runtime::detail

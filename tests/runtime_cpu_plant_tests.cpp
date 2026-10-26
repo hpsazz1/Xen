@@ -35,6 +35,7 @@ struct Plant {
     int pending = 0;
     bool fail_next_move = false;
     unsigned sequence = 0, closed = 0;
+    int side = 32;
     double last_expected_center = 0;
 };
 class MemoryMouse final : public IMouseController {
@@ -43,6 +44,7 @@ public:
     bool open() noexcept override { return true; }
     void close() noexcept override {}
     MouseStatus status() const noexcept override { return MouseStatus::READY; }
+    bool output_owner_exclusive() const noexcept override { return true; }
     std::string last_error() const override { return {}; }
     bool poll_input(InputSnapshot&) noexcept override { return false; }
     MouseMoveReceipt move(const MouseMoveCommand& command) noexcept override {
@@ -74,9 +76,9 @@ public:
             const auto gray = static_cast<int>(std::lround((center - 4) / 24 * 255));
             plant_->last_expected_center = 4.0 + 24.0 * gray / 255;
             frame = {};
-            frame.bgr = cv::Mat(32, 32, CV_8UC3, cv::Scalar(gray, gray, gray));
-            frame.width = frame.height = frame.source_width = frame.source_height = 32;
-            frame.encoded_width = frame.encoded_height = 32;
+            frame.bgr = cv::Mat(plant_->side, plant_->side, CV_8UC3, cv::Scalar(gray, gray, gray));
+            frame.width = frame.height = frame.source_width = frame.source_height = plant_->side;
+            frame.encoded_width = frame.encoded_height = plant_->side;
             frame.timing.sequence = ++plant_->sequence;
             frame.timing.captured_at = Clock::now();
             return CaptureStatus::FRAME;
@@ -263,6 +265,55 @@ int main(int argc, char** argv) {
         require(frame() == stopped + 1, "后端失败后下一帧仍派发");
         runtime->stop();
         { std::lock_guard lock(plant->mutex); require(plant->closed == 2, "重启采集未关闭"); }
+        // 在完整CPU Runtime中复用320原图：借用期间生产者继续取图，Aim不发送。
+        { std::lock_guard lock(plant->mutex); plant->side = 320; plant->camera = 0; }
+        config.capture.roi_width = config.capture.roi_height = 320;
+        require(runtime->start(config, mouse), "道具热流测试Runtime启动失败");
+        runtime->post_intent({RuntimeIntentType::INPUT_HEALTH_CHANGED, true});
+        runtime->post_intent({RuntimeIntentType::ARM_OUTPUT});
+        runtime->post_intent({RuntimeIntentType::AIM_HOLD_CHANGED, true});
+        std::atomic_bool canceled{false}; std::string reason;
+        auto control = runtime->acquire_grenade_control(canceled, reason);
+        require(control && control->valid(), "运行中无法借用道具控制");
+        const auto feed = [&] {
+            const auto processed = runtime->snapshot().processed_frames;
+            { std::lock_guard lock(plant->mutex); ++plant->pending; }
+            await([&] { return runtime->snapshot().processed_frames > processed; }, "借用期间Capture/Detector被停止");
+        };
+        unsigned before_borrow;
+        { std::lock_guard lock(plant->mutex); before_borrow = plant->calls; }
+        feed();
+        CapturedFrame borrowed;
+        require(control->grab(borrowed) == CaptureStatus::FRAME && borrowed.width == 320 &&
+            borrowed.height == 320 && borrowed.source_width == 320 && borrowed.timing.captured_at != Clock::time_point{},
+            "借用丢失原始ROI或FrameTiming");
+        const auto pixels = borrowed.bgr.clone();
+        require(control->grab(borrowed) == CaptureStatus::NO_FRAME, "同一原始帧被重复发布为新帧");
+        feed(); feed();
+        { std::lock_guard lock(plant->mutex); require(plant->calls == before_borrow && plant->closed == 2,
+            "借用期间生产输出未暂停或NDI等价采集器被关闭"); }
+        require(cv::norm(pixels, borrowed.bgr) == 0, "后续采集覆写了借用的像素副本");
+        control.reset();
+        require(runtime->snapshot().state == RuntimeState::RUNNING && runtime->snapshot().output_armed,
+            "正常归还改写了Runtime或用户武装状态");
+        auto ended = runtime->acquire_grenade_control(canceled, reason);
+        require(ended && ended->valid(), "第二次借用失败");
+        runtime->post_intent({RuntimeIntentType::EMERGENCY_STOP});
+        require(!ended->valid(), "End未撤销借用");
+        ended.reset(); feed();
+        require(runtime->snapshot().emergency_stopped && !runtime->snapshot().output_armed,
+            "归还借用意外恢复End撤销的旧许可");
+        runtime->post_intent({RuntimeIntentType::AIM_HOLD_CHANGED, false});
+        require(runtime->post_intent({RuntimeIntentType::RESET_EMERGENCY}) &&
+            runtime->post_intent({RuntimeIntentType::ARM_OUTPUT}), "显式恢复输入许可失败");
+        auto stopped_control = runtime->acquire_grenade_control(canceled, reason);
+        require(stopped_control && stopped_control->valid(), "停止交错测试借用失败");
+        runtime->stop();
+        require(!stopped_control->valid() && stopped_control->grab(borrowed) == CaptureStatus::ACCESS_LOST,
+            "Runtime停止后旧借用仍提供画面");
+        stopped_control.reset();
+        require(runtime->snapshot().state == RuntimeState::STOPPED && !runtime->snapshot().output_armed,
+            "旧借用析构重新启动了已停止的Runtime或恢复许可");
         require(!focus.failed, "源fixture发生失败");
         std::cout << "完整CPU链、跨帧源断点、保持键、急停、重启及失败回执通过\n";
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; result = 1; }

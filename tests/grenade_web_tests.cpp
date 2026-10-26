@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <WinSock2.h>
 #include <WS2tcpip.h>
+#include <bcrypt.h>
 #ifdef ERROR
 #undef ERROR
 #endif
@@ -16,6 +17,8 @@
 #include <fstream>
 #include <iostream>
 #include <thread>
+#include <array>
+#include <opencv2/imgcodecs.hpp>
 
 namespace {
 using Json = nlohmann::json;
@@ -89,6 +92,25 @@ Response http_exchange(std::uint16_t port, const std::string& request) {
 Response get(std::uint16_t port, const std::string& target) {
     return http_exchange(port,"GET " + target + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
 }
+Response select_plan(std::uint16_t port, const std::string& plan_id, const std::string& generation) {
+    const auto body=Json{{"plan_id",plan_id},{"generation",generation}}.dump();
+    return http_exchange(port,"POST /select.json HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: " +
+        std::to_string(body.size()) + "\r\n\r\n" + body);
+}
+std::string image_hash(const std::filesystem::path& path) {
+    std::ifstream file(path,std::ios::binary);
+    const std::string bytes{std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>()};
+    BCRYPT_ALG_HANDLE algorithm=nullptr;
+    if (BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0)<0) throw std::runtime_error("测试摘要创建失败");
+    std::array<unsigned char,32> digest{};
+    const auto status=BCryptHash(algorithm,nullptr,0,reinterpret_cast<PUCHAR>(const_cast<char*>(bytes.data())),
+        static_cast<ULONG>(bytes.size()),digest.data(),static_cast<ULONG>(digest.size()));
+    BCryptCloseAlgorithmProvider(algorithm,0);
+    if (status<0) throw std::runtime_error("测试摘要计算失败");
+    std::string result;
+    for (const auto byte:digest) {result+="0123456789abcdef"[byte>>4];result+="0123456789abcdef"[byte&15];}
+    return result;
+}
 std::uint64_t utc_seconds() {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::system_clock::now().time_since_epoch()).count());
@@ -115,6 +137,85 @@ void write_plan(const std::filesystem::path& path, const std::string& name, cons
     std::ofstream file(path,std::ios::binary);
     file << movement::timeline::plan_json(plan).dump();
     if (!file) throw std::runtime_error("测试方案写入失败");
+}
+void selection_tests(const std::filesystem::path& root) {
+    const auto base=root/"mobile-selection", plans=base/"plans", resources=base/"references"/"t";
+    std::filesystem::create_directories(plans); std::filesystem::create_directories(resources);
+    const auto path=plans/"t.json";
+    write_plan(path,"T1 VIP烟","de_mirage");
+    write_plan(plans/"ct.json","CT1 B烟","de_mirage");
+    Json plan; {std::ifstream file(path);file>>plan;}
+    cv::imwrite((resources/"standing.png").string(),cv::Mat(360,640,CV_8UC3,cv::Scalar(10,20,30)));
+    cv::imwrite((resources/"aim.png").string(),cv::Mat(320,320,CV_8UC3,cv::Scalar(30,20,10)));
+    Json reference{{"schema_version",1},{"plan_id","t.json"},{"reference_id","t"},{"manual_throw_verified",true},
+        {"plan",plan},{"standing_image","standing.png"},{"aim_image","aim.png"},{"standing_note","站在T1"},
+        {"standing_marker",{{"x",0.2},{"y",0.4},{"label","T1"}}},
+        {"geometry",{{"source_width",320},{"source_height",320},{"roi_x",0},{"roi_y",0},
+            {"roi_width",320},{"roi_height",320},{"scale_x",1},{"scale_y",1}}},
+        {"image_sha256",{{"standing_image",image_hash(resources/"standing.png")},{"aim_image",image_hash(resources/"aim.png")}}}};
+    {std::ofstream file(resources/"reference.json");file<<reference.dump();}
+    auto gsi=std::make_shared<weapon::GsiReceiver>();
+    weapon::GsiConfig gsi_config;gsi_config.enabled=true;gsi_config.port=unused_port();gsi_config.ttl_ms=3000;
+    expect(gsi->start(gsi_config),"手机选择夹具启动共享GSI");
+    grenade_web::Server server;grenade_web::Config config;config.bind_address="127.0.0.1";config.port=0;config.plans_root=utf8(plans);
+    expect(server.start(config,gsi),"手机选择使用生产HTTP服务");const auto port=server.snapshot().port;
+    const auto timestamp=utc_seconds();
+    expect(post_context(gsi_config.port,timestamp,"de_mirage","T"),"手机选择建立T阵营");
+    const auto generation=get(port,"/context.json").json().value("generation",std::string{});
+    expect(select_plan(port,"../t.json",generation).status==409 && select_plan(port,"ct.json",generation).status==409,
+        "选择不能跳目录或串阵营");
+    const auto pending=select_plan(port,"t.json",generation);
+    expect(pending.status==202 && pending.json().value("state",std::string{})=="pending","HTTP提交只进入待处理，不冒称选中");
+    const auto request=server.poll_selection();
+    expect(request && request->plan_id=="t.json" && std::filesystem::u8path(request->plan_path)==path &&
+        server.selection_current(*request) && !server.poll_selection(),"App只收到一次可信库路径请求");
+    expect(select_plan(port,"t.json",generation).status==409,"在途请求不排队");
+    if (request) server.finish_selection(*request,true);
+    expect(get(port,"/selection.json").json().value("state",std::string{})=="selected","仅App完成后发布已选中");
+    debug_session::Snapshot selected;selected.movement_test_enabled=true;selected.movement_test_mode=debug_session::Mode::GRENADE_TEST;
+    selected.grenade_selected_path=utf8(path);selected.grenade_current=plan;selected.grenade_baseline=plan;
+    selected.grenade_guidance_state="aligning";selected.grenade_guidance_plan_id="t.json";selected.grenade_guidance_message="正在对齐";
+    server.publish_capture(std::make_shared<const debug_session::Snapshot>(selected),AppConfig{},true);
+    const auto guidance=get(port,"/selection.json").json();
+    expect(guidance.value("actual_plan_id",std::string{})=="t.json" && guidance["guidance"]["state"]=="aligning",
+        "手机读取实际Session选择和对齐状态，不需要主机GUI");
+    const auto info=get(port,"/reference.json?plan_id=t.json");
+    expect(info.status==200 && info.json().value("standing_width",0)==640 && info.json()["geometry"]["source_width"]==320 &&
+        info.json()["standing_marker"]["x"]==0.2,"参考图复用生产契约，站位与瞄点尺寸独立且输出标记");
+    expect(get(port,"/reference/standing.png?plan_id=t.json").headers.find("Content-Type: image/png")!=std::string::npos &&
+        get(port,"/reference/aim.png?plan_id=t.json&revision="+info.json().value("revision",std::string{})).status==200,
+        "双图固定入口返回PNG并支持版本参数");
+    reference["standing_note"]="新采集站位";
+    {std::ofstream file(resources/"reference.json");file<<reference.dump();}
+    const auto refreshed=get(port,"/reference.json?plan_id=t.json").json();
+    expect(refreshed.value("revision",std::string{})!=info.json().value("revision",std::string{}) &&
+        refreshed.value("standing_note",std::string{})=="新采集站位","F10替换资源后轮询发现新版，无需重新选择方案");
+    expect(get(port,"/reference/aim.png?plan_id=t.json&revision="+info.json().value("revision",std::string{})).status==404 &&
+        get(port,"/reference/aim.png?plan_id=t.json&revision="+refreshed.value("revision",std::string{})).status==200,
+        "图片与标记使用同一资源版本，旧版本地址不返回新图");
+    expect(get(port,"/reference.json?plan_id=%2e%2e%2ft.json").status==404 &&
+        get(port,"/reference/config.ini?plan_id=t.json").status==404,"参考图片路由不能读任意路径");
+    {std::ofstream file(resources/"aim.png",std::ios::app|std::ios::binary);file<<'x';}
+    expect(get(port,"/reference/aim.png?plan_id=t.json").status==404,"原图变化不得继续显示未核对旧资源");
+    expect(select_plan(port,"t.json",generation).status==202,"前次完成后接受新选择");
+    const auto old=server.poll_selection();
+    expect(post_context(gsi_config.port,timestamp+1,"de_mirage","CT"),"在途选择时换边");
+    expect(old && !server.selection_current(*old),"App提交前立即观察GSI换边");
+    get(port,"/context.json");
+    if(old)server.finish_selection(*old,true);
+    expect(get(port,"/selection.json").json().value("state",std::string{})=="failed","旧回执不能在换边后变成成功");
+    expect(post_context(gsi_config.port,timestamp+2,"de_mirage","T"),"重新回到T阵营");
+    const auto restored=get(port,"/context.json").json().value("generation",std::string{});
+    expect(restored!=generation && select_plan(port,"t.json",generation).status==409,"T到CT再T不能复活旧请求");
+    expect(select_plan(port,"t.json",restored).status==202,"新页面身份重新选择");
+    const auto current=server.poll_selection();if(old)server.finish_selection(*old,false,"过期回执");
+    expect(current && server.selection_current(*current),"旧完成回执不覆盖新在途请求");
+    if(current)server.finish_selection(*current,false,"尚有未保存修改");
+    expect(get(port,"/selection.json").json().value("reason",std::string{})=="尚有未保存修改","手机显示App返回的选择失败原因");
+    server.stop();gsi->stop();
+    for(const auto* name:{"standing.png","aim.png","reference.json"})std::filesystem::remove(resources/name);
+    std::filesystem::remove(resources);std::filesystem::remove(base/"references");
+    std::filesystem::remove(path);std::filesystem::remove(plans/"ct.json");std::filesystem::remove(plans);std::filesystem::remove(base);
 }
 void capture_context_tests(const std::filesystem::path& root) {
     const auto directory = root / "capture-context";
@@ -346,7 +447,7 @@ int main(int argc, char** argv) {
     expect(expired.is_object() && !expired.value("valid",true) && expired.value("remaining_ms",1)==0 &&
         expired.value("map",std::string("old")).empty() && expired.value("team",std::string("old")).empty(),"源TTL到期清空地图和阵营");
     expect(http_exchange(started.port,"POST /context.json HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n").status==405,
-        "网页不提供POST或控制接口");
+        "非选择接口不接受POST");
     expect(get(started.port,"/../config.ini").status==404 && get(started.port,"/catalog.json?path=../config.ini").status==404,
         "任意路径和查询参数不能读取文件");
     expect(http_exchange(started.port,"GET /context.json HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\n\r\nx").status==400,
@@ -367,6 +468,7 @@ int main(int argc, char** argv) {
     expect(post_context(gsi_config.port,timestamp+4,"de_mirage","T") && gsi->map_snapshot().valid,"网页停止不关闭共享GSI");
     catalog_limits(root,gsi);
     capture_context_tests(root);
+    selection_tests(root);
     gsi->stop();
     auto invalid = config; invalid.bind_address = "203.0.113.8";
     expect(!server.start(invalid,gsi) && !server.snapshot().error.empty(),"公开地址绑定在创建监听前拒绝");

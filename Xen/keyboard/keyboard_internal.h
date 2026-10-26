@@ -100,7 +100,6 @@ inline KeyboardEventPollResult update_keyboard_events(
         // 按住不会重复，多个别名同次按下只发布一次；忙碌时是否接受由会话决定，不在监听层排队。
         if (pressed) result.events[result.count++] = {type, true};
     };
-    grenade_pressed(config.grenade_menu_virtual_keys, KeyboardEventType::GRENADE_MENU);
     grenade_pressed(config.grenade_align_virtual_keys, KeyboardEventType::GRENADE_ALIGN);
     grenade_pressed(config.grenade_throw_virtual_keys, KeyboardEventType::GRENADE_THROW);
     grenade_pressed(config.grenade_cancel_virtual_keys, KeyboardEventType::GRENADE_CANCEL);

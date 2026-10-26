@@ -37,7 +37,7 @@ struct KeyboardConfig {
     std::vector<int> anomaly_mark_virtual_keys{0x78}; // VK_F9，仅标记诊断
     std::vector<int> voice_virtual_keys{}; // 按住说话，旧配置不自动占键。
     bool grenade_assist_enabled = false;
-    std::vector<int> grenade_menu_virtual_keys{0x27}; // VK_RIGHT，打开道具清单，不启动收音。
+    std::vector<int> grenade_menu_virtual_keys{}; // 旧配置兼容槽；手机选择已替代主机清单，不再占键。
     std::vector<int> grenade_align_virtual_keys{0x26}; // VK_UP，按下后对齐。
     std::vector<int> grenade_throw_virtual_keys{0x28}; // VK_DOWN，按下后投掷一次。
     std::vector<int> grenade_cancel_virtual_keys{0x25}; // VK_LEFT，取消当前道具操作。
@@ -71,8 +71,7 @@ inline bool valid_keyboard_config(const KeyboardConfig& config) noexcept {
         !claim(config.voice_virtual_keys)) return false;
     if (config.debug_test_enabled && !claim(config.debug_test_virtual_keys)) return false;
     if (config.grenade_assist_enabled &&
-        (!claim(config.grenade_menu_virtual_keys) ||
-         !claim(config.grenade_align_virtual_keys) ||
+        (!claim(config.grenade_align_virtual_keys) ||
          !claim(config.grenade_throw_virtual_keys) ||
          !claim(config.grenade_cancel_virtual_keys))) return false;
     // 未启用功能只校验各绑定自身键值和重复，草稿不占用其他功能按键。
@@ -81,8 +80,7 @@ inline bool valid_keyboard_config(const KeyboardConfig& config) noexcept {
         if (!claim(config.debug_test_virtual_keys)) return false;
     }
     if (!config.grenade_assist_enabled) {
-        for (const auto* keys : {&config.grenade_menu_virtual_keys,
-                                &config.grenade_align_virtual_keys,
+        for (const auto* keys : {&config.grenade_align_virtual_keys,
                                 &config.grenade_throw_virtual_keys,
                                 &config.grenade_cancel_virtual_keys}) {
             assigned.fill(false);

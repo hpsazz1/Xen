@@ -4,6 +4,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -19,9 +21,32 @@
 #include "mouse/mouse.h"
 #include "input_training/input_training.h"
 #include "movement/movement.h"
+#include "source_context/source_context.h"
 
 namespace data_collection { class Collector; struct Config; }
 class Runtime;
+// 道具短事务借用现有采集和设备；释放只归还内部暂停，不恢复用户已撤销的武装。
+class RuntimeGrenadeControl final {
+public:
+    ~RuntimeGrenadeControl();
+    RuntimeGrenadeControl(const RuntimeGrenadeControl&) = delete;
+    RuntimeGrenadeControl& operator=(const RuntimeGrenadeControl&) = delete;
+    bool valid() const noexcept;
+    CaptureStatus grab(CapturedFrame& frame) noexcept;
+    source_context::SourceContextSnapshot source_snapshot() const noexcept;
+    void finish(bool cleanup_known = true) noexcept;
+private:
+    friend class Runtime;
+    RuntimeGrenadeControl(std::function<bool()> valid,
+        std::function<CaptureStatus(CapturedFrame&)> grab,
+        std::function<source_context::SourceContextSnapshot()> source,
+        std::function<void(bool)> release);
+    std::function<bool()> valid_;
+    std::function<CaptureStatus(CapturedFrame&)> grab_;
+    std::function<source_context::SourceContextSnapshot()> source_;
+    std::function<void(bool)> release_;
+    std::atomic_bool finished_{false};
+};
 namespace runtime::detail {
 struct StartupAdapter;
 std::unique_ptr<Runtime> make_runtime_with_startup_adapter(StartupAdapter adapter);
@@ -397,6 +422,8 @@ public:
     // 仅在 RUNNING 状态接受请求。候选模型异步加载，失败不替换旧模型。
     bool reload_detector(const DetectorConfig& config) noexcept;
     bool post_intent(const RuntimeIntent& intent) noexcept;
+    std::shared_ptr<RuntimeGrenadeControl> acquire_grenade_control(
+        std::atomic_bool& canceled, std::string& reason) noexcept;
     // 自动扳机的窄接口；允许键只授予许可，本接口才创建制动请求。
     // 请求编号在一次会话中严格递增。预计完成不等于已停稳或允许开火。
     bool request_auto_stop(std::uint64_t request_id) noexcept;
@@ -420,7 +447,7 @@ private:
     friend std::unique_ptr<Runtime> runtime::detail::make_runtime_with_startup_adapter(
         runtime::detail::StartupAdapter adapter);
     struct Impl;
-    std::unique_ptr<Impl> impl_;
+    std::shared_ptr<Impl> impl_;
 };
 
 #endif // RUNTIME_H

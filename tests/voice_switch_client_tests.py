@@ -5,9 +5,11 @@ import argparse
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.voice_switch.client import Controller, JsonLines, MAX_LINE, SherpaEngine
+from tools.voice_switch import client
 
 
 class Engine:
@@ -219,6 +221,26 @@ class ClientTests(unittest.TestCase):
                            {"id": "smoke-a.json", "command": "", "name": "测试 T1 窗烟", "team": "T"},
                            {"id": "smoke-b.json", "command": "二号窗烟", "name": "测试 CT来源5号 烟", "team": "CT"}]})
 
+    def test_running_client_consumes_guidance_without_host_window(self):
+        connection = mock.MagicMock()
+        connection.__enter__.return_value = connection
+        messages = [
+            {"type": "catalog_show", "map": "de_test", "epoch": 1, "revision": 1},
+            {"type": "guidance", "revision": 1, "state": "selected",
+             "plan_id": "smoke-a.json", "reference_id": "smoke-a", "message": "已选择"},
+        ]
+        connection.recv.side_effect = [
+            ("\n".join(json.dumps(value) for value in messages) + "\n").encode(), KeyboardInterrupt]
+        with mock.patch.object(client.socket, "create_connection", return_value=connection), \
+                mock.patch.object(client.select, "select", return_value=([connection], [], [])), \
+                mock.patch.object(client, "Microphone", return_value=self.audio), \
+                mock.patch("tools.voice_switch.guidance.subprocess.Popen", side_effect=AssertionError("主机不得创建显示进程")) as process:
+            with self.assertRaises(KeyboardInterrupt):
+                client.run("test-host", 5014, Path("unused"), voice=False)
+        process.assert_not_called()
+        self.assertFalse(self.audio.active)
+        self.assertEqual(self.audio.started, 0)
+
     def pick(self, identity="smoke-a.json", revision=1, generation=None):
         self.c.handle_ui({"type": "catalog_pick", "plan_id": identity, "map": "de_test", "epoch": 1,
                           "revision": revision, "generation": self.c.ui_generation if generation is None else generation})
@@ -231,10 +253,9 @@ class ClientTests(unittest.TestCase):
         self.assertFalse(self.c.catalog.labels)
         self.assertFalse(self.sent[-1]["voice_enabled"])
         self.c.handle({"type": "catalog_show", "map": "de_test", "epoch": 1, "revision": 1})
-        self.assertEqual(self.guidance[-1]["type"], "catalog_show")
+        self.assertFalse(self.guidance, "旧主机清单消息不得弹窗")
         self.pick()
-        self.assertEqual(self.sent[-1]["type"], "catalog_select")
-        self.assertEqual(self.sent[-1]["plan_id"], "smoke-a.json")
+        self.assertFalse(any(item["type"] == "catalog_select" for item in self.sent))
         self.c.handle({"type": "catalog_result", "id": 1, "plan_id": "smoke-a.json", "ok": True})
         self.assertIsNone(self.c.menu_pending)
         self.assertEqual(self.audio.started, 0)
@@ -255,15 +276,15 @@ class ClientTests(unittest.TestCase):
         self.c.handle({"type": "catalog_show", "map": "de_test", "epoch": 1, "revision": 0})
         self.assertEqual(len(self.guidance), before)
 
-    def test_menu_select_is_single_flight_and_wrong_result_never_succeeds(self):
+    def test_retired_menu_clicks_and_results_never_select(self):
         self.menu_catalog()
         self.pick()
         self.pick("smoke-b.json")
-        self.assertEqual(sum(item["type"] == "catalog_select" for item in self.sent), 1)
+        self.assertEqual(sum(item["type"] == "catalog_select" for item in self.sent), 0)
         self.c.handle({"type": "catalog_result", "id": 9, "plan_id": "smoke-a.json", "ok": True})
-        self.assertIsNotNone(self.c.menu_pending)
+        self.assertIsNone(self.c.menu_pending)
         self.c.handle({"type": "catalog_result", "id": 1, "plan_id": "smoke-b.json", "ok": True})
-        self.assertEqual(self.guidance[-1]["type"], "catalog_error")
+        self.assertFalse(self.guidance)
         self.assertIsNone(self.c.menu_pending)
         self.assertFalse(self.tones)
 
@@ -272,7 +293,7 @@ class ClientTests(unittest.TestCase):
         self.pick()
         self.now = 9
         self.c.tick()
-        self.assertEqual(self.guidance[-1]["type"], "catalog_error")
+        self.assertFalse(self.guidance, "旧清单点击不得建立待处理轮次或超时提示")
         self.pick()
         self.menu_catalog(revision=2)
         self.assertIsNone(self.c.menu_pending)

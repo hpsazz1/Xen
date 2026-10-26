@@ -51,6 +51,8 @@ struct Scene {
     std::atomic_bool canceled{false};
     int moves=0,opened=0,closed=0;
     std::chrono::milliseconds close_delay{0};
+    Clock::time_point first_frame_at{};
+    int stop_after_frames=0;
     std::vector<MouseMoveCommand> commands;
 };
 class Device final : public IMouseController {
@@ -88,7 +90,9 @@ public:
     bool open() noexcept override {++scene_.opened;return true;}
     CaptureStatus grab(CapturedFrame& frame) noexcept override {
         scene_.now+=30ms;
-        if (scene_.no_frame) return CaptureStatus::NO_FRAME;
+        if (scene_.no_frame || scene_.now<scene_.first_frame_at ||
+            (scene_.stop_after_frames && scene_.sequence>=static_cast<std::uint64_t>(scene_.stop_after_frames)))
+            return CaptureStatus::NO_FRAME;
         frame={};frame.width=frame.height=frame.source_width=frame.source_height=320;
         frame.encoded_width=frame.encoded_height=320;
         frame.bgr=scene_.unrelated?texture(7788):translated(scene_.original,scene_.x,scene_.y);
@@ -182,6 +186,14 @@ void image_failures() {
     expect(!run(failure).aligned&&failure.moves==1,"设备命令失败不得重试");
 }
 void timing_geometry_and_cancellation() {
+    Scene cold;cold.network=true;cold.clock_warming=true;cold.first_frame_at=cold.now+2500ms;
+    const auto cold_result=run(cold);
+    expect(cold_result.aligned&&cold.moves==0,"NDI冷启动首帧晚于两秒后仍可暖机对齐："+cold_result.error);
+    Scene interrupted;interrupted.stop_after_frames=1;
+    const auto interrupted_result=run(interrupted);
+    expect(!interrupted_result.aligned&&interrupted.moves==0&&
+        interrupted_result.evidence.value("elapsed_ms",9999.0)<600,
+        "已出帧后的断流仍应在原期限内停止");
     Scene stale;stale.stale=true;
     expect(!run(stale).aligned&&stale.moves==0,"陈旧帧不得输出");
     Scene repeated;repeated.repeated=true;

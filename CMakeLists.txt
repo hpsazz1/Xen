@@ -589,7 +589,7 @@ configure_file(Xen/grenade_web/page.h.in generated/grenade_mobile_page.h @ONLY)
 add_library(grenade_web STATIC Xen/grenade_web/server.cpp)
 target_include_directories(grenade_web PUBLIC ${PROJECT_SOURCE_DIR}/Xen
     PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
-target_link_libraries(grenade_web PUBLIC weapon PRIVATE debug_session movement nlohmann_json::nlohmann_json ws2_32 bcrypt log)
+target_link_libraries(grenade_web PUBLIC weapon PRIVATE debug_session grenade_alignment movement nlohmann_json::nlohmann_json ws2_32 iphlpapi bcrypt log)
 
 add_library(overlay STATIC
     Xen/overlay/overlay.cpp Xen/overlay/recoil_panel.cpp Xen/overlay/input_training_panel.cpp Xen/overlay/debug_panel.cpp Xen/overlay/movement_panel.cpp)

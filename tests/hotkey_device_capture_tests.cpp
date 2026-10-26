@@ -67,8 +67,7 @@ void device_key(int key) {
         "本机Esc优先于同时到达的后端侧键");
 }
 void grenade_keys() {
-    const std::array<std::pair<int, KeyboardEventType>, 4> bindings{{
-        {0x27, KeyboardEventType::GRENADE_MENU},
+    const std::array<std::pair<int, KeyboardEventType>, 3> bindings{{
         {0x26, KeyboardEventType::GRENADE_ALIGN},
         {0x28, KeyboardEventType::GRENADE_THROW},
         {0x25, KeyboardEventType::GRENADE_CANCEL}}};
@@ -107,6 +106,23 @@ void grenade_keys() {
         device->input.virtual_keys[key] = false; ++device->input.sequence; disabled.poll();
         device->input.virtual_keys[key] = true; ++device->input.sequence;
         expect(count(disabled.poll()) == 0, "辅助开关关闭时新按下也不发道具事件");
+    }
+    // 即使内存仍含旧菜单配置，右键也不能重新产生已废弃的语义事件。
+    for (const int key : {0x27, 0x66}) {
+        auto device = std::make_shared<Device>();
+        KeyboardConfig config;
+        config.grenade_assist_enabled = true;
+        config.grenade_menu_virtual_keys = {key};
+        KeyboardListener listener(config, device);
+        expect(listener.open(), "旧菜单绑定不能阻止三键监听启动");
+        device->input.status = InputMonitorStatus::READY;
+        device->input.state_valid = true; device->input.sequence = 1;
+        listener.poll();
+        device->input.virtual_keys[key] = true; ++device->input.sequence;
+        const auto polled = listener.poll();
+        expect(std::none_of(polled.events.begin(), polled.events.end(), [](const auto& event) {
+            return event.type == KeyboardEventType::GRENADE_MENU;
+        }), "方向区右键和数字区6均不得呼出旧主机清单");
     }
 }
 void numeric_keypad_mapping() {

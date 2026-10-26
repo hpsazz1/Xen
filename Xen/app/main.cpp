@@ -281,6 +281,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
     // 手机只读页面由辅机应用持有，直接共享 GSI；不依赖 Runtime 或主机语音工具。
     grenade_web::Server mobile_web;
+    std::optional<grenade_web::SelectionRequest> mobile_selection;
+    std::string observed_reference_path;
+    std::optional<std::filesystem::file_time_type> observed_reference_time;
+    auto reference_poll_at=std::chrono::steady_clock::time_point{};
     if (!mobile_web.start({},shared_gsi)) {
         append_message(app_message,"手机道具清单未启动：" + mobile_web.snapshot().error);
     } else {
@@ -415,7 +419,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         }
         report_lifecycle.cancel_restart();
         if (report_lifecycle.defer_runtime_restart(stop_runtime_session)) return;
-        debug_workspace.invalidate_repeat();
+        if (debug_workspace.snapshot()->movement_test_mode!=debug_session::Mode::GRENADE_TEST)
+            debug_workspace.invalidate_repeat();
+        else debug_workspace.cancel_grenade("Runtime启动，旧对齐结果已撤销");
         if (release_environment.managed &&
             app::detail::runtime_for_backend(config.detector.backend) !=
                 release_environment.runtime_id) {
@@ -580,18 +586,19 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             context.map = shared_gsi->map_snapshot();
             context.runtime_idle = !report_lifecycle.stopping() &&
                 (snapshot.state == RuntimeState::STOPPED || snapshot.state == RuntimeState::FAILED);
+            context.runtime = !report_lifecycle.stopping() && snapshot.state==RuntimeState::RUNNING ? &runtime : nullptr;
             context.input_recording_idle = !snapshot.training ||
                 (!input_training::is_busy(snapshot.training->status) &&
                  snapshot.training->status != input_training::Status::STOP_TIMEOUT);
-            context.cleanup_known = !snapshot.auto_stop.cleanup_unknown && !snapshot.trigger.button_may_be_down &&
-                !snapshot.trigger.faulted && !snapshot.output_armed && !debug_workspace.snapshot()->cleanup_unknown;
+            context.cleanup_known = !snapshot.auto_stop.cleanup_unknown && !snapshot.trigger.faulted &&
+                (context.runtime || (!snapshot.trigger.button_may_be_down && !snapshot.output_armed)) &&
+                !debug_workspace.snapshot()->cleanup_unknown;
             return context;
         };
         if (actions.movement_draft_changed)
             debug_workspace.update_movement_draft(actions.debug_request,make_debug_context());
         debug_workspace.maintain_grenade(make_debug_context(),keyboard_poll.input_healthy && !actions.hotkey_capture_consumed);
         if (keyboard_routing.grenade_cancel_pressed) debug_workspace.cancel_grenade();
-        else if (keyboard_routing.grenade_menu_pressed) debug_workspace.cancel_grenade("打开道具清单，旧对齐结果已撤销");
         if (emergency_pressed || actions.training_stop_requested || actions.stop_requested) {
             if (emergency_pressed || actions.stop_requested) report_lifecycle.cancel_restart();
             debug_workspace.cancel();
@@ -810,14 +817,44 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             actions.start_requested || runtime_toggle_pressed || actions.save_config_requested ||
             actions.debug_action == debug_session::Action::CANCEL || overlay.close_requested() ||
             report_lifecycle.busy() || report_lifecycle.stop_pending() || overlay.background_busy();
+        if (mobile_selection) {
+            const bool current=!interface_blocked && !actions.hotkey_capture_consumed &&
+                mobile_web.selection_current(*mobile_selection);
+            if (const auto completed=debug_workspace.finish_voice(interface_context,current)) {
+                mobile_web.finish_selection(*mobile_selection,*completed,
+                    *completed ? "方案已切换" : "方案或游戏状态已变化，请重新点选");
+                mobile_selection.reset();
+            }
+        }
+        if (!mobile_selection) if (auto selected=mobile_web.poll_selection()) {
+            debug_session::Request request;request.mode=debug_session::Mode::GRENADE_TEST;
+            request.load_path=selected->plan_path;
+            if (!interface_blocked && !actions.hotkey_capture_consumed && mobile_web.selection_current(*selected) &&
+                debug_workspace.select_grenade(request,interface_context)) mobile_selection=std::move(selected);
+            else mobile_web.finish_selection(*selected,false,"当前操作未结束，或道具辅助尚未启用，请稍后点选");
+        }
+        // 重采原子发布后只检查小清单时间，撤销旧对齐；图片由手机按资源版本刷新。
+        const auto reference_now=std::chrono::steady_clock::now();
+        if (reference_now>=reference_poll_at) {
+            reference_poll_at=reference_now+std::chrono::seconds(1);
+            const auto selected=debug_workspace.snapshot()->grenade_selected_path;
+            std::error_code error;
+            const auto plan=std::filesystem::u8path(selected);
+            const auto reference=plan.parent_path().parent_path()/"references"/plan.stem()/"reference.json";
+            const auto modified=std::filesystem::last_write_time(reference,error);
+            if (selected!=observed_reference_path) {observed_reference_path=selected;observed_reference_time.reset();}
+            else if (!error && observed_reference_time && *observed_reference_time!=modified)
+                debug_workspace.cancel_grenade("参考图已更新，请按上键重新找点");
+            if (!error) observed_reference_time=modified;
+        }
         voice_controller.tick(interface_context,keyboard_poll,active_keyboard_config,
             interface_blocked,actions.hotkey_capture_consumed);
         // F10只读当前已保存选择；每轮心跳撤销旧许可，不在网页线程访问可变App状态。
         interface_context.config.keyboard = active_keyboard_config;
         mobile_web.publish_capture(debug_workspace.snapshot(),interface_context.config,
-            snapshot.state == RuntimeState::STOPPED && interface_context.input_recording_idle && interface_context.cleanup_known &&
+            (interface_context.runtime_idle || interface_context.runtime) && interface_context.input_recording_idle && interface_context.cleanup_known &&
             !debug_workspace.busy() && !interface_blocked && !actions.hotkey_capture_consumed,
-            "请先停止Runtime并结束当前调试或配置操作，再按F10采集");
+            "请先结束当前道具动作或配置操作，再按F10采集");
         // 本轮键盘与界面停止/急停优先，不能先自动重启再清除刚收到的急停。
         const auto restart_target = report_lifecycle.take_restart(debug_workspace.busy() || overlay.background_busy() ||
                 model_workspace.poll().job_running,

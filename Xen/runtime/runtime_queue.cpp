@@ -162,6 +162,13 @@ void LatestFrameQueue::stop() noexcept {
     }
 }
 
+std::shared_ptr<const CapturedFrame> LatestFrameQueue::peek_latest() const noexcept {
+    try {
+        std::lock_guard lock(mutex_);
+        return stopped_ ? nullptr : latest_;
+    } catch (...) { return nullptr; }
+}
+
 void LatestFrameQueue::reset() noexcept {
     try {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -427,6 +434,7 @@ PreviewStats RuntimePreviewChannel::stats() const noexcept {
 }
 
 void SafetyGate::reset_session() noexcept {
+    grenade_suspended_.store(false, std::memory_order_release);
     visual_output_blocked_.store(false, std::memory_order_release);
     armed_.store(false, std::memory_order_release);
     hold_active_.store(false, std::memory_order_release);
@@ -488,9 +496,18 @@ bool SafetyGate::can_dispatch_auxiliary() const noexcept {
 }
 
 bool SafetyGate::can_dispatch_recoil() const noexcept {
-    return input_healthy_.load(std::memory_order_acquire) &&
+    return !grenade_suspended_.load(std::memory_order_acquire) &&
+           input_healthy_.load(std::memory_order_acquire) &&
            armed_.load(std::memory_order_acquire) &&
            !emergency_stopped_.load(std::memory_order_acquire);
+}
+
+void SafetyGate::set_grenade_suspended(bool suspended) noexcept {
+    grenade_suspended_.store(suspended, std::memory_order_release);
+}
+
+bool SafetyGate::grenade_suspended() const noexcept {
+    return grenade_suspended_.load(std::memory_order_acquire);
 }
 
 bool SafetyGate::visual_output_blocked() const noexcept {

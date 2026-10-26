@@ -389,8 +389,8 @@ void MovementPanel::render(const AppConfig& config, const Snapshot* snapshot, Ov
             ImGui::Separator();
         }
         if (ui.grenade()) {
-            ImGui::TextWrapped("方向区右键打开主机清单，点选道具方案；按站位图定位并拿出对应道具，大致转向目标后上键对齐、下键投掷、左键取消，End全局急停。清单不依赖麦克风，语音可选；按键须启用并保存，F11手动测试仍保留。");
-            tip("道具辅助只调整视角，不替代固定站位；右键仅打开清单，点选不会自动对齐或投掷。四向为默认方向区布局，可在上方捕获实际数字区按键。对齐需要当前方案已配置有效参考资源，已通过的动作时序保持原样。");
+            ImGui::TextWrapped("手机网页选择道具并查看站位、瞄点参考；拿出对应道具，大致转向目标后上键对齐、下键投掷、左键取消，End全局急停。主机不再弹出清单或参考图；按键须启用并保存，F11手动测试仍保留。");
+            tip("道具辅助只调整视角，不替代固定站位；手机点选不会自动对齐或投掷。上/下/左默认使用方向区，可在上方捕获实际数字区按键，右键不再占用。对齐需要当前方案已配置有效参考资源，已通过的动作时序保持原样。");
             if (snapshot) {
                 ImGui::TextWrapped("对齐状态：%s", snapshot->grenade_guidance_message.empty()
                     ? "等待选择方案与参考资源" : snapshot->grenade_guidance_message.c_str());

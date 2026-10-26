@@ -204,14 +204,25 @@ int main() {
         for(int i=0;i<10;++i){tick();std::this_thread::sleep_for(std::chrono::milliseconds(5));}
         input.events={{KeyboardEventType::GRENADE_MENU,true}};tick();
         const auto shown=receive("catalog_show");
-        expect(shown.is_object() && shown["revision"]==menu_catalog["revision"],"独立菜单键无需语音键或模型即可打开清单");
+        expect(!shown.is_object(),"旧菜单键不得重新打开主机清单");
+        const auto before_mobile=session.snapshot()->grenade_loaded_revision;
         send({{"type","catalog_select"},{"id",1},{"map","de_inferno"},{"epoch",2},
             {"revision",menu_catalog["revision"]},{"plan_id",empty_command_id}});
         send({{"type","fail"},{"id",1},{"reason","迟到语音消息"}});
         const auto menu_result=receive("catalog_result");
-        expect(menu_result.is_object() && menu_result.value("ok",false) && menu_result["plan_id"]==empty_command_id,
-            "无口令道具可独立点选，迟到同编号语音消息不干扰菜单请求");
-        expect(session.snapshot()->grenade_selected_path==menu_path,"菜单异步选择复用正式道具Session");
+        expect(menu_result.is_object() && !menu_result.value("ok",true),"旧主机菜单请求须明确指向手机入口");
+        expect(session.snapshot()->grenade_loaded_revision==before_mobile,"旧菜单请求不得切换方案");
+        request.load_path=menu_path;
+        context.config.keyboard.grenade_assist_enabled=true;
+        expect(session.select_grenade(request,context),"手机应可选择无语音口令的道具");
+        std::optional<bool> mobile_done;
+        for(int i=0;i<300&&!mobile_done;++i) {
+            tick(); // 无语音作业时不能抢走手机载入future。
+            mobile_done=session.finish_voice(context,true);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        expect(mobile_done&&*mobile_done&&session.snapshot()->grenade_selected_path==menu_path,
+            "手机选择须实际载入，语音轮询不得吞掉回执");
         const auto loaded=session.snapshot()->grenade_loaded_revision;
         send({{"type","catalog_select"},{"id",1},{"map","de_inferno"},{"epoch",2},
             {"revision",menu_catalog["revision"]},{"plan_id",empty_command_id}});

@@ -92,6 +92,11 @@ struct Runtime::Impl {
     std::atomic<bool> stop_requested{false};
     std::atomic<bool> aim_reset_requested{false};
     std::atomic<bool> detector_reload_running{false};
+    std::atomic<std::uint64_t> grenade_cancel_epoch{0};
+    std::atomic<std::uint64_t> grenade_active_id{0};
+    std::uint64_t grenade_next_id = 0;
+    bool grenade_workers_stopped = false;
+    std::atomic<bool> auto_stop_user_paused{false};
     runtime::detail::PipelineLatencyWindow latency_window;
     DebugSampleRing debug_samples;
     bool diagnostics_enabled = false; // snapshot_mutex 保护
@@ -159,6 +164,7 @@ struct Runtime::Impl {
     }
 
     void fail_runtime(const std::string& error) noexcept {
+        ++grenade_cancel_epoch;
         // 故障后旧图像不再代表实时状态。递增预览代际可同时阻止已经在锁外
         // 执行颜色转换的旧帧重新发布，但保留用户开关和已分配的大缓冲。
         const auto preview_stats = preview_channel.finish_session();
@@ -198,6 +204,10 @@ struct Runtime::Impl {
             return false;
         }
         config = value;
+        ++grenade_cancel_epoch;
+        grenade_active_id.store(0);
+        grenade_workers_stopped = false;
+        auto_stop_user_paused.store(false);
         frame_queue.reset();
         preview_channel.set_session_active(false);
         stop_requested.store(false, std::memory_order_release);
@@ -1203,6 +1213,7 @@ struct Runtime::Impl {
     }
 
     bool configure_movement(const movement::Config& value) noexcept {
+        if (safety_gate.grenade_suspended()) return value == config.movement;
         if (value.enabled && !movement::valid_config(value)) return false;
         if (auto worker = movement_worker.load()) {
             if (!(config.movement == value)) {
@@ -1224,7 +1235,7 @@ struct Runtime::Impl {
             auto worker = std::make_shared<movement::Worker>(mouse, [this] {
                 // 只沿用应用已有输出开关/急停；身法没有视觉、武器或地面前提。
                 return config.mouse.allow_send_input && !stop_requested.load() &&
-                    safety_gate.output_armed() && !safety_gate.emergency_stopped();
+                    !safety_gate.grenade_suspended() && safety_gate.output_armed() && !safety_gate.emergency_stopped();
             }, [this](bool suspended) {
                 if (auto counter_strafe = auto_stop_worker.load()) {
                     counter_strafe->set_movement_suspended(suspended);
@@ -1250,6 +1261,91 @@ struct Runtime::Impl {
         if (training_device) training_device->set_input_report_subscription(false);
         if (auto session = training.load()) session->stop();
         training_device.reset();
+    }
+
+    bool stop_grenade_outputs(std::string& reason) {
+        // 取消标志不是清理确认。复用各worker的有界停止协议，等待其输入归还，
+        // 采集与推理线程保持运行；随后穿过Aim同一提交锁排空在途发送。
+        grenade_workers_stopped = true;
+        if (auto worker = movement_worker.load()) worker->stop();
+        if (auto worker = trigger_worker.load()) worker->stop();
+        if (auto worker = recoil_worker.load()) worker->stop();
+        if (auto worker = auto_stop_worker.load()) worker->stop();
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(std::clamp(config.mouse.kmbox_command_timeout_ms, 1, 1000) + 100);
+        std::unique_lock<std::timed_mutex> barrier;
+        while (output_arbiter && std::chrono::steady_clock::now() < deadline) {
+            barrier = output_arbiter->try_enter_cleanup();
+            if (barrier.owns_lock()) break;
+        }
+        if (output_arbiter && !barrier.owns_lock()) {
+            reason = "既有输出尚未完成，无法借用道具控制"; return false;
+        }
+        bool clean = mouse && !mouse->left_button_faulted() && !mouse->left_button_cleanup_required();
+        if (auto worker = movement_worker.load()) clean = clean && worker->snapshot().state != movement::State::FAULT;
+        if (auto worker = trigger_worker.load()) {
+            const auto state = worker->snapshot(); clean = clean && !state.faulted && !state.button_may_be_down;
+        }
+        if (auto worker = recoil_worker.load()) clean = clean && !worker->snapshot().faulted;
+        if (auto worker = auto_stop_worker.load()) {
+            const auto state = worker->snapshot(); clean = clean && !state.cleanup_unknown && state.status != AutoStopStatus::FAULT;
+        }
+        if (!clean) reason = "既有输出清理未完成，道具控制未接管";
+        return clean;
+    }
+
+    bool resume_grenade_outputs() {
+        if (!grenade_workers_stopped) return true;
+        const int timeout = config.mouse.backend == MouseBackend::MAKCU
+            ? config.mouse.makcu_command_timeout_ms : config.mouse.kmbox_command_timeout_ms;
+        bool ready = true;
+        if (auto worker = auto_stop_worker.load()) {
+            ready = worker->start(config.auto_stop, timeout) && ready;
+            worker->set_paused(auto_stop_user_paused.load());
+        }
+        if (auto worker = trigger_worker.load()) {
+            auto trigger_config = config.trigger;
+            if (trigger_config.require_stop) trigger_config.allow_estimated_stop = true;
+            trigger_config.person_class_ids = config.aim.person_class_ids;
+            trigger_config.head_class_ids = config.aim.head_class_ids;
+            ready = worker->start(trigger_config) && ready;
+        }
+        if (auto worker = recoil_worker.load()) ready = worker->start(config.recoil) && ready;
+        if (auto worker = movement_worker.load()) ready = worker->start(config.movement) && ready;
+        grenade_workers_stopped = false;
+        aim_reset_requested.store(true);
+        return ready;
+    }
+
+    bool grenade_control_valid(std::uint64_t id, std::uint64_t epoch) const noexcept {
+        try {
+            if (grenade_active_id.load() != id || grenade_cancel_epoch.load() != epoch ||
+                stop_requested.load() || safety_gate.emergency_stopped() || !safety_gate.input_healthy()) return false;
+            std::lock_guard lock(snapshot_mutex);
+            return current_snapshot.state == RuntimeState::RUNNING;
+        } catch (...) { return false; }
+    }
+
+    void finish_grenade_control(std::uint64_t id, std::uint64_t generation, bool cleanup_known) noexcept {
+        try {
+            std::lock_guard lock(lifecycle_mutex);
+            if (grenade_active_id.load() != id || runtime_generation != generation) return;
+            grenade_active_id.store(0);
+            RuntimeState state;
+            { std::lock_guard lock(snapshot_mutex); state = current_snapshot.state; }
+            if (!cleanup_known) {
+                safety_gate.emergency_stop(); ++grenade_cancel_epoch;
+                set_error("道具输入清理未确认，其他输出保持暂停");
+                return;
+            }
+            if (state != RuntimeState::RUNNING || stop_requested.load()) return;
+            // End或解除武装只改变原有SafetyGate；重启空闲worker不会重新武装。
+            if (!resume_grenade_outputs()) {
+                safety_gate.emergency_stop(); ++grenade_cancel_epoch;
+                set_error("归还道具控制后输出模块恢复失败"); return;
+            }
+            safety_gate.set_grenade_suspended(false);
+        } catch (...) { safety_gate.emergency_stop(); ++grenade_cancel_epoch; }
     }
 
     void release_modules() noexcept {
@@ -1342,7 +1438,7 @@ const char* DetectorReloadStateName(DetectorReloadState state) noexcept {
     return "UNKNOWN";
 }
 
-Runtime::Runtime(std::shared_ptr<weapon::GsiReceiver> shared_gsi) : impl_(std::make_unique<Impl>()) {
+Runtime::Runtime(std::shared_ptr<weapon::GsiReceiver> shared_gsi) : impl_(std::make_shared<Impl>()) {
     if (shared_gsi) { impl_->gsi_receiver = std::move(shared_gsi); impl_->owns_gsi = false; }
     Log::register_module("runtime", LogLevel::INFO);
 }
@@ -1356,6 +1452,98 @@ std::unique_ptr<Runtime> runtime::detail::make_runtime_with_startup_adapter(
 
 Runtime::~Runtime() {
     stop();
+}
+
+RuntimeGrenadeControl::RuntimeGrenadeControl(std::function<bool()> valid,
+    std::function<CaptureStatus(CapturedFrame&)> grab,
+    std::function<source_context::SourceContextSnapshot()> source,
+    std::function<void(bool)> release)
+    : valid_(std::move(valid)), grab_(std::move(grab)), source_(std::move(source)), release_(std::move(release)) {}
+RuntimeGrenadeControl::~RuntimeGrenadeControl() { finish(); }
+bool RuntimeGrenadeControl::valid() const noexcept {
+    try { return !finished_.load() && valid_ && valid_(); } catch (...) { return false; }
+}
+CaptureStatus RuntimeGrenadeControl::grab(CapturedFrame& frame) noexcept {
+    try {
+        if (!valid()) return CaptureStatus::ACCESS_LOST;
+        const auto status = grab_(frame);
+        if (!valid()) { frame = {}; return CaptureStatus::ACCESS_LOST; }
+        return status;
+    } catch (...) { frame = {}; return CaptureStatus::FAILURE; }
+}
+source_context::SourceContextSnapshot RuntimeGrenadeControl::source_snapshot() const noexcept {
+    try { return valid() && source_ ? source_() : source_context::SourceContextSnapshot{}; }
+    catch (...) { return {}; }
+}
+void RuntimeGrenadeControl::finish(bool cleanup_known) noexcept {
+    if (finished_.exchange(true)) return;
+    try { if (release_) release_(cleanup_known); } catch (...) {}
+}
+
+std::shared_ptr<RuntimeGrenadeControl> Runtime::acquire_grenade_control(
+    std::atomic_bool& canceled, std::string& reason) noexcept {
+    try {
+        if (!impl_) { reason = "Runtime不可用"; return {}; }
+        std::unique_lock lock(impl_->lifecycle_mutex, std::try_to_lock);
+        if (!lock.owns_lock()) { reason = "Runtime正在切换，请稍后重试"; return {}; }
+        RuntimeState state;
+        { std::lock_guard snapshot_lock(impl_->snapshot_mutex); state = impl_->current_snapshot.state; }
+        if (state != RuntimeState::RUNNING || canceled.load() || impl_->stop_requested.load() ||
+            impl_->safety_gate.emergency_stopped() || !impl_->safety_gate.input_healthy() ||
+            !impl_->config.mouse.allow_send_input || !impl_->mouse || !impl_->mouse->output_owner_exclusive() ||
+            impl_->mouse->status() != MouseStatus::READY) {
+            reason = "Runtime或输入状态不能借用道具控制"; return {};
+        }
+        if (impl_->grenade_active_id.load() || impl_->safety_gate.grenade_suspended()) {
+            reason = "已有道具控制尚未归还"; return {};
+        }
+        if (impl_->gpu_interop_enabled() || impl_->config.capture.roi_width != 320 ||
+            impl_->config.capture.roi_height != 320) {
+            reason = "道具对齐需要当前Runtime的320×320 CPU图像"; return {};
+        }
+        const auto id = ++impl_->grenade_next_id;
+        const auto generation = impl_->runtime_generation;
+        const auto epoch = impl_->grenade_cancel_epoch.load();
+        impl_->grenade_active_id.store(id);
+        impl_->safety_gate.set_grenade_suspended(true);
+        bool clean = false;
+        try { clean = impl_->stop_grenade_outputs(reason); }
+        catch (...) { reason = "既有输出交接异常"; }
+        if (!clean || canceled.load() || !impl_->grenade_control_valid(id, epoch)) {
+            if (reason.empty()) reason = "道具控制请求已取消";
+            lock.unlock();
+            impl_->finish_grenade_control(id, generation, clean);
+            return {};
+        }
+        const std::weak_ptr<Impl> weak = impl_;
+        try {
+            auto result = std::shared_ptr<RuntimeGrenadeControl>(new RuntimeGrenadeControl(
+                [weak,id,epoch] { const auto value = weak.lock(); return value && value->grenade_control_valid(id,epoch); },
+                [weak,last_sequence=std::uint64_t{0}](CapturedFrame& output) mutable {
+                    const auto value = weak.lock();
+                    if (!value) return CaptureStatus::ACCESS_LOST;
+                    // stop/start可重置原槽；只在复制这张小ROI时短持生命周期锁。
+                    std::unique_lock copy_lock(value->lifecycle_mutex, std::try_to_lock);
+                    if (!copy_lock.owns_lock()) return CaptureStatus::NO_FRAME;
+                    const auto latest = value->frame_queue.peek_latest();
+                    if (!latest || latest->timing.sequence <= last_sequence) return CaptureStatus::NO_FRAME;
+                    if (latest->storage != CapturedFrameStorage::CPU_BGR || latest->width != 320 || latest->height != 320)
+                        return CaptureStatus::INVALID_CONFIG;
+                    output = *latest;
+                    output.bgr = latest->bgr.clone();
+                    output.bgr_storage.reset();
+                    last_sequence = latest->timing.sequence;
+                    return CaptureStatus::FRAME;
+                },
+                [weak] { const auto value = weak.lock(); return value ? value->source_context_client.snapshot() : source_context::SourceContextSnapshot{}; },
+                [weak,id,generation](bool known) { if (const auto value = weak.lock()) value->finish_grenade_control(id,generation,known); }));
+            reason.clear();
+            return result;
+        } catch (...) {
+            lock.unlock(); impl_->finish_grenade_control(id,generation,true);
+            reason = "创建道具控制借用失败"; return {};
+        }
+    } catch (...) { reason = "道具控制借用失败"; return {}; }
 }
 
 bool Runtime::set_data_collector(
@@ -1498,6 +1686,7 @@ bool Runtime::start(const AppConfig& config,
 
 void Runtime::stop() noexcept {
     if (!impl_) return;
+    ++impl_->grenade_cancel_epoch;
     std::lock_guard<std::mutex> lifecycle_lock(impl_->lifecycle_mutex);
     impl_->safety_gate.emergency_stop();
     if (auto worker = impl_->auto_stop_worker.load()) worker->cancel();
@@ -1737,6 +1926,7 @@ bool Runtime::post_intent(const RuntimeIntent& intent) noexcept {
             }
             break;
         case RuntimeIntentType::DISARM_OUTPUT:
+            ++impl_->grenade_cancel_epoch;
             impl_->safety_gate.disarm();
             if (auto worker = impl_->auto_stop_worker.load()) worker->cancel();
             if (auto trigger = impl_->trigger_worker.load()) trigger->cancel();
@@ -1745,6 +1935,7 @@ bool Runtime::post_intent(const RuntimeIntent& intent) noexcept {
         case RuntimeIntentType::INPUT_HEALTH_CHANGED:
             impl_->safety_gate.set_input_health(intent.active);
             if (!intent.active) {
+                ++impl_->grenade_cancel_epoch;
                 if (auto worker = impl_->auto_stop_worker.load()) worker->cancel();
             if (auto trigger = impl_->trigger_worker.load()) trigger->cancel();
             if (auto recoil = impl_->recoil_worker.load()) recoil->cancel();
@@ -1756,6 +1947,7 @@ bool Runtime::post_intent(const RuntimeIntent& intent) noexcept {
             // 更新轨迹、预测和最新命令，下一次按下即可直接放行当前结果。
             break;
         case RuntimeIntentType::EMERGENCY_STOP:
+            ++impl_->grenade_cancel_epoch;
             impl_->safety_gate.emergency_stop();
             if (auto worker = impl_->auto_stop_worker.load()) worker->cancel();
             if (auto trigger = impl_->trigger_worker.load()) trigger->cancel();
@@ -1766,6 +1958,7 @@ bool Runtime::post_intent(const RuntimeIntent& intent) noexcept {
             if (!impl_->safety_gate.reset_emergency()) return false;
             break;
         case RuntimeIntentType::SET_AUTO_STOP_PAUSED: {
+            impl_->auto_stop_user_paused.store(intent.active);
             auto worker = impl_->auto_stop_worker.load();
             if (!worker) return false;
             worker->set_paused(intent.active);

@@ -30,7 +30,7 @@ inline auto hotkey_bindings(const AppConfig& config) noexcept {
     const auto& move = config.movement;
     return std::array<HotkeyBindingView, 15>{{
         {Target::VOICE, keyboard.voice_virtual_keys, true},
-        {Target::GRENADE_MENU, keyboard.grenade_menu_virtual_keys, keyboard.grenade_assist_enabled},
+        {Target::GRENADE_MENU, {}, false},
         {Target::GRENADE_ALIGN, keyboard.grenade_align_virtual_keys, keyboard.grenade_assist_enabled},
         {Target::GRENADE_THROW, keyboard.grenade_throw_virtual_keys, keyboard.grenade_assist_enabled},
         {Target::GRENADE_CANCEL, keyboard.grenade_cancel_virtual_keys, keyboard.grenade_assist_enabled},
@@ -97,16 +97,15 @@ inline bool movement_hotkeys_conflict(const AppConfig& config) noexcept {
         hotkey_binding_conflicts(config, HotkeyTarget::MOVEMENT_LARGE, config.movement.large_virtual_key);
 }
 
-// 默认布局是用户显式选择的事务；右键转为清单，只移除旧语音中的同键绑定，保留其他可选语音键。
+// 默认布局只设置上/下/左三键；手机选择替代主机清单，不占用右键或改动可选语音。
 // 先验证整组再写回，不覆盖其他功能，不依赖麦克风可用性。
 // 普通开关传 false，仅恢复已保存的自定义布局，数字区捕获不会被再次改回方向区。
 inline bool enable_grenade_assist_hotkeys(
         AppConfig& config, bool use_direction_defaults, std::string& error) {
     auto candidate = config;
     candidate.keyboard.grenade_assist_enabled = true;
+    candidate.keyboard.grenade_menu_virtual_keys.clear();
     if (use_direction_defaults) {
-        std::erase(candidate.keyboard.voice_virtual_keys, 0x27);
-        candidate.keyboard.grenade_menu_virtual_keys = {0x27};
         candidate.keyboard.grenade_align_virtual_keys = {0x26};
         candidate.keyboard.grenade_throw_virtual_keys = {0x28};
         candidate.keyboard.grenade_cancel_virtual_keys = {0x25};

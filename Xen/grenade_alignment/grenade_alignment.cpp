@@ -158,6 +158,19 @@ struct CaptureCloser {
     ICapture* capture = nullptr;
     ~CaptureCloser() { if (capture) capture->close(); }
 };
+class SharedCapture final : public ICapture {
+public:
+    explicit SharedCapture(std::function<CaptureStatus(CapturedFrame&)> grab):grab_(std::move(grab)) {}
+    bool open() noexcept override { return true; }
+    CaptureStatus grab(CapturedFrame& frame) noexcept override {
+        try { return grab_(frame); } catch (...) { return CaptureStatus::FAILURE; }
+    }
+    void close() noexcept override {}
+    CaptureStatus status() const noexcept override { return CaptureStatus::READY; }
+    std::string last_error() const override { return "Runtime画面借用已结束"; }
+private:
+    std::function<CaptureStatus(CapturedFrame&)> grab_;
+};
 }
 
 Result detail::run_with_dependencies(const Reference& reference, const AppConfig& config,
@@ -249,7 +262,7 @@ Result detail::run_with_dependencies(const Reference& reference, const AppConfig
         auto capture_config=config.capture;
         if (capture_config.enable_d3d11_cuda_interop || capture_config.enable_d3d11_directml_interop)
             throw std::runtime_error("道具对齐需要CPU图像，当前GPU专用采集配置不适用");
-        capture_config.ndi_discovery_timeout_ms=std::min(capture_config.ndi_discovery_timeout_ms,500);
+        // NDI发现和首次连接是异步过程；沿用源配置，由整次任务期限限制等待。
         capture_config.ndi_receive_timeout_ms=std::min(capture_config.ndi_receive_timeout_ms,50);
         capture_config.acquire_timeout_ms=std::min(capture_config.acquire_timeout_ms,50);
         capture_config.udp_read_timeout_ms=std::min(capture_config.udp_read_timeout_ms,50);
@@ -273,7 +286,8 @@ Result detail::run_with_dependencies(const Reference& reference, const AppConfig
                 throw std::runtime_error("道具采集断流或失败："+capture->last_error());
             const auto now=dependencies.now();
             if (status!=CaptureStatus::FRAME || frame.timing.sequence<=last_sequence) {
-                if (now-last_fresh>kNoFrameDuration) throw std::runtime_error("未收到新的道具画面，对齐已停止");
+                if (last_sequence && now-last_fresh>kNoFrameDuration)
+                    throw std::runtime_error("未收到新的道具画面，对齐已停止");
                 dependencies.sleep(2ms); continue;
             }
             if (!geometry_matches(reference,frame)) throw std::runtime_error("当前画面与参考图的ROI或分辨率不一致");
@@ -289,7 +303,7 @@ Result detail::run_with_dependencies(const Reference& reference, const AppConfig
                 timing.source_clock_uncertainty_ms>50)) {
                 // 每个短时NDI接收器的mapper需要三次真实时钟交换。暖机只等候，
                 // 不产生匹配/稳定帧/鼠标命令；一旦消费过有效帧则不允许降级重暖。
-                if (!frames && now<started+2s && !config.capture.ndi_clock_sync_url.empty() &&
+                if (!frames && now<deadline && !config.capture.ndi_clock_sync_url.empty() &&
                     (timing.source_clock_status==SourceClockStatus::WARMING ||
                      timing.source_clock_status==SourceClockStatus::UNSYNCHRONIZED)) {
                     last_fresh=now;dependencies.sleep(5ms);continue;
@@ -384,9 +398,18 @@ Result detail::run_with_dependencies(const Reference& reference, const AppConfig
 
 Result run(const Reference& reference, const AppConfig& config,
            std::shared_ptr<IMouseController> device,std::atomic_bool& canceled,
-           bool verify_only,std::function<bool()> permitted) noexcept {
+           bool verify_only,std::function<bool()> permitted,SharedStream stream) noexcept {
     try {
         Log::register_module("grenade_alignment",LogLevel::INFO);
+        if (stream.grab && stream.source) {
+            detail::Dependencies dependencies{
+                [&](const CaptureConfig&){return std::make_unique<SharedCapture>(stream.grab);},
+                []{return Clock::now();},
+                [](std::chrono::milliseconds duration){std::this_thread::sleep_for(duration);},
+                stream.source};
+            return detail::run_with_dependencies(reference,config,std::move(device),canceled,
+                verify_only,std::move(permitted),dependencies);
+        }
         source_context::SourceContextClient source;
         auto source_config=config.source_context;
         char* token=nullptr;std::size_t length=0;

@@ -3291,24 +3291,21 @@ struct Overlay::Impl {
         if (ImGui::BeginTabItem("道具测试")) {
             ImGui::PushID("grenade_test");
             ImGui::BeginDisabled(!can_edit || (debug_snapshot && debug_snapshot->busy));
-            if (ImGui::Button("启用道具辅助按键")) {
+            if (ImGui::Button("启用道具上/下/左三键")) {
                 if (config::detail::enable_grenade_assist_hotkeys(app_config, true, hotkey_capture_message))
-                    hotkey_capture_message = "已设置右键清单、上键对齐、下键投掷、左键取消；旧语音中的右键已清除，其他语音绑定保留。保存配置后生效，不依赖麦克风。";
+                    hotkey_capture_message = "已设置上键对齐、下键投掷、左键取消；手机选择方案，主机不显示清单或参考图。保存配置后生效，可选语音绑定保留。";
             }
-            show_help_tooltip("一次设置方向区右键打开清单、上键对齐、下键投掷、左键取消；四个道具绑定恢复默认，只清除旧语音中的方向区右键，其他语音绑定保留为可选。与其他已启用功能冲突时整组拒绝，不覆盖其他功能。保存后生效，不依赖麦克风，不立即对齐或投掷。");
+            show_help_tooltip("一次设置方向区上键对齐、下键投掷、左键取消；手机网页选择方案并显示站位和瞄点参考，主机不弹窗、不占用右键。可选语音保持原绑定。与其他已启用功能冲突时整组拒绝，不覆盖其他功能。保存后生效，不立即对齐或投掷。");
             if (begin_form("grenade_hotkey_form", 150.0f)) {
-                form_row("启用当前绑定", "只启停当前四个道具绑定，不重设可选语音键或自定义数字区绑定。清单点选不需要麦克风；保存后生效，禁用不会执行动作。");
+                form_row("启用当前绑定", "只启停上/下/左三个道具绑定，不重设可选语音键或自定义数字区绑定。手机点选不需要麦克风；保存后生效，禁用不会执行动作。");
                 bool enabled = app_config.keyboard.grenade_assist_enabled;
                 if (toggle_switch("##grenade_assist_enabled", &enabled)) {
                     if (!enabled) app_config.keyboard.grenade_assist_enabled = false;
                     else if (config::detail::enable_grenade_assist_hotkeys(app_config, false, hotkey_capture_message))
                         hotkey_capture_message = "已启用当前道具按键布局；保存配置后生效。";
                 }
-                render_hotkey_row("道具清单（按下）", "##grenade_menu_keys",
-                    "打开主机道具清单，点选当前地图方案；不收音、不对齐、不投掷。默认方向区右键，可捕获后端数字区6，NumLock不改变物理键身份；按住不循环，Esc清空，保存后生效。",
-                    HotkeyBindingTarget::GRENADE_MENU, app_config.keyboard.grenade_menu_virtual_keys, key_active);
                 render_hotkey_row("可选语音（按住）", "##grenade_voice_keys",
-                    "可选入口：按住说话、松开选择当前地图已保存方案，不执行动作；必须有可用主机语音工具和麦克风。清单点选不依赖此绑定，不能与四个道具键共用；Esc清空，保存后生效。",
+                    "可选入口：按住说话、松开选择当前地图已保存方案，不执行动作；必须有可用主机语音工具和麦克风。手机点选不依赖此绑定，不能与上/下/左三键共用；Esc清空，保存后生效。",
                     HotkeyBindingTarget::VOICE, app_config.keyboard.voice_virtual_keys, key_active);
                 render_hotkey_row("自动对齐（按下）", "##grenade_align_keys",
                     "启用道具辅助后，按下启动已选方案的画面对齐；不会自动走位或投掷。默认方向区上键，可捕获后端数字区8；按住不循环，故障恢复先释放，Esc清空。",

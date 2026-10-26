@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -22,7 +23,11 @@ struct Snapshot {
     std::string error;
     std::vector<std::string> urls;
 };
-// App 持有生命周期；只读共享 GSI 与已发布的 Session 快照，不调用执行或设备接口。
+struct SelectionRequest {
+    std::uint64_t id = 0, map_epoch = 0;
+    std::string plan_id, plan_path, map, team, generation;
+};
+// App 持有生命周期；网页只提交选择意图，由 App 载入方案，不调用设备接口。
 class Server final {
 public:
     Server();
@@ -33,6 +38,9 @@ public:
     // App 主线程发布心跳与不可变选择；只检查 controls 的按键，不保留配置或秘密字段。
     void publish_capture(std::shared_ptr<const debug_session::Snapshot> selection,
                          const AppConfig& controls, bool available, const std::string& reason = {}) noexcept;
+    std::optional<SelectionRequest> poll_selection() noexcept;
+    bool selection_current(const SelectionRequest& request) const noexcept;
+    void finish_selection(const SelectionRequest& request, bool ok, const std::string& reason = {}) noexcept;
     void stop() noexcept;
     Snapshot snapshot() const;
 private:

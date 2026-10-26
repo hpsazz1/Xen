@@ -89,10 +89,13 @@ struct Snapshot {
     bool timing_catalog_valid = false;
 };
 
-// App生命周期owner提供准入事实；Session不创建第二设备、不停止或启动生产Runtime。
+// App生命周期owner提供准入事实；运行态道具借用Runtime输出和原始ROI，不停启Runtime。
 struct Context {
     AppConfig config;
     std::shared_ptr<IMouseController> device;
+    Runtime* runtime = nullptr;
+    // 仅worker持有Runtime借用时填写；每步时间线输出前检查。
+    std::function<bool()> output_permitted;
     bool runtime_idle = false, input_recording_idle = false, cleanup_known = false;
     weapon::MapSnapshot map;
 };
@@ -116,6 +119,8 @@ public:
     void update_map(const weapon::MapSnapshot&) noexcept;
     // 文件解析异步完成，App 在本帧停止/热键处理之后复核再提交。
     bool select_voice(const Request&, const Context&) noexcept;
+    // 手机选择明确切入道具域，只载入已保存方案，不执行物理动作。
+    bool select_grenade(const Request&, const Context&) noexcept;
     std::optional<bool> finish_voice(const Context&, bool still_current) noexcept;
     bool align_grenade(const Context&) noexcept;
     bool throw_grenade(const Context&) noexcept;
