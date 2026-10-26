@@ -6,7 +6,6 @@ import http.server
 import json
 from pathlib import Path
 import shutil
-import subprocess
 import sys
 import tempfile
 import threading
@@ -16,17 +15,16 @@ from unittest.mock import patch
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tools.voice_switch import capture_workflow
-from tools.voice_switch.capture_workflow import (
+from tools.grenade_capture import capture_workflow, worker
+from tools.grenade_capture.capture_workflow import (
     ContextReader, LocalSavePending, capture_once, short_name, standing_for, transfer_capture, validate_context)
-from tools.voice_switch.capture_hotkey import SingleJob, completion_notice
-from tools.voice_switch.reference_assets import load_reference
-from tools.voice_switch.screen_capture import png_rgb
+from tools.grenade_capture.reference_assets import load_reference
+from tools.grenade_capture.screen_capture import png_rgb
 
 
 class CaptureTests(unittest.TestCase):
     def setUp(self):
-        fixtures = Path(__file__).resolve().parents[1] / "temp/XEN-GRENADE-ALIGN-20261026-001/capture-fixtures"
+        fixtures = Path(__file__).resolve().parents[1] / "temp/XEN-GRENADE-OBS-MENU-20261026-001/capture-fixtures"
         fixtures.mkdir(parents=True, exist_ok=True)
         self.temporary = tempfile.TemporaryDirectory(prefix="run-", dir=fixtures)
         self.addCleanup(self.temporary.cleanup)
@@ -253,40 +251,67 @@ class CaptureTests(unittest.TestCase):
                 ContextReader(host)
 
 
-class JobTests(unittest.TestCase):
-    def test_unexpected_exit_or_nonterminal_progress_is_reported_unconfirmed(self):
-        for status in (None, {"state": "capturing", "terminal": False},
-                       {"state": "pending", "terminal": False}, {"state": "sent", "terminal": True}):
-            self.assertIn("未确认", completion_notice("finished", status, 1))
-        self.assertIn("未确认", completion_notice("finished", {"state": "saving", "terminal": False}, 0))
-        self.assertIsNone(completion_notice("finished", {"state": "sent", "terminal": True}, 0))
-        self.assertIsNone(completion_notice("finished", {"state": "pending", "terminal": True}, 2))
-        self.assertIsNone(completion_notice("finished", {"state": "failed", "terminal": True}, 1))
-        self.assertIn("未确认", completion_notice("timeout", None, None))
+    # 单作业忙态、超时与退出状态的消费已由 OBS 插件模型负责；此处验证实际 worker 协议。
+    def worker_arguments(self):
+        self.status_path = self.base / "jobs" / "capture.json"
+        return ["--host", "127.0.0.1", "--web-port", "5015", "--root", str(self.root),
+                "--destination", str(self.remote), "--shared-standing", str(self.standing),
+                "--window", "12", "--process", "34", "--job-status", str(self.status_path)]
 
-    def test_busy_does_not_queue_and_timeout_stops_one_job(self):
-        class Process:
-            done = False
-            stopped = 0
-            def poll(self):
-                return 1 if self.done else None
-            def terminate(self):
-                self.stopped += 1
-                self.done = True
-            def wait(self, timeout):
-                return 1
-        process, launches, clock = Process(), [], [0]
-        def launch(arguments):
-            launches.append(arguments)
-            return process
-        job = SingleJob(launch, clock=lambda: clock[0], timeout=30)
-        self.assertTrue(job.start(["one"]))
-        self.assertFalse(job.start(["two"]))
-        clock[0] = 31
-        self.assertEqual(job.tick(), "timeout")
-        self.assertEqual(process.stopped, 1)
-        self.assertEqual(launches, [["one"]])
-        self.assertIsNone(job.tick())
+    def run_worker(self):
+        def capture(*args, **kwargs):
+            return capture_once(*args, capture=self.fake_capture, **kwargs)
+        with patch.object(worker, "ContextReader", return_value=lambda: deepcopy(self.context)), \
+             patch.object(worker, "capture_once", side_effect=capture), \
+             patch.object(worker, "foreground_identity", return_value={"window": 12, "process": 34}):
+            result = worker.main(self.worker_arguments())
+        return result, json.loads(self.status_path.read_text(encoding="utf-8"))
+
+    def test_obs_worker_captures_and_transfers_once_then_reports_terminal_success(self):
+        plan_bytes = self.plan_path.read_bytes()
+        result, status = self.run_worker()
+        self.assertEqual(result, 0)
+        self.assertEqual(self.capture_count, 1)
+        self.assertEqual((status["state"], status["terminal"]), ("sent", True))
+        self.assertIn("T1 VIP烟", status["message"])
+        self.assertEqual(self.plan_path.read_bytes(), plan_bytes)
+        _, directory = load_reference(self.remote / "references", self.plan_path.stem)
+        self.assertEqual((directory / "aim.png").read_bytes(), self.aim.read_bytes())
+
+    def test_obs_worker_failed_context_reports_failure_without_capture(self):
+        self.context["ready"] = False
+        self.context["reason"] = "当前方案不可用"
+        result, status = self.run_worker()
+        self.assertEqual(result, 1)
+        self.assertEqual(self.capture_count, 0)
+        self.assertEqual((status["state"], status["terminal"]), ("failed", True))
+        self.assertIn("当前方案不可用", status["message"])
+        self.assertFalse((self.remote / "references").exists())
+
+    def test_obs_worker_transfer_failure_reports_pending_and_keeps_local_resources(self):
+        with patch.object(worker, "transfer_capture", side_effect=OSError("synthetic disconnected share")):
+            result, status = self.run_worker()
+        self.assertEqual(result, 2)
+        self.assertEqual(self.capture_count, 1)
+        self.assertEqual((status["state"], status["terminal"]), ("pending", True))
+        self.assertIn("本地已保存，发送未确认", status["message"])
+        _, directory = load_reference(self.root / "references", self.plan_path.stem)
+        self.assertEqual((directory / "aim.png").read_bytes(), self.aim.read_bytes())
+        self.assertFalse((self.remote / "references").exists())
+
+    def test_obs_worker_interrupted_local_publish_reports_pending_not_false_failure(self):
+        write = capture_workflow.write_json
+        def fail_metadata(path, value):
+            if Path(path).parent.name == "captures":
+                raise OSError("synthetic metadata failure")
+            return write(path, value)
+        with patch.object(capture_workflow, "write_json", side_effect=fail_metadata):
+            result, status = self.run_worker()
+        self.assertEqual(result, 2)
+        self.assertEqual((status["state"], status["terminal"]), ("pending", True))
+        journal = self.root / "capture-transactions" / self.plan_path.stem / "pending.json"
+        self.assertTrue(journal.is_file())
+        self.assertFalse((self.remote / "references").exists())
 
 
 if __name__ == "__main__":

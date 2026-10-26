@@ -8,9 +8,9 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tools.voice_switch.reference_assets import load_reference, manifest_revision, png_size, resource_directory
-from tools.voice_switch.reference_tool import add_image, begin
-from tools.voice_switch.screen_capture import png_rgb
+from tools.grenade_capture.reference_assets import load_reference, manifest_revision, png_size, resource_directory
+from tools.grenade_capture.reference_tool import add_image, begin
+from tools.grenade_capture.screen_capture import png_rgb
 
 
 class ReferenceTests(unittest.TestCase):

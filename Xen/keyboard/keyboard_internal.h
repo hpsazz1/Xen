@@ -11,8 +11,6 @@ namespace keyboard::detail {
 
 struct KeyboardEventState {
     bool aim_hold_active = false;
-    bool voice_hold_active = false;
-    std::array<bool,256> voice_blocked_until_release{};
     std::array<bool,256> debug_blocked_until_release{};
     std::array<bool,256> anomaly_blocked_until_release{};
     std::array<bool,256> grenade_blocked_until_release{};
@@ -80,14 +78,6 @@ inline KeyboardEventPollResult update_keyboard_events(
             !state.anomaly_blocked_until_release[index]) anomaly_pressed = true;
     }
     if (anomaly_pressed) result.events[result.count++] = {KeyboardEventType::ANOMALY_MARK, true};
-    bool voice_hold_active = false;
-    for (const int key : config.voice_virtual_keys) {
-        const auto index = static_cast<std::size_t>(key);
-        if (!key_active[index]) state.voice_blocked_until_release[index] = false;
-        if (key_active[index] && !state.voice_blocked_until_release[index]) voice_hold_active = true;
-    }
-    if (voice_hold_active != state.voice_hold_active)
-        result.events[result.count++] = {KeyboardEventType::VOICE_HOLD_CHANGED, voice_hold_active};
     const auto grenade_pressed = [&](const std::vector<int>& keys, KeyboardEventType type) {
         bool pressed = false;
         for (const int key : keys) {
@@ -103,7 +93,6 @@ inline KeyboardEventPollResult update_keyboard_events(
     grenade_pressed(config.grenade_align_virtual_keys, KeyboardEventType::GRENADE_ALIGN);
     grenade_pressed(config.grenade_throw_virtual_keys, KeyboardEventType::GRENADE_THROW);
     grenade_pressed(config.grenade_cancel_virtual_keys, KeyboardEventType::GRENADE_CANCEL);
-    state.voice_hold_active = voice_hold_active;
     state.aim_hold_active = aim_hold_active;
     state.previous_key_active = key_active;
     return result;

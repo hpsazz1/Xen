@@ -1,9 +1,9 @@
-#ifndef GRENADE_WEB_MOBILE_PAGE_H
-#define GRENADE_WEB_MOBILE_PAGE_H
+#ifndef GRENADE_WEB_OBS_PAGE_H
+#define GRENADE_WEB_OBS_PAGE_H
 
 #include <string_view>
 
 namespace grenade_web {
-inline constexpr std::string_view kMobilePage = R"XEN_MOBILE(@XEN_GRENADE_MOBILE_HTML@)XEN_MOBILE";
+inline constexpr std::string_view kObsMenuPage = R"XEN_OBS_MENU(@XEN_GRENADE_OBS_HTML@)XEN_OBS_MENU";
 }
 #endif

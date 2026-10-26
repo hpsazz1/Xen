@@ -144,45 +144,6 @@ int main() {
     numeric_keypad_mapping();
     {
         auto device = std::make_shared<Device>();
-        KeyboardConfig config; config.voice_virtual_keys = {'J', 'K'};
-        KeyboardListener listener(config, device);
-        expect(listener.open(), "语音监听应打开");
-        const auto voice = [](const KeyboardPollResult& poll) {
-            int result = 0;
-            for (const auto& event : poll.events)
-                if (event.type == KeyboardEventType::VOICE_HOLD_CHANGED) result = event.active ? 1 : -1;
-            return result;
-        };
-        device->input.status = InputMonitorStatus::READY;
-        device->input.state_valid = true; device->input.sequence = 1;
-        device->input.virtual_keys['J'] = true;
-        expect(voice(listener.poll()) == 0, "初始按住语音键不能补启动");
-        device->input.virtual_keys['J'] = false; ++device->input.sequence;
-        expect(voice(listener.poll()) == 0, "初始阻塞键释放不能伪造语音松开");
-        device->input.virtual_keys['J'] = true; ++device->input.sequence;
-        expect(voice(listener.poll()) == 1, "新按下应开始语音");
-        expect(voice(listener.poll()) == 0, "同序号不得重复语音事件");
-        device->input.virtual_keys['K'] = true; ++device->input.sequence;
-        expect(voice(listener.poll()) == 0, "第二绑定按住不能重复开始语音");
-        device->input.virtual_keys['J'] = false; ++device->input.sequence;
-        expect(voice(listener.poll()) == 0, "仍有绑定按住不能结束语音");
-        device->input.virtual_keys['K'] = false; ++device->input.sequence;
-        expect(voice(listener.poll()) == -1, "全部释放应结束语音");
-        device->input.virtual_keys['J'] = true; ++device->input.sequence;
-        expect(voice(listener.poll()) == 1, "下一轮新按下应有效");
-        device->input.status = InputMonitorStatus::STALE; ++device->input.sequence;
-        expect(voice(listener.poll()) == 0, "故障不得伪造正常松键");
-        device->input.status = InputMonitorStatus::READY; ++device->input.sequence;
-        expect(voice(listener.poll()) == 0, "恢复时旧按住不得补启动");
-        device->input.virtual_keys['J'] = false; ++device->input.sequence;
-        expect(voice(listener.poll()) == 0, "恢复后的释放仅解除阻塞");
-        device->input.virtual_keys['J'] = true; ++device->input.sequence;
-        expect(voice(listener.poll()) == 1, "恢复后新按下应可开始");
-        listener.close(); expect(listener.open(), "重建语音监听应成功");
-        expect(voice(listener.poll()) == 0, "监听重建不得补启动已按住键");
-    }
-    {
-        auto device = std::make_shared<Device>();
         KeyboardConfig config;
         KeyboardListener listener(config, device);
         expect(listener.open(), "异常标记监听可打开");

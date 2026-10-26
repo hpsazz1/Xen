@@ -85,14 +85,6 @@ std::string save_movement_plan(const Json& document, const std::string& selected
             destination = selected;
         }
     }
-    if (!plan.voice_command.empty()) {
-        for (const auto& entry : list_movement_plans(utf8(root))) {
-            std::error_code code;
-            if (!destination.empty() && fs::equivalent(fs::u8path(entry.path), destination, code)) continue;
-            if (entry.map == plan.map && entry.voice_command == plan.voice_command)
-                throw std::runtime_error("同地图语音口令与方案冲突：" + entry.name);
-        }
-    }
     wchar_t temporary_name[MAX_PATH]{};
     if (!GetTempFileNameW(root.c_str(), L"xmp", 0, temporary_name))
         throw std::runtime_error("无法创建身法方案临时文件");

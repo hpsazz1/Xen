@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // OBS负责图片、文字和标记的GPU绘制；Win32仅管理桌面窗口的位置和输入行为。
 #include <windows.h>
+#include <windowsx.h>
 #include <winhttp.h>
 #ifdef ERROR
 #undef ERROR
@@ -15,6 +16,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -30,6 +32,7 @@ namespace {
 using Clock = std::chrono::steady_clock;
 using Json = xen_obs::Json;
 constexpr uint32_t kWidth = 344, kHeight = 576;
+constexpr uint32_t kMenuWidth = 1152, kMenuHeight = 704;
 constexpr UINT kApplySettings = WM_APP + 21;
 constexpr wchar_t kWindowClass[] = L"XenObsGrenadeReference";
 constexpr char kSettingsSource[] = "xen_grenade_overlay_settings";
@@ -119,11 +122,13 @@ HttpReply get_json(HINTERNET session, HINTERNET connection, const std::string& p
 struct Configuration {
     bool enabled = true;
     std::string url = "http://127.0.0.1:5015";
+    std::string capture_python, capture_root, capture_destination;
     uint64_t revision = 0;
 };
 
 struct Publication {
     xen_obs::View view;
+    Json selection;
     Clock::time_point received{};
     uint64_t configuration = 0;
 };
@@ -140,6 +145,9 @@ public:
             Configuration next;
             next.enabled = obs_data_get_bool(settings, "enabled");
             next.url = obs_data_get_string(settings, "auxiliary_url");
+            next.capture_python = obs_data_get_string(settings, "capture_python");
+            next.capture_root = obs_data_get_string(settings, "capture_root");
+            next.capture_destination = obs_data_get_string(settings, "capture_destination");
             {
                 std::lock_guard lock(mutex_);
                 next.revision = configuration_.revision + 1;
@@ -150,6 +158,9 @@ public:
                 obs_data_t* saved = obs_data_create();
                 obs_data_set_bool(saved, "enabled", next.enabled);
                 obs_data_set_string(saved, "auxiliary_url", next.url.c_str());
+                obs_data_set_string(saved, "capture_python", next.capture_python.c_str());
+                obs_data_set_string(saved, "capture_root", next.capture_root.c_str());
+                obs_data_set_string(saved, "capture_destination", next.capture_destination.c_str());
                 if (!obs_data_save_json_safe(saved, config_file_.c_str(), "tmp", "bak"))
                     blog(LOG_WARNING, "[xen-obs-overlay] 配置未能保存");
                 obs_data_release(saved);
@@ -185,6 +196,7 @@ public:
         WNDCLASSEXW descriptor{}; descriptor.cbSize = sizeof(descriptor);
         descriptor.lpfnWndProc = window_proc; descriptor.hInstance = instance;
         descriptor.lpszClassName = kWindowClass;
+        descriptor.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         if (!RegisterClassExW(&descriptor) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
             throw std::runtime_error("OBS提示窗口注册失败");
         instance_ = instance;
@@ -193,6 +205,7 @@ public:
             0, 0, kWidth, kHeight, nullptr, nullptr, instance_, this);
         if (!window) throw std::runtime_error("OBS提示窗口创建失败");
         handle_.store(window);
+        exclude_from_capture(window);
         SetLayeredWindowAttributes(window, 0, 230, LWA_ALPHA);
         obs_data_t* browser_settings = obs_data_create();
         obs_data_set_bool(browser_settings, "is_local_file", false);
@@ -215,6 +228,31 @@ public:
         if (!display_) throw std::runtime_error("OBS提示GPU显示创建失败");
         obs_display_add_draw_callback(display_, draw, this);
         obs_display_set_enabled(display_, false);
+        menu_window_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED,
+            kWindowClass, L"Xen OBS 道具菜单", WS_POPUP, 0, 0, kMenuWidth, kMenuHeight,
+            nullptr, nullptr, instance_, this);
+        if (!menu_window_) throw std::runtime_error("OBS道具菜单创建失败");
+        exclude_from_capture(menu_window_);
+        SetLayeredWindowAttributes(menu_window_, 0, 235, LWA_ALPHA);
+        obs_data_t* menu_settings = obs_data_create();
+        obs_data_set_string(menu_settings, "url", "about:blank");
+        obs_data_set_int(menu_settings, "width", kMenuWidth);
+        obs_data_set_int(menu_settings, "height", kMenuHeight);
+        obs_data_set_int(menu_settings, "fps", 20);
+        obs_data_set_bool(menu_settings, "fps_custom", true);
+        obs_data_set_bool(menu_settings, "shutdown", false);
+        menu_browser_ = obs_source_create_private("browser_source", "Xen 道具菜单渲染", menu_settings);
+        obs_data_release(menu_settings);
+        if (!menu_browser_) throw std::runtime_error("OBS菜单浏览器源不可用");
+        obs_source_set_muted(menu_browser_, true);
+        graphics.window.hwnd = menu_window_; graphics.cx = kMenuWidth; graphics.cy = kMenuHeight;
+        menu_display_ = obs_display_create(&graphics, 0xFF181818);
+        if (!menu_display_) throw std::runtime_error("OBS菜单GPU显示创建失败");
+        obs_display_add_draw_callback(menu_display_, draw_menu, this);
+        obs_display_set_enabled(menu_display_, false);
+        hotkey_ids_[0] = GlobalAddAtomW(L"Xen.OBS.Grenade.Menu.Right");
+        hotkey_ids_[1] = GlobalAddAtomW(L"Xen.OBS.Grenade.Menu.Num6");
+        hotkey_ids_[2] = GlobalAddAtomW(L"Xen.OBS.Grenade.Capture.F10");
         SetTimer(window, 1, 100, nullptr);
         worker_ = std::thread([this] { poll(); });
         blog(LOG_INFO, "[xen-obs-overlay] 已加载：OBS私有浏览器源与桌面显示，不加入NDI场景");
@@ -229,6 +267,20 @@ public:
         condition_.notify_all();
         if (worker_.joinable()) worker_.join();
         if (const auto window = handle_.load()) KillTimer(window, 1);
+        close_menu(false);
+        for (size_t index=0;index<3;++index) if (hotkey_ids_[index]) {
+            UnregisterHotKey(handle_.load(), hotkey_ids_[index]); GlobalDeleteAtom(hotkey_ids_[index]);
+        }
+        if (capture_process_) {
+            TerminateProcess(capture_process_, 1); WaitForSingleObject(capture_process_, 2000);
+            CloseHandle(capture_process_); capture_process_ = nullptr;
+        }
+        if (menu_display_) {
+            obs_display_remove_draw_callback(menu_display_, draw_menu, this);
+            obs_display_destroy(menu_display_); menu_display_ = nullptr;
+        }
+        if (menu_browser_) { obs_source_release(menu_browser_); menu_browser_ = nullptr; }
+        if (menu_window_) { DestroyWindow(menu_window_); menu_window_ = nullptr; }
         set_visible(false);
         // 先解绑GPU回调并销毁display，之后才能释放它访问的browser和本对象。
         if (display_) {
@@ -242,11 +294,227 @@ public:
     }
 
 private:
+    static void exclude_from_capture(HWND window) noexcept {
+        if (!SetWindowDisplayAffinity(window, WDA_EXCLUDEFROMCAPTURE))
+            blog(LOG_WARNING, "[xen-obs-overlay] 系统截图隐藏未设置成功 error=%lu", GetLastError());
+        else {
+            DWORD affinity = 0;
+            if (GetWindowDisplayAffinity(window, &affinity) && affinity == WDA_EXCLUDEFROMCAPTURE)
+                blog(LOG_INFO, "[xen-obs-overlay] 系统截图隐藏已设置并回读：0x11");
+        }
+    }
+
+    static bool game_window(HWND window) noexcept {
+        DWORD pid = 0; GetWindowThreadProcessId(window, &pid);
+        const auto process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!process) return false;
+        wchar_t path[32768]; DWORD length = static_cast<DWORD>(std::size(path));
+        const bool queried = QueryFullProcessImageNameW(process, 0, path, &length) != FALSE;
+        CloseHandle(process);
+        if (!queried) return false;
+        const auto file = std::filesystem::path(std::wstring(path, length)).filename().wstring();
+        return _wcsicmp(file.c_str(), L"cs2.exe") == 0;
+    }
+
+    void update_hotkeys(bool enabled) noexcept {
+        const auto foreground = GetForegroundWindow();
+        if (foreground != checked_foreground_) {
+            checked_foreground_ = foreground;
+            foreground_is_game_ = game_window(foreground);
+        }
+        const bool wanted = enabled && (foreground_is_game_ || foreground == menu_window_);
+        const UINT keys[]{VK_RIGHT, VK_NUMPAD6, VK_F10};
+        for (size_t index=0;index<3;++index) {
+            if (wanted == hotkeys_registered_[index] || !hotkey_ids_[index]) continue;
+            if (wanted) {
+                hotkeys_registered_[index] = RegisterHotKey(handle_.load(), hotkey_ids_[index], MOD_NOREPEAT, keys[index]) != FALSE;
+                if (!hotkeys_registered_[index] && !hotkey_error_logged_[index]) {
+                    blog(LOG_WARNING, "[xen-obs-overlay] 热键注册失败 vk=%u error=%lu", keys[index], GetLastError());
+                    hotkey_error_logged_[index] = true;
+                }
+            } else { UnregisterHotKey(handle_.load(), hotkey_ids_[index]); hotkeys_registered_[index] = false; }
+        }
+    }
+
+    void toggle_menu() noexcept {
+        if (menu_visible_) { close_menu(); return; }
+        if (capture_process_ || pending_capture_ || !menu_browser_) return;
+        try {
+            Configuration config; Json selection;
+            { std::lock_guard lock(mutex_); config = configuration_; if (publication_) selection = publication_->selection; }
+            if (!config.enabled) return;
+            const auto target = endpoint(config.url);
+            return_window_ = GetForegroundWindow();
+            menu_selection_.open(selection);
+            menu_configuration_ = config.revision;
+            // 每次呼出刷新GSI与清单；旧选择只作基线，不能立即关闭刚打开的菜单。
+            obs_data_t* settings = obs_source_get_settings(menu_browser_);
+            const auto url = target.base + "/obs-menu#open-" + std::to_string(++menu_open_count_);
+            obs_data_set_string(settings, "url", url.c_str());
+            obs_source_update(menu_browser_, settings); obs_data_release(settings);
+            set_visible(false);
+            MONITORINFO info{}; info.cbSize = sizeof(info);
+            GetMonitorInfoW(MonitorFromWindow(return_window_, MONITOR_DEFAULTTOPRIMARY), &info);
+            const auto width = (info.rcMonitor.right - info.rcMonitor.left) * 9 / 16;
+            const auto height = width * static_cast<int>(kMenuHeight) / static_cast<int>(kMenuWidth);
+            obs_display_resize(menu_display_, width, height);
+            obs_source_inc_showing(menu_browser_); obs_display_set_enabled(menu_display_, true);
+            menu_visible_ = true;
+            SetWindowPos(menu_window_, HWND_TOPMOST, info.rcMonitor.left + (info.rcMonitor.right-info.rcMonitor.left-width)/2,
+                info.rcMonitor.top+(info.rcMonitor.bottom-info.rcMonitor.top-height)/2, width, height, SWP_SHOWWINDOW);
+            if (SetForegroundWindow(menu_window_)) {
+                SetFocus(menu_window_); ClipCursor(nullptr);
+                obs_source_send_focus(menu_browser_, true);
+            } else blog(LOG_WARNING, "[xen-obs-overlay] 菜单已显示，但系统未授予前台焦点");
+        } catch (const std::exception& error) { blog(LOG_WARNING, "[xen-obs-overlay] 菜单未打开：%s", error.what()); }
+    }
+
+    void close_menu(bool restore = true) noexcept {
+        if (!menu_visible_) return;
+        const bool owns_focus = GetForegroundWindow() == menu_window_;
+        menu_visible_ = false;
+        if (GetCapture() == menu_window_) ReleaseCapture();
+        obs_source_send_focus(menu_browser_, false);
+        ShowWindow(menu_window_, SW_HIDE); obs_display_set_enabled(menu_display_, false);
+        obs_source_dec_showing(menu_browser_); menu_selection_.reset();
+        if (restore && owns_focus && IsWindow(return_window_)) SetForegroundWindow(return_window_);
+    }
+
+    LRESULT menu_message(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcept {
+        if (message == WM_ERASEBKGND) return 1;
+        if (message == WM_MOUSEACTIVATE) return MA_ACTIVATE;
+        if (message == WM_NCHITTEST) return HTCLIENT;
+        if (message == WM_CLOSE || (message == WM_KEYDOWN && wp == VK_ESCAPE)) { close_menu(); return 0; }
+        if (message == WM_ACTIVATE && LOWORD(wp) == WA_INACTIVE && menu_visible_) { close_menu(false); return 0; }
+        if (!menu_browser_) return DefWindowProcW(window, message, wp, lp);
+        if (message == WM_SETFOCUS || message == WM_KILLFOCUS) {
+            obs_source_send_focus(menu_browser_, message == WM_SETFOCUS); return 0;
+        }
+        if (message == WM_MOUSEMOVE || message == WM_LBUTTONDOWN || message == WM_LBUTTONUP ||
+            message == WM_MOUSEWHEEL || message == WM_MOUSELEAVE) {
+            POINT point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            if (message == WM_MOUSEWHEEL) ScreenToClient(window, &point);
+            RECT client{}; GetClientRect(window, &client);
+            obs_mouse_event event{};
+            event.x = point.x * static_cast<int>(kMenuWidth) / std::max(1L, client.right);
+            event.y = point.y * static_cast<int>(kMenuHeight) / std::max(1L, client.bottom);
+            if (GetKeyState(VK_LBUTTON) & 0x8000) event.modifiers |= INTERACT_MOUSE_LEFT;
+            if (message == WM_LBUTTONDOWN || message == WM_LBUTTONUP) {
+                if (message == WM_LBUTTONDOWN) SetCapture(window);
+                obs_source_send_mouse_click(menu_browser_, &event, MOUSE_LEFT, message == WM_LBUTTONUP, 1);
+                if (message == WM_LBUTTONUP && GetCapture() == window) ReleaseCapture();
+            } else if (message == WM_MOUSEWHEEL) obs_source_send_mouse_wheel(menu_browser_, &event, 0, GET_WHEEL_DELTA_WPARAM(wp));
+            else {
+                obs_source_send_mouse_move(menu_browser_, &event, message == WM_MOUSELEAVE);
+                if (message == WM_MOUSEMOVE) { TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0}; TrackMouseEvent(&tracking); }
+            }
+            return 0;
+        }
+        return DefWindowProcW(window, message, wp, lp);
+    }
+
+    static void draw_menu(void* data, uint32_t cx, uint32_t cy) {
+        const auto* self = static_cast<Manager*>(data);
+        if (!self->menu_browser_) return;
+        gs_viewport_push(); gs_projection_push(); gs_matrix_push();
+        gs_set_viewport(0, 0, cx, cy); gs_ortho(0, kMenuWidth, 0, kMenuHeight, -100, 100); gs_matrix_identity();
+        obs_source_video_render(self->menu_browser_);
+        gs_matrix_pop(); gs_projection_pop(); gs_viewport_pop();
+    }
+
+    void notice(std::string message) {
+        blog(LOG_INFO, "[xen-obs-overlay] %s", message.c_str());
+        notice_ = {{"title", "F10 道具采集"}, {"message",std::move(message)}, {"notification",true}};
+        notice_until_ = Clock::now() + std::chrono::seconds(6);
+    }
+
+    void request_capture() noexcept {
+        if (capture_process_ || pending_capture_) return;
+        if (menu_visible_) close_menu();
+        pending_capture_ = GetForegroundWindow();
+        set_visible(false); notice_until_ = {};
+        // 全屏采集前让桌面合成移除插件窗口，不把提示卡写进原图。
+        capture_after_ = Clock::now() + std::chrono::milliseconds(150);
+    }
+
+    static std::wstring quote_argument(const std::wstring& value) {
+        std::wstring result = L"\""; size_t slashes = 0;
+        for (const auto c : value) {
+            if (c == L'\\') { ++slashes; continue; }
+            result.append(c == L'\"' ? slashes*2+1 : slashes, L'\\'); slashes = 0; result.push_back(c);
+        }
+        result.append(slashes*2, L'\\'); result.push_back(L'\"'); return result;
+    }
+
+    void start_capture(const Configuration& config) {
+        const auto foreground = pending_capture_; pending_capture_ = nullptr;
+        try {
+            const auto target = endpoint(config.url);
+            if (config.capture_python.empty() || config.capture_root.empty() || config.capture_destination.empty())
+                throw std::runtime_error("采集路径尚未配置，请在OBS道具设置中填写");
+            const auto root = std::filesystem::path(wide(config.capture_root));
+            const auto jobs = root / L"capture-jobs"; std::filesystem::create_directories(jobs);
+            capture_status_ = jobs / (std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) + L".json");
+            char* script_path = obs_module_file("capture/worker.py");
+            if (!script_path) throw std::runtime_error("采集内部作业未安装");
+            const std::string script_text = script_path; bfree(script_path);
+            const auto script = std::filesystem::canonical(std::filesystem::path(wide(script_text)));
+            DWORD process = 0; GetWindowThreadProcessId(foreground, &process);
+            const auto executable = wide(config.capture_python);
+            std::wstring arguments = quote_argument(executable) + L" -X utf8 -B " + quote_argument(script.wstring());
+            const auto add = [&](const wchar_t* name, const std::wstring& value) { arguments += L" "; arguments += name; arguments += L" "; arguments += quote_argument(value); };
+            add(L"--host", target.host); add(L"--web-port", std::to_wstring(target.port));
+            add(L"--root", root.wstring()); add(L"--destination", wide(config.capture_destination));
+            add(L"--window", std::to_wstring(reinterpret_cast<std::uintptr_t>(foreground)));
+            add(L"--process", std::to_wstring(process)); add(L"--job-status", capture_status_.wstring());
+            STARTUPINFOW startup{}; startup.cb = sizeof(startup); PROCESS_INFORMATION launched{};
+            if (!CreateProcessW(executable.c_str(), arguments.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                                nullptr, script.parent_path().c_str(), &startup, &launched))
+                throw std::runtime_error("无法启动采集内部作业，请核对Python路径");
+            CloseHandle(launched.hThread); capture_process_ = launched.hProcess;
+            capture_job_.start(GetTickCount64());
+            blog(LOG_INFO, "[xen-obs-overlay] F10采集作业已开始");
+        } catch (const std::exception& error) { notice(error.what()); }
+    }
+
+    void poll_capture() {
+        if (!capture_process_) return;
+        Json status;
+        try {
+            if (std::filesystem::file_size(capture_status_) < 16384) {
+                std::ifstream input(capture_status_); status = Json::parse(input, nullptr, false);
+            }
+        } catch (...) {}
+        DWORD code = STILL_ACTIVE; GetExitCodeProcess(capture_process_, &code);
+        if (!capture_job_.running()) {
+            if (code != STILL_ACTIVE) { CloseHandle(capture_process_); capture_process_ = nullptr; }
+            return;
+        }
+        const auto message = capture_job_.poll(GetTickCount64(), code == STILL_ACTIVE ? std::nullopt : std::optional<int>(code), status);
+        if (!message) return;
+        if (code == STILL_ACTIVE) {
+            TerminateProcess(capture_process_, 1);
+            if (WaitForSingleObject(capture_process_, 2000) != WAIT_OBJECT_0) {
+                blog(LOG_WARNING, "[xen-obs-overlay] 采集作业停止未确认");
+                notice(*message + "；作业停止尚未确认，原资源保留");
+                return; // 继续持有句柄，实际退出前不能并行写下一份资源。
+            }
+        }
+        CloseHandle(capture_process_); capture_process_ = nullptr;
+        notice(*message);
+    }
+
     static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
         Manager* self = reinterpret_cast<Manager*>(GetWindowLongPtrW(window, GWLP_USERDATA));
         if (message == WM_NCCREATE) {
             self = static_cast<Manager*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
             SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        if (self && window == self->menu_window_) return self->menu_message(window, message, wp, lp);
+        if (self && message == WM_HOTKEY) {
+            if (wp == self->hotkey_ids_[2]) self->request_capture();
+            else self->toggle_menu();
+            return 0;
         }
         if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
         if (message == WM_NCHITTEST) return HTTRANSPARENT;
@@ -261,7 +529,8 @@ private:
         if (!self->browser_) return;
         gs_viewport_push(); gs_projection_push(); gs_matrix_push();
         gs_set_viewport(0, 0, cx, cy);
-        gs_ortho(0.0f, static_cast<float>(kWidth), 0.0f, static_cast<float>(kHeight), -100.0f, 100.0f);
+        gs_ortho(0.0f, static_cast<float>(obs_source_get_width(self->browser_)), 0.0f,
+                 static_cast<float>(obs_source_get_height(self->browser_)), -100.0f, 100.0f);
         gs_matrix_identity();
         obs_source_video_render(self->browser_);
         gs_matrix_pop(); gs_projection_pop(); gs_viewport_pop();
@@ -280,7 +549,7 @@ private:
             if (GetMonitorInfoW(monitor, &info)) desktop = info.rcMonitor;
             else { desktop.right = GetSystemMetrics(SM_CXSCREEN); desktop.bottom = GetSystemMetrics(SM_CYSCREEN); }
             SetWindowPos(window, HWND_TOPMOST, std::max(desktop.left, desktop.right - static_cast<LONG>(kWidth) - 16),
-                         desktop.top + 16, kWidth, kHeight, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                         desktop.top + 16, kWidth, card_height_, SWP_NOACTIVATE | SWP_SHOWWINDOW);
             ShowWindow(window, SW_SHOWNOACTIVATE);
         } else {
             ShowWindow(window, SW_HIDE);
@@ -296,20 +565,37 @@ private:
             Configuration config;
             std::shared_ptr<const Publication> current;
             { std::lock_guard lock(mutex_); config = configuration_; current = publication_; }
+            update_hotkeys(config.enabled);
+            poll_capture();
+            if (pending_capture_ && Clock::now() >= capture_after_) start_capture(config);
+            if (menu_visible_) {
+                if (!config.enabled || menu_configuration_ != config.revision) close_menu();
+                else if (current && menu_selection_.should_close(current->selection)) close_menu();
+                else { set_visible(false); return; }
+            }
+            if (capture_process_ || pending_capture_) { set_visible(false); return; }
+            if (Clock::now() < notice_until_) { show_payload(notice_, 112); return; }
             if (!config.enabled || !current || current->configuration != config.revision ||
                 Clock::now() - current->received > std::chrono::milliseconds(1200) || !current->view.visible) {
                 set_visible(false); return;
             }
-            const auto payload = current->view.payload.dump();
+            show_payload(current->view.payload, kHeight);
+        } catch (...) { set_visible(false); }
+    }
+
+    void show_payload(const Json& value, uint32_t height) {
+            const auto payload = value.dump();
             if (payload != last_payload_) {
                 set_visible(false);
+                card_height_ = height;
+                obs_display_resize(display_, kWidth, height);
                 obs_data_t* settings = obs_source_get_settings(browser_);
+                obs_data_set_int(settings, "height", height);
                 obs_data_set_string(settings, "url", (page_url_ + "?payload=" + xen_obs::percent_encode(payload)).c_str());
                 obs_source_update(browser_, settings); obs_data_release(settings);
                 last_payload_ = payload;
             }
             set_visible(true);
-        } catch (...) { set_visible(false); }
     }
 
     void poll() noexcept {
@@ -355,6 +641,7 @@ private:
                 }
                 auto next = std::make_shared<Publication>();
                 next->view = model.update(selection.document, reference, catalog, target.base);
+                next->selection = selection.document;
                 next->received = Clock::now(); next->configuration = config.revision;
                 { std::lock_guard lock(mutex_); if (configuration_.revision == config.revision) publication_ = std::move(next); }
                 if (!online) { online = true; blog(LOG_INFO, "[xen-obs-overlay] 辅机只读状态已连接"); }
@@ -386,6 +673,22 @@ private:
     Configuration configuration_;
     std::shared_ptr<const Publication> publication_;
     std::thread worker_;
+    HWND menu_window_ = nullptr, return_window_ = nullptr, checked_foreground_ = nullptr, pending_capture_ = nullptr;
+    obs_source_t* menu_browser_ = nullptr;
+    obs_display_t* menu_display_ = nullptr;
+    bool menu_visible_ = false, foreground_is_game_ = false;
+    bool hotkeys_registered_[3]{};
+    bool hotkey_error_logged_[3]{};
+    ATOM hotkey_ids_[3]{};
+    uint64_t menu_configuration_ = 0;
+    uint64_t menu_open_count_ = 0;
+    uint32_t card_height_ = kHeight;
+    xen_obs::MenuSelectionState menu_selection_;
+    xen_obs::CaptureJobState capture_job_;
+    HANDLE capture_process_ = nullptr;
+    std::filesystem::path capture_status_;
+    Clock::time_point capture_after_{}, notice_until_{};
+    Json notice_;
 };
 
 const char* settings_name(void*) { return "Xen 道具提示"; }
@@ -403,10 +706,16 @@ void settings_defaults(obs_data_t* settings) {
 }
 obs_properties_t* settings_properties(void*) {
     auto* properties = obs_properties_create();
-    auto* enabled = obs_properties_add_bool(properties, "enabled", "显示游戏右上角参考图");
-    obs_property_set_long_description(enabled, "开启后只在手机重新点选方案时显示站位和瞄点；对齐完成、开始投掷、取消或断线时隐藏，旧选择不会再次弹出。");
+    auto* enabled = obs_properties_add_bool(properties, "enabled", "启用道具菜单、参考图和F10采集");
+    obs_property_set_long_description(enabled, "游戏中小键盘右键开关居中菜单；点选后返回游戏并显示参考图，对齐或投掷后隐藏。F10采集当前正确瞄角并同步辅机。");
     auto* address = obs_properties_add_text(properties, "auxiliary_url", "辅机道具网址", OBS_TEXT_DEFAULT);
-    obs_property_set_long_description(address, "填写辅机HTTP地址，例如http://192.168.3.20:5015。只读取已有方案和参考图，修改后立即重连并保存。");
+    obs_property_set_long_description(address, "填写辅机道具接口地址，例如http://192.168.3.20:5015。插件从这里读取GSI、清单和图片，并提交点选方案。");
+    auto* python = obs_properties_add_path(properties, "capture_python", "采集Python", OBS_PATH_FILE, "Python (*.exe)", nullptr);
+    obs_property_set_long_description(python, "使用主机已有Python 3，安装时自动填写；只在F10采集作业期间启动，无语音模型依赖。");
+    auto* root = obs_properties_add_path(properties, "capture_root", "采集本地目录", OBS_PATH_DIRECTORY, nullptr, nullptr);
+    obs_property_set_long_description(root, "保留原图、自动命名资源及待发送记录；沿用主机cache/grenade。");
+    auto* destination = obs_properties_add_text(properties, "capture_destination", "辅机资源目录", OBS_TEXT_DEFAULT);
+    obs_property_set_long_description(destination, "辅机cache/grenade的已有共享路径；F10自动打包同步，不需要单独启动采集程序。");
     return properties;
 }
 void settings_menu(void*) { if (manager) manager->open_settings(); }

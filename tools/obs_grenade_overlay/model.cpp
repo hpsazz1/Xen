@@ -35,6 +35,74 @@ std::string file_url(const std::filesystem::path& path) {
 
 void Model::reset() { seen_request_.clear(); display_request_.clear(); initialized_ = false; displayed_ = false; }
 
+bool CaptureJobState::start(std::uint64_t now_ms) {
+    if (running_) return false;
+    started_ms_ = now_ms;
+    running_ = true;
+    return true;
+}
+
+std::optional<std::string> CaptureJobState::poll(std::uint64_t now_ms,
+    std::optional<int> exit_code, const Json& status) {
+    if (!running_) return std::nullopt;
+    if (exit_code) {
+        running_ = false;
+        const auto state = text(status, "state");
+        const auto message = text(status, "message");
+        // pending保留采集工具给出的待发送说明，不把已保留的资源当作发送成功。
+        if (state == "pending") return message.empty() ? "采集资源已保留，等待发送" : message;
+        if (state == "failed") return message.empty() ? "采集失败，请查看日志" : message;
+        if (*exit_code != 0)
+            return "采集进程异常退出（退出码 " + std::to_string(*exit_code) + "），请查看日志";
+        const auto terminal = status.find("terminal");
+        if (state == "sent" && terminal != status.end() && terminal->is_boolean() && terminal->get<bool>())
+            return message.empty() ? "采集完成，资源已发送" : message;
+        return "采集进程已结束，但没有完成回执，请查看日志";
+    }
+    if (now_ms >= started_ms_ && now_ms - started_ms_ >= 30000) {
+        running_ = false;
+        return "采集超时（30秒），请查看日志";
+    }
+    return std::nullopt;
+}
+
+void MenuSelectionState::open(const Json& selection) {
+    generation_ = text(selection, "generation");
+    request_id_ = text(selection, "request_id");
+    baseline_known_ = !generation_.empty();
+    pending_after_open_ = false;
+    opened_ = true;
+}
+
+bool MenuSelectionState::should_close(const Json& selection) {
+    if (!opened_) return false;
+    const auto generation = text(selection, "generation");
+    const auto request_id = text(selection, "request_id");
+    const auto state = text(selection, "state");
+    // 无快照打开时，重连带来的旧selected只能建立基线；先看到的新pending仍可等待其完成。
+    if (!baseline_known_) {
+        if (!generation.empty()) {
+            generation_ = generation;
+            request_id_ = request_id;
+            baseline_known_ = true;
+            pending_after_open_ = state == "pending" && !request_id.empty();
+        }
+        return false;
+    }
+    if (state != "selected") return false;
+    if (generation.empty() || request_id.empty() ||
+        (generation == generation_ && request_id == request_id_ && !pending_after_open_)) return false;
+    const auto plan = text(selection, "plan_id");
+    const auto guidance = selection.find("guidance");
+    return valid_plan_id(plan) && text(selection, "actual_plan_id") == plan &&
+        guidance != selection.end() && guidance->is_object() && text(*guidance, "plan_id") == plan;
+}
+
+void MenuSelectionState::reset() {
+    generation_.clear(); request_id_.clear();
+    opened_ = false; baseline_known_ = false; pending_after_open_ = false;
+}
+
 View Model::update(const Json& selection, const Json& reference, const Json& catalog,
                    const std::string& base_url) {
     View result;

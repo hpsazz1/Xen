@@ -805,7 +805,6 @@ bool validate_typed_config_values(const CSimpleIniA& ini,
         {"keyboard", "runtime_toggle_virtual_keys"},
         {"keyboard", "debug_test_virtual_keys"},
         {"keyboard", "anomaly_mark_virtual_keys"},
-        {"keyboard", "voice_virtual_keys"},
         {"keyboard", "grenade_align_virtual_keys"},
         {"keyboard", "grenade_throw_virtual_keys"},
         {"keyboard", "grenade_cancel_virtual_keys"},
@@ -1562,7 +1561,6 @@ bool load_app_config(const std::string& path,
         };
         candidate.keyboard.debug_test_enabled = ini.GetBoolValue("keyboard", "debug_test_enabled", false);
         candidate.keyboard.debug_test_virtual_keys = load_virtual_keys("debug_test_virtual_keys", "debug_test_virtual_key", {});
-        candidate.keyboard.voice_virtual_keys = load_virtual_keys("voice_virtual_keys", "voice_virtual_keys", {});
         candidate.keyboard.grenade_assist_enabled = ini.GetBoolValue("keyboard", "grenade_assist_enabled", false);
         // 历史菜单绑定不再参与解析和按键占用，避免升级后右键重新弹出旧清单。
         candidate.keyboard.grenade_menu_virtual_keys.clear();
@@ -1870,7 +1868,6 @@ ConfigWriteResult save_config_file(const std::string& path,
         ini.SetBoolValue("keyboard", "debug_test_enabled", config.keyboard.debug_test_enabled);
         ini.SetValue("keyboard", "debug_test_virtual_keys", format_int_list(config.keyboard.debug_test_virtual_keys).c_str());
         ini.SetValue("keyboard", "anomaly_mark_virtual_keys", format_int_list(config.keyboard.anomaly_mark_virtual_keys).c_str());
-        ini.SetValue("keyboard", "voice_virtual_keys", format_int_list(config.keyboard.voice_virtual_keys).c_str());
         ini.SetBoolValue("keyboard", "grenade_assist_enabled", config.keyboard.grenade_assist_enabled);
         ini.SetValue("keyboard", "grenade_align_virtual_keys", format_int_list(config.keyboard.grenade_align_virtual_keys).c_str());
         ini.SetValue("keyboard", "grenade_throw_virtual_keys", format_int_list(config.keyboard.grenade_throw_virtual_keys).c_str());

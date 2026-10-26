@@ -416,11 +416,12 @@ int main(int argc, char** argv) {
     const auto started = server.snapshot();
     if (!started.running || !started.port) return 1;
     expect(started.urls == std::vector<std::string>{"http://127.0.0.1:" + std::to_string(started.port) + "/"},"实际端口和可用网址可查询");
-    const auto page = get(started.port,"/");
+    expect(get(started.port,"/").status == 404,"手机选择入口已移除");
+    const auto page = get(started.port,"/obs-menu");
     expect(page.status == 200 && page.body.find("<html") != std::string::npos &&
         page.headers.find("Cache-Control: no-store") != std::string::npos &&
         page.headers.find("Content-Length: " + std::to_string(page.body.size())) != std::string::npos,
-        "内嵌页面GET成功，响应无缓存且长度按实际字节计算");
+        "OBS内嵌菜单GET成功，响应无缓存且长度按实际字节计算");
     const auto waiting = get(started.port,"/context.json").json();
     expect(waiting.is_object() && !waiting.value("valid",true) && waiting.value("map",std::string("old")).empty() &&
         waiting.value("team",std::string("old")).empty() && waiting.value("remaining_ms",1)==0,"无GSI时明确等待，不猜地图或阵营");

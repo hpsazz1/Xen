@@ -75,5 +75,70 @@ int main() {
     check(page_url.starts_with("file:///") && page_url.size() > 10 && page_url[9] == ':' &&
           page_url.find("/../") == std::string::npos && page_url.ends_with("/tools/obs_grenade_overlay/tests.cpp"),
           "OBS相对资源路径必须转换为带盘符的绝对文件URL");
+
+    xen_obs::CaptureJobState capture;
+    const Json sent{{"terminal", true}, {"state", "sent"}, {"message", "采集完成，已同步到辅机"}};
+    check(capture.start(1000) && capture.running(), "空闲时允许一次采集");
+    check(!capture.start(2000), "采集中再次按F10不排队、不重置超时");
+    check(!capture.poll(30999, std::nullopt, sent) && capture.running(), "子进程未结束时不凭文件提前宣称完成");
+    auto message = capture.poll(31000, std::nullopt, Json::object());
+    check(message && message->find("超时") != std::string::npos && !capture.running(), "30秒超时结束等待");
+    check(!capture.poll(32000, 0, sent), "超时后的晚到退出不重复发布成功");
+    check(capture.start(33000), "上次结束后下一次F10可重新采集");
+    message = capture.poll(34000, 0, sent);
+    check(message && *message == sent["message"].get<std::string>() && !capture.running(), "退出0且sent终态才发布成功");
+    capture.start(35000);
+    message = capture.poll(36000, 4, sent);
+    check(message && message->find("异常退出") != std::string::npos && *message != sent["message"].get<std::string>(),
+          "sent文件不能覆盖子进程异常退出");
+    capture.start(37000);
+    message = capture.poll(38000, 0, Json{{"state", "sent"}, {"message", "成功"}});
+    check(message && message->find("没有完成回执") != std::string::npos, "缺少terminal不能宣称成功");
+    capture.start(39000);
+    message = capture.poll(40000, 0, Json::object());
+    check(message && message->find("没有完成回执") != std::string::npos, "缺少状态文件不能宣称成功");
+    capture.start(41000);
+    Json pending{{"terminal", true}, {"state", "pending"}, {"message", "截图已保存，辅机断线，等待重发"},
+        {"package", "capture/t1.zip"}};
+    const auto original_pending = pending;
+    message = capture.poll(42000, 2, pending);
+    check(message && *message == pending["message"].get<std::string>() && pending == original_pending && !capture.running(),
+          "待发送原说明及资源数据保持，不把pending当作成功");
+    capture.start(43000);
+    const Json failed{{"terminal", true}, {"state", "failed"}, {"message", "未取得游戏画面"}};
+    message = capture.poll(44000, 1, failed);
+    check(message && *message == failed["message"].get<std::string>(), "失败保留采集工具原说明");
+
+    xen_obs::MenuSelectionState menu;
+    Json choice{{"state", "selected"}, {"generation", "menu-g1"}, {"request_id", "1"},
+        {"plan_id", "t1.json"}, {"actual_plan_id", "t1.json"}, {"guidance", {{"plan_id", "t1.json"}}}};
+    check(!menu.should_close(choice), "菜单未打开时不处理选择关闭");
+    menu.open(choice);
+    check(!menu.should_close(choice), "打开菜单不被已有选择立即关闭");
+    choice["request_id"] = "2"; choice["state"] = "pending";
+    check(!menu.should_close(choice), "新选择尚在载入时保持菜单");
+    choice["state"] = "failed";
+    check(!menu.should_close(choice), "选择失败保留菜单供重试");
+    choice["state"] = "selected"; choice["actual_plan_id"] = "old.json";
+    check(!menu.should_close(choice), "回执尚未匹配实际方案不关闭菜单");
+    choice["actual_plan_id"] = "t1.json"; choice["guidance"]["plan_id"] = "old.json";
+    check(!menu.should_close(choice), "引导仍属于旧方案不关闭菜单");
+    choice["guidance"]["plan_id"] = "t1.json";
+    check(menu.should_close(choice), "同方案新请求实际成功后关闭菜单");
+    menu.reset();
+    check(!menu.should_close(choice), "菜单重置后旧完成回执不产生关闭动作");
+    menu.open(choice); choice["request_id"] = "";
+    check(!menu.should_close(choice), "缺少请求身份不当作人工选择");
+    menu.open(Json()); choice["request_id"] = "3";
+    check(!menu.should_close(choice), "无publication打开时首个旧selected只建立基线");
+    check(!menu.should_close(choice), "建立空快照基线后旧回执持续保持菜单");
+    choice["request_id"] = "4";
+    check(menu.should_close(choice), "空快照建立基线后新选择可关闭");
+    menu.open(Json()); choice["request_id"] = "5"; choice["state"] = "pending";
+    check(!menu.should_close(choice), "无publication打开后首先看到pending保持菜单");
+    choice["state"] = "selected";
+    check(menu.should_close(choice), "打开后首个pending以相同请求完成时可关闭");
+    choice["state"] = "pending"; menu.open(choice); choice["state"] = "selected";
+    check(!menu.should_close(choice), "打开之前已经存在的pending完成不能误关闭");
     return failures ? 1 : 0;
 }

@@ -21,7 +21,6 @@ param(
     [switch]$IncludeModelDataReview,
     [switch]$ModelDataReviewOnly,
     [switch]$IncludeAimTools,
-    [switch]$IncludeVoiceTools,
     [switch]$AimToolsOnly,
     [switch]$ChangesOnly
 )
@@ -34,13 +33,13 @@ if ($AimToolsOnly) {
         $IncludeRecoilTools -or $IncludeCaptureTools -or $IncludeClockSource -or $ConfigPath -or $WorkspaceSettingsPath -or
         $SourceContextExecutable -or $IncludeModelDataReview -or $IncludeRecoilMigrationScripts -or
         $IncludeSourceSessionScript -or $IncludeHudAcceptanceScript -or $IncludeSoakAcceptanceTools -or
-        $PackageNotesPath -or $ManualAcceptancePath -or $IncludeVoiceTools) {
+        $PackageNotesPath -or $ManualAcceptancePath) {
         throw 'Aim tools-only publication accepts only the fixed offline Aim tool closure.'
     }
     $IncludeAimTools = $true
 }
 if ($ModelDataReviewOnly) {
-    if ($IncludeAimTools -or $IncludeVoiceTools) { throw '仅审核资源模式不能混入 Aim 或语音工具。' }
+    if ($IncludeAimTools) { throw '仅审核资源模式不能混入 Aim 工具。' }
     if (-not $ChangesOnly -or $IncludeLauncher -or $IncludeRecoilTools -or $IncludeCaptureTools -or $IncludeClockSource -or $IncludeRecoilMigrationScripts -or
         $IncludeSourceSessionScript -or $IncludeHudAcceptanceScript -or $IncludeSoakAcceptanceTools -or
         $SourceContextExecutable -or $ConfigPath -or $WorkspaceSettingsPath -or $PackageNotesPath -or $ManualAcceptancePath) {
@@ -167,6 +166,10 @@ foreach ($route in $manifest.runtimes) {
         -not $runtimeIds.Add([string]$route.id) -or
         $route.executable -cne "runtimes/$($route.id)/Xen.exe") { throw '基包运行时路由无效。' }
 }
+# 已退役的语音/独立采集目录不再进入新Worker包；纯工具更新保持其他载荷记录。
+if (-not $toolsOnly) {
+    $manifest.files = @($manifest.files | Where-Object { -not $_.path.StartsWith('tools/voice-switch/', [StringComparison]::OrdinalIgnoreCase) })
+}
 $records = @{}
 foreach ($record in $manifest.files) {
     $relative = ([string]$record.path).Replace('\', '/')
@@ -262,23 +265,6 @@ if ($IncludeAimTools) {
             $record = [pscustomobject][ordered]@{ path = $relative; runtime = ''; size = 0; sha256 = ''; source = '' }
             $manifest.files = @($manifest.files) + @($record)
             $records[$relative] = $record
-        }
-    }
-}
-if ($IncludeVoiceTools) {
-    # 主机工具仅发布固定源码；模型与虚拟环境由主机安装入口管理，不进入 Worker 运行库。
-    foreach ($tool in @('client.py', 'requirements.txt', 'install.ps1', 'start.ps1',
-        'empty_keywords.txt', 'README.md', 'LICENSES.md', 'prepare_model.py',
-        'guidance.py', 'preview_window.py', 'reference_assets.py', 'reference_tool.py', 'screen_capture.py',
-        'capture_workflow.py', 'capture_hotkey.py', 'capture_references.ps1', 'standing/mirage-t-spawns.png')) {
-        $relative = "tools/voice-switch/$tool"
-        $overrides[$relative] = Resolve-UpdateFile (Join-Path $sourceRoot "tools/voice_switch/$tool")
-        if (-not $records.ContainsKey($relative)) {
-            $record = [pscustomobject][ordered]@{ path = $relative; runtime = ''; size = 0; sha256 = ''; source = '' }
-            $manifest.files = @($manifest.files) + @($record)
-            $records[$relative] = $record
-        } elseif ($records[$relative].runtime -cne '') {
-            throw "语音主机工具不能归入 Worker 运行库：$relative"
         }
     }
 }

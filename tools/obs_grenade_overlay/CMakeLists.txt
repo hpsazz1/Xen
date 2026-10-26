@@ -43,3 +43,9 @@ add_test(NAME obs_grenade_overlay_tests COMMAND obs_grenade_overlay_tests)
 
 install(TARGETS xen-grenade-overlay RUNTIME DESTINATION obs-plugins/64bit LIBRARY DESTINATION obs-plugins/64bit)
 install(FILES reference.html README.md LICENSE.GPL-2.0 DESTINATION data/obs-plugins/xen-grenade-overlay)
+install(FILES ../grenade_capture/worker.py ../grenade_capture/capture_workflow.py
+  ../grenade_capture/reference_assets.py ../grenade_capture/reference_tool.py
+  ../grenade_capture/screen_capture.py ../grenade_capture/README.md
+  DESTINATION data/obs-plugins/xen-grenade-overlay/capture)
+install(FILES ../grenade_capture/standing/mirage-t-spawns.png
+  DESTINATION data/obs-plugins/xen-grenade-overlay/capture/standing)

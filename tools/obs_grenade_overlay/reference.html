@@ -29,6 +29,7 @@
   .note { color:var(--ink); }
   .note:empty { display:none; }
   .message { color:var(--muted); }
+  body.notification,body.notification .card{height:112px}body.notification section{display:none}body.notification .state{display:none}
 </style>
 </head>
 <body>
@@ -84,6 +85,7 @@
   $('state').textContent={aligning:'找点中',failed:'请调整',selected:'参考'}[value.state]||'参考';
   $('note').textContent=string(value.standing_note);
   $('message').textContent=string(value.message)||string(value.reason)||'站好位置后，按 ↑ 找点。';
+  if(value.notification===true){document.body.classList.add('notification');return;}
 
   function drawStanding(svg,width,height) {
     const marker=value.standing_marker;

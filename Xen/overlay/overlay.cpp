@@ -3293,20 +3293,17 @@ struct Overlay::Impl {
             ImGui::BeginDisabled(!can_edit || (debug_snapshot && debug_snapshot->busy));
             if (ImGui::Button("启用道具上/下/左三键")) {
                 if (config::detail::enable_grenade_assist_hotkeys(app_config, true, hotkey_capture_message))
-                    hotkey_capture_message = "已设置上键对齐、下键投掷、左键取消；手机选择方案，主机不显示清单或参考图。保存配置后生效，可选语音绑定保留。";
+                    hotkey_capture_message = "已设置上键对齐、下键投掷、左键取消；主机OBS插件右键呼出道具菜单。保存配置后生效。";
             }
-            show_help_tooltip("一次设置方向区上键对齐、下键投掷、左键取消；手机网页选择方案并显示站位和瞄点参考，主机不弹窗、不占用右键。可选语音保持原绑定。与其他已启用功能冲突时整组拒绝，不覆盖其他功能。保存后生效，不立即对齐或投掷。");
+            show_help_tooltip("一次设置方向区上键对齐、下键投掷、左键取消；主机OBS插件负责右键菜单、站位和瞄点参考。与其他已启用功能冲突时整组拒绝，不覆盖其他功能。保存后生效，不立即对齐或投掷。");
             if (begin_form("grenade_hotkey_form", 150.0f)) {
-                form_row("启用当前绑定", "只启停上/下/左三个道具绑定，不重设可选语音键或自定义数字区绑定。手机点选不需要麦克风；保存后生效，禁用不会执行动作。");
+                form_row("启用当前绑定", "只启停上/下/左三个道具绑定，不重设自定义数字区绑定。主机OBS菜单独立处理右键；保存后生效，禁用不会执行动作。");
                 bool enabled = app_config.keyboard.grenade_assist_enabled;
                 if (toggle_switch("##grenade_assist_enabled", &enabled)) {
                     if (!enabled) app_config.keyboard.grenade_assist_enabled = false;
                     else if (config::detail::enable_grenade_assist_hotkeys(app_config, false, hotkey_capture_message))
                         hotkey_capture_message = "已启用当前道具按键布局；保存配置后生效。";
                 }
-                render_hotkey_row("可选语音（按住）", "##grenade_voice_keys",
-                    "可选入口：按住说话、松开选择当前地图已保存方案，不执行动作；必须有可用主机语音工具和麦克风。手机点选不依赖此绑定，不能与上/下/左三键共用；Esc清空，保存后生效。",
-                    HotkeyBindingTarget::VOICE, app_config.keyboard.voice_virtual_keys, key_active);
                 render_hotkey_row("自动对齐（按下）", "##grenade_align_keys",
                     "启用道具辅助后，按下启动已选方案的画面对齐；不会自动走位或投掷。默认方向区上键，可捕获后端数字区8；按住不循环，故障恢复先释放，Esc清空。",
                     HotkeyBindingTarget::GRENADE_ALIGN, app_config.keyboard.grenade_align_virtual_keys, key_active);
@@ -3791,8 +3788,6 @@ struct Overlay::Impl {
                 return &app_config.keyboard.debug_test_virtual_keys;
             case HotkeyBindingTarget::ANOMALY_MARK:
                 return &app_config.keyboard.anomaly_mark_virtual_keys;
-            case HotkeyBindingTarget::VOICE:
-                return &app_config.keyboard.voice_virtual_keys;
             case HotkeyBindingTarget::GRENADE_MENU:
                 return &app_config.keyboard.grenade_menu_virtual_keys;
             case HotkeyBindingTarget::GRENADE_ALIGN:
@@ -3965,11 +3960,6 @@ struct Overlay::Impl {
                 "由当前键鼠后端监听源端按键，默认F9；每次按下标记归档前后各30秒，不改变武装或发送输入。不能与其他功能键共用；Esc清空，保存后生效。",
                 HotkeyBindingTarget::ANOMALY_MARK,
                 app_config.keyboard.anomaly_mark_virtual_keys, key_active);
-            render_hotkey_row(
-                "语音选择（按住）", "##voice_virtual_keys",
-                "可选语音入口，由当前键鼠后端监听；按住说话、松开选择当前地图的已保存方案，不执行动作。默认未绑定，不与其他已启用功能共键；Esc清空，保存后生效。道具清单点选不依赖麦克风；主机语音工具及候选准备完成后才开始收音。",
-                HotkeyBindingTarget::VOICE,
-                app_config.keyboard.voice_virtual_keys, key_active);
             ImGui::EndTable();
         }
         if (!hotkey_capture_message.empty()) {

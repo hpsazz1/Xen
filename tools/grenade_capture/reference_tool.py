@@ -2,19 +2,17 @@
 
 from __future__ import annotations
 
-import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
-import re
 import time
 
 try:
-    from .reference_assets import DEFAULT_ROOT, geometry_for, load_reference, manifest_revision, png_size, resource_directory, validate_standing_marker
+    from .reference_assets import geometry_for, load_reference, manifest_revision, png_size, resource_directory, validate_standing_marker
     from .screen_capture import capture_primary
 except ImportError:
-    from reference_assets import DEFAULT_ROOT, geometry_for, load_reference, manifest_revision, png_size, resource_directory, validate_standing_marker
+    from reference_assets import geometry_for, load_reference, manifest_revision, png_size, resource_directory, validate_standing_marker
     from screen_capture import capture_primary
 
 
@@ -28,7 +26,7 @@ def write_json(path, value):
 
 def begin(root, plan_path, verified, standing_note="", standing_marker=None):
     if not verified:
-        raise ValueError("必须先人工完成一次成功投掷，再明确传入 --verified")
+        raise ValueError("必须先人工完成一次成功投掷，再按F10采集")
     source = Path(plan_path).resolve()
     if source.suffix.lower() != ".json" or source.stat().st_size > 1024 * 1024:
         raise ValueError("方案文件无效")
@@ -96,73 +94,3 @@ def add_image(root, identity, role, image=None, capture=False, delay=5.0,
     finally:
         if temporary.exists():
             temporary.unlink()  # 只回收本次明确创建的单个暂存图片。
-
-
-def list_plans(plans, root, map_name="de_mirage"):
-    for path in sorted(Path(plans).glob("*.json")):
-        value = json.loads(path.read_text(encoding="utf-8-sig"))
-        if value.get("map") != map_name:
-            continue
-        state = "未建立参考；需先人工确认投掷"
-        directory = resource_directory(root, path.stem)
-        if (directory / "draft.json").exists():
-            state = "待瞄点图" if (directory / "standing.png").exists() else "待站位图"
-        if (directory / "reference.json").exists():
-            try:
-                load_reference(root, path.stem, path.name)
-                state = "双图参考完整"
-            except (OSError, ValueError) as error:
-                state = "资源无效：" + str(error)
-        print(f"{value.get('name', path.stem)} | {path.name} | {state}")
-        instruction = re.search(r"setpos[^\r\n]*?setang[^\r\n\\]*", value.get("notes", ""))
-        if instruction:
-            print("  " + instruction.group(0))
-
-
-def main(argv=None):
-    parser = argparse.ArgumentParser(description="道具双图资源：人工确认后，站位采图，再复位瞄点采图；不执行投掷")
-    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
-    sub = parser.add_subparsers(dest="action", required=True)
-    listing = sub.add_parser("list", help="列出 Mirage 逐套方案、指令和参考图进度")
-    listing.add_argument("--plans", type=Path, default=DEFAULT_ROOT.parent / "plans")
-    listing.add_argument("--map", default="de_mirage")
-    first = sub.add_parser("begin", help="先人工成功投掷一次，再开始采集")
-    first.add_argument("--plan", type=Path, required=True)
-    first.add_argument("--verified", action="store_true", help="明确确认本人已验证该方案投掷成功")
-    first.add_argument("--standing-note", default="")
-    for role in ("standing", "aim"):
-        step = sub.add_parser(role, help="采集站位图" if role == "standing" else "复位后采集正确瞄点图并完成资源")
-        step.add_argument("--id", required=True)
-        source = step.add_mutually_exclusive_group(required=True)
-        source.add_argument("--image", type=Path, help="导入现有全屏 PNG，保留原始像素")
-        source.add_argument("--capture", action="store_true", help="显式采集 Windows 主屏")
-        step.add_argument("--delay", type=float, default=5)
-        step.add_argument("--roi-x", type=int)
-        step.add_argument("--roi-y", type=int)
-        step.add_argument("--scale-x", type=float, default=1.0)
-        step.add_argument("--scale-y", type=float, default=1.0)
-    check = sub.add_parser("validate", help="核对确认标记、双图、几何及资源身份")
-    check.add_argument("--id", required=True)
-    args = parser.parse_args(argv)
-    try:
-        if args.action == "list":
-            list_plans(args.plans, args.root, args.map)
-        elif args.action == "begin":
-            identity = begin(args.root, args.plan, args.verified, args.standing_note)
-            print(f"已记录人工确认：{identity}。下一步站到对应点位，采集 standing。")
-        elif args.action == "validate":
-            value, _ = load_reference(args.root, args.id)
-            print(f"资源完整：{value['plan_id']} / {value['reference_revision']}")
-        else:
-            complete = add_image(args.root, args.id, args.action, args.image, args.capture, args.delay,
-                                 args.roi_x, args.roi_y, args.scale_x, args.scale_y)
-            print("双图资源已完成。将该资源目录原样同步到辅机后使用。" if complete else
-                  "站位图已保留。请复位到同一方案的原始站位与正确瞄角，再采集 aim。")
-        return 0
-    except (OSError, ValueError) as error:
-        print("未完成：" + str(error))
-        return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

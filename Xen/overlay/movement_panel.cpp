@@ -103,7 +103,6 @@ struct MovementPanel::Impl {
             action.button = Button::LEFT; action.duration_ms = 1000;
             plan.actions.push_back(action);
         } else {
-            plan.voice_command = plan.name;
             plan.actions.push_back({ActionKind::KEY, Key::SPACE, 0, 40, 0});
         }
     }
@@ -211,7 +210,6 @@ struct MovementPanel::Impl {
     void copy_preset(const movement::Config& config, bool spin, bool right, OverlayActions& actions) {
         Plan copy;
         copy.name = spin ? "旋转跳副本" : "大跳副本";
-        copy.voice_command = copy.name;
         copy.notes = "主动发送空格的固定方向时间轴；原辅助页的物理跳跃触发与方向选择保持不变。";
         copy.actions.push_back({ActionKind::KEY, Key::SPACE, 0, 40, 0});
         const int start = config.jump_delay_ms;
@@ -230,11 +228,10 @@ struct MovementPanel::Impl {
     }
     void editor(OverlayActions& actions, const movement::Config& config, const Snapshot* snapshot) {
         bool change = text_field(grenade() ? "道具名称" : "方案名称", plan.name, "本页独立方案文件的名称，不影响另一类方案。");
-        change |= text_field("地图（可选）", plan.map, "语音候选仅匹配当前 GSI 地图标识；旧地图备注保留，手动方案不受地图限制。");
+        change |= text_field("地图（可选）", plan.map, "道具菜单按当前GSI地图筛选；保存地图标识，手动身法方案不受地图限制。");
         if (button("使用当前地图", "将有效 GSI 地图填入当前草稿，保存后写入本页方案库。", snapshot && snapshot->movement_map.valid)) {
             plan.map = snapshot->movement_map.map_name; change = true;
         }
-        change |= text_field("语音口令", plan.voice_command, "同一地图内口令必须唯一；清空可作为手动方案保存，未保存修改不会发布。语音只选择方案，不直接对齐或执行动作。");
         change |= text_field("点位（可选）", plan.location, "保存点位名称；每次测试前由用户对齐位置和朝向。");
         change |= text_field("起始说明", plan.notes, "记录起始朝向、站位和人工准备步骤；不参与设备执行。");
         auto command = console_command(plan.notes);
@@ -389,8 +386,8 @@ void MovementPanel::render(const AppConfig& config, const Snapshot* snapshot, Ov
             ImGui::Separator();
         }
         if (ui.grenade()) {
-            ImGui::TextWrapped("手机网页选择道具并查看站位、瞄点参考；拿出对应道具，大致转向目标后上键对齐、下键投掷、左键取消，End全局急停。主机不再弹出清单或参考图；按键须启用并保存，F11手动测试仍保留。");
-            tip("道具辅助只调整视角，不替代固定站位；手机点选不会自动对齐或投掷。上/下/左默认使用方向区，可在上方捕获实际数字区按键，右键不再占用。对齐需要当前方案已配置有效参考资源，已通过的动作时序保持原样。");
+            ImGui::TextWrapped("主机OBS插件右键呼出道具菜单，点选后显示站位和瞄点参考；拿出对应道具，大致转向目标后上键对齐、下键投掷、左键取消，End全局急停。按键须启用并保存，F11手动测试仍保留。");
+            tip("道具辅助只调整视角，不替代固定站位；OBS菜单点选不会自动对齐或投掷。上/下/左默认使用方向区，可在上方捕获实际数字区按键；右键由OBS插件呼出或隐藏菜单。对齐沿用当前参考资源，已通过的动作时序保持原样。");
             if (snapshot) {
                 ImGui::TextWrapped("对齐状态：%s", snapshot->grenade_guidance_message.empty()
                     ? "等待选择方案与参考资源" : snapshot->grenade_guidance_message.c_str());

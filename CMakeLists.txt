@@ -577,15 +577,12 @@ target_compile_definitions(debug_session PRIVATE
     XEN_DEBUG_BUILD_DIRTY=${XEN_BUILD_GIT_DIRTY}
     XEN_DEBUG_RUNTIME_ID="${XEN_BUILD_RUNTIME_ID}")
 
-add_library(voice_switch STATIC Xen/voice_switch/voice_switch.cpp Xen/voice_switch/controller.cpp)
-target_include_directories(voice_switch PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
-target_link_libraries(voice_switch PUBLIC debug_session nlohmann_json::nlohmann_json PRIVATE ws2_32)
 
-# 手机页随 Worker 编译，不额外部署网页服务器或静态资源目录。
+# OBS内嵌菜单随Worker编译，复用现有道具接口，不提供手机选择入口。
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${PROJECT_SOURCE_DIR}/Xen/grenade_web/page.html")
-file(READ "${PROJECT_SOURCE_DIR}/Xen/grenade_web/page.html" XEN_GRENADE_MOBILE_HTML)
-configure_file(Xen/grenade_web/page.h.in generated/grenade_mobile_page.h @ONLY)
+file(READ "${PROJECT_SOURCE_DIR}/Xen/grenade_web/page.html" XEN_GRENADE_OBS_HTML)
+configure_file(Xen/grenade_web/page.h.in generated/grenade_obs_page.h @ONLY)
 add_library(grenade_web STATIC Xen/grenade_web/server.cpp)
 target_include_directories(grenade_web PUBLIC ${PROJECT_SOURCE_DIR}/Xen
     PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
@@ -645,7 +642,7 @@ add_custom_target(model_workspace_tools
     VERBATIM)
 add_dependencies(xen_app model_workspace_tools)
 target_link_libraries(xen_app PRIVATE
-    overlay app_input app_startup runtime xen_debug config crash log app_release voice_switch grenade_web)
+    overlay app_input app_startup runtime xen_debug config crash log app_release grenade_web)
 if(WIN32)
     xen_deploy_runtime_dlls(xen_app OPENCV ORT NDI)
 endif()
@@ -1578,18 +1575,9 @@ if(BUILD_TESTING)
     add_test(NAME grenade_alignment_tests COMMAND grenade_alignment_tests "${PROJECT_SOURCE_DIR}/temp/XEN-GRENADE-ALIGN-20261026-001/alignment-fixtures")
     xen_deploy_runtime_dlls(grenade_alignment_tests OPENCV NDI)
     set_tests_properties(grenade_alignment_tests PROPERTIES TIMEOUT 30)
-    add_executable(voice_switch_tests tests/voice_switch_tests.cpp)
-    add_test(NAME voice_switch_client_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" -X utf8 -B "${PROJECT_SOURCE_DIR}/tests/voice_switch_client_tests.py")
     add_test(NAME grenade_reference_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" -X utf8 -B "${PROJECT_SOURCE_DIR}/tests/grenade_reference_tests.py")
     add_test(NAME grenade_capture_workflow_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" -X utf8 -B "${PROJECT_SOURCE_DIR}/tests/grenade_capture_workflow_tests.py")
     set_tests_properties(grenade_capture_workflow_tests PROPERTIES TIMEOUT 30)
-    target_link_libraries(voice_switch_tests PRIVATE voice_switch ws2_32)
-    add_test(NAME voice_switch_tests COMMAND voice_switch_tests)
-    xen_deploy_runtime_dlls(voice_switch_tests OPENCV ORT NDI)
-    add_executable(voice_controller_tests tests/voice_controller_tests.cpp)
-    target_link_libraries(voice_controller_tests PRIVATE voice_switch ws2_32)
-    add_test(NAME voice_controller_tests COMMAND voice_controller_tests "${CMAKE_BINARY_DIR}/voice-controller-fixtures")
-    xen_deploy_runtime_dlls(voice_controller_tests OPENCV ORT NDI)
     add_executable(grenade_web_tests tests/grenade_web_tests.cpp)
     target_link_libraries(grenade_web_tests PRIVATE grenade_web debug_session nlohmann_json::nlohmann_json ws2_32)
     add_test(NAME grenade_web_tests COMMAND grenade_web_tests

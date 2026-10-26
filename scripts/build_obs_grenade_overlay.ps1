@@ -5,7 +5,10 @@ param(
     [string]$BuildDirectory = '',
     [string]$Generator = 'Visual Studio 18 2026',
     [switch]$Install,
-    [string]$AuxiliaryUrl = 'http://192.168.3.20:5015'
+    [string]$AuxiliaryUrl = 'http://192.168.3.20:5015',
+    [string]$CapturePython = '',
+    [string]$CaptureRoot = '',
+    [string]$CaptureDestination = '\\192.168.3.20\XenLab$\releases\Xen-current\cache\grenade'
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -79,6 +82,9 @@ if ($Install) {
         'data/obs-plugins/xen-grenade-overlay/reference.html',
         'data/obs-plugins/xen-grenade-overlay/README.md',
         'data/obs-plugins/xen-grenade-overlay/LICENSE.GPL-2.0')
+    $relativeFiles += @('worker.py','capture_workflow.py','reference_assets.py','reference_tool.py',
+        'screen_capture.py','README.md','standing/mirage-t-spawns.png') |
+        ForEach-Object { "data/obs-plugins/xen-grenade-overlay/capture/$_" }
     foreach ($relative in $relativeFiles) {
         $destination = Join-Path $ObsRoot $relative
         New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
@@ -91,11 +97,22 @@ if ($Install) {
     }
     $configRoot = Join-Path $env:APPDATA 'obs-studio/plugin_config/xen-grenade-overlay'
     $settings = Join-Path $configRoot 'settings.json'
-    if (-not (Test-Path -LiteralPath $settings)) {
-        New-Item -ItemType Directory -Path $configRoot -Force | Out-Null
-        [ordered]@{enabled=$true; auxiliary_url=$AuxiliaryUrl} | ConvertTo-Json |
-            Set-Content -LiteralPath $settings -Encoding utf8
+    New-Item -ItemType Directory -Path $configRoot -Force | Out-Null
+    $configuration = if (Test-Path -LiteralPath $settings) { Get-Content -Raw -LiteralPath $settings | ConvertFrom-Json -AsHashtable }
+        else { @{enabled=$true; auxiliary_url=$AuxiliaryUrl} }
+    if (-not $configuration.ContainsKey('capture_python') -or -not $configuration.capture_python) {
+        if (-not $CapturePython) {
+            $CapturePython = (& py -3 -c 'import sys; print(sys.executable)').Trim()
+            if ($LASTEXITCODE -ne 0) { throw '未找到主机现有Python 3，请指定CapturePython。' }
+        }
+        $configuration.capture_python = (Resolve-Path -LiteralPath $CapturePython).Path
     }
+    if (-not $configuration.ContainsKey('capture_root') -or -not $configuration.capture_root) {
+        if (-not $CaptureRoot) { $CaptureRoot = Join-Path $RepositoryRoot 'cache/releases/Xen-current/cache/grenade' }
+        $configuration.capture_root = [IO.Path]::GetFullPath($CaptureRoot)
+    }
+    if (-not $configuration.ContainsKey('capture_destination') -or -not $configuration.capture_destination) { $configuration.capture_destination = $CaptureDestination }
+    $configuration | ConvertTo-Json | Set-Content -LiteralPath $settings -Encoding utf8
     Write-Host "OBS 插件已安装并回读：$ObsRoot"
 }
 Write-Host "OBS 插件产物：$package"

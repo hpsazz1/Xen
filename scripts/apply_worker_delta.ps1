@@ -34,18 +34,13 @@ $modelReviewFiles = @('tools/model-data/model_data_pipeline.py', 'tools/model-da
     'tools/model-data/model_training_environment.py', 'tools/model-data/model_training_requirements.txt')
 $aimTools = @('tools/invoke_aim_manual_acceptance.ps1', 'tools/aim_report.ps1',
     'tools/aim_control_diagnostics.ps1', 'tools/aim_fixed_scene_analysis.ps1')
-$voiceTools = @('client.py', 'requirements.txt', 'install.ps1', 'start.ps1',
-    'empty_keywords.txt', 'README.md', 'LICENSES.md', 'prepare_model.py',
-        'guidance.py', 'preview_window.py', 'reference_assets.py', 'reference_tool.py', 'screen_capture.py',
-        'capture_workflow.py', 'capture_hotkey.py', 'capture_references.ps1', 'standing/mirage-t-spawns.png') |
-    ForEach-Object { "tools/voice-switch/$_" }
 $allowed = @($workerRelative, 'tools/acceptance/WORKER-UPDATE.json',
     'tools/acceptance/PACKAGE-NOTES.md', 'tools/acceptance/MANUAL-ACCEPTANCE.md',
     'tools/acceptance/invoke_hud_stop_acceptance.ps1',
     'tools/acceptance/measure_process_resources.ps1', 'tools/acceptance/soak_acceptance_support.ps1',
     'tools/source/xen_source_context.exe', 'tools/source/start_source_context_session.ps1', 'XenLauncher.exe', 'manifest.json',
     'tools/recoil/import_recoil_profiles.py', 'tools/recoil/migrate_legacy_recoil_profiles.py',
-    'tools/recoil/invoke_recoil_legacy_acceptance.ps1') + $recoilTools + $sourceTools + $modelReviewFiles + $aimTools + $voiceTools
+    'tools/recoil/invoke_recoil_legacy_acceptance.ps1') + $recoilTools + $sourceTools + $modelReviewFiles + $aimTools
 if ($reviewOnly) { $allowed = $modelReviewFiles + @('manifest.json') }
 if ($aimToolsOnly) {
     if ($reviewOnly) { throw 'Cannot combine tools-only modes.' }
@@ -146,9 +141,6 @@ foreach ($required in $requiredFiles) {
 }
 if (@($modelReviewFiles | Where-Object { $seen.Contains($_) }).Count -notin @(0, $modelReviewFiles.Count)) {
     throw '模型工作区资源必须包含完整四文件依赖组。'
-}
-if (@($voiceTools | Where-Object { $seen.Contains($_) }).Count -notin @(0, $voiceTools.Count)) {
-    throw '语音主机工具必须包含完整固定文件组。'
 }
 $manifest = Get-Content -LiteralPath (Join-Path $stage 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 if (@($manifest.PSObject.Properties.Name).Count -ne 5 -or $manifest.schema -ne 1 -or $manifest.product -cne 'Xen') {

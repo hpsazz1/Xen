@@ -17,8 +17,6 @@
 #include "overlay/overlay.h"
 #include "runtime/runtime.h"
 #include "model_workspace/model_workspace.h"
-#include "voice_switch/voice_switch.h"
-#include "voice_switch/controller.h"
 #include "grenade_web/server.h"
 
 #include <Windows.h>
@@ -255,20 +253,6 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     std::vector<RuntimePipelineSample> pending_debug_samples;
     Overlay overlay;
     debug_session::Session debug_workspace;
-    voice_switch::Server voice_server;
-    voice_switch::Controller voice_controller(voice_server,debug_workspace);
-    const auto configure_voice = [&] {
-        voice_controller.cancel();
-        voice_server.stop();
-        if (active_keyboard_config.grenade_assist_enabled || !active_keyboard_config.voice_virtual_keys.empty()) {
-            voice_switch::Config voice_config;
-            voice_config.bind_address = active_gsi_config.bind_address;
-            voice_config.allowed_peer_ipv4 = active_gsi_config.allowed_peer_ipv4;
-            if (!voice_server.start(voice_config))
-                append_message(app_message,"主机方案通道未启动：" + voice_server.snapshot().error);
-        }
-    };
-    configure_voice();
     debug_session::Request catalog_request; catalog_request.mode = debug_session::Mode::MOVEMENT_TEST;
     debug_workspace.dispatch(debug_session::Action::LIST_MOVEMENT_PLANS,catalog_request,{});
     if (!startup_boundary.observe_overlay_initialization(
@@ -279,20 +263,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         return startup_boundary.finish(0);
     }
 
-    // 手机只读页面由辅机应用持有，直接共享 GSI；不依赖 Runtime 或主机语音工具。
-    grenade_web::Server mobile_web;
-    std::optional<grenade_web::SelectionRequest> mobile_selection;
+    // OBS道具菜单与F10制作共用辅机接口，直接共享GSI及当前选择。
+    grenade_web::Server grenade_bridge;
+    std::optional<grenade_web::SelectionRequest> bridge_selection;
     std::string observed_reference_path;
     std::optional<std::filesystem::file_time_type> observed_reference_time;
     auto reference_poll_at=std::chrono::steady_clock::time_point{};
-    if (!mobile_web.start({},shared_gsi)) {
-        append_message(app_message,"手机道具清单未启动：" + mobile_web.snapshot().error);
-    } else {
-        for (const auto& url : mobile_web.snapshot().urls) {
-            LOG_INFO("app","手机道具清单：{}",url);
-            if (url.find("127.0.0.1") == std::string::npos)
-                append_message(app_message,"手机道具清单：" + url);
-        }
+    if (!grenade_bridge.start({},shared_gsi)) {
+        append_message(app_message,"OBS道具接口未启动：" + grenade_bridge.snapshot().error);
     }
 
     const auto drain_debug_samples = [&](bool final_drain = false, const RuntimeSnapshot* frozen = nullptr) noexcept {
@@ -727,7 +705,6 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         } else if (actions.save_config_requested && !overlay.close_requested()) {
             // 保存草稿不要求模型文件已经到位；实际启动/应用模型时再解析存在性。
             if (save_current_config(config_error)) {
-                voice_controller.cancel();
                 debug_workspace.cancel_grenade("配置已保存，请重新选择与对齐");
                 if (!same_gsi_config(active_gsi_config,config.gsi)) {
                     shared_gsi->stop(); active_gsi_config = config.gsi;
@@ -806,7 +783,6 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                 } else {
                     app_message = "配置已保存，但快捷键重载失败。";
                 }
-                configure_voice();
             } else {
                 app_message = config_error;
             }
@@ -817,23 +793,23 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             actions.start_requested || runtime_toggle_pressed || actions.save_config_requested ||
             actions.debug_action == debug_session::Action::CANCEL || overlay.close_requested() ||
             report_lifecycle.busy() || report_lifecycle.stop_pending() || overlay.background_busy();
-        if (mobile_selection) {
+        if (bridge_selection) {
             const bool current=!interface_blocked && !actions.hotkey_capture_consumed &&
-                mobile_web.selection_current(*mobile_selection);
+                grenade_bridge.selection_current(*bridge_selection);
             if (const auto completed=debug_workspace.finish_voice(interface_context,current)) {
-                mobile_web.finish_selection(*mobile_selection,*completed ? debug_workspace.snapshot() : nullptr,
+                grenade_bridge.finish_selection(*bridge_selection,*completed ? debug_workspace.snapshot() : nullptr,
                     *completed ? "方案已切换" : "方案或游戏状态已变化，请重新点选");
-                mobile_selection.reset();
+                bridge_selection.reset();
             }
         }
-        if (!mobile_selection) if (auto selected=mobile_web.poll_selection()) {
+        if (!bridge_selection) if (auto selected=grenade_bridge.poll_selection()) {
             debug_session::Request request;request.mode=debug_session::Mode::GRENADE_TEST;
             request.load_path=selected->plan_path;
-            if (!interface_blocked && !actions.hotkey_capture_consumed && mobile_web.selection_current(*selected) &&
-                debug_workspace.select_grenade(request,interface_context)) mobile_selection=std::move(selected);
-            else mobile_web.finish_selection(*selected,nullptr,"当前操作未结束，或道具辅助尚未启用，请稍后点选");
+            if (!interface_blocked && !actions.hotkey_capture_consumed && grenade_bridge.selection_current(*selected) &&
+                debug_workspace.select_grenade(request,interface_context)) bridge_selection=std::move(selected);
+            else grenade_bridge.finish_selection(*selected,nullptr,"当前操作未结束，或道具辅助尚未启用，请稍后点选");
         }
-        // 重采原子发布后只检查小清单时间，撤销旧对齐；图片由手机按资源版本刷新。
+        // 重采原子发布后只检查小清单时间，撤销旧对齐；OBS按资源版本刷新图片。
         const auto reference_now=std::chrono::steady_clock::now();
         if (reference_now>=reference_poll_at) {
             reference_poll_at=reference_now+std::chrono::seconds(1);
@@ -847,11 +823,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                 debug_workspace.cancel_grenade("参考图已更新，请按上键重新找点");
             if (!error) observed_reference_time=modified;
         }
-        voice_controller.tick(interface_context,keyboard_poll,active_keyboard_config,
-            interface_blocked,actions.hotkey_capture_consumed);
         // F10只读当前已保存选择；每轮心跳撤销旧许可，不在网页线程访问可变App状态。
         interface_context.config.keyboard = active_keyboard_config;
-        mobile_web.publish_capture(debug_workspace.snapshot(),interface_context.config,
+        grenade_bridge.publish_capture(debug_workspace.snapshot(),interface_context.config,
             (interface_context.runtime_idle || interface_context.runtime) && interface_context.input_recording_idle && interface_context.cleanup_known &&
             !debug_workspace.busy() && !interface_blocked && !actions.hotkey_capture_consumed,
             "请先结束当前道具动作或配置操作，再按F10采集");
@@ -868,9 +842,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
 
     // 渲染失败和系统退出同样经过屏障；不可先关闭后台仍使用的设备或日志。
-    mobile_web.stop();
-    voice_controller.cancel();
-    voice_server.stop();
+    grenade_bridge.stop();
     debug_workspace.request_shutdown();
     overlay.cancel_background();
     for (;;) {

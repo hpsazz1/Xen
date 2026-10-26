@@ -8,7 +8,7 @@
 #undef ERROR
 #endif
 #include "grenade_web/server.h"
-#include "grenade_mobile_page.h"
+#include "grenade_obs_page.h"
 #include "movement/timeline.h"
 #include "debug_session/debug_session.h"
 #include "grenade_alignment/grenade_alignment.h"
@@ -127,7 +127,7 @@ bool f10_conflicts(const AppConfig& config) {
     const auto& key = config.keyboard;
     if (contains(key.aim_hold_virtual_keys) || contains(key.emergency_virtual_keys) ||
         contains(key.runtime_toggle_virtual_keys) || contains(key.anomaly_mark_virtual_keys) ||
-        contains(key.voice_virtual_keys) || (key.debug_test_enabled && contains(key.debug_test_virtual_keys))) return true;
+        (key.debug_test_enabled && contains(key.debug_test_virtual_keys))) return true;
     if (key.grenade_assist_enabled && (contains(key.grenade_menu_virtual_keys) || contains(key.grenade_align_virtual_keys) ||
         contains(key.grenade_throw_virtual_keys) || contains(key.grenade_cancel_virtual_keys))) return true;
     return (config.trigger.enabled && config.trigger.fire_enabled && config.trigger.hold_virtual_key == 0x79) ||
@@ -664,7 +664,8 @@ struct Server::Impl {
                         {"reason","方案文件已改变，请刷新清单后重选"}}.dump(),deadline);
                 }
             }
-            else if (target == "/") respond(client,200,"text/html; charset=utf-8",kMobilePage,deadline);
+            else if (target == "/") respond(client,404,"text/plain; charset=utf-8","手机选择入口已移除，请在主机OBS中按小键盘右键选择道具。",deadline);
+            else if (target == "/obs-menu") respond(client,200,"text/html; charset=utf-8",kObsMenuPage,deadline);
             else if (target == "/context.json") respond(client,200,"application/json; charset=utf-8",context_json(),deadline);
             else if (target == "/selection.json") respond(client,200,"application/json; charset=utf-8",selection_json(),deadline);
             else if (target.starts_with("/reference.json?plan_id=") || target.starts_with("/reference/standing.png?plan_id=") ||

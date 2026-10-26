@@ -92,12 +92,9 @@ void run(const fs::path& root) {
         if (entry.path == bound) structured = entry.map == "de_dust2" && entry.voice_command == "跳箱";
     require(structured, "目录未提供结构化地图及口令");
     for (const bool save_as : {false, true}) {
-        rejected = false;
-        try { save_movement_plan(voiced, save_as ? bound : first, save_as, library); }
-        catch (const std::exception& e) { rejected = std::string(e.what()).find("中文方案") != std::string::npos; }
-        require(rejected && read(bound) == voiced && read(first) == document &&
-            list_movement_plans(library, legacy).size() == before.size(),
-            "口令冲突未拒绝、未指出方案或改变了正式库");
+        const auto saved = save_movement_plan(voiced, save_as ? bound : first, save_as, library);
+        require(read(saved) == voiced && read(bound) == voiced,
+            "历史语音字段应保留，但不得继续阻止同地图另存或保存");
     }
     auto other_map = voiced; other_map["map"] = "de_mirage";
     require(read(save_movement_plan(other_map, bound, true, library)) == other_map, "跨地图同口令被拒绝");

@@ -110,11 +110,6 @@ KeyboardPollResult KeyboardListener::poll() noexcept {
 
             // 初次健康建立或故障恢复不能把缓存按住状态当成调试启动边沿。
             if (!impl_->input_healthy || snapshot.status != InputMonitorStatus::READY) {
-                // 输入失信由 App 取消本轮，不伪造松键；恢复前已按住的语音键必须先释放。
-                impl_->event_state.voice_hold_active = false;
-                for (const int key : impl_->config.voice_virtual_keys)
-                    impl_->event_state.voice_blocked_until_release[static_cast<std::size_t>(key)] =
-                        snapshot.virtual_keys[static_cast<std::size_t>(key)];
                 for (const int key : impl_->config.debug_test_virtual_keys)
                     impl_->event_state.debug_blocked_until_release[static_cast<std::size_t>(key)] =
                         snapshot.virtual_keys[static_cast<std::size_t>(key)];
