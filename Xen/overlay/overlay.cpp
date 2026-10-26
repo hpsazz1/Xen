@@ -692,6 +692,7 @@ struct Overlay::Impl {
     InputTrainingPanel input_training_panel;
     DebugPanel debug_panel;
     MovementPanel movement_panel;
+    MovementPanel grenade_panel{debug_session::Mode::GRENADE_TEST};
     int trigger_general_class = 0;
     overlay::detail::HotkeyCaptureState hotkey_capture_state;
     std::array<bool, 256> capture_device_keys{};
@@ -3272,13 +3273,19 @@ struct Overlay::Impl {
             ImGui::EndTable();
         }
         ImGui::EndDisabled();
-        ImGui::TextWrapped("停止运行后测试，每次执行一组；身法编排启用一次后，改参可直接测试。");
+        ImGui::TextWrapped("停止运行后测试，每次执行一组；身法编排与道具测试各自启用，F11只执行最后明确启用的页面。");
         ImGui::TextDisabled("准备与重复测试说明");
         show_help_tooltip("身法编排启用后使用最新有效草稿，改参、保存和载入无需重新启用。标定与采集新弹道每组都需重新准备；已有弹道验证、急停和射击节奏可按模板重复，编辑后需重新准备。切换设备、启动 Runtime 或急停会撤销测试许可，无自动循环。生产组合效果在辅助页配置后单独验收。");
         if (!hotkey_capture_message.empty()) ImGui::TextWrapped("%s",hotkey_capture_message.c_str());
         if (!ImGui::BeginTabBar("debug_tabs")) return;
         if (ImGui::BeginTabItem("身法编排")) {
             movement_panel.render(app_config, debug_snapshot, actions);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("道具测试")) {
+            ImGui::PushID("grenade_test");
+            grenade_panel.render(app_config, debug_snapshot, actions);
+            ImGui::PopID();
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("急停测试")) {

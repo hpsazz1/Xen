@@ -210,6 +210,113 @@ void interactions() {
     edit_io.AddKeyEvent(ImGuiKey_Enter, false); frame();
 
 }
+void grenade_interactions() {
+    using namespace debug_session;
+    MovementPanel panel(Mode::GRENADE_TEST);
+    AppConfig config;
+    Snapshot snapshot;
+    const char* title = "道具测试交互回归";
+    auto frame = [&](const char* focus = nullptr) {
+        ImGui::NewFrame();
+        if (auto* prior = ImGui::FindWindowByName(title); focus && prior)
+            ImGui::SetFocusID(prior->GetID(focus), prior);
+        ImGui::SetNextWindowPos({0, 0}); ImGui::SetNextWindowSize({1100, 2000});
+        ImGui::Begin(title, nullptr, ImGuiWindowFlags_NoSavedSettings);
+        OverlayActions actions; panel.render(config, &snapshot, actions);
+        ImGui::End(); ImGui::Render(); return actions;
+    };
+    auto click = [&](const char* label) {
+        auto& io = ImGui::GetIO(); io.AddMousePosEvent(-100, -100); frame(label);
+        auto* window = ImGui::FindWindowByName(title);
+        expect(window && ImGui::GetCurrentContext()->NavId == window->GetID(label), "道具交互须定位真实控件");
+        const auto rect = ImGui::WindowRectRelToAbs(window, window->NavRectRel[ImGuiNavLayer_Main]);
+        io.AddMousePosEvent(rect.GetCenter().x, rect.GetCenter().y); frame();
+        io.AddMouseButtonEvent(0, true); frame();
+        io.AddMouseButtonEvent(0, false); return frame();
+    };
+    auto actions = frame();
+    expect(actions.debug_action == Action::LIST_MOVEMENT_PLANS && actions.debug_request.mode == Mode::GRENADE_TEST &&
+        actions.debug_request.movement_library_root == "cache/grenade/plans" && !actions.movement_draft_changed,
+        "首次道具浏览只查询独立道具库，不启用或发布草稿");
+    snapshot.movement_test_enabled = true; snapshot.movement_test_mode = Mode::MOVEMENT_TEST;
+    actions = frame();
+    expect(actions.debug_action == Action::NONE && !actions.movement_draft_changed,
+        "身法拥有F11时浏览道具页不得自动接管");
+    actions = click("启用道具测试");
+    expect(actions.debug_action == Action::ENABLE_MOVEMENT_TEST && actions.debug_request.mode == Mode::GRENADE_TEST,
+        "道具页必须显式启用自己的F11域");
+    const auto initial = Json::parse(actions.debug_request.plan_text);
+    expect(initial.at("voice_command").get<std::string>().empty(), "道具默认不能发布身法语音口令");
+
+    movement::timeline::Plan grenade;
+    grenade.name = "Mirage T1 VIP R1"; grenade.map = "de_mirage";
+    grenade.notes = "setpos 1296 -352 -167.968750;setang -41.580170 -173.471710 0";
+    movement::timeline::Action button;
+    button.kind = movement::timeline::ActionKind::BUTTON; button.duration_ms = 1000;
+    grenade.actions.push_back(button);
+    snapshot.grenade_saved_plans = {{"cache/grenade/plans/other.json", "烟雾 Anubis", "de_anubis", ""},
+        {"cache/grenade/plans/mirage-t1.json", grenade.name, grenade.map, ""}};
+    snapshot.grenade_selected_path = snapshot.grenade_saved_plans.back().path;
+    snapshot.grenade_catalog_revision = 1;
+    snapshot.movement_saved_plans = {{"cache/movement/plans/ancient.json", "身法原方案", "de_ancient", ""}};
+    snapshot.movement_selected_path = snapshot.movement_saved_plans.front().path;
+    snapshot.movement_catalog_revision = 1;
+    snapshot.draft_plan_mode = Mode::GRENADE_TEST; snapshot.draft_plan_revision = 1;
+    snapshot.draft_plan = movement::timeline::plan_json(grenade);
+    snapshot.grenade_loaded_draft = snapshot.draft_plan; snapshot.grenade_loaded_revision = 1;
+    snapshot.movement_test_mode = Mode::GRENADE_TEST;
+    actions = frame();
+    expect(!actions.movement_draft_changed, "道具载入同步不能伪装手工编辑");
+    actions = click("投掷一次");
+    expect(actions.debug_action == Action::RUN_MOVEMENT_TEST && actions.debug_request.mode == Mode::GRENADE_TEST &&
+        Json::parse(actions.debug_request.plan_text) == snapshot.draft_plan,
+        "投掷使用当前道具完整草稿和道具域");
+    actions = click("保存方案");
+    expect(actions.debug_action == Action::SAVE_PLAN && actions.debug_request.load_path == snapshot.grenade_selected_path &&
+        actions.debug_request.movement_library_root == "cache/grenade/plans",
+        "道具保存必须使用独立库和选中项");
+    auto movement_plan = grenade; movement_plan.name = "来自另一页的身法";
+    snapshot.draft_plan = movement::timeline::plan_json(movement_plan);
+    snapshot.draft_plan_mode = Mode::MOVEMENT_TEST; ++snapshot.draft_plan_revision;
+    ++snapshot.movement_catalog_revision; frame();
+    actions = click("校验方案");
+    expect(Json::parse(actions.debug_request.plan_text).at("name") == grenade.name &&
+        actions.debug_request.load_path == snapshot.grenade_selected_path,
+        "身法草稿或目录变化不得覆盖道具草稿和保存目标");
+    click("道具方案"); frame();
+    auto* popup = ImGui::FindWindowByName("##Combo_00");
+    expect(popup && popup->Active, "道具方案列表应打开真实下拉");
+    if (popup && popup->Active) {
+        const ImVec2 pos{popup->Pos.x + ImGui::GetStyle().WindowPadding.x + 30,
+            popup->Pos.y + ImGui::GetStyle().WindowPadding.y + ImGui::GetTextLineHeight() * .5f};
+        auto& io = ImGui::GetIO(); io.AddMousePosEvent(pos.x, pos.y); frame();
+        io.AddMouseButtonEvent(0, true); frame(); io.AddMouseButtonEvent(0, false); actions = frame();
+        expect(actions.debug_action == Action::LOAD_PLAN && actions.debug_request.load_path == snapshot.grenade_selected_path,
+            "道具列表须优先显示Mirage五点且不混入身法库");
+    }
+    // 道具载入已完成但页面尚未渲染，随后身法载入覆盖全局草稿；返回仍须匹配道具保存目标。
+    auto pending_grenade = grenade; pending_grenade.name = "Mirage T2 VIP R1";
+    snapshot.grenade_loaded_draft = movement::timeline::plan_json(pending_grenade);
+    ++snapshot.grenade_loaded_revision;
+    snapshot.grenade_selected_path = "cache/grenade/plans/mirage-t2.json";
+    ++snapshot.grenade_catalog_revision;
+    snapshot.draft_plan = movement::timeline::plan_json(movement_plan);
+    snapshot.draft_plan_mode = Mode::MOVEMENT_TEST; ++snapshot.draft_plan_revision;
+    snapshot.movement_loaded_draft = snapshot.draft_plan; snapshot.movement_loaded_revision = 1;
+    frame();
+    actions = click("保存方案");
+    expect(Json::parse(actions.debug_request.plan_text).at("name") == pending_grenade.name &&
+        actions.debug_request.load_path == snapshot.grenade_selected_path,
+        "异步跨页载入不能挤掉未显示的道具草稿并用旧内容覆盖新文件");
+    snapshot.movement_test_mode = Mode::MOVEMENT_TEST; frame();
+    actions = click("启用道具测试");
+    expect(actions.debug_action == Action::ENABLE_MOVEMENT_TEST && actions.debug_request.mode == Mode::GRENADE_TEST,
+        "另一页重新拥有F11后，道具需再次显式启用");
+    snapshot.movement_test_mode = Mode::GRENADE_TEST; frame();
+    actions = click("关闭道具测试");
+    expect(actions.debug_action == Action::CANCEL, "道具测试必须可以撤销许可和清理");
+}
+
 }
 
 int main() {
@@ -218,6 +325,7 @@ int main() {
     io.DisplaySize = {1200, 2100}; io.DeltaTime = 1.f / 60;
     unsigned char* pixels; int width, height; io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
     interactions();
+    grenade_interactions();
     for (const ImVec2 size : {ImVec2{620, 480}, ImVec2{820, 600}}) {
         io.DisplaySize = size; MovementPanel panel;
         ImGui::NewFrame(); ImGui::SetNextWindowSize(size);

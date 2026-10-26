@@ -88,15 +88,24 @@ void timeline(const Plan& plan) {
 struct MovementPanel::Impl {
     Plan plan;
     Request request;
-    std::string error;
-    bool initialized = false, catalog_requested = false;
+    std::string error, map_filter;
+    bool grenade() const { return request.mode == Mode::GRENADE_TEST; }
+    bool initialized = false, catalog_requested = false, seen_loaded_slot = false;
     std::uint64_t seen_draft = 0, seen_catalog = 0;
 
-    Impl() {
-        request.mode = Mode::MOVEMENT_TEST;
+    explicit Impl(Mode mode) {
+        request.mode = mode;
         request.output_root = "cache/debug";
-        plan.voice_command = plan.name;
-        plan.actions.push_back({ActionKind::KEY, Key::SPACE, 0, 40, 0});
+        if (grenade()) {
+            request.movement_library_root = "cache/grenade/plans";
+            plan.name = "新道具方案";
+            TimelineAction action; action.kind = ActionKind::BUTTON;
+            action.button = Button::LEFT; action.duration_ms = 1000;
+            plan.actions.push_back(action);
+        } else {
+            plan.voice_command = plan.name;
+            plan.actions.push_back({ActionKind::KEY, Key::SPACE, 0, 40, 0});
+        }
     }
     bool update_request() {
         request.plan_text.clear();
@@ -121,46 +130,82 @@ struct MovementPanel::Impl {
     void sync(const Snapshot* snapshot, OverlayActions& actions) {
         if (!initialized) { initialized = true; update_request(); }
         if (!snapshot) return;
-        if (snapshot->movement_catalog_revision != seen_catalog) {
-            seen_catalog = snapshot->movement_catalog_revision;
-            request.load_path = snapshot->movement_selected_path;
+        const auto revision = grenade() ? snapshot->grenade_catalog_revision : snapshot->movement_catalog_revision;
+        if (revision != seen_catalog) {
+            seen_catalog = revision;
+            request.load_path = grenade() ? snapshot->grenade_selected_path : snapshot->movement_selected_path;
         }
-        if (snapshot->draft_plan_revision != seen_draft && snapshot->draft_plan_mode == Mode::MOVEMENT_TEST) {
-            seen_draft = snapshot->draft_plan_revision;
+        const auto loaded_revision = grenade() ? snapshot->grenade_loaded_revision : snapshot->movement_loaded_revision;
+        const auto& loaded_draft = grenade() ? snapshot->grenade_loaded_draft : snapshot->movement_loaded_draft;
+        // 每个页面消费自己的载入结果，另一页异步完成不能挤掉尚未显示的草稿。
+        // 零版本兼容旧快照；本域开始发布后不再回退到全局单槽。
+        const bool legacy = !seen_loaded_slot && loaded_revision == 0 && snapshot->draft_plan_mode == request.mode;
+        const auto draft_revision = legacy ? snapshot->draft_plan_revision : loaded_revision;
+        if ((draft_revision != seen_draft || (loaded_revision && !seen_loaded_slot)) && (loaded_revision || legacy)) {
+            seen_draft = draft_revision;
+            seen_loaded_slot |= loaded_revision != 0;
             Plan loaded;
-            if (movement::timeline::parse_plan(snapshot->draft_plan, loaded, error)) {
+            if (movement::timeline::parse_plan(legacy ? snapshot->draft_plan : loaded_draft, loaded, error)) {
                 plan = std::move(loaded); update_request();
             }
         }
     }
     void library(const Snapshot* snapshot, OverlayActions& actions, bool busy) {
-        const char* selected = "未保存的新方案";
+        std::vector<const MovementSavedPlan*> entries;
         if (snapshot) {
-            for (const auto& item : snapshot->movement_saved_plans)
-                if (item.path == request.load_path) { selected = item.name.c_str(); break; }
+            const auto& saved = grenade() ? snapshot->grenade_saved_plans : snapshot->movement_saved_plans;
+            for (const auto& item : saved) entries.push_back(&item);
         }
+        if (grenade()) {
+            // 专用五点方案优先；其他道具仍可按地图查找，不改变保存文件顺序。
+            std::stable_sort(entries.begin(), entries.end(), [](const auto* a, const auto* b) {
+                const auto priority = [](const auto* item) {
+                    return item->name.starts_with("Mirage T") && item->name.find(" VIP R") != std::string::npos;
+                };
+                return priority(a) > priority(b);
+            });
+            ImGui::BeginDisabled(busy);
+            if (ImGui::BeginCombo("筛选地图", map_filter.empty() ? "全部地图" : map_filter.c_str())) {
+                if (ImGui::Selectable("全部地图", map_filter.empty())) map_filter.clear();
+                std::vector<std::string> maps;
+                for (const auto* item : entries)
+                    if (!item->map.empty()) maps.push_back(item->map);
+                std::sort(maps.begin(), maps.end());
+                maps.erase(std::unique(maps.begin(), maps.end()), maps.end());
+                for (const auto& map : maps)
+                    if (ImGui::Selectable(map.c_str(), map_filter == map)) map_filter = map;
+                ImGui::EndCombo();
+            }
+            ImGui::EndDisabled();
+            tip("只筛选道具列表，不载入、不启用测试，也不改变当前F11方案。Mirage五点专用方案优先显示。");
+        }
+        const char* selected = "未保存的新方案";
+        for (const auto* item : entries)
+            if (item->path == request.load_path) { selected = item->name.c_str(); break; }
         ImGui::BeginDisabled(busy);
         ImGui::SetNextItemWidth(std::max(100.f, ImGui::GetContentRegionAvail().x * .7f));
-        if (ImGui::BeginCombo("已保存方案", selected)) {
-            if (snapshot) {
-                for (const auto& item : snapshot->movement_saved_plans) {
-                    ImGui::PushID(item.path.c_str());
-                    if (ImGui::Selectable(item.name.c_str(), item.path == request.load_path)) {
-                        send(Action::LOAD_PLAN, actions);
-                        // 只提交目标，成功载入后再由目录快照更新当前保存路径。
-                        actions.debug_request.load_path = item.path;
-                    }
-                    tip(item.path.c_str());
-                    ImGui::PopID();
+        if (ImGui::BeginCombo(grenade() ? "道具方案" : "已保存方案", selected)) {
+            int visible = 0;
+            for (const auto* item : entries) {
+                if (grenade() && !map_filter.empty() && item->map != map_filter) continue;
+                ++visible;
+                ImGui::PushID(item->path.c_str());
+                if (ImGui::Selectable(item->name.c_str(), item->path == request.load_path)) {
+                    send(Action::LOAD_PLAN, actions);
+                    // 成功载入后才更新保存目标，避免旧草稿覆盖新选择。
+                    actions.debug_request.load_path = item->path;
                 }
-                if (snapshot->movement_saved_plans.empty()) ImGui::TextDisabled("暂无方案，编辑后点击保存方案。");
+                tip(item->path.c_str());
+                ImGui::PopID();
             }
+            if (!visible) ImGui::TextDisabled("当前筛选没有方案，可刷新或切换地图。");
             ImGui::EndCombo();
         }
         ImGui::EndDisabled();
-        tip("选择后自动载入，可继续修改并保存；同名方案可通过悬浮路径区分。运行期间不切换方案。");
+        tip(grenade() ? "只载入独立道具库；不会显示或覆盖身法方案。运行期间不切换方案。" :
+            "选择后自动载入，可继续修改并保存；同名方案可通过悬浮路径区分。运行期间不切换方案。");
         ImGui::SameLine();
-        if (button("刷新方案", "只列出主动保存的方案；测试记录和录制草稿不会加入列表。", !busy))
+        if (button("刷新方案", "只列出本页主动保存的方案；测试记录和录制草稿不会加入列表。", !busy))
             send(Action::LIST_MOVEMENT_PLANS, actions);
     }
     void copy_preset(const movement::Config& config, bool spin, bool right, OverlayActions& actions) {
@@ -184,12 +229,12 @@ struct MovementPanel::Impl {
         plan = std::move(copy); error.clear(); changed(actions);
     }
     void editor(OverlayActions& actions, const movement::Config& config, const Snapshot* snapshot) {
-        bool change = text_field("方案名称", plan.name, "独立方案文件的名称，不修改原旋转跳或大跳配置。");
-        change |= text_field("地图（可选）", plan.map, "语音候选仅匹配当前 GSI 地图标识；旧地图备注保留，手动方案不受地图限制。");
-        if (button("使用当前地图", "将有效 GSI 地图填入草稿，保存后才发布语音绑定。", snapshot && snapshot->movement_map.valid)) {
+        bool change = text_field(grenade() ? "道具名称" : "方案名称", plan.name, "本页独立方案文件的名称，不影响另一类方案。");
+        change |= text_field("地图（可选）", plan.map, grenade() ? "记录配方所属地图，供道具列表筛选；手动测试前请自行确认游戏地图。" : "语音候选仅匹配当前 GSI 地图标识；旧地图备注保留，手动方案不受地图限制。");
+        if (button("使用当前地图", "将有效 GSI 地图填入当前草稿，保存后写入本页方案库。", snapshot && snapshot->movement_map.valid)) {
             plan.map = snapshot->movement_map.map_name; change = true;
         }
-        change |= text_field("语音口令", plan.voice_command, "同一地图内口令必须唯一；清空可作为手动方案保存，未保存修改不会发布。");
+        if (!grenade()) change |= text_field("语音口令", plan.voice_command, "同一地图内口令必须唯一；清空可作为手动方案保存，未保存修改不会发布。");
         change |= text_field("点位（可选）", plan.location, "保存点位名称；每次测试前由用户对齐位置和朝向。");
         change |= text_field("起始说明", plan.notes, "记录起始朝向、站位和人工准备步骤；不参与设备执行。");
         auto command = console_command(plan.notes);
@@ -313,7 +358,7 @@ struct MovementPanel::Impl {
     }
 };
 
-MovementPanel::MovementPanel() : impl_(std::make_unique<Impl>()) {}
+MovementPanel::MovementPanel(debug_session::Mode mode) : impl_(std::make_unique<Impl>(mode)) {}
 MovementPanel::~MovementPanel() = default;
 
 void MovementPanel::render(const AppConfig& config, const Snapshot* snapshot, OverlayActions& actions) noexcept {
@@ -322,28 +367,33 @@ void MovementPanel::render(const AppConfig& config, const Snapshot* snapshot, Ov
         ui.sync(snapshot, actions);
         const bool busy = snapshot && snapshot->busy;
         const bool recording = snapshot && snapshot->movement_recording;
-        ImGui::TextWrapped("录制可同时保留人工操作、原身法软件动作和屏蔽区间。录原快捷身法时，先启动 Runtime，再开始录制并执行身法。");
-        ImGui::BeginDisabled(recording || busy);
-        const char* motion_modes[]{"只存原始记录", "按相对位移解释", "按累计坐标解释"};
-        ImGui::SetNextItemWidth(230);
-        ImGui::Combo("录制鼠标解释", &ui.request.movement_record_motion_mode, motion_modes, 3);
-        ImGui::EndDisabled();
-        tip("原始 XY 语义尚未实机标定。选择相对或累计时按该解释生成可修改的方案；原始数据始终保留。只存原始记录不会生成回放方案。");
-        ImGui::TextWrapped("鼠标原始值尚未实机标定：按所选解释生成编辑稿，原始数据始终保留；只存原始记录不生成回放方案。");
-        if (!recording) {
-            if (button("开始录制", "被动录制，不启动 Runtime，不要求当前草稿有效。录制结束后可继续编辑生成的方案。", !busy))
-                ui.send(Action::START_MOVEMENT_RECORDING, actions);
-        } else {
-            if (button("停止录制并生成方案", "停止采集并保留原始记录；生成当前草稿，点击保存才写入方案文件。不会停止原 Runtime。"))
-                ui.send(Action::STOP_MOVEMENT_RECORDING, actions);
-            ImGui::SameLine(); ImGui::Text("已录制 %llu 个事件", static_cast<unsigned long long>(snapshot->movement_record_events));
+        if (!ui.grenade()) {
+            ImGui::TextWrapped("录制可同时保留人工操作、原身法软件动作和屏蔽区间。录原快捷身法时，先启动 Runtime，再开始录制并执行身法。");
+            ImGui::BeginDisabled(recording || busy);
+            const char* motion_modes[]{"只存原始记录", "按相对位移解释", "按累计坐标解释"};
+            ImGui::SetNextItemWidth(230);
+            ImGui::Combo("录制鼠标解释", &ui.request.movement_record_motion_mode, motion_modes, 3);
+            ImGui::EndDisabled();
+            tip("原始 XY 语义尚未实机标定。选择相对或累计时按该解释生成可修改的方案；原始数据始终保留。只存原始记录不会生成回放方案。");
+            ImGui::TextWrapped("鼠标原始值尚未实机标定：按所选解释生成编辑稿，原始数据始终保留；只存原始记录不生成回放方案。");
+            if (!recording) {
+                if (button("开始录制", "被动录制，不启动 Runtime，不要求当前草稿有效。录制结束后可继续编辑生成的方案。", !busy))
+                    ui.send(Action::START_MOVEMENT_RECORDING, actions);
+            } else {
+                if (button("停止录制并生成方案", "停止采集并保留原始记录；生成当前草稿，点击保存才写入方案文件。不会停止原 Runtime。"))
+                    ui.send(Action::STOP_MOVEMENT_RECORDING, actions);
+                ImGui::SameLine(); ImGui::Text("已录制 %llu 个事件", static_cast<unsigned long long>(snapshot->movement_record_events));
+            }
+            if (snapshot && !snapshot->movement_recording_path.empty())
+                ImGui::TextWrapped("录制文件：%s", snapshot->movement_recording_path.c_str());
+            ImGui::Separator();
         }
-        if (snapshot && !snapshot->movement_recording_path.empty())
-            ImGui::TextWrapped("录制文件：%s", snapshot->movement_recording_path.c_str());
-        ImGui::Separator();
-        ImGui::TextWrapped("手动编排并行动作，保存为独立方案；每次执行前请对齐站位与朝向。修改只影响下次测试，当前执行使用启动时的参数。");
+        if (ui.grenade()) {
+            ImGui::TextWrapped("选择道具，复制指令到游戏控制台确认站位与瞄角；拿出对应道具后再启用测试。F11执行当前道具一次，End急停。投掷时序可在下方逐项调整。");
+            ui.library(snapshot, actions, busy || recording);
+        } else ImGui::TextWrapped("手动编排并行动作，保存为独立方案；每次执行前请对齐站位与朝向。修改只影响下次测试，当前执行使用启动时的参数。");
         ImGui::BeginDisabled(recording || (busy && snapshot->state == debug_session::State::WORKING));
-        if (ImGui::CollapsingHeader("原旋转跳与大跳预设")) {
+        if (!ui.grenade() && ImGui::CollapsingHeader("原旋转跳与大跳预设")) {
             const auto& move = config.movement;
             ImGui::TextWrapped("原辅助页继续保留物理跳跃触发、A/D 选侧和固定 A→D 大跳逻辑。下面只复制参数为主动发送空格的自定义脚本。");
             ImGui::Text("旋转跳 %.2f° / %d ms；大跳每侧 %.2f° / %d ms", move.spin_angle_degrees, move.spin_duration_ms, move.large_angle_degrees, move.large_duration_ms);
@@ -357,7 +407,7 @@ void MovementPanel::render(const AppConfig& config, const Snapshot* snapshot, Ov
         ImGui::EndDisabled();
         if (!ui.error.empty()) ImGui::TextWrapped("方案错误：%s", ui.error.c_str());
         ImGui::Separator();
-        ui.library(snapshot, actions, busy || recording);
+        if (!ui.grenade()) ui.library(snapshot, actions, busy || recording);
         if (button("校验方案", "仅校验时间轴及参数，不输出设备。", !busy && !recording)) ui.send(Action::VALIDATE, actions);
         ImGui::SameLine();
         if (button("保存方案", "保存当前修改；已选方案直接更新，新方案自动保存到方案库，无需填写路径。", !busy && !recording)) ui.send(Action::SAVE_PLAN, actions);
@@ -365,26 +415,30 @@ void MovementPanel::render(const AppConfig& config, const Snapshot* snapshot, Ov
         if (button("另存新方案", "将当前草稿保存为新文件，保留原方案。", !busy && !recording)) ui.send(Action::SAVE_PLAN, actions, true);
         ImGui::Text("共享灵敏度 %.3f；m_yaw %.6f", config.movement.sensitivity, config.movement.yaw_degrees_per_count);
         tip("换算参数在辅助 / 身法修改；脚本目标角度不等于游戏已实际完成的转角。");
-        const bool enabled = snapshot && snapshot->movement_test_enabled;
+        const bool enabled = snapshot && snapshot->movement_test_enabled && snapshot->movement_test_mode == ui.request.mode;
+        if (snapshot && snapshot->movement_test_enabled && !enabled) {
+            ImGui::TextColored({1.f, .65f, .2f, 1.f}, "注意：当前F11仍属于%s。", snapshot->movement_test_mode == Mode::GRENADE_TEST ? "道具测试" : "身法编排");
+            ImGui::TextWrapped("浏览或编辑本页不会接管快捷键；请明确启用本页后再按F11。");
+        }
         if (!enabled) {
-            if (button("启用身法测试", "允许本页后续测试输出；启用本身不执行动作。改参、保存和载入后无需重新启用，End 或关闭测试会撤销。", !busy && !recording))
+            if (button(ui.grenade() ? "启用道具测试" : "启用身法测试", "允许本页后续测试输出；启用本身不执行动作。改参、保存和载入后无需重新启用，End 或关闭测试会撤销。", !busy && !recording))
                 ui.send(Action::ENABLE_MOVEMENT_TEST, actions);
         } else {
-            ImGui::TextUnformatted("身法测试已启用：修改后可直接测试或使用全局测试键。");
-            if (button("测试一次", "按最新有效草稿执行一次；运行期间改参用于下一次，忙碌不排队，End 急停。", !busy && !recording))
+            ImGui::TextUnformatted(ui.grenade() ? "道具测试已启用：F11投掷当前道具，修改用于下一次。" : "身法测试已启用：修改后可直接测试或使用全局测试键。");
+            if (button(ui.grenade() ? "投掷一次" : "测试一次", "按最新有效草稿执行一次；运行期间改参用于下一次，忙碌不排队，End 急停。", !busy && !recording))
                 ui.send(Action::RUN_MOVEMENT_TEST, actions);
         }
         ImGui::SameLine();
-        if (button("关闭身法测试", "取消当前测试并撤销后续输出授权，释放脚本输入、恢复物理按键；清理未确认时保留故障。", busy || enabled))
+        if (button(ui.grenade() ? "关闭道具测试" : "关闭身法测试", "取消当前测试并撤销后续输出授权，释放脚本输入、恢复物理按键；清理未确认时保留故障。", busy || enabled))
             ui.send(Action::CANCEL, actions);
         if (!ui.catalog_requested && !busy && !recording && actions.debug_action == Action::NONE) {
             ui.catalog_requested = true;
             ui.send(Action::LIST_MOVEMENT_PLANS, actions);
         }
         if (snapshot && !snapshot->message.empty()) ImGui::TextWrapped("任务反馈：%s", snapshot->message.c_str());
-        ImGui::TextWrapped("全局测试键与执行结果沿用调试模块。计时完成只证明命令执行，实际身法效果需本地游戏核对。");
+        ImGui::TextWrapped(ui.grenade() ? "道具库独立保存；计时完成只证明命令执行，实际烟雾落点需要游戏核对。" : "全局测试键与执行结果沿用调试模块。计时完成只证明命令执行，实际身法效果需本地游戏核对。");
     } catch (...) {
         impl_->changed(actions);
-        ImGui::TextUnformatted("身法草稿无法显示，请重新载入有效方案。");
+        ImGui::TextUnformatted(impl_->grenade() ? "道具草稿无法显示，请重新载入有效方案。" : "身法草稿无法显示，请重新载入有效方案。");
     }
 }

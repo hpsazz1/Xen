@@ -72,8 +72,22 @@ std::filesystem::path new_directory(const std::string& root) {
     }
     throw std::runtime_error("不能建立独立结果目录");
 }
+bool timeline_mode(Mode mode) { return mode == Mode::MOVEMENT_TEST || mode == Mode::GRENADE_TEST; }
+const char* timeline_name(Mode mode) { return mode == Mode::GRENADE_TEST ? "道具" : "身法"; }
+const char* timeline_report(Mode mode) { return mode == Mode::GRENADE_TEST ? "grenade-run-plan.json" : mode == Mode::MOVEMENT_TEST ? "movement-run-plan.json" : "plan.json"; }
+template<class T> auto& current_plan(T& s, Mode mode) { return mode == Mode::GRENADE_TEST ? s.grenade_current : s.movement_current; }
+template<class T> auto& baseline_plan(T& s, Mode mode) { return mode == Mode::GRENADE_TEST ? s.grenade_baseline : s.movement_baseline; }
+void publish_loaded_plan(Snapshot& s, Mode mode, const Json& plan) {
+    auto& loaded = mode == Mode::GRENADE_TEST ? s.grenade_loaded_draft : s.movement_loaded_draft;
+    auto& revision = mode == Mode::GRENADE_TEST ? s.grenade_loaded_revision : s.movement_loaded_revision;
+    loaded = plan; ++revision;
+}
+std::string timeline_library_root(const Request& request) {
+    return request.mode == Mode::GRENADE_TEST && request.movement_library_root == "cache/movement/plans"
+        ? "cache/grenade/plans" : request.movement_library_root;
+}
 Json request_plan(const Request& request) {
-    if (request.mode == Mode::MOVEMENT_TEST) {
+    if (timeline_mode(request.mode)) {
         movement::timeline::Plan plan;
         std::string error;
         if (!movement::timeline::parse_plan(parse_document(request.plan_text,16*1024*1024),plan,error))
@@ -90,7 +104,7 @@ Json request_plan(const Request& request) {
         {"shot_after_release_ms",18},{"shot_hold_ms",5},{"late_tolerance_ms",5},{"direction",2}});
 }
 Json request_sampling(const Request& request) {
-    if (request.mode == Mode::MOVEMENT_TEST) return Json::object();
+    if (timeline_mode(request.mode)) return Json::object();
     if (request.mode == Mode::FIRE_TEST) {
         SamplingSettings settings; settings.hud_enabled = false;
         return sampling_settings_json(settings); // 原地点射不以其他页面的模型草稿作为准入条件。
@@ -116,7 +130,7 @@ DebugRunMode run_mode(Mode mode) {
 }
 bool recoil_mode(Mode mode) { return mode == Mode::RECOIL_TEST || mode == Mode::RECOIL_CALIBRATE || mode == Mode::RECOIL_CAPTURE; }
 bool single_use_recoil_mode(Mode mode) { return mode == Mode::RECOIL_CALIBRATE || mode == Mode::RECOIL_CAPTURE; }
-bool physical_mode(Mode mode) { return mode == Mode::COUNTERPULSE || mode == Mode::FIRE_TEST || mode == Mode::MOVEMENT_TEST || recoil_mode(mode); }
+bool physical_mode(Mode mode) { return mode == Mode::COUNTERPULSE || mode == Mode::FIRE_TEST || timeline_mode(mode) || recoil_mode(mode); }
 bool uses_device(Mode mode) { return physical_mode(mode) || mode == Mode::MANUAL_RECORDING; }
 void admit(const Context& context, Mode mode) {
     if (!uses_device(mode)) return;
@@ -302,6 +316,7 @@ struct Session::Impl {
                 s.draft_plan=plan;
                 s.movement_current=plan; s.movement_voice_selected=false;
                 s.draft_plan_mode=Mode::MOVEMENT_TEST; ++s.draft_plan_revision;
+                publish_loaded_plan(s,Mode::MOVEMENT_TEST,plan);
             }
         });
     }
@@ -311,9 +326,10 @@ struct Session::Impl {
         if (!parse_plan(work.plan,plan,error)) throw DebugRunFailure(error,true);
         auto& device = *work.context.device;
         const auto& config = work.context.config;
+        const auto label = std::string(timeline_name(work.request.mode));
         if (!device.supports_wasd_keyboard() || config.keyboard.emergency_virtual_keys.empty() ||
             !valid_keyboard_config(config.keyboard))
-            throw DebugRunFailure("身法测试需要方向键能力和有效急停键，未开始输出",true);
+            throw DebugRunFailure(label + "测试需要方向键能力和有效急停键，未开始输出",true);
         source_context::SourceContextClient source;
         auto source_config = config.source_context;
         char* token = nullptr; std::size_t token_size = 0;
@@ -321,7 +337,7 @@ struct Session::Impl {
             source_config.token = token; std::free(token);
         }
         if (!source_config.enabled || !source.start(source_config))
-            throw DebugRunFailure("源焦点接收器未配置或启动失败，身法未开始输出",true);
+            throw DebugRunFailure("源焦点接收器未配置或启动失败，" + label + "未开始输出",true);
         const auto emergency = [&] {
             if (canceled.load()) return true;
             InputSnapshot input;
@@ -332,8 +348,8 @@ struct Session::Impl {
                 }
             return false;
         };
-        update([](Snapshot& s) { s.state = State::RUNNING;
-            s.message = "等待源端游戏聚焦；允许持续按住WASD，起跳后按方案屏蔽；急停键可取消"; });
+        update([&](Snapshot& s) { s.state = State::RUNNING;
+            s.message = "等待源端游戏聚焦；" + label + "按当前方案执行，急停键可取消"; });
         source_context::SourceContextSnapshot initial;
         const auto deadline = std::chrono::steady_clock::now() + 15s;
         bool ready = false;
@@ -344,7 +360,7 @@ struct Session::Impl {
             }
             std::this_thread::sleep_for(2ms);
         }
-        if (!ready) throw DebugRunFailure(canceled.load() ? "身法测试已取消，未开始输出" :
+        if (!ready) throw DebugRunFailure(canceled.load() ? label + "测试已取消，未开始输出" :
             "等待源焦点或设备输入超时，未开始输出",true);
         Callbacks callbacks;
         callbacks.canceled = emergency;
@@ -360,11 +376,11 @@ struct Session::Impl {
             published_ms = p.elapsed_ms;
             const auto value = std::make_shared<const Json>(Json{{"elapsed_ms",p.elapsed_ms},
                 {"total_ms",p.total_ms},{"sent_dx",p.sent_dx}});
-            update([&](Snapshot& s) { s.live = value; s.message = "身法执行中：" +
+            update([&](Snapshot& s) { s.live = value; s.message = std::string(timeline_name(work.request.mode)) + "执行中：" +
                 std::to_string(p.elapsed_ms) + "/" + std::to_string(p.total_ms) + " ms"; });
         };
         const auto result = run_plan(device,plan,config.movement,callbacks);
-        Json index{{"schema_version",1},{"mode","movement"},{"prepared_id",work.id},
+        Json index{{"schema_version",1},{"mode",work.request.mode == Mode::GRENADE_TEST ? "grenade" : "movement"},{"prepared_id",work.id},
             {"code_identity",code_identity()},{"plan",work.plan},
             {"sensitivity",config.movement.sensitivity},{"yaw_degrees_per_count",config.movement.yaw_degrees_per_count},
             {"success",result.outcome == Outcome::COMPLETED},{"cleanup_known",result.cleanup_known},
@@ -372,19 +388,20 @@ struct Session::Impl {
             {"planned_duration_ms",duration_ms(plan)},{"actual_duration_with_cleanup_ms",result.elapsed_ms},
             {"error",result.error},{"physical_output",true},{"physical_validation_passed",false}};
         try { write_document(work.directory/"result-index.json",index); }
-        catch (...) { throw DebugRunFailure("身法结果保存失败",false,result.cleanup_known); }
+        catch (...) { throw DebugRunFailure(std::string(timeline_name(work.request.mode)) + "结果保存失败",false,result.cleanup_known); }
         auto completed = std::make_shared<const Json>(std::move(index));
         update([&](Snapshot& s) {
             s.result = completed; s.cleanup_unknown = !result.cleanup_known;
             s.state = s.cleanup_unknown ? State::CLEANUP_UNKNOWN : result.outcome == Outcome::COMPLETED ?
                 State::COMPLETED : result.outcome == Outcome::CANCELED ? State::CANCELED : State::FAILED;
-            s.message = s.cleanup_unknown ? "身法输入释放未确认，禁止新物理任务" :
-                result.outcome == Outcome::COMPLETED ? "身法执行完成并已解除屏蔽；游戏动作效果请结合录像核对" :
-                result.error.empty() ? "身法已取消并清理" : result.error;
+            const auto prefix = std::string(timeline_name(work.request.mode));
+            s.message = s.cleanup_unknown ? prefix + "输入释放未确认，禁止新物理任务" :
+                result.outcome == Outcome::COMPLETED ? prefix + "执行完成并已解除屏蔽；游戏效果需人工核对" :
+                result.error.empty() ? prefix + "已取消并清理" : result.error;
         });
     }
     void run(Prepared work, bool allow, const std::string& confirmation) {
-        if (work.request.mode == Mode::MOVEMENT_TEST) { run_movement(work); return; }
+        if (timeline_mode(work.request.mode)) { run_movement(work); return; }
         if (recoil_mode(work.request.mode)) {
             update([&](Snapshot& s) { s.state=State::RUNNING;s.report_directory=(work.directory/"run").string();
                 s.message="等待源端聚焦并松开键鼠，然后执行一组；紧急停止键可取消"; });
@@ -584,41 +601,46 @@ void Session::invalidate_repeat(const std::string& reason) noexcept {
     }); } catch (...) {}
 }
 bool Session::update_movement_draft(const Request& request, const Context& context, bool manual) noexcept {
-    if (impl_->shutting_down || request.mode != Mode::MOVEMENT_TEST) return false;
+    if (impl_->shutting_down || !timeline_mode(request.mode)) return false;
+    const auto owns_test = [&] { const auto s = snapshot(); return s->movement_test_enabled && s->movement_test_mode == request.mode; };
     try {
         const auto plan = request_plan(request);
-        const bool changed = snapshot()->movement_current != plan;
-        if (manual && changed) ++impl_->repeat_revision;
+        const bool changed = current_plan(*snapshot(),request.mode) != plan;
+        if (manual && changed && owns_test()) ++impl_->repeat_revision;
         impl_->update([&](Snapshot& s) {
-            s.movement_current = plan;
-            if (manual && changed) s.movement_voice_selected = false;
+            current_plan(s,request.mode) = plan;
+            if (manual && changed && request.mode == Mode::MOVEMENT_TEST) s.movement_voice_selected = false;
         });
-        if (!snapshot()->movement_test_enabled) return false;
+        // 编辑另一页只更新该页草稿，不能接管或撤销当前F11模板。
+        if (!owns_test()) return false;
         const auto& binding = impl_->movement_binding;
         if (!binding || binding->device != context.device || !context.runtime_idle || !context.input_recording_idle ||
             !context.cleanup_known || !context.config.mouse.allow_send_input ||
             binding->config.keyboard.debug_test_virtual_keys != context.config.keyboard.debug_test_virtual_keys ||
             binding->config.keyboard.emergency_virtual_keys != context.config.keyboard.emergency_virtual_keys) {
-            invalidate_repeat("身法测试运行环境已改变，请重新启用"); return false;
+            invalidate_repeat("测试运行环境已改变，请重新启用"); return false;
         }
         const auto revision = ++impl_->repeat_revision;
         impl_->repeat_plan.store(nullptr);
-        // 先撤掉旧草稿；解析失败也不能执行上一次有效参数。
-        impl_->update([](Snapshot& s) { s.repeat_ready = false; s.repeat_unavailable_reason = "身法草稿无效，请修正参数"; });
-        Impl::Prepared work{request,context,plan,Json::object(),"movement-session-" + std::to_string(revision),{}};
+        impl_->update([](Snapshot& s) { s.repeat_ready = false; s.repeat_unavailable_reason = "当前草稿无效，请修正参数"; });
+        Impl::Prepared work{request,context,plan,Json::object(),"timeline-session-" + std::to_string(revision),{}};
         work.repeat_revision = revision;
         impl_->repeat_plan.store(std::make_shared<const Impl::Prepared>(std::move(work)));
         impl_->update([&](Snapshot& s) {
-            if (s.movement_test_enabled) {
+            if (s.movement_test_enabled && s.movement_test_mode == request.mode) {
                 s.repeat_ready = true; s.repeat_unavailable_reason.clear();
-                if (!s.busy) s.message = "身法测试已启用，修改参数后可直接测试";
+                if (!s.busy) s.message = std::string(timeline_name(request.mode)) + "测试已启用，修改参数后可直接测试";
             } else impl_->repeat_plan.store(nullptr);
         });
-        return snapshot()->movement_test_enabled;
+        return owns_test();
     } catch (...) {
-        ++impl_->repeat_revision; impl_->repeat_plan.store(nullptr);
-        try { impl_->update([](Snapshot& s) { s.movement_current = Json(); s.movement_voice_selected = false;
-            s.repeat_ready = false; s.repeat_unavailable_reason = "身法草稿无效，请修正参数"; }); } catch (...) {}
+        const bool owner = owns_test();
+        if (owner) { ++impl_->repeat_revision; impl_->repeat_plan.store(nullptr); }
+        try { impl_->update([&](Snapshot& s) {
+            current_plan(s,request.mode) = Json();
+            if (request.mode == Mode::MOVEMENT_TEST) s.movement_voice_selected = false;
+            if (owner) { s.repeat_ready = false; s.repeat_unavailable_reason = "当前草稿无效，请修正参数"; }
+        }); } catch (...) {}
         return false;
     }
 }
@@ -636,7 +658,8 @@ void Session::update_map(const weapon::MapSnapshot& map) noexcept {
 bool Session::select_voice(const Request& request, const Context& context) noexcept {
     try {
         const auto s = snapshot();
-        if (busy() || impl_->shutting_down || !s->movement_test_enabled || !context.map.valid ||
+        if (busy() || impl_->shutting_down || request.mode != Mode::MOVEMENT_TEST ||
+            s->movement_test_mode != Mode::MOVEMENT_TEST || !s->movement_test_enabled || !context.map.valid ||
             s->movement_current != s->movement_baseline || !context.runtime_idle || !context.input_recording_idle ||
             !context.cleanup_known || !context.config.mouse.allow_send_input) return false;
         admit(context, Mode::MOVEMENT_TEST);
@@ -657,7 +680,7 @@ std::optional<bool> Session::finish_voice(const Context& context, bool still_cur
         const auto plan = impl_->voice_load.get();
         const auto s = snapshot();
         const auto& binding = impl_->movement_binding;
-        if (!still_current || impl_->shutting_down || !s->movement_test_enabled ||
+        if (!still_current || impl_->shutting_down || !s->movement_test_enabled || s->movement_test_mode != Mode::MOVEMENT_TEST ||
             impl_->voice_revision != impl_->repeat_revision.load() || !context.map.valid ||
             impl_->voice_epoch != context.map.context_epoch || plan.value("map",std::string{}) != context.map.map_name ||
             !context.runtime_idle || !context.input_recording_idle || !context.cleanup_known ||
@@ -670,6 +693,7 @@ std::optional<bool> Session::finish_voice(const Context& context, bool still_cur
         if (!update_movement_draft(request,context,false)) return false;
         impl_->update([&](Snapshot& next) {
             next.draft_plan = plan; next.draft_plan_mode = Mode::MOVEMENT_TEST; ++next.draft_plan_revision;
+            publish_loaded_plan(next,Mode::MOVEMENT_TEST,plan);
             next.movement_baseline = plan; next.movement_current = plan;
             next.movement_selected_path = request.load_path; ++next.movement_catalog_revision;
             next.movement_voice_selected = true; next.movement_voice_epoch = context.map.context_epoch;
@@ -691,8 +715,9 @@ bool Session::run_repeat(const Context& context, bool keyboard_trigger) noexcept
             return reject("语音方案地图已失效，请重新选择");
         if (keyboard_trigger && !context.config.keyboard.debug_test_enabled) return reject("调试测试快捷键开关未启用");
         const auto source = impl_->repeat_plan.load();
-        if (!keyboard_trigger && (!source || source->request.mode != Mode::MOVEMENT_TEST || !snapshot()->movement_test_enabled))
-            return reject("请先启用身法测试并修正当前参数");
+        if (!keyboard_trigger && (!source || !timeline_mode(source->request.mode) || !snapshot()->movement_test_enabled ||
+            snapshot()->movement_test_mode != source->request.mode))
+            return reject("请先启用当前页面测试并修正参数");
         if (!source || source->repeat_revision != impl_->repeat_revision.load() || !physical_mode(source->request.mode)) {
             const auto current=snapshot();
             // 无许可重按不能覆盖上组失败；保留原始原因供用户决定如何重新准备。
@@ -711,7 +736,7 @@ bool Session::run_repeat(const Context& context, bool keyboard_trigger) noexcept
             return reject("设备或清理状态变化，请重新准备");
         if (!context.config.mouse.allow_send_input || !source->context.config.mouse.allow_send_input)
             return reject("设置中的物理输出未允许，请保存后重新准备");
-        if ((recoil_mode(source->request.mode) || source->request.mode == Mode::MOVEMENT_TEST) &&
+        if ((recoil_mode(source->request.mode) || timeline_mode(source->request.mode)) &&
             (context.config.keyboard.debug_test_virtual_keys != source->context.config.keyboard.debug_test_virtual_keys ||
              context.config.keyboard.emergency_virtual_keys != source->context.config.keyboard.emergency_virtual_keys))
             return reject("测试键或紧急停止键已改变，请重新准备");
@@ -725,7 +750,7 @@ bool Session::run_repeat(const Context& context, bool keyboard_trigger) noexcept
             write_document(work.directory / "prepare.json",{{"schema_version",1},{"prepared_id",work.id},
                 {"repeat_of",parent_id},{"trigger",keyboard_trigger ? "USER_HOTKEY" : "USER_BUTTON"},{"code_identity",code_identity()},
                 {"plan",work.plan},{"sampling",work.sampling},{"physical_output",true}});
-            write_document(work.directory / (work.request.mode == Mode::MOVEMENT_TEST ? "movement-run-plan.json" : "plan.json"),work.plan);
+            write_document(work.directory / timeline_report(work.request.mode),work.plan);
             write_document(work.directory / "sampling-settings.json",work.sampling);
             impl_->update([&](Snapshot& s) { s.prepared_id = work.id; s.report_directory = work.directory.string(); });
             impl_->run(work,true,physical_confirmation());
@@ -773,18 +798,19 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
             return impl_->launch(State::RUNNING,false,[this,request,context]{impl_->record_movement(request,context);});
         }
         if (action == Action::ENABLE_MOVEMENT_TEST) {
-            if (request.mode != Mode::MOVEMENT_TEST) return reject("只有身法页面可以启用身法测试");
+            if (!timeline_mode(request.mode)) return reject("只有身法或道具页面可以启用动作测试");
             admit(context,request.mode);
             if (snapshot()->cleanup_unknown || !context.config.mouse.allow_send_input)
                 return reject("设备清理未确认或设置中的物理输出未允许");
-            invalidate_repeat("已切换到身法测试");
+            invalidate_repeat("已切换测试执行域");
             impl_->prepared.reset(); impl_->movement_binding = context;
-            impl_->update([](Snapshot& s) { s.movement_test_enabled = true; });
+            impl_->update([&](Snapshot& s) { s.movement_test_enabled = true; s.movement_test_mode = request.mode; });
             update_movement_draft(request,context);
             return true;
         }
         if (action == Action::RUN_MOVEMENT_TEST) {
-            if (!update_movement_draft(request,context)) return reject("请启用身法测试并修正当前草稿");
+            if (snapshot()->movement_test_mode != request.mode) return reject("请先启用本页测试；另一页仍持有F11");
+            if (!update_movement_draft(request,context)) return reject("请启用当前页面测试并修正草稿");
             return run_repeat(context,false);
         }
         if (action == Action::START) {
@@ -805,48 +831,51 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
             });
         }
         if (snapshot()->cleanup_unknown && uses_device(request.mode)) return false;
-        const bool movement_document = request.mode == Mode::MOVEMENT_TEST &&
+        const bool movement_document = timeline_mode(request.mode) &&
             (action == Action::LIST_MOVEMENT_PLANS || action == Action::LOAD_PLAN ||
              action == Action::SAVE_PLAN || action == Action::VALIDATE);
         if (!movement_document) {
             impl_->prepared.reset();
             invalidate_repeat("新任务正在准备；旧测试模板已失效");
-        } else if (action == Action::LOAD_PLAN) {
+        } else if (action == Action::LOAD_PLAN && snapshot()->movement_test_mode == request.mode) {
             // 载入期间不留旧参数兜底；页面接收载入草稿后更新下一次测试。
             ++impl_->repeat_revision; impl_->repeat_plan.store(nullptr);
-            impl_->update([](Snapshot& s) { s.repeat_ready = false; s.repeat_unavailable_reason = "等待载入身法方案"; });
+            impl_->update([](Snapshot& s) { s.repeat_ready = false; s.repeat_unavailable_reason = "等待载入当前方案"; });
         }
         const auto repeat_revision = impl_->repeat_revision.load();
-        if (request.mode == Mode::MOVEMENT_TEST && action == Action::SAVE_PLAN) {
+        if (timeline_mode(request.mode) && action == Action::SAVE_PLAN) {
             const auto current = request_plan(request);
-            impl_->update([&](Snapshot& s) { s.movement_current = current; });
+            impl_->update([&](Snapshot& s) { current_plan(s,request.mode) = current; });
         }
         impl_->update([](Snapshot& s) { s.prepared_id.clear(); });
         return impl_->launch(State::WORKING,false,[this,action,request,context,repeat_revision] {
             const auto refresh_movement_library = [&](const std::string& selected) {
-                const auto entries = detail::list_movement_plans(request.movement_library_root,request.output_root);
+                const auto entries = detail::list_movement_plans(timeline_library_root(request),request.output_root);
                 impl_->update([&](Snapshot& s) {
-                    s.movement_saved_plans.clear();
-                    for (const auto& entry : entries) s.movement_saved_plans.push_back({entry.path,entry.name,entry.map,entry.voice_command});
-                    s.movement_selected_path = selected; ++s.movement_catalog_revision;
+                    auto& catalog = request.mode == Mode::GRENADE_TEST ? s.grenade_saved_plans : s.movement_saved_plans;
+                    auto& path = request.mode == Mode::GRENADE_TEST ? s.grenade_selected_path : s.movement_selected_path;
+                    auto& revision = request.mode == Mode::GRENADE_TEST ? s.grenade_catalog_revision : s.movement_catalog_revision;
+                    catalog.clear();
+                    for (const auto& entry : entries) catalog.push_back({entry.path,entry.name,entry.map,entry.voice_command});
+                    path = selected; ++revision;
                 });
             };
-            if (request.mode == Mode::MOVEMENT_TEST && action == Action::LIST_MOVEMENT_PLANS) {
+            if (timeline_mode(request.mode) && action == Action::LIST_MOVEMENT_PLANS) {
                 refresh_movement_library(request.load_path);
-                impl_->update([](Snapshot& s) { s.state = State::COMPLETED; s.message = "已刷新身法方案列表"; });
+                impl_->update([&](Snapshot& s) { s.state = State::COMPLETED; s.message = std::string("已刷新") + timeline_name(request.mode) + "方案列表"; });
                 return;
             }
-            if (request.mode == Mode::MOVEMENT_TEST && action == Action::SAVE_PLAN) {
+            if (timeline_mode(request.mode) && action == Action::SAVE_PLAN) {
                 const auto plan = request_plan(request);
                 std::string path;
-                try { path = detail::save_movement_plan(plan,request.load_path,request.movement_save_as,request.movement_library_root); }
+                try { path = detail::save_movement_plan(plan,request.load_path,request.movement_save_as,timeline_library_root(request)); }
                 catch (const std::exception& error) {
                     impl_->update([&](Snapshot& s) { s.state = State::COMPLETED; s.message = error.what(); });
                     return;
                 }
                 refresh_movement_library(path);
-                impl_->update([&](Snapshot& s) { s.movement_baseline = plan;
-                    s.state = State::COMPLETED; s.message = "身法方案已保存，可从下拉框重新选择"; });
+                impl_->update([&](Snapshot& s) { baseline_plan(s,request.mode) = plan;
+                    s.state = State::COMPLETED; s.message = std::string(timeline_name(request.mode)) + "方案已保存，可从下拉框重新选择"; });
                 return;
             }
             if (action == Action::SAVE_WEAPON_TIMING) {
@@ -886,23 +915,25 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
             }
             if (action == Action::LOAD_PLAN || action == Action::LOAD_SAMPLING || action == Action::LOAD_FIRE_SETTINGS) {
                 const auto document = read_document(std::filesystem::u8path(request.load_path),
-                    request.mode == Mode::MOVEMENT_TEST ? 16*1024*1024 : kDocumentLimit);
+                    timeline_mode(request.mode) ? 16*1024*1024 : kDocumentLimit);
                 const auto value = action == Action::LOAD_SAMPLING ? sampling_settings_json(parse_sampling_settings(document)) :
                     action == Action::LOAD_FIRE_SETTINGS ? make_fire_test_plan(document) :
-                    request.mode == Mode::MOVEMENT_TEST ? request_plan([&] { auto r=request; r.plan_text=document.dump(); return r; }()) : validate_debug_plan(document);
+                    timeline_mode(request.mode) ? request_plan([&] { auto r=request; r.plan_text=document.dump(); return r; }()) : validate_debug_plan(document);
                 impl_->update([&](Snapshot& s) { if (action == Action::LOAD_SAMPLING) s.sampling = value; else s.plan = value;
                     if (action == Action::LOAD_SAMPLING) { s.draft_sampling = value; ++s.draft_sampling_revision; }
                     else { s.draft_plan = value; s.draft_plan_mode = action == Action::LOAD_FIRE_SETTINGS ? Mode::FIRE_TEST :
-                        request.mode == Mode::MOVEMENT_TEST ? Mode::MOVEMENT_TEST : Mode::COUNTERPULSE;
-                        ++s.draft_plan_revision; }
+                        timeline_mode(request.mode) ? request.mode : Mode::COUNTERPULSE;
+                        ++s.draft_plan_revision;
+                        if (timeline_mode(request.mode)) publish_loaded_plan(s,request.mode,value);
+                    }
                     s.state = State::COMPLETED; s.message = "文档已载入，请检查草稿并重新准备"; });
-                if (request.mode == Mode::MOVEMENT_TEST) {
-                    impl_->update([&](Snapshot& s) { s.movement_baseline = value; s.movement_current = value;
-                        s.movement_voice_selected = false; });
+                if (timeline_mode(request.mode)) {
+                    impl_->update([&](Snapshot& s) { baseline_plan(s,request.mode) = value; current_plan(s,request.mode) = value;
+                        if (request.mode == Mode::MOVEMENT_TEST) s.movement_voice_selected = false; });
                     auto loaded = request; loaded.plan_text = value.dump();
                     update_movement_draft(loaded,context,false);
                     refresh_movement_library(request.load_path);
-                    impl_->update([](Snapshot& s) { s.message = "身法方案已载入，修改后可直接测试或保存"; });
+                    impl_->update([&](Snapshot& s) { s.message = std::string(timeline_name(request.mode)) + "方案已载入，修改后可直接测试或保存"; });
                 }
                 return;
             }
@@ -955,7 +986,7 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
                 {"code_identity",code_identity()},
                 {"parent_run",effective.input_path},{"physical_output",false},{"state","PREPARED_NOT_LAUNCHED"}};
             write_document(directory / "prepare.json",task);
-            if (!plan.empty()) write_document(directory / (effective.mode == Mode::MOVEMENT_TEST ? "movement-run-plan.json" : "plan.json"),plan);
+            if (!plan.empty()) write_document(directory / timeline_report(effective.mode),plan);
             write_document(directory / "sampling-settings.json",sampling);
             impl_->update([&](Snapshot& s) { s.report_directory = directory.string(); });
             if (action == Action::SAVE_PLAN) {

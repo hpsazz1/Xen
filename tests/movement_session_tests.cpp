@@ -564,6 +564,78 @@ void test_voice_selection(const std::filesystem::path& root) {
         "设备变化导致失败语音部分写入草稿或基线");
     require(device->touches == 0, "语音选择专项触碰了设备操作");
 }
+void test_grenade_domain_isolation(const std::filesystem::path& root) {
+    FocusFixture focus;
+    auto device = std::make_shared<RecordingDevice>();
+    auto context = context_for(device); context.config.source_context = focus.config;
+    context.map.valid = true; context.map.map_name = "de_mirage"; context.map.context_epoch = 21;
+    const auto domain_root = root / ("domain-isolation-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    auto move = request_for(domain_root);
+    auto grenade = move; grenade.mode = Mode::GRENADE_TEST;
+    grenade.movement_library_root = utf8(domain_root / "grenade-library");
+    movement::timeline::Plan plan; plan.name = "身法独立方案"; plan.map = "de_mirage";
+    plan.mask.enabled = false;
+    plan.actions = {{movement::timeline::ActionKind::KEY,movement::timeline::Key::W,0,40}};
+    move.plan_text = movement::timeline::plan_json(plan).dump();
+    plan.name = "Mirage道具独立方案"; plan.actions[0].key = movement::timeline::Key::A;
+    grenade.plan_text = movement::timeline::plan_json(plan).dump();
+    Session session;
+    submit(session,Action::SAVE_PLAN,move,context,State::COMPLETED);
+    move.load_path = session.snapshot()->movement_selected_path;
+    const auto movement_catalog = session.snapshot()->movement_catalog_revision;
+    submit(session,Action::SAVE_PLAN,grenade,context,State::COMPLETED);
+    grenade.load_path = session.snapshot()->grenade_selected_path;
+    auto snap = session.snapshot();
+    require(snap->movement_selected_path == move.load_path && snap->movement_catalog_revision == movement_catalog &&
+        !grenade.load_path.empty() && snap->grenade_saved_plans.size() == 1 && snap->movement_saved_plans.size() >= 1 &&
+        snap->grenade_current == Json::parse(grenade.plan_text) && snap->movement_current == Json::parse(move.plan_text),
+        "道具保存污染身法目录、选中项或草稿");
+    submit(session,Action::LOAD_PLAN,grenade,context,State::COMPLETED);
+    require(session.snapshot()->draft_plan_mode == Mode::GRENADE_TEST &&
+        session.snapshot()->draft_plan == Json::parse(grenade.plan_text), "道具载入未标记独立草稿域");
+    // 两页依次完成载入、UI尚未消费时，两份发布内容都必须留存。
+    const auto grenade_revision = session.snapshot()->grenade_loaded_revision;
+    submit(session,Action::LOAD_PLAN,move,context,State::COMPLETED);
+    require(session.snapshot()->movement_loaded_draft == Json::parse(move.plan_text) &&
+        session.snapshot()->movement_loaded_revision == 1 &&
+        session.snapshot()->grenade_loaded_draft == Json::parse(grenade.plan_text) &&
+        session.snapshot()->grenade_loaded_revision == grenade_revision,
+        "另一页载入吞掉未消费的独立草稿发布");
+    require(session.dispatch(Action::ENABLE_MOVEMENT_TEST,move,context), "身法owner启用失败");
+    submit(session,Action::LOAD_PLAN,grenade,context,State::COMPLETED);
+    require(session.snapshot()->movement_test_mode == Mode::MOVEMENT_TEST && session.snapshot()->repeat_ready &&
+        !session.dispatch(Action::RUN_MOVEMENT_TEST,grenade,context), "异域载入或运行抢占身法F11");
+    require(session.repeat(context), "道具载入后身法F11失效"); wait_idle(session);
+    snap = session.snapshot();
+    require(snap->state == State::COMPLETED && snap->result->at("mode") == "movement" &&
+        read_json(std::filesystem::u8path(snap->report_directory)/"movement-run-plan.json") == Json::parse(move.plan_text),
+        "身法F11误执行道具草稿");
+    require(session.dispatch(Action::ENABLE_MOVEMENT_TEST,grenade,context) &&
+        session.snapshot()->movement_test_mode == Mode::GRENADE_TEST && !session.snapshot()->movement_voice_selected,
+        "明确启用道具未切换owner或清除语音来源");
+    require(!session.select_voice(move,context), "道具测试仍接受身法语音选择");
+    auto invalid_move = move; invalid_move.plan_text = "损坏的另一页草稿";
+    require(!session.update_movement_draft(invalid_move,context) && session.snapshot()->repeat_ready &&
+        session.snapshot()->movement_test_mode == Mode::GRENADE_TEST, "另一页坏草稿撤销道具F11");
+    require(!session.update_movement_draft(move,context), "另一页编辑错误获得道具输出许可");
+    require(session.snapshot()->grenade_loaded_draft == Json::parse(grenade.plan_text) &&
+        session.snapshot()->movement_loaded_draft == Json::parse(move.plan_text),
+        "普通草稿编辑改写显式载入发布槽");
+    submit(session,Action::LOAD_PLAN,move,context,State::COMPLETED);
+    require(session.snapshot()->grenade_selected_path == grenade.load_path &&
+        session.snapshot()->grenade_baseline == Json::parse(grenade.plan_text) && session.snapshot()->repeat_ready &&
+        !session.dispatch(Action::RUN_MOVEMENT_TEST,move,context), "身法载入污染道具基线或抢占owner");
+    require(session.repeat(context), "道具F11执行失败"); wait_idle(session);
+    snap = session.snapshot();
+    require(snap->state == State::COMPLETED && snap->result->at("mode") == "grenade" &&
+        read_json(std::filesystem::u8path(snap->report_directory)/"grenade-run-plan.json") == Json::parse(grenade.plan_text) &&
+        !std::filesystem::exists(std::filesystem::u8path(snap->report_directory)/"movement-run-plan.json"),
+        "道具F11误执行身法或报告归属错误");
+    session.cancel();
+    require(!session.snapshot()->movement_test_enabled && !session.repeat(context) && device->cleanups == 2,
+        "急停未撤销共享许可或未完成两次清理");
+    require(!focus.failed && device->touches == 0, "域隔离专项误触设备或源fixture失败");
+}
 void test_passive_recording(const std::filesystem::path& root, bool incomplete) {
     auto device = std::make_shared<TraceDevice>();
     device->incomplete = incomplete;
@@ -649,6 +721,7 @@ int main(int argc, char** argv) {
         test_enabled_edit_and_cancel(root);
         test_edit_while_running(root);
         test_voice_selection(root);
+        test_grenade_domain_isolation(root);
         test_passive_recording(root, false);
         test_passive_recording(root, true);
         std::cout << "身法会话测试通过（合成设备，未执行真实输出）\n";

@@ -8,7 +8,7 @@ struct OverlayActions;
 // 页面只编辑草稿；文件读写、准备及设备执行交由统一调试会话。
 class MovementPanel {
 public:
-    MovementPanel();
+    explicit MovementPanel(debug_session::Mode mode = debug_session::Mode::MOVEMENT_TEST);
     ~MovementPanel();
     MovementPanel(const MovementPanel&) = delete;
     MovementPanel& operator=(const MovementPanel&) = delete;

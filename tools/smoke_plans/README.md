@@ -1,6 +1,6 @@
 # 烟雾方案初稿生成器
 
-把已经核对来源的 `data-smokes.json` 转成独立的 schema 3 身法方案，供现有编辑器逐条载入调试。只使用 Python 标准库，不连接设备、不操作游戏、不写入正式方案库，也不自动绑定全局快捷键。
+把已经核对来源的 `data-smokes.json` 转成 schema 3 动作方案，供“调试 → 道具测试”逐条载入调试。道具正式库为 `cache/grenade/plans`，与身法库 `cache/movement/plans` 分离。生成器只使用 Python 标准库，不连接设备、不操作游戏、不自动安装或绑定全局快捷键。
 
 ```powershell
 py -3 -X utf8 -B tools/smoke_plans/generate.py --input docs/evidence/XEN-SMOKE-MANUAL-20261026-001/data-smokes.json --output docs/evidence/XEN-SMOKE-MANUAL-20261026-001/plans
@@ -21,4 +21,13 @@ py -3 -X utf8 -B tools/smoke_plans/generate.py --input docs/evidence/XEN-SMOKE-M
 
 从已安装初稿中选择一条，在练习地图手动粘贴对应命令确认站位和瞄点，关闭控制台、切出烟雾，再按项目现有测试流程使用执行热键。每次只测试当前选中的方案，不将来源字段齐全当作落点成功。
 
-每次只改一个动作参数，使用“另存”为新调试版本并记录成功次数和偏差；确认可用后再保留正式方案。不要用重新运行生成器覆盖编辑器保存结果。淘汰项从正式库移到库外备份位置，原始清单与 `manifest.json` 保持可追溯；待补项先人工补齐动作条件，不能为凑齐数量随意套用时长。语音口令默认空，不加入现有语音选择。
+每次只改一个动作参数，使用“另存”为新调试版本并记录成功次数和偏差；确认可用后再保留正式方案。不要用重新运行生成器覆盖编辑器保存结果。淘汰项从道具正式库移到库外备份位置，原始清单与 `manifest.json` 保持可追溯；待补项先人工补齐动作条件，不能为凑齐数量随意套用时长。道具不加入身法语音选择。
+
+## 迁移旧方案
+
+`migrate_library.ps1` 按显式JSON文件名数组，将指定文件从包内 `cache/movement/plans` 移至 `cache/grenade/plans`，保持实际文件字节（包括用户调过的参数）。先关闭该包程序，默认只预检，传 `-Apply` 才移动。所有路径须留在包内，无重解析点；目标同名冲突整批停止，不覆盖。已迁移项支持重入；无关身法文件回读保护。
+
+```powershell
+./tools/smoke_plans/migrate_library.ps1 -PackageRoot cache/releases/Xen-current -NamesPath <文件名数组.json> -ReportPath <迁移报告.json>
+# 核对预检后，同一命令增加 -Apply 执行。
+```

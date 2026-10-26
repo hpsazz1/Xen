@@ -15,7 +15,7 @@ class Runtime;
 namespace debug_session {
 using Json = nlohmann::json;
 enum class Mode { COUNTERPULSE, FIRE_TEST, RECOIL_TEST, RECOIL_CALIBRATE, RECOIL_CAPTURE, MANUAL_RECORDING, EVALUATE_MANUAL,
-    EVALUATE_COMMANDS, DERIVE_DEFAULTS, DERIVE_PLAN, MOVEMENT_TEST };
+    EVALUATE_COMMANDS, DERIVE_DEFAULTS, DERIVE_PLAN, MOVEMENT_TEST, GRENADE_TEST };
 enum class Action { NONE, VALIDATE, SAVE_PLAN, PREPARE, START, CANCEL, REEVALUATE,
     HIDE_HUD, SHOW_HUD, LOAD_PLAN, LOAD_SAMPLING, LOAD_FIRE_SETTINGS,
     LOAD_WEAPON_TIMING, SAVE_WEAPON_TIMING, DERIVE_PLAN, DERIVE_DEFAULTS,
@@ -51,6 +51,7 @@ struct Snapshot {
     bool busy = false, physical = false, hud_visible = false, cleanup_unknown = false;
     bool repeat_ready = false;
     bool movement_test_enabled = false;
+    Mode movement_test_mode = Mode::MOVEMENT_TEST; // F11唯一执行域；启用另一页才切换。
     bool movement_recording = false;
     std::uint64_t movement_record_events = 0;
     std::string movement_recording_path;
@@ -58,6 +59,13 @@ struct Snapshot {
     std::string movement_selected_path;
     std::uint64_t movement_catalog_revision = 0;
     Json movement_current, movement_baseline;
+    std::vector<MovementSavedPlan> grenade_saved_plans;
+    std::string grenade_selected_path;
+    std::uint64_t grenade_catalog_revision = 0;
+    Json grenade_current, grenade_baseline;
+    // 每域独立载入发布槽，另一页后来的载入不能吞掉未显示页面的载入结果。
+    Json movement_loaded_draft, grenade_loaded_draft;
+    std::uint64_t movement_loaded_revision = 0, grenade_loaded_revision = 0;
     weapon::MapSnapshot movement_map;
     bool movement_voice_selected = false;
     std::uint64_t movement_voice_epoch = 0;
