@@ -32,7 +32,7 @@ target_include_directories(xen-grenade-overlay PRIVATE "${OBS_SDK_ROOT}/source/l
 target_compile_definitions(xen-grenade-overlay PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 target_compile_options(xen-grenade-overlay PRIVATE /utf-8 /W4 /permissive-)
 target_link_libraries(xen-grenade-overlay PRIVATE xen_obs_overlay_model
-  "${OBS_SDK_ROOT}/lib/obs.lib" "${OBS_SDK_ROOT}/lib/obs-frontend-api.lib" user32 winhttp)
+  "${OBS_SDK_ROOT}/lib/obs.lib" "${OBS_SDK_ROOT}/lib/obs-frontend-api.lib" user32 gdi32 winhttp)
 set_target_properties(xen-grenade-overlay PROPERTIES PREFIX "" RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin")
 
 include(CTest)
@@ -40,6 +40,11 @@ add_executable(obs_grenade_overlay_tests tests.cpp)
 target_compile_options(obs_grenade_overlay_tests PRIVATE /utf-8 /W4 /permissive-)
 target_link_libraries(obs_grenade_overlay_tests PRIVATE xen_obs_overlay_model)
 add_test(NAME obs_grenade_overlay_tests COMMAND obs_grenade_overlay_tests)
+add_executable(obs_grenade_window_tests window_surface_tests.cpp)
+target_compile_definitions(obs_grenade_window_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+target_compile_options(obs_grenade_window_tests PRIVATE /utf-8 /W4 /permissive-)
+target_link_libraries(obs_grenade_window_tests PRIVATE user32 gdi32)
+add_test(NAME obs_grenade_window_tests COMMAND obs_grenade_window_tests)
 
 install(TARGETS xen-grenade-overlay RUNTIME DESTINATION obs-plugins/64bit LIBRARY DESTINATION obs-plugins/64bit)
 install(FILES reference.html README.md LICENSE.GPL-2.0 DESTINATION data/obs-plugins/xen-grenade-overlay)

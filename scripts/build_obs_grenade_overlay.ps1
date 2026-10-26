@@ -60,9 +60,9 @@ $jsonInclude = Join-Path $RepositoryRoot 'build/nvidia/_deps/nlohmann_json-src/i
 $project = Join-Path $RepositoryRoot 'tools/obs_grenade_overlay'
 & cmake -S $project -B $BuildDirectory -G $Generator -A x64 "-DOBS_SDK_ROOT=$SdkRoot" "-DXEN_JSON_INCLUDE=$jsonInclude"
 if ($LASTEXITCODE -ne 0) { throw 'OBS 插件配置失败。' }
-& cmake --build $BuildDirectory --config Release --target xen-grenade-overlay obs_grenade_overlay_tests
+& cmake --build $BuildDirectory --config Release --target xen-grenade-overlay obs_grenade_overlay_tests obs_grenade_window_tests
 if ($LASTEXITCODE -ne 0) { throw 'OBS 插件构建失败。' }
-& ctest --test-dir $BuildDirectory -C Release -R '^obs_grenade_overlay_tests$' --output-on-failure
+& ctest --test-dir $BuildDirectory -C Release -R '^obs_grenade_(overlay|window)_tests$' --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw 'OBS 插件状态专项失败。' }
 $package = Join-Path $BuildDirectory 'package'
 & cmake --install $BuildDirectory --config Release --prefix $package

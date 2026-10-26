@@ -10,6 +10,7 @@
 #include <obs-frontend-api.h>
 #include <util/platform.h>
 #include "model.h"
+#include "window_surface.h"
 
 #include <algorithm>
 #include <atomic>
@@ -32,7 +33,7 @@ namespace {
 using Clock = std::chrono::steady_clock;
 using Json = xen_obs::Json;
 constexpr uint32_t kWidth = 344, kHeight = 576;
-constexpr uint32_t kMenuWidth = 1152, kMenuHeight = 704;
+constexpr uint32_t kMenuWidth = 800, kMenuHeight = 430;
 constexpr UINT kApplySettings = WM_APP + 21;
 constexpr wchar_t kWindowClass[] = L"XenObsGrenadeReference";
 constexpr char kSettingsSource[] = "xen_grenade_overlay_settings";
@@ -205,8 +206,7 @@ public:
             0, 0, kWidth, kHeight, nullptr, nullptr, instance_, this);
         if (!window) throw std::runtime_error("OBS提示窗口创建失败");
         handle_.store(window);
-        exclude_from_capture(window);
-        SetLayeredWindowAttributes(window, 0, 230, LWA_ALPHA);
+        prepare_window(window, 230);
         obs_data_t* browser_settings = obs_data_create();
         obs_data_set_bool(browser_settings, "is_local_file", false);
         obs_data_set_string(browser_settings, "url", (page_url_ + "?payload=%7B%7D").c_str());
@@ -228,12 +228,12 @@ public:
         if (!display_) throw std::runtime_error("OBS提示GPU显示创建失败");
         obs_display_add_draw_callback(display_, draw, this);
         obs_display_set_enabled(display_, false);
+        verify_capture_exclusion(window);
         menu_window_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED,
             kWindowClass, L"Xen OBS 道具菜单", WS_POPUP, 0, 0, kMenuWidth, kMenuHeight,
             nullptr, nullptr, instance_, this);
         if (!menu_window_) throw std::runtime_error("OBS道具菜单创建失败");
-        exclude_from_capture(menu_window_);
-        SetLayeredWindowAttributes(menu_window_, 0, 235, LWA_ALPHA);
+        prepare_window(menu_window_, 235);
         obs_data_t* menu_settings = obs_data_create();
         obs_data_set_string(menu_settings, "url", "about:blank");
         obs_data_set_int(menu_settings, "width", kMenuWidth);
@@ -250,6 +250,7 @@ public:
         if (!menu_display_) throw std::runtime_error("OBS菜单GPU显示创建失败");
         obs_display_add_draw_callback(menu_display_, draw_menu, this);
         obs_display_set_enabled(menu_display_, false);
+        verify_capture_exclusion(menu_window_);
         hotkey_ids_[0] = GlobalAddAtomW(L"Xen.OBS.Grenade.Menu.Right");
         hotkey_ids_[1] = GlobalAddAtomW(L"Xen.OBS.Grenade.Menu.Num6");
         hotkey_ids_[2] = GlobalAddAtomW(L"Xen.OBS.Grenade.Capture.F10");
@@ -294,14 +295,17 @@ public:
     }
 
 private:
-    static void exclude_from_capture(HWND window) noexcept {
-        if (!SetWindowDisplayAffinity(window, WDA_EXCLUDEFROMCAPTURE))
-            blog(LOG_WARNING, "[xen-obs-overlay] 系统截图隐藏未设置成功 error=%lu", GetLastError());
-        else {
-            DWORD affinity = 0;
-            if (GetWindowDisplayAffinity(window, &affinity) && affinity == WDA_EXCLUDEFROMCAPTURE)
-                blog(LOG_INFO, "[xen-obs-overlay] 系统截图隐藏已设置并回读：0x11");
-        }
+    static void prepare_window(HWND window, BYTE opacity) noexcept {
+        const auto error = xen_obs::prepare_desktop_window(window, opacity);
+        if (error != ERROR_SUCCESS)
+            blog(LOG_WARNING, "[xen-obs-overlay] 系统截图隐藏未设置成功 error=%lu", error);
+    }
+
+    static void verify_capture_exclusion(HWND window) noexcept {
+        DWORD affinity = WDA_NONE;
+        if (GetWindowDisplayAffinity(window, &affinity) && affinity == WDA_EXCLUDEFROMCAPTURE)
+            blog(LOG_INFO, "[xen-obs-overlay] 实际显示窗口截图排除已回读：0x11");
+        else blog(LOG_WARNING, "[xen-obs-overlay] 实际显示窗口截图排除未生效 value=0x%lx", affinity);
     }
 
     static bool game_window(HWND window) noexcept {
@@ -347,21 +351,32 @@ private:
             return_window_ = GetForegroundWindow();
             menu_selection_.open(selection);
             menu_configuration_ = config.revision;
+            MONITORINFO info{}; info.cbSize = sizeof(info);
+            if (!GetMonitorInfoW(MonitorFromWindow(return_window_, MONITOR_DEFAULTTOPRIMARY), &info))
+                throw std::runtime_error("菜单显示器尺寸不可用");
+            const auto screen_width = info.rcMonitor.right - info.rcMonitor.left;
+            const auto screen_height = info.rcMonitor.bottom - info.rcMonitor.top;
+            const auto width = std::min(std::clamp(screen_width * 5 / 16, 560L, 960L),
+                std::min(screen_width - 32, (screen_height - 32) * 80 / 43));
+            const auto height = width * static_cast<int>(kMenuHeight) / static_cast<int>(kMenuWidth);
             // 每次呼出刷新GSI与清单；旧选择只作基线，不能立即关闭刚打开的菜单。
             obs_data_t* settings = obs_source_get_settings(menu_browser_);
             const auto url = target.base + "/obs-menu#open-" + std::to_string(++menu_open_count_);
             obs_data_set_string(settings, "url", url.c_str());
+            // 以真实客户区像素排版，不能将固定小纹理拉伸到大窗口造成文字发虚。
+            obs_data_set_int(settings, "width", width);
+            obs_data_set_int(settings, "height", height);
             obs_source_update(menu_browser_, settings); obs_data_release(settings);
             set_visible(false);
-            MONITORINFO info{}; info.cbSize = sizeof(info);
-            GetMonitorInfoW(MonitorFromWindow(return_window_, MONITOR_DEFAULTTOPRIMARY), &info);
-            const auto width = (info.rcMonitor.right - info.rcMonitor.left) * 9 / 16;
-            const auto height = width * static_cast<int>(kMenuHeight) / static_cast<int>(kMenuWidth);
             obs_display_resize(menu_display_, width, height);
             obs_source_inc_showing(menu_browser_); obs_display_set_enabled(menu_display_, true);
             menu_visible_ = true;
             SetWindowPos(menu_window_, HWND_TOPMOST, info.rcMonitor.left + (info.rcMonitor.right-info.rcMonitor.left-width)/2,
-                info.rcMonitor.top+(info.rcMonitor.bottom-info.rcMonitor.top-height)/2, width, height, SWP_SHOWWINDOW);
+                info.rcMonitor.top+(info.rcMonitor.bottom-info.rcMonitor.top-height)/2, width, height, 0);
+            xen_obs::round_desktop_window(menu_window_, width, height);
+            ShowWindow(menu_window_, SW_SHOW);
+            verify_capture_exclusion(menu_window_);
+            blog(LOG_INFO, "[xen-obs-overlay] 菜单窗口与Browser均为%ldx%ld，原尺寸渲染", width, height);
             if (SetForegroundWindow(menu_window_)) {
                 SetFocus(menu_window_); ClipCursor(nullptr);
                 obs_source_send_focus(menu_browser_, true);
@@ -396,8 +411,8 @@ private:
             if (message == WM_MOUSEWHEEL) ScreenToClient(window, &point);
             RECT client{}; GetClientRect(window, &client);
             obs_mouse_event event{};
-            event.x = point.x * static_cast<int>(kMenuWidth) / std::max(1L, client.right);
-            event.y = point.y * static_cast<int>(kMenuHeight) / std::max(1L, client.bottom);
+            event.x = point.x * static_cast<int>(obs_source_get_width(menu_browser_)) / std::max(1L, client.right);
+            event.y = point.y * static_cast<int>(obs_source_get_height(menu_browser_)) / std::max(1L, client.bottom);
             if (GetKeyState(VK_LBUTTON) & 0x8000) event.modifiers |= INTERACT_MOUSE_LEFT;
             if (message == WM_LBUTTONDOWN || message == WM_LBUTTONUP) {
                 if (message == WM_LBUTTONDOWN) SetCapture(window);
@@ -417,7 +432,10 @@ private:
         const auto* self = static_cast<Manager*>(data);
         if (!self->menu_browser_) return;
         gs_viewport_push(); gs_projection_push(); gs_matrix_push();
-        gs_set_viewport(0, 0, cx, cy); gs_ortho(0, kMenuWidth, 0, kMenuHeight, -100, 100); gs_matrix_identity();
+        gs_set_viewport(0, 0, cx, cy);
+        gs_ortho(0, static_cast<float>(obs_source_get_width(self->menu_browser_)),
+            0, static_cast<float>(obs_source_get_height(self->menu_browser_)), -100, 100);
+        gs_matrix_identity();
         obs_source_video_render(self->menu_browser_);
         gs_matrix_pop(); gs_projection_pop(); gs_viewport_pop();
     }
@@ -549,8 +567,10 @@ private:
             if (GetMonitorInfoW(monitor, &info)) desktop = info.rcMonitor;
             else { desktop.right = GetSystemMetrics(SM_CXSCREEN); desktop.bottom = GetSystemMetrics(SM_CYSCREEN); }
             SetWindowPos(window, HWND_TOPMOST, std::max(desktop.left, desktop.right - static_cast<LONG>(kWidth) - 16),
-                         desktop.top + 16, kWidth, card_height_, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                         desktop.top + 16, kWidth, card_height_, SWP_NOACTIVATE);
+            xen_obs::round_desktop_window(window, kWidth, card_height_);
             ShowWindow(window, SW_SHOWNOACTIVATE);
+            verify_capture_exclusion(window);
         } else {
             ShowWindow(window, SW_HIDE);
             if (display_) obs_display_set_enabled(display_, false);
