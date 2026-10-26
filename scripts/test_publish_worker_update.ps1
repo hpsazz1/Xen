@@ -556,6 +556,10 @@ try {
     finally { $lock.Dispose() }
     Assert-UpdateTest $lockedRejected '已锁定 Worker 拒绝替换'
     Assert-UpdateTest ((Get-FileHash -LiteralPath $baseManifestPath).Hash -ceq $baseHash) '拒绝时旧清单不变'
+    # 辅机SSH使用Windows PowerShell 5；用真实解释器验证中文脚本编码及只读前置检查。
+    $legacyShell = Join-Path $env:WINDIR 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    & $legacyShell -NoProfile -NonInteractive -File $apply -PackageRoot $baseRoot -StageName $deltaName -CheckOnly
+    Assert-UpdateTest ($LASTEXITCODE -eq 0) 'Windows PowerShell 5实际解析并通过差量前置检查'
     $savedDelta = @{}
     foreach ($entry in $deltaEntries) {
         $savedDelta[$entry.path] = [IO.File]::ReadAllBytes((Join-Path $deltaStage $entry.path))
