@@ -17,7 +17,8 @@ using Clock = detail::Clock;
 using namespace std::chrono_literals;
 constexpr double kSearchRatio = 0.20;
 constexpr double kAgreementRatio = 1.5 / 320.0;
-constexpr double kAlignedRatio = 1.5 / 320.0;
+// 精确瞄点不能在仍有一像素以上残差时结束；以ROI比例统一主动细调与投前复核。
+constexpr double kAlignedRatio = 0.35 / 320.0;
 constexpr auto kStableDuration = 80ms;
 constexpr auto kFrameAge = 200ms;
 constexpr auto kNoFrameDuration = 350ms;

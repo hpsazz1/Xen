@@ -43,6 +43,9 @@ struct Scene {
     Clock::time_point now=Clock::time_point(10s);
     cv::Mat original=texture();
     double x=0,y=0;
+    // 分开表达配置换算与实际鼠标响应，覆盖实机末段的细步进和不可达量化点。
+    double response_counts_per_pixel_x=0.4,response_counts_per_pixel_y=0.4;
+    double configured_counts_per_pixel_x=0.4,configured_counts_per_pixel_y=0.4;
     std::uint64_t sequence=0;
     bool stale=false,repeated=false,geometry_change=false,receiver_change=false;
     bool no_frame=false,no_response=false,unrelated=false,network=false,source_clock_missing=false;
@@ -61,7 +64,10 @@ public:
     bool open() noexcept override { return true; }
     MouseMoveReceipt move(const MouseMoveCommand& value) noexcept override {
         ++scene_.moves;scene_.commands.push_back(value);
-        if (!scene_.no_response && !scene_.command_failed) {scene_.x-=value.dx_counts/0.4;scene_.y-=value.dy_counts/0.4;}
+        if (!scene_.no_response && !scene_.command_failed) {
+            scene_.x-=value.dx_counts/scene_.response_counts_per_pixel_x;
+            scene_.y-=value.dy_counts/scene_.response_counts_per_pixel_y;
+        }
         return {!scene_.command_failed,scene_.now,true,scene_.now,false,{}};
     }
     bool poll_input(InputSnapshot& value) noexcept override {
@@ -133,7 +139,8 @@ AppConfig config(const Scene& scene) {
     if (scene.network) result.capture.ndi_clock_sync_url="udp://127.0.0.1:5011";
     result.mouse.backend=MouseBackend::KMBOX_NET;result.mouse.allow_send_input=true;
     result.keyboard.grenade_assist_enabled=scene.local_cancel;
-    result.aim.counts_per_pixel_x=result.aim.counts_per_pixel_y=0.4f;
+    result.aim.counts_per_pixel_x=static_cast<float>(scene.configured_counts_per_pixel_x);
+    result.aim.counts_per_pixel_y=static_cast<float>(scene.configured_counts_per_pixel_y);
     result.aim.max_counts_per_frame=4;result.aim.control_delay_ms=15;
     return result;
 }
@@ -149,10 +156,14 @@ grenade_alignment::Result run(Scene& scene,bool verify=false,std::function<bool(
 void aligned_and_control() {
     for (const auto offset:std::array<cv::Point2d,6>{{{0,0},{24,-17},{-13,29},{1.1,-1.2},{1.5,0.5},{-0.5,1.5}}}) {
         Scene scene;scene.x=offset.x;scene.y=offset.y;
+        scene.response_counts_per_pixel_x=scene.response_counts_per_pixel_y=2.5;
+        scene.configured_counts_per_pixel_x=scene.configured_counts_per_pixel_y=2.5;
         const auto result=run(scene);
         expect(result.aligned&&!result.canceled,"局部平移必须通过真实匹配及闭环收敛：起点="+
             std::to_string(offset.x)+","+std::to_string(offset.y)+" 最终="+std::to_string(scene.x)+","+
             std::to_string(scene.y)+" commands="+std::to_string(scene.moves)+" "+result.error);
+        expect(std::max(std::abs(scene.x),std::abs(scene.y))<=0.4,
+            "成功必须实际接近目标，不能只检查aligned标志");
         expect(scene.opened==1&&scene.closed==1,"采集器须成对关闭");
         for (const auto& command:scene.commands) expect(std::hypot(command.dx_counts,command.dy_counts)<=4,
             "每步输出不得超过现有向量上限");
@@ -167,6 +178,35 @@ void aligned_and_control() {
         "验证时间须绑定实际源帧，采集关闭耗时不得刷新其年龄");
     Scene shifted;shifted.x=10;const auto rejected=run(shifted,true);
     expect(!rejected.aligned&&shifted.moves==0,"下键复核偏移应拒绝投掷且不自动对齐");
+}
+Json precision_control(const cv::Mat& original=texture()) {
+    Json evidence=Json::array();
+    // 来自Run20/25/29的末端误差；实际原帧未保存，此处以相同残差构造图像输入。
+    for (const auto offset:std::array<cv::Point2d,4>{{{-1.3812,0.2678},{-1.4888,-1.1924},
+                                                    {-1.0364,-0.6857},{0.8,0}}}) {
+        Scene verify;verify.original=original;verify.x=offset.x;verify.y=offset.y;
+        const auto before=run(verify,true);
+        expect(!before.aligned&&verify.moves==0,"下键不能把一像素以上的剩余偏差当作精确对齐");
+        Scene scene;scene.original=original;scene.x=offset.x;scene.y=offset.y;
+        scene.response_counts_per_pixel_x=1/0.38;scene.response_counts_per_pixel_y=1/0.55;
+        scene.configured_counts_per_pixel_x=0.425;scene.configured_counts_per_pixel_y=0.4;
+        const auto result=run(scene);
+        expect(result.aligned&&scene.moves>0&&std::max(std::abs(scene.x),std::abs(scene.y))<=0.4,
+            "上键须继续消除已记录末段残差："+result.error);
+        const auto move_count=scene.moves;
+        const auto after=run(scene,true);
+        expect(after.aligned&&scene.moves==move_count,"完成细调后下键复核仍为零鼠标输出");
+        evidence.push_back({{"initial_x",offset.x},{"initial_y",offset.y},
+            {"final_x",scene.x},{"final_y",scene.y},{"moves",move_count},
+            {"old_residual_verified",before.aligned},{"alignment",result.evidence},
+            {"prethrow",after.evidence}});
+    }
+    Scene coarse;coarse.original=original;coarse.x=1.1;coarse.y=-1.2;
+    const auto unreachable=run(coarse);
+    expect(!unreachable.aligned&&coarse.moves>0&&coarse.moves<=48,
+        "单count为2.5像素的不可达目标须有界结束，不能虚报精确完成");
+    evidence.push_back({{"quantized_unreachable",unreachable.evidence}});
+    return evidence;
 }
 void image_failures() {
     Scene flat;flat.original.setTo(cv::Scalar::all(100));
@@ -314,7 +354,14 @@ void reference_resources(const std::filesystem::path& root) {
 
 int main(int argc,char** argv) {
     try {
-        aligned_and_control();image_failures();timing_geometry_and_cancellation();
+        if (argc==5&&std::string(argv[1])=="--precision-image"&&std::string(argv[3])=="--report") {
+            const auto image=cv::imread(argv[2]);
+            if (image.cols!=2560||image.rows!=1440) throw std::runtime_error("实图精度回放要求本次2560×1440原图");
+            const auto report=precision_control(image(cv::Rect(1120,560,320,320)).clone());
+            save(argv[4],report.dump(2));
+            return failures?1:0;
+        }
+        aligned_and_control();precision_control();image_failures();timing_geometry_and_cancellation();
         const auto root=argc==2?std::filesystem::path(argv[1]):
             argc==3&&std::string(argv[1])=="--output-root"?std::filesystem::path(argv[2]):
             std::filesystem::path("temp/XEN-GRENADE-ALIGN-20261026-001/reference-tests");
