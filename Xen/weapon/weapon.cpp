@@ -187,6 +187,11 @@ WeaponSnapshot parse_payload(std::string_view body, const GsiConfig& config, std
                     map->map_name = name;
                     map->valid = true;
                     map->status = Status::READY;
+                    // 展示用阵营只认本地身份，不继承旁观目标或已失效的旧值。
+                    if (player.contains("team") && player["team"].is_string()) {
+                        if (player["team"] == "CT") map->local_team = Team::CT;
+                        else if (player["team"] == "T") map->local_team = Team::T;
+                    }
                 }
             }
         }
@@ -250,6 +255,7 @@ WeaponSnapshot parse_payload(std::string_view body, const GsiConfig& config, std
 void GsiState::reset() noexcept {
     invalidate_map(Status::UNAVAILABLE);
     seen_maps_.clear();
+    map_team_conflicted_ = false;
     current_ = {}; timestamp_ = 0; last_now_ = {}; timestamp_deadline_ = {}; seen_states_.clear();
     if (epoch_ != std::numeric_limits<std::uint64_t>::max()) ++epoch_;
     if (recoil_safety_epoch_ != std::numeric_limits<std::uint64_t>::max()) ++recoil_safety_epoch_;
@@ -280,6 +286,7 @@ Status GsiState::ingest(std::string_view body, const GsiConfig& config,
                 timestamp_deadline_ = now + std::chrono::milliseconds(config.ttl_ms);
                 seen_states_.clear();
                 seen_maps_.clear();
+                map_team_conflicted_ = false;
             }
             incoming_map.valid_until = timestamp_deadline_;
             publish_map(std::move(incoming_map), now);
@@ -355,6 +362,7 @@ void GsiState::invalidate_map(Status status) const noexcept {
     if (map_.valid && map_.context_epoch != std::numeric_limits<std::uint64_t>::max()) ++map_.context_epoch;
     map_.valid = false;
     map_.map_name.clear();
+    map_.local_team = Team::UNKNOWN;
     map_.status = status;
 }
 
@@ -367,11 +375,17 @@ void GsiState::publish_map(MapSnapshot incoming, Clock::time_point now) {
     if (seen) {
         // 同秒回到已见地图无法与重放区分，撤销而不重新解释旧请求。
         if (incoming.valid != map_.valid || incoming.map_name != map_.map_name) invalidate_map(Status::DUPLICATE);
+        else if (incoming.valid && incoming.local_team != map_.local_team) {
+            // 秒级源时间无法确定换边顺序；锁存未知直到新秒，不改变地图上下文或TTL。
+            map_team_conflicted_ = true;
+            map_.local_team = Team::UNKNOWN;
+        }
         return;
     }
     if (seen_maps_.size() >= 128) { invalidate_map(Status::INVALID_PAYLOAD); return; }
     seen_maps_.push_back(key);
     if (!incoming.valid) { invalidate_map(incoming.status); return; }
+    if (map_team_conflicted_) incoming.local_team = Team::UNKNOWN;
     auto epoch = map_.context_epoch;
     if (!map_.valid || map_.map_name != incoming.map_name) {
         if (epoch != std::numeric_limits<std::uint64_t>::max()) ++epoch;

@@ -31,11 +31,13 @@ struct GsiConfig {
     int max_clock_skew_ms = 5000;
 };
 
-// 地图身份独立于玩家生命、活动状态和所持武器；仅用于语音方案上下文。
+// 地图身份独立于玩家生命、活动状态和所持武器；用于方案上下文和只读展示。
 struct MapSnapshot {
     bool valid = false;
     Status status = Status::UNAVAILABLE;
     std::string map_name;
+    // 已核对为本地玩家的展示阵营；死亡可保留，不参与武器/输出许可。
+    Team local_team = Team::UNKNOWN;
     std::uint64_t context_epoch = 0;
     std::optional<std::uint64_t> provider_timestamp_seconds;
     Clock::time_point received_at{}, valid_until{};

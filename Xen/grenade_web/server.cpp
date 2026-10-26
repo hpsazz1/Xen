@@ -1,0 +1,394 @@
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <WinSock2.h>
+#include <WS2tcpip.h>
+#ifdef ERROR
+#undef ERROR
+#endif
+#include "grenade_web/server.h"
+#include "grenade_mobile_page.h"
+#include "movement/timeline.h"
+#include "weapon/weapon.h"
+#include "log/log.h"
+#include <nlohmann/json.hpp>
+#include <algorithm>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <limits>
+#include <mutex>
+#include <optional>
+#include <set>
+#include <stdexcept>
+#include <string_view>
+#include <thread>
+#include <tuple>
+
+namespace grenade_web {
+namespace {
+using Json = nlohmann::json;
+using Clock = std::chrono::steady_clock;
+constexpr std::size_t kMaximumHeader = 8192;
+constexpr std::size_t kMaximumResponse = 1024 * 1024;
+constexpr std::size_t kMaximumCatalogEntries = 512;
+constexpr std::size_t kMaximumPlanBytes = 16 * 1024 * 1024;
+constexpr std::size_t kMaximumCatalogBytes = 32 * 1024 * 1024;
+constexpr auto kCatalogTimeout = std::chrono::milliseconds(750);
+constexpr auto kRequestTimeout = std::chrono::seconds(2);
+std::atomic<std::uint64_t> service_sequence{0};
+
+struct ScopedSocket {
+    SOCKET value = INVALID_SOCKET;
+    ~ScopedSocket() { if (value != INVALID_SOCKET) closesocket(value); }
+};
+bool nonblocking(SOCKET socket) {
+    u_long mode = 1;
+    return ioctlsocket(socket, FIONBIO, &mode) == 0;
+}
+bool private_address(unsigned long network_address) noexcept {
+    const auto ip = ntohl(network_address);
+    return (ip & 0xff000000UL) == 0x7f000000UL || (ip & 0xff000000UL) == 0x0a000000UL ||
+        (ip & 0xfff00000UL) == 0xac100000UL || (ip & 0xffff0000UL) == 0xc0a80000UL;
+}
+std::vector<std::string> local_urls(const Config& config, std::uint16_t port) {
+    const auto url = [port](const std::string& address) { return "http://" + address + ":" + std::to_string(port) + "/"; };
+    if (config.bind_address != "0.0.0.0") return {url(config.bind_address)};
+    std::vector<std::string> result;
+    char hostname[256]{};
+    addrinfo hints{}; hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM;
+    addrinfo* addresses = nullptr;
+    if (gethostname(hostname, sizeof(hostname)) == 0 && getaddrinfo(hostname, nullptr, &hints, &addresses) == 0) {
+        const std::unique_ptr<addrinfo, decltype(&freeaddrinfo)> owner(addresses, freeaddrinfo);
+        for (auto* item = addresses; item; item = item->ai_next) {
+            const auto* address = reinterpret_cast<const sockaddr_in*>(item->ai_addr);
+            char text[INET_ADDRSTRLEN]{};
+            if (private_address(address->sin_addr.s_addr) &&
+                inet_ntop(AF_INET, &address->sin_addr, text, sizeof(text))) result.push_back(url(text));
+        }
+    }
+    result.push_back(url("127.0.0.1"));
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+}
+std::string plan_team(const std::string& name) {
+    const auto title = " " + name;
+    for (const auto* side : {"CT", "T"}) {
+        const std::string token = std::string(" ") + side;
+        const auto start = title.find(token);
+        if (start == std::string::npos) continue;
+        const auto suffix = title.substr(start + token.size());
+        if ((!suffix.empty() && suffix.front() >= '0' && suffix.front() <= '9') || suffix.starts_with("来源")) return side;
+    }
+    return {};
+}
+class CatalogLimit final : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+// 复用正式 Plan 解析；库文件格式/重复字段/注释规则与正式库保持一致。
+// 网页额外限制总扫描量，并在分块读取及 JSON 事件间协作停止。
+template<class Check>
+movement::timeline::Plan read_catalog_plan(const std::filesystem::path& path, std::size_t& total, Check&& check) {
+    check();
+    const auto declared = std::filesystem::file_size(path);
+    if (declared > kMaximumPlanBytes) throw CatalogLimit("单个道具方案超过16MiB");
+    if (declared > kMaximumCatalogBytes - total) throw CatalogLimit("道具清单累计输入超过32MiB");
+    std::ifstream file(path,std::ios::binary);
+    if (!file) throw std::runtime_error("无法读取道具方案");
+    std::string text;
+    while (file) {
+        check();
+        char bytes[16 * 1024];
+        const auto limit = std::min({sizeof(bytes),kMaximumPlanBytes - text.size() + 1,kMaximumCatalogBytes - total + 1});
+        file.read(bytes,static_cast<std::streamsize>(limit));
+        const auto count = static_cast<std::size_t>(file.gcount());
+        if (count > kMaximumPlanBytes - text.size()) throw CatalogLimit("单个道具方案超过16MiB");
+        if (count > kMaximumCatalogBytes - total) throw CatalogLimit("道具清单累计输入超过32MiB");
+        total += count; text.append(bytes,count);
+        check();
+    }
+    if (file.bad()) throw std::runtime_error("道具方案读取失败");
+    std::vector<std::set<std::string>> keys;
+    const auto document = Json::parse(text,[&](int depth, Json::parse_event_t event, Json& value) {
+        check();
+        if (depth > 32) throw std::runtime_error("方案嵌套过深");
+        if (event == Json::parse_event_t::object_start) keys.emplace_back();
+        if (event == Json::parse_event_t::key && !keys.back().insert(value.get<std::string>()).second)
+            throw std::runtime_error("方案包含重复字段");
+        if (event == Json::parse_event_t::object_end) keys.pop_back();
+        return true;
+    },true,true);
+    check();
+    movement::timeline::Plan plan;
+    std::string error;
+    const bool valid = movement::timeline::parse_plan(document,plan,error);
+    check();
+    if (!valid) throw std::runtime_error(error);
+    return plan;
+}
+std::string_view trim(std::string_view value) {
+    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.remove_prefix(1);
+    while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) value.remove_suffix(1);
+    return value;
+}
+// 本服务没有请求体或写操作；拒绝分块、重复长度与管线请求，保持单请求单连接。
+int request_target(std::string_view request, std::string& target) {
+    const auto end = request.find("\r\n\r\n");
+    if (end == std::string_view::npos || end + 4 != request.size()) return 400;
+    const auto line_end = request.find("\r\n");
+    const auto line = request.substr(0, line_end);
+    const auto first = line.find(' '), last = line.rfind(' ');
+    if (first == std::string_view::npos || first == last || line.find(' ', first + 1) != last) return 400;
+    if (line.substr(last + 1) != "HTTP/1.1" && line.substr(last + 1) != "HTTP/1.0") return 400;
+    if (line.substr(0, first) != "GET") return 405;
+    const auto path = line.substr(first + 1, last - first - 1);
+    if (path.empty() || path.size() > 256 || path.front() != '/') return 400;
+    bool length_seen = false;
+    for (auto begin = line_end + 2; begin < end; ) {
+        const auto next = request.find("\r\n", begin);
+        const auto entry = request.substr(begin, next - begin);
+        const auto colon = entry.find(':');
+        if (colon == std::string_view::npos || colon == 0 || entry.front() == ' ' || entry.front() == '\t') return 400;
+        std::string name(entry.substr(0, colon));
+        for (auto& c : name) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        const auto value = trim(entry.substr(colon + 1));
+        if (name == "transfer-encoding" || name == "expect") return 400;
+        if (name == "content-length") {
+            std::size_t length = 1;
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), length);
+            if (length_seen || parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() || length != 0) return 400;
+            length_seen = true;
+        }
+        begin = next + 2;
+    }
+    target = path;
+    return 200;
+}
+}
+
+struct Server::Impl {
+    mutable std::mutex mutex;
+    Snapshot state;
+    Config config;
+    std::shared_ptr<weapon::GsiReceiver> gsi;
+    std::atomic<bool> stopping{false};
+    std::thread worker;
+    SOCKET listener = INVALID_SOCKET;
+    bool winsock = false;
+    std::string prefix;
+    std::uint64_t generation = 0;
+    std::optional<std::tuple<bool, std::string, weapon::Team, std::uint64_t>> identity;
+    weapon::MapSnapshot current;
+    std::string catalog;
+    Clock::time_point next_catalog{};
+
+    void update_context() {
+        current = gsi->map_snapshot();
+        const auto now = Clock::now();
+        if (!current.valid || current.map_name.empty() || now < current.received_at || now >= current.valid_until) {
+            current.valid = false; current.map_name.clear(); current.local_team = weapon::Team::UNKNOWN;
+        }
+        const auto next = std::make_tuple(current.valid, current.map_name, current.local_team, current.context_epoch);
+        if (!identity || next != *identity) {
+            if (generation == std::numeric_limits<std::uint64_t>::max()) throw std::runtime_error("网页状态代际已耗尽");
+            ++generation; identity = next;
+        }
+    }
+    bool wait_socket(SOCKET socket, bool writing, Clock::time_point deadline) {
+        while (!stopping && Clock::now() < deadline) {
+            update_context();
+            fd_set set; FD_ZERO(&set); FD_SET(socket, &set);
+            timeval timeout{0, 10000};
+            const auto result = select(0, writing ? nullptr : &set, writing ? &set : nullptr, nullptr, &timeout);
+            if (result == SOCKET_ERROR) {
+                if (socket == listener && !stopping) throw std::runtime_error("网页监听等待失败");
+                return false;
+            }
+            if (result > 0) return true;
+        }
+        return false;
+    }
+    std::string context_json() {
+        update_context();
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(current.valid_until - Clock::now()).count();
+        const bool valid = current.valid && remaining > 0;
+        return Json{{"valid",valid},{"map",valid ? current.map_name : std::string{}},
+            {"team",valid && current.local_team != weapon::Team::UNKNOWN ? weapon::team_name(current.local_team) : ""},
+            {"epoch",std::to_string(current.context_epoch)},{"generation",prefix + "-" + std::to_string(generation)},
+            {"remaining_ms",valid ? std::min<std::int64_t>(remaining,10000) : 0}}.dump();
+    }
+    bool refresh_catalog(Clock::time_point request_deadline) {
+        if (Clock::now() < next_catalog) return !catalog.empty();
+        next_catalog = Clock::now() + std::chrono::seconds(2);
+        try {
+            const auto deadline = std::min(request_deadline,Clock::now() + kCatalogTimeout);
+            auto next_context = Clock::time_point{};
+            const auto check = [&] {
+                if (stopping) throw CatalogLimit("道具清单读取已取消");
+                const auto now = Clock::now();
+                if (now >= deadline) throw CatalogLimit("道具清单读取超过时间预算");
+                if (now >= next_context) { update_context(); next_context = now + std::chrono::milliseconds(10); }
+            };
+            std::vector<std::pair<std::string,std::string>> entries;
+            std::size_t visited = 0, total = 0, response_bytes = 2;
+            const auto root = std::filesystem::u8path(config.plans_root);
+            check();
+            if (std::filesystem::exists(root)) for (const auto& entry : std::filesystem::directory_iterator(root)) {
+                check();
+                if (++visited > kMaximumCatalogEntries) throw CatalogLimit("道具目录条目超过512项");
+                // 与正式库相同：只读本层 .json，忽略临时文件、子目录和符号链接。
+                if (entry.path().extension() != ".json") continue;
+                try {
+                    if (entry.is_symlink() || !entry.is_regular_file()) continue;
+                    const auto plan = read_catalog_plan(entry.path(),total,check);
+                    const auto filename = entry.path().filename().u8string();
+                    const std::string id(filename.begin(),filename.end());
+                    auto encoded = Json{{"id",id},{"name",plan.name},{"map",plan.map},{"team",plan_team(plan.name)}}.dump();
+                    check();
+                    response_bytes += encoded.size() + (entries.empty() ? 0 : 1);
+                    if (response_bytes > kMaximumResponse) throw CatalogLimit("网页道具清单超过响应上限");
+                    auto sort_key = plan.name;
+                    if (!plan.map.empty()) sort_key += " / " + plan.map;
+                    if (!plan.location.empty()) sort_key += " / " + plan.location;
+                    sort_key += " [方案库/" + id + "]";
+                    entries.emplace_back(std::move(sort_key),std::move(encoded));
+                } catch (const CatalogLimit&) { throw; }
+                catch (const std::exception&) { /* 单个坏文件不阻断正式方案列表。 */ }
+            }
+            check();
+            std::sort(entries.begin(),entries.end(),[](const auto& a, const auto& b) { return a.first < b.first; });
+            std::string encoded = "[";
+            for (const auto& entry : entries) {
+                check();
+                if (encoded.size() > 1) encoded += ',';
+                encoded += entry.second;
+            }
+            encoded += ']';
+            check();
+            catalog = std::move(encoded);
+            std::lock_guard lock(mutex); state.error.clear();
+            return true;
+        } catch (const std::exception& error) {
+            catalog.clear();
+            std::lock_guard lock(mutex); state.error = "道具清单读取失败：" + std::string(error.what());
+            if (!stopping) LOG_WARN("grenade_web", "{}", state.error);
+            return false;
+        }
+    }
+    void respond(SOCKET client, int status, std::string_view content_type, std::string_view body, Clock::time_point deadline) {
+        const auto reason = status == 200 ? "OK" : status == 404 ? "Not Found" : status == 405 ? "Method Not Allowed" :
+            status == 431 ? "Request Header Fields Too Large" : status == 503 ? "Service Unavailable" : "Bad Request";
+        const auto response = "HTTP/1.1 " + std::to_string(status) + " " + reason + "\r\nContent-Type: " +
+            std::string(content_type) + "\r\nContent-Length: " + std::to_string(body.size()) +
+            "\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n" +
+            (status == 405 ? "Allow: GET\r\n" : "") + "\r\n" + std::string(body);
+        std::size_t sent = 0;
+        while (sent < response.size() && wait_socket(client, true, deadline)) {
+            const auto count = ::send(client, response.data() + sent, static_cast<int>(response.size() - sent), 0);
+            if (count < 0 && WSAGetLastError() == WSAEWOULDBLOCK) continue;
+            if (count <= 0) return;
+            sent += static_cast<std::size_t>(count);
+        }
+    }
+    void handle(SOCKET client) {
+        const auto deadline = Clock::now() + kRequestTimeout;
+        std::string request;
+        while (wait_socket(client, false, deadline)) {
+            char buffer[2048];
+            const auto count = recv(client, buffer, sizeof(buffer), 0);
+            if (count < 0 && WSAGetLastError() == WSAEWOULDBLOCK) continue;
+            if (count <= 0) return;
+            request.append(buffer, static_cast<std::size_t>(count));
+            if (request.size() > kMaximumHeader) { respond(client,431,"text/plain; charset=utf-8","请求头过长",deadline); return; }
+            if (request.find("\r\n\r\n") == std::string::npos) continue;
+            std::string target;
+            const auto status = request_target(request,target);
+            if (status != 200) respond(client,status,"text/plain; charset=utf-8","此服务只提供固定只读页面",deadline);
+            else if (target == "/") respond(client,200,"text/html; charset=utf-8",kMobilePage,deadline);
+            else if (target == "/context.json") respond(client,200,"application/json; charset=utf-8",context_json(),deadline);
+            else if (target == "/catalog.json") {
+                if (refresh_catalog(deadline)) respond(client,200,"application/json; charset=utf-8",catalog,deadline);
+                else respond(client,503,"text/plain; charset=utf-8","道具清单读取失败",deadline);
+            } else respond(client,404,"text/plain; charset=utf-8","页面不存在",deadline);
+            return;
+        }
+    }
+    void run() noexcept {
+        try {
+            while (!stopping) {
+                if (!wait_socket(listener, false, Clock::now() + std::chrono::milliseconds(20))) continue;
+                sockaddr_in peer{}; int size = sizeof(peer);
+                ScopedSocket client{accept(listener,reinterpret_cast<sockaddr*>(&peer),&size)};
+                if (client.value == INVALID_SOCKET) {
+                    const auto error = WSAGetLastError();
+                    if (error == WSAEWOULDBLOCK || error == WSAECONNRESET) continue;
+                    throw std::runtime_error("网页监听失败");
+                }
+                if (!private_address(peer.sin_addr.s_addr) || !nonblocking(client.value)) continue;
+                handle(client.value);
+            }
+        } catch (const std::exception& error) {
+            std::lock_guard lock(mutex); state.error = error.what();
+            LOG_ERROR("grenade_web", "网页服务已停止：{}", state.error);
+        } catch (...) {
+            std::lock_guard lock(mutex); state.error = "网页服务发生未知异常";
+        }
+        std::lock_guard lock(mutex); state.running = false;
+    }
+};
+
+Server::Server() : impl_(std::make_unique<Impl>()) {}
+Server::~Server() { stop(); }
+bool Server::start(const Config& config, std::shared_ptr<weapon::GsiReceiver> gsi) noexcept {
+    stop();
+    try {
+        Log::register_module("grenade_web",LogLevel::INFO);
+        if (!gsi || config.plans_root.empty()) throw std::runtime_error("网页缺少共享GSI或正式方案库路径");
+        sockaddr_in address{}; address.sin_family = AF_INET; address.sin_port = htons(config.port);
+        if (inet_pton(AF_INET,config.bind_address.c_str(),&address.sin_addr) != 1 ||
+            (address.sin_addr.s_addr != INADDR_ANY && !private_address(address.sin_addr.s_addr)))
+            throw std::runtime_error("网页仅允许绑定本机或局域网IPv4地址");
+        WSADATA data{};
+        if (WSAStartup(MAKEWORD(2,2),&data) != 0) throw std::runtime_error("网页网络初始化失败");
+        impl_->winsock = true;
+        impl_->listener = socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
+        BOOL exclusive = TRUE;
+        if (impl_->listener == INVALID_SOCKET ||
+            setsockopt(impl_->listener,SOL_SOCKET,SO_EXCLUSIVEADDRUSE,reinterpret_cast<const char*>(&exclusive),sizeof(exclusive)) != 0 ||
+            bind(impl_->listener,reinterpret_cast<sockaddr*>(&address),sizeof(address)) != 0 ||
+            listen(impl_->listener,4) != 0 || !nonblocking(impl_->listener)) throw std::runtime_error("网页端口绑定失败");
+        int size = sizeof(address);
+        if (getsockname(impl_->listener,reinterpret_cast<sockaddr*>(&address),&size) != 0) throw std::runtime_error("网页端口读取失败");
+        impl_->config = config; impl_->gsi = std::move(gsi);
+        impl_->prefix = std::to_string(GetCurrentProcessId()) + "-" + std::to_string(++service_sequence) + "-" +
+            std::to_string(Clock::now().time_since_epoch().count());
+        impl_->identity.reset(); impl_->generation = 0; impl_->catalog.clear(); impl_->next_catalog = {};
+        {
+            std::lock_guard lock(impl_->mutex);
+            impl_->state = {true,ntohs(address.sin_port),{},local_urls(config,ntohs(address.sin_port))};
+        }
+        impl_->stopping = false;
+        impl_->worker = std::thread([this] { impl_->run(); });
+        LOG_INFO("grenade_web", "道具只读网页已启动，端口={}", ntohs(address.sin_port));
+        return true;
+    } catch (const std::exception& error) {
+        stop(); std::lock_guard lock(impl_->mutex); impl_->state.error = error.what(); return false;
+    } catch (...) {
+        stop(); std::lock_guard lock(impl_->mutex); impl_->state.error = "网页服务启动异常"; return false;
+    }
+}
+void Server::stop() noexcept {
+    impl_->stopping = true;
+    if (impl_->worker.joinable()) impl_->worker.join();
+    // 工作线程已退出，关闭监听不会与 accept/select 竞争或复用句柄。
+    if (impl_->listener != INVALID_SOCKET) closesocket(impl_->listener);
+    impl_->listener = INVALID_SOCKET;
+    if (impl_->winsock) WSACleanup();
+    impl_->winsock = false; impl_->gsi.reset();
+    std::lock_guard lock(impl_->mutex); impl_->state.running = false;
+}
+Snapshot Server::snapshot() const { std::lock_guard lock(impl_->mutex); return impl_->state; }
+}

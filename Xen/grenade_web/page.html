@@ -1,0 +1,212 @@
+<!doctype html>
+<!-- 一版简洁手机预览：只读游戏状态，选择留在页面。 -->
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f5f6f4">
+<title>Xen · 道具</title>
+<style>
+:root{color-scheme:light;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;color:#202923;background:#eef0ed;font-synthesis:none;--accent:#23634d;--muted:#7a847d;--line:#e6e9e4}
+*{box-sizing:border-box}body{margin:0}button{font:inherit;-webkit-tap-highlight-color:transparent}button{cursor:pointer}button:focus-visible{outline:3px solid #86b9a3;outline-offset:2px}button{color:inherit}.app{max-width:460px;min-height:100dvh;margin:auto;background:#fafbf9}.top{padding:22px 22px 17px;display:flex;align-items:center;justify-content:space-between}.brand{display:flex;align-items:center;gap:9px;font-size:20px;font-weight:750;letter-spacing:-.7px}.mark{width:25px;height:25px;border:2px solid var(--accent);border-radius:8px;display:grid;place-items:center;color:var(--accent);font-size:14px;letter-spacing:0}.preview{font-size:11px;color:var(--muted);border:1px solid #dde3dc;padding:4px 8px;border-radius:5px;letter-spacing:.4px}.controls{position:sticky;top:0;z-index:2;background:#fafbf9;padding:4px 22px 15px;border-bottom:1px solid var(--line)}.list-label{padding:19px 23px 7px;font-size:12px;color:var(--muted);display:flex;justify-content:space-between}.list{padding:0 15px 25px}.item{display:flex;width:100%;align-items:center;text-align:left;padding:16px 9px;gap:13px;background:transparent;border:0;border-bottom:1px solid var(--line);min-height:80px}.item:active{background:#edf3ec}.point{width:42px;height:42px;flex-shrink:0;display:grid;place-items:center;background:#eef2eb;color:#4a6758;border:1px solid #e2e8dd;border-radius:12px;font-size:13px;font-weight:700}.point.unknown{font-size:11px;color:#8a8e88;background:#f1f2ef}.item-copy{flex:1;min-width:0}.item-title{font-size:16px;font-weight:600;line-height:1.4}.item-sub{font-size:11px;line-height:1.5;margin-top:5px;color:var(--muted)}.chevron{color:#a0aaa2;font-size:24px;font-weight:300}.version{font-size:10px;background:#eef0eb;color:#889084;border-radius:3px;padding:2px 5px;margin-left:5px}.empty{text-align:center;color:var(--muted);padding:60px 20px;font-size:14px}.notice{padding:8px 20px 20px;font-size:11px;text-align:center;color:#8a928a;line-height:1.6}.back{display:flex;align-items:center;gap:8px;border:0;background:none;min-height:44px;padding:0;font-size:14px;color:#5f6e63}.detail{padding:1px 22px 120px}.detail h1{font-size:24px;line-height:1.4;margin:12px 0 8px;font-weight:650;letter-spacing:-.5px}.detail-meta{color:var(--muted);font-size:12px;margin-bottom:26px}.section{display:flex;align-items:center;justify-content:space-between;margin:20px 0 10px}.section strong{font-size:14px;font-weight:600}.section span{font-size:11px;color:var(--muted)}.image-slot{aspect-ratio:16/8;background:#edf0ea;border:1px solid #e1e7de;border-radius:12px;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:9px;color:#8a9689}.image-slot svg{width:32px;height:32px;stroke:#a8b4a4;fill:none;stroke-width:1.3}.image-slot span{font-size:12px}.hint{font-size:12px;color:#7b867d;line-height:1.7;margin-top:12px}.actions{position:fixed;bottom:0;left:50%;transform:translateX(-50%);max-width:460px;width:100%;background:#fafbf9ef;backdrop-filter:blur(10px);border-top:1px solid var(--line);padding:13px 22px calc(16px + env(safe-area-inset-bottom))}.use{border:0;border-radius:11px;background:var(--accent);color:#fff;width:100%;height:52px;font-weight:600;font-size:16px}.use.selected{background:#e2eee5;color:var(--accent)}.action-note{text-align:center;color:#8a928a;font-size:11px;margin-top:9px}.hidden{display:none!important}.toast{position:fixed;left:50%;bottom:125px;transform:translateX(-50%);border-radius:9px;background:#253c31;color:#fff;box-shadow:0 4px 16px #18251e20;font-size:13px;padding:13px 18px;white-space:nowrap;z-index:5}.error{padding:35px 22px;color:#8a493c;font-size:14px;line-height:1.7}@media(min-width:600px){.app{margin:24px auto;min-height:calc(100dvh - 48px);border:1px solid #dde3d9;border-radius:20px;overflow:clip;box-shadow:0 8px 45px #23371e08}.actions{bottom:0;border-radius:16px 16px 0 0}}@media(max-width:350px){.top,.controls,.detail{padding-left:16px;padding-right:16px}.item-title{font-size:15px}}
+.game-state{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:54px}.game-state strong{font-size:18px;font-weight:650}.game-state span{font-size:11px;color:var(--muted)}.use:disabled{opacity:.5;cursor:default}
+</style>
+<main class="app">
+  <header class="top"><div class="brand"><span class="mark">x</span>Xen <span style="font-size:13px;font-weight:400;color:#819080;letter-spacing:0;margin-left:3px">道具</span></div><span class="preview">界面预览</span></header>
+  <section id="catalog">
+    <div class="controls"><div class="game-state" aria-live="polite"><strong id="game-state">等待游戏状态</strong><span id="sync-state">GSI 未同步</span></div></div>
+    <div class="list-label"><span id="count">等待同步</span><span>点开查看站位与瞄点</span></div>
+    <div id="list" class="list"><div class="empty">进入游戏后自动同步地图与阵营</div></div><div class="notice">当前为预览选择，不会触发游戏动作</div>
+  </section>
+  <section id="details" class="hidden">
+    <div class="detail"><button class="back" id="back">‹ <span>返回道具列表</span></button><h1 id="title"></h1><div class="detail-meta" id="meta"></div>
+      <div class="section"><strong>站位图</strong><span>先站到这里</span></div><div class="image-slot"><svg viewBox="0 0 32 32"><path d="M16 28s9-9 9-17a9 9 0 0 0-18 0c0 8 9 17 9 17Z"/><circle cx="16" cy="11" r="3"/></svg><span>这套方案还没有站位图</span></div>
+      <div class="section"><strong>瞄点图</strong><span>再看向这里</span></div><div class="image-slot"><svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="9"/><path d="M16 2v8m0 12v8M2 16h8m12 0h8"/><circle cx="16" cy="16" r="2"/></svg><span>这套方案还没有瞄点图</span></div>
+      <p class="hint">先人工确认投掷成功，再采集这两张图。</p>
+    </div><div class="actions"><button class="use" id="use" disabled>使用此方案</button><div class="action-note" id="action-note">当前为预览选择，不会触发游戏动作</div></div>
+  </section>
+</main><div class="toast hidden" id="toast" role="status"></div>
+<script>
+const state = {
+  plans: [], catalogLoaded: false, catalogError: false,
+  map: '', team: '', contextKey: '', deadline: 0, generation: 0,
+  plan: null, selected: null, listScroll: 0
+};
+const $ = id => document.getElementById(id);
+const mapNames = {
+  de_mirage: 'Mirage', de_dust2: 'Dust II', de_inferno: 'Inferno', de_ancient: 'Ancient',
+  de_anubis: 'Anubis', de_nuke: 'Nuke', de_vertigo: 'Vertigo', de_train: 'Train',
+  de_cache: 'Cache', de_overpass: 'Overpass'
+};
+const escapeText = text => String(text).replace(/[&<>"']/g, char => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+}[char]));
+function title(plan) {
+  const prefix = mapNames[plan.map] || plan.map.replace(/^de_/, '');
+  const name = plan.name.toLowerCase().startsWith(prefix.toLowerCase() + ' ')
+    ? plan.name.slice(prefix.length).trimStart() : plan.name;
+  return name.replace(/\s+R\d+$/, '');
+}
+function rowTitle(plan) { return title(plan).replace(/^(?:CT|T)(?:来源\d+号|\d+)\s+/, ''); }
+function version(plan) { return /\s(R\d+)$/.exec(plan.name)?.[1] || ''; }
+function badge(plan) {
+  return /(?:^| )((?:CT|T)(?:来源\d+号|\d+))/.exec(plan.name)?.[1]
+    ?.replace('来源', '·').replace('号', '') || plan.team;
+}
+function ready() {
+  return Boolean(state.map && state.team && performance.now() < state.deadline);
+}
+function findPlan(id) {
+  return ready() ? state.plans.find(plan => plan.id === id && plan.map === state.map && plan.team === state.team) : null;
+}
+function render() {
+  $('game-state').textContent = state.map
+    ? (mapNames[state.map] || state.map) + (state.team ? ' · ' + state.team : '') : '等待游戏状态';
+  $('sync-state').textContent = !state.map ? 'GSI 未同步' : state.team ? 'GSI 已同步' : '等待本地阵营';
+  if (!ready()) {
+    $('count').textContent = '等待同步';
+    $('list').innerHTML = '<div class="empty">' + (state.map ? '等待本地阵营' : '进入游戏后自动同步地图与阵营') + '</div>';
+    return;
+  }
+  if (state.catalogError) {
+    $('count').textContent = '加载未完成';
+    $('list').innerHTML = '<div class="error">暂时无法读取方案，请刷新页面。</div>';
+    return;
+  }
+  if (!state.catalogLoaded) {
+    $('count').textContent = '正在读取方案';
+    $('list').innerHTML = '<div class="empty">等待方案清单</div>';
+    return;
+  }
+  const plans = state.plans.filter(plan => plan.map === state.map && plan.team === state.team)
+    .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', {numeric: true}));
+  $('count').textContent = plans.length + ' 套道具';
+  $('list').innerHTML = plans.length ? plans.map(plan =>
+    `<button class="item" data-id="${escapeText(plan.id)}"><span class="point">${escapeText(badge(plan))}</span>` +
+    `<span class="item-copy"><span class="item-title">${escapeText(rowTitle(plan))}</span>` +
+    `<span class="item-sub" style="display:block">参考图待采集${version(plan) ? ` <span class="version">${escapeText(version(plan))}</span>` : ''}</span></span>` +
+    '<span class="chevron">›</span></button>'
+  ).join('') : '<div class="empty">这个阵营还没有已保存的方案</div>';
+}
+function showPlan(id) {
+  state.plan = findPlan(id);
+  if (!state.plan) return false;
+  $('title').textContent = title(state.plan);
+  $('meta').textContent = [mapNames[state.map] || state.map, state.team + ' 阵营', version(state.plan)].filter(Boolean).join(' · ');
+  $('catalog').classList.add('hidden');
+  $('details').classList.remove('hidden');
+  updateUse();
+  window.scrollTo(0, 0);
+  return true;
+}
+function updateUse() {
+  const usable = state.plan && findPlan(state.plan.id);
+  const selected = usable && state.selected === state.plan.id;
+  $('use').disabled = !usable;
+  $('use').textContent = selected ? '✓ 已选中' : '使用此方案';
+  $('use').classList.toggle('selected', Boolean(selected));
+}
+function goBack() {
+  state.plan = null;
+  $('use').disabled = true;
+  $('details').classList.add('hidden');
+  $('catalog').classList.remove('hidden');
+  window.scrollTo(0, state.listScroll);
+}
+function resetSelection() {
+  state.generation++;
+  state.selected = null;
+  state.listScroll = 0;
+  $('toast').classList.add('hidden');
+  goBack();
+  history.replaceState(null, '', location.pathname);
+}
+let expiryTimer;
+function clearContext() {
+  clearTimeout(expiryTimer);
+  if (state.contextKey || state.plan || state.selected) resetSelection();
+  state.map = '';
+  state.team = '';
+  state.contextKey = '';
+  state.deadline = 0;
+  render();
+}
+function validIdentity(value) {
+  return (typeof value === 'string' && value.length > 0 && value.length <= 128 && !/[\u0000-\u001f\u007f]/.test(value))
+    || (Number.isSafeInteger(value) && value >= 0);
+}
+function applyContext(value, started) {
+  if (!value || value.valid !== true) { clearContext(); return; }
+  if (typeof value.map !== 'string' || !value.map || value.map.length > 256
+      || !['T', 'CT', ''].includes(value.team) || !validIdentity(value.epoch) || !validIdentity(value.generation)
+      || !Number.isInteger(value.remaining_ms) || value.remaining_ms <= 0 || value.remaining_ms > 10000) {
+    throw Error('状态字段无效');
+  }
+  // 使用请求开始时的单调时间，扣除整个请求耗时；响应到达不会重新获得源状态寿命。
+  const now = performance.now(), deadline = started + value.remaining_ms;
+  if (!Number.isFinite(started) || started > now || deadline <= now) { clearContext(); return; }
+  const key = JSON.stringify([value.map, value.team, String(value.epoch), String(value.generation)]);
+  const changed = key !== state.contextKey || state.deadline <= now;
+  if (changed) resetSelection();
+  state.map = value.map;
+  state.team = value.team;
+  state.contextKey = key;
+  state.deadline = deadline;
+  clearTimeout(expiryTimer);
+  expiryTimer = setTimeout(clearContext, deadline - now);
+  if (changed) render();
+}
+$('list').addEventListener('click', event => {
+  const row = event.target.closest('[data-id]');
+  if (!row || !findPlan(row.dataset.id)) return;
+  state.listScroll = window.scrollY;
+  if (showPlan(row.dataset.id)) history.pushState({detail: row.dataset.id, generation: state.generation}, '', '#detail');
+});
+$('back').addEventListener('click', () => history.back());
+window.addEventListener('popstate', event => {
+  if (event.state?.detail && event.state.generation === state.generation && showPlan(event.state.detail)) return;
+  goBack();
+  history.replaceState(null, '', location.pathname);
+});
+$('use').addEventListener('click', () => {
+  if (!state.plan || !findPlan(state.plan.id)) { clearContext(); return; }
+  state.selected = state.plan.id;
+  updateUse();
+  $('toast').textContent = '已选择';
+  $('toast').classList.remove('hidden');
+  setTimeout(() => $('toast').classList.add('hidden'), 1800);
+});
+// 浏览器缓存恢复或后台休眠不能恢复之前的方案详情。
+window.addEventListener('pageshow', event => { if (event.persisted) clearContext(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden || performance.now() >= state.deadline) clearContext();
+});
+async function pollContext() {
+  const started = performance.now(), abort = new AbortController();
+  const timeout = setTimeout(() => { clearContext(); abort.abort(); }, 2000);
+  try {
+    const response = await fetch('/context.json', {cache: 'no-store', signal: abort.signal});
+    if (!response.ok) throw Error('读取状态失败');
+    const value = await response.json();
+    if (abort.signal.aborted) throw Error('读取状态超时');
+    applyContext(value, started);
+  } catch { clearContext(); }
+  finally {
+    clearTimeout(timeout);
+    setTimeout(pollContext, Math.max(0, 500 - (performance.now() - started)));
+  }
+}
+history.replaceState(null, '', location.pathname);
+render();
+pollContext();
+fetch('/catalog.json', {cache: 'no-store'}).then(response => {
+  if (!response.ok) throw Error('读取清单失败');
+  return response.json();
+}).then(data => {
+  if (!Array.isArray(data) || data.some(plan => !plan || typeof plan.id !== 'string' || typeof plan.name !== 'string'
+      || typeof plan.map !== 'string' || !['T', 'CT', ''].includes(plan.team))) throw Error('清单字段无效');
+  state.plans = data;
+  state.catalogLoaded = true;
+  render();
+}).catch(() => { state.catalogError = true; clearContext(); });
+</script>
+</html>

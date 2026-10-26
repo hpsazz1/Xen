@@ -413,6 +413,103 @@ int main() {
     map_payload["provider"]["timestamp"] = 1700000001;
     silent_expiry.ingest(map_payload.dump(), config, start + 4001ms, utc + 9001);
     expect(!silent_expiry.map_snapshot(start + 4001ms).valid, "墙钟拒绝同时撤销地图");
+
+    // 手机展示阵营与控制阵营分离；不以死亡或所持武器推断当前阵营。
+    GsiState display;
+    auto display_payload = full;
+    display_payload["map"]["name"] = "de_mirage";
+    display_payload["player"]["team"] = "T";
+    display.ingest(display_payload.dump(), config, start, utc);
+    const auto display_first = display.map_snapshot(start);
+    expect(display_first.valid && display_first.local_team == Team::T, "本地玩家地图携带展示阵营");
+    display_payload["player"]["state"]["health"] = 0;
+    display.ingest(display_payload.dump(), config, start + 1ms, utc + 1);
+    expect(display.map_snapshot(start + 1ms).local_team == Team::T &&
+           display.map_snapshot(start + 1ms).context_epoch == display_first.context_epoch &&
+           !display.snapshot(start + 1ms).valid && display.snapshot(start + 1ms).team == Team::UNKNOWN,
+           "本地死亡保留展示阵营，原武器有效性和控制阵营仍撤销");
+    display_payload["player"]["activity"] = "textinput";
+    display.ingest(display_payload.dump(), config, start + 2ms, utc + 2);
+    expect(display.map_snapshot(start + 2ms).local_team == Team::T &&
+           display.snapshot(start + 2ms).team == Team::UNKNOWN, "非playing显示本地阵营不放宽控制契约");
+    display_payload["player"]["activity"] = "playing";
+    display_payload["player"]["team"] = "CT";
+    expect(display.ingest(display_payload.dump(), config, start + 3ms, utc + 3) == Status::DUPLICATE &&
+           display.map_snapshot(start + 3ms).valid && display.map_snapshot(start + 3ms).local_team == Team::UNKNOWN &&
+           display.map_snapshot(start + 3ms).context_epoch == display_first.context_epoch,
+           "死亡时仅阵营冲突仍撤销展示值，不被相同武器指纹的去重吞掉");
+    display_payload["provider"]["timestamp"] = 1700000001;
+    display_payload["player"]["activity"] = "playing";
+    display_payload["player"]["state"]["health"] = 100;
+    display_payload["player"]["team"] = "CT";
+    display_payload["player"]["weapons"]["weapon_0"] = {{"name", "weapon_smokegrenade"}, {"type", "Grenade"}, {"state", "active"}};
+    display.ingest(display_payload.dump(), config, start + 1s, utc + 1000);
+    const auto display_ct = display.map_snapshot(start + 1s);
+    expect(display_ct.valid && display_ct.local_team == Team::CT &&
+           display_ct.context_epoch == display_first.context_epoch &&
+           display.snapshot(start + 1s).status == Status::NON_FIREARM && !display.snapshot(start + 1s).valid,
+           "新秒换边T到CT可更新展示且持道具不放宽武器有效性，也不推进地图代际");
+    display_payload["player"]["team"] = "T";
+    display.ingest(display_payload.dump(), config, start + 1100ms, utc + 1100);
+    const auto display_conflict = display.map_snapshot(start + 1100ms);
+    expect(display_conflict.valid && display_conflict.local_team == Team::UNKNOWN &&
+           display_conflict.context_epoch == display_ct.context_epoch && display_conflict.valid_until == display_ct.valid_until &&
+           display.snapshot(start + 1100ms).team == Team::T,
+           "同秒矛盾仅撤销展示阵营，不改地图代际、TTL或既有控制阵营语义");
+    for (const auto* value : {"CT", "T", "CT"}) {
+        display_payload["player"]["team"] = value;
+        display.ingest(display_payload.dump(), config, start + 1200ms, utc + 1200);
+        expect(display.map_snapshot(start + 1200ms).local_team == Team::UNKNOWN &&
+               display.map_snapshot(start + 1200ms).valid_until == display_ct.valid_until,
+               "同秒旧包或反复换边不能恢复展示阵营或续期");
+    }
+    display_payload["map"]["name"] = "de_nuke";
+    display.ingest(display_payload.dump(), config, start + 1300ms, utc + 1300);
+    const auto display_new_map = display.map_snapshot(start + 1300ms);
+    expect(display_new_map.valid && display_new_map.local_team == Team::UNKNOWN,
+           "同秒新地图不能绕过已锁存的阵营冲突");
+    display_payload["provider"]["timestamp"] = 1700000002;
+    display.ingest(display_payload.dump(), config, start + 2s, utc + 2000);
+    const auto display_restored = display.map_snapshot(start + 2s);
+    expect(display_restored.local_team == Team::CT && display_restored.context_epoch == display_new_map.context_epoch,
+           "新秒恢复明确阵营而不制造地图切换");
+    auto old_display = display_payload;
+    old_display["provider"]["timestamp"] = 1700000001;
+    old_display["player"]["team"] = "T";
+    expect(display.ingest(old_display.dump(), config, start + 2100ms, utc + 2100) == Status::OUT_OF_ORDER &&
+           display.map_snapshot(start + 2100ms).local_team == Team::CT &&
+           display.map_snapshot(start + 2100ms).valid_until == display_restored.valid_until,
+           "乱序旧秒不能回滚展示阵营或续期");
+    const auto display_expired = display.map_snapshot(start + 4500ms);
+    expect(!display_expired.valid && display_expired.local_team == Team::UNKNOWN && display_expired.status == Status::EXPIRED,
+           "地图TTL到期同时清除展示阵营");
+
+    for (const auto& value : {nlohmann::json("ct"), nlohmann::json("SPECTATOR"), nlohmann::json(3), nlohmann::json(nullptr)}) {
+        auto unknown_display = display_payload;
+        unknown_display["player"]["team"] = value;
+        MapSnapshot parsed_map;
+        parse_payload(unknown_display.dump(), config, utc + 2000, &parsed_map);
+        expect(parsed_map.valid && parsed_map.local_team == Team::UNKNOWN, "展示只接受精确T/CT，不猜测未知枚举");
+    }
+    auto missing_display_team = display_payload;
+    missing_display_team["player"].erase("team");
+    MapSnapshot parsed_map;
+    parse_payload(missing_display_team.dump(), config, utc + 2000, &parsed_map);
+    expect(parsed_map.valid && parsed_map.local_team == Team::UNKNOWN, "缺阵营保持地图可用但不继承旧展示阵营");
+    for (const auto& failure : {"identity", "clock", "map", "json", "reset"}) {
+        GsiState invalid_display;
+        invalid_display.ingest(display_payload.dump(), config, start, utc + 2000);
+        expect(invalid_display.map_snapshot(start).local_team == Team::CT, "失效用例先建立有效展示阵营");
+        auto invalid_payload = display_payload;
+        if (std::string_view(failure) == "identity") invalid_payload["player"]["steamid"] = "76561198000000001";
+        if (std::string_view(failure) == "map") invalid_payload.erase("map");
+        if (std::string_view(failure) == "reset") invalid_display.reset();
+        else invalid_display.ingest(std::string_view(failure) == "json" ? "{" : invalid_payload.dump(), config, start + 1ms,
+                                    utc + (std::string_view(failure) == "clock" ? 12000 : 2001));
+        const auto invalidated = invalid_display.map_snapshot(start + 1ms);
+        expect(!invalidated.valid && invalidated.local_team == Team::UNKNOWN,
+               "身份不符、时钟拒绝、地图缺失、坏JSON和停止均清除展示阵营");
+    }
     // 只测试纯解码/时间状态，不start接收器、不监听、不访问游戏或设备。
     return failures == 0 ? 0 : 1;
 }

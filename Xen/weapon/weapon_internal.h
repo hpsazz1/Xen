@@ -21,6 +21,7 @@ private:
     void publish_map(MapSnapshot incoming, Clock::time_point now);
     mutable MapSnapshot map_;
     std::vector<std::string> seen_maps_;
+    bool map_team_conflicted_ = false;
     WeaponSnapshot current_;
     std::uint64_t epoch_ = 0, revision_ = 0, timestamp_ = 0;
     std::uint64_t recoil_safety_epoch_ = 0, control_safety_epoch_ = 0;

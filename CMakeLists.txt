@@ -581,6 +581,16 @@ add_library(voice_switch STATIC Xen/voice_switch/voice_switch.cpp Xen/voice_swit
 target_include_directories(voice_switch PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(voice_switch PUBLIC debug_session nlohmann_json::nlohmann_json PRIVATE ws2_32)
 
+# 手机页随 Worker 编译，不额外部署网页服务器或静态资源目录。
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${PROJECT_SOURCE_DIR}/Xen/grenade_web/page.html")
+file(READ "${PROJECT_SOURCE_DIR}/Xen/grenade_web/page.html" XEN_GRENADE_MOBILE_HTML)
+configure_file(Xen/grenade_web/page.h.in generated/grenade_mobile_page.h @ONLY)
+add_library(grenade_web STATIC Xen/grenade_web/server.cpp)
+target_include_directories(grenade_web PUBLIC ${PROJECT_SOURCE_DIR}/Xen
+    PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+target_link_libraries(grenade_web PUBLIC weapon PRIVATE movement nlohmann_json::nlohmann_json ws2_32 log)
+
 add_library(overlay STATIC
     Xen/overlay/overlay.cpp Xen/overlay/recoil_panel.cpp Xen/overlay/input_training_panel.cpp Xen/overlay/debug_panel.cpp Xen/overlay/movement_panel.cpp)
 target_include_directories(overlay PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
@@ -635,7 +645,7 @@ add_custom_target(model_workspace_tools
     VERBATIM)
 add_dependencies(xen_app model_workspace_tools)
 target_link_libraries(xen_app PRIVATE
-    overlay app_input app_startup runtime xen_debug config crash log app_release voice_switch)
+    overlay app_input app_startup runtime xen_debug config crash log app_release voice_switch grenade_web)
 if(WIN32)
     xen_deploy_runtime_dlls(xen_app OPENCV ORT NDI)
 endif()
@@ -1578,6 +1588,12 @@ if(BUILD_TESTING)
     target_link_libraries(voice_controller_tests PRIVATE voice_switch ws2_32)
     add_test(NAME voice_controller_tests COMMAND voice_controller_tests "${CMAKE_BINARY_DIR}/voice-controller-fixtures")
     xen_deploy_runtime_dlls(voice_controller_tests OPENCV ORT NDI)
+    add_executable(grenade_web_tests tests/grenade_web_tests.cpp)
+    target_link_libraries(grenade_web_tests PRIVATE grenade_web nlohmann_json::nlohmann_json ws2_32)
+    add_test(NAME grenade_web_tests COMMAND grenade_web_tests
+        "${PROJECT_SOURCE_DIR}/temp/XEN-GRENADE-ALIGN-20261026-001/web-fixtures")
+    set_tests_properties(grenade_web_tests PROPERTIES TIMEOUT 20)
+    xen_deploy_runtime_dlls(grenade_web_tests OPENCV ORT NDI)
     target_link_libraries(movement_session_tests PRIVATE debug_session movement ws2_32)
     add_test(NAME movement_session_tests COMMAND movement_session_tests "${CMAKE_BINARY_DIR}/movement-session-fixtures")
     set_tests_properties(movement_session_tests PROPERTIES TIMEOUT 30)

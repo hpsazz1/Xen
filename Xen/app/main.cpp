@@ -19,6 +19,7 @@
 #include "model_workspace/model_workspace.h"
 #include "voice_switch/voice_switch.h"
 #include "voice_switch/controller.h"
+#include "grenade_web/server.h"
 
 #include <Windows.h>
 
@@ -276,6 +277,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         crash_handler.uninstall();
         Log::shutdown();
         return startup_boundary.finish(0);
+    }
+
+    // 手机只读页面由辅机应用持有，直接共享 GSI；不依赖 Runtime 或主机语音工具。
+    grenade_web::Server mobile_web;
+    if (!mobile_web.start({},shared_gsi)) {
+        append_message(app_message,"手机道具清单未启动：" + mobile_web.snapshot().error);
+    } else {
+        for (const auto& url : mobile_web.snapshot().urls) {
+            LOG_INFO("app","手机道具清单：{}",url);
+            if (url.find("127.0.0.1") == std::string::npos)
+                append_message(app_message,"手机道具清单：" + url);
+        }
     }
 
     const auto drain_debug_samples = [&](bool final_drain = false, const RuntimeSnapshot* frozen = nullptr) noexcept {
@@ -810,6 +823,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
 
     // 渲染失败和系统退出同样经过屏障；不可先关闭后台仍使用的设备或日志。
+    mobile_web.stop();
     voice_controller.cancel();
     voice_server.stop();
     debug_workspace.request_shutdown();
