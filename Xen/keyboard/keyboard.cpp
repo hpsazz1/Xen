@@ -121,6 +121,13 @@ KeyboardPollResult KeyboardListener::poll() noexcept {
                 for (const int key : impl_->config.anomaly_mark_virtual_keys)
                     impl_->event_state.anomaly_blocked_until_release[static_cast<std::size_t>(key)] =
                         snapshot.virtual_keys[static_cast<std::size_t>(key)];
+                for (const auto* keys : {&impl_->config.grenade_menu_virtual_keys,
+                                        &impl_->config.grenade_align_virtual_keys,
+                                        &impl_->config.grenade_throw_virtual_keys,
+                                        &impl_->config.grenade_cancel_virtual_keys})
+                    for (const int key : *keys)
+                        impl_->event_state.grenade_blocked_until_release[static_cast<std::size_t>(key)] =
+                            snapshot.virtual_keys[static_cast<std::size_t>(key)];
             }
             const auto polled = keyboard::detail::update_keyboard_events(
                 impl_->event_state, impl_->config, snapshot.virtual_keys);

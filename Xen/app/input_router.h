@@ -12,6 +12,7 @@ struct KeyboardRoutingResult {
     bool runtime_toggle_pressed = false;
     bool debug_test_pressed = false;
     bool anomaly_mark_pressed = false;
+    bool grenade_menu_pressed = false, grenade_align_pressed = false, grenade_throw_pressed = false, grenade_cancel_pressed = false;
 };
 // 全局界面急停与键盘急停共享独立调试取消语义。
 bool debug_emergency_requested(bool keyboard_emergency, std::span<const RuntimeIntent> intents) noexcept;

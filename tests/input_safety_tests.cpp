@@ -559,6 +559,16 @@ int main() {
             "异常标记只通知App，不改变运行或输出状态");
         expect(!app::detail::route_keyboard_events(runtime,poll,true).anomaly_mark_pressed,
             "绑定捕获不得生成异常标记");
+        poll.events = {{KeyboardEventType::GRENADE_MENU,true},{KeyboardEventType::GRENADE_ALIGN,true},{KeyboardEventType::GRENADE_THROW,true},
+                       {KeyboardEventType::GRENADE_CANCEL,true}};
+        const auto grenade = app::detail::route_keyboard_events(runtime,poll,false);
+        expect(grenade.grenade_menu_pressed && grenade.grenade_align_pressed && grenade.grenade_throw_pressed && grenade.grenade_cancel_pressed &&
+               !grenade.emergency_pressed && !grenade.runtime_toggle_pressed &&
+               runtime.snapshot().state==RuntimeState::STOPPED,
+            "道具四向操作不能触发全局急停或启动Runtime");
+        const auto captured = app::detail::route_keyboard_events(runtime,poll,true);
+        expect(!captured.grenade_menu_pressed && !captured.grenade_align_pressed && !captured.grenade_throw_pressed && !captured.grenade_cancel_pressed,
+            "热键捕获不得同时启动或取消道具动作");
     }
     test_startup_loss_and_recovery();
     test_failure_cache_and_new_release();

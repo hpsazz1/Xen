@@ -1,4 +1,4 @@
-﻿param([string]$TestRoot = (Join-Path $PSScriptRoot '..\cache\worker-update-tests'), [string]$ManifestValidator = '', [string]$GitExecutable = 'git')
+param([string]$TestRoot = (Join-Path $PSScriptRoot '..\cache\worker-update-tests'), [string]$ManifestValidator = '', [string]$GitExecutable = 'git')
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'path_safety.psm1') -Force
@@ -10,7 +10,8 @@ $sharedSourceToolNames = $captureToolNames + @('XenClockSource.exe')
 $modelReviewNames = @('model_data_pipeline.py', 'model_data_review.html',
     'model_training_environment.py', 'model_training_requirements.txt')
 $voiceToolNames = @('client.py', 'requirements.txt', 'install.ps1', 'start.ps1',
-    'empty_keywords.txt', 'README.md', 'LICENSES.md', 'prepare_model.py')
+    'empty_keywords.txt', 'README.md', 'LICENSES.md', 'prepare_model.py',
+        'guidance.py', 'preview_window.py', 'reference_assets.py', 'reference_tool.py', 'screen_capture.py')
 $script:passed = 0
 function Assert-UpdateTest([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw "FAIL: $Message" }

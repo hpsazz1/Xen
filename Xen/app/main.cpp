@@ -259,12 +259,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     const auto configure_voice = [&] {
         voice_controller.cancel();
         voice_server.stop();
-        if (!active_keyboard_config.voice_virtual_keys.empty()) {
+        if (active_keyboard_config.grenade_assist_enabled || !active_keyboard_config.voice_virtual_keys.empty()) {
             voice_switch::Config voice_config;
             voice_config.bind_address = active_gsi_config.bind_address;
             voice_config.allowed_peer_ipv4 = active_gsi_config.allowed_peer_ipv4;
             if (!voice_server.start(voice_config))
-                append_message(app_message,"语音通道未启动：" + voice_server.snapshot().error);
+                append_message(app_message,"主机方案通道未启动：" + voice_server.snapshot().error);
         }
     };
     configure_voice();
@@ -560,6 +560,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             context.config.gsi = active_gsi_config;
             // 已打开设备的参数才是事实；未保存草稿不能冒充连接已重配。
             context.config.mouse = active_input_config;
+            context.config.keyboard = active_keyboard_config;
+            context.config.keyboard.debug_test_enabled = active_keyboard_config.debug_test_enabled && config.keyboard.debug_test_enabled;
+            context.config.keyboard.grenade_assist_enabled = active_keyboard_config.grenade_assist_enabled && config.keyboard.grenade_assist_enabled;
             context.device = input_device;
             context.map = shared_gsi->map_snapshot();
             context.runtime_idle = !report_lifecycle.stopping() &&
@@ -573,14 +576,28 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         };
         if (actions.movement_draft_changed)
             debug_workspace.update_movement_draft(actions.debug_request,make_debug_context());
+        debug_workspace.maintain_grenade(make_debug_context(),keyboard_poll.input_healthy && !actions.hotkey_capture_consumed);
+        if (keyboard_routing.grenade_cancel_pressed) debug_workspace.cancel_grenade();
+        else if (keyboard_routing.grenade_menu_pressed) debug_workspace.cancel_grenade("打开道具清单，旧对齐结果已撤销");
         if (emergency_pressed || actions.training_stop_requested || actions.stop_requested) {
             if (emergency_pressed || actions.stop_requested) report_lifecycle.cancel_restart();
             debug_workspace.cancel();
             // 停止同时撤销文件处理后的准备意图，后台结果回迁不能恢复下一步。
             overlay.cancel_background();
         }
+        if (!emergency_pressed && !keyboard_routing.grenade_cancel_pressed && !keyboard_routing.grenade_menu_pressed && !actions.stop_requested &&
+            !runtime_toggle_pressed && !actions.start_requested && !actions.save_config_requested &&
+            !overlay.close_requested() && !report_lifecycle.busy() && !overlay.background_busy() &&
+            actions.debug_action == debug_session::Action::NONE) {
+            if (keyboard_routing.grenade_align_pressed)
+                debug_workspace.align_grenade(make_debug_context());
+            else if (keyboard_routing.grenade_throw_pressed)
+                debug_workspace.throw_grenade(make_debug_context());
+        }
         if (keyboard_routing.debug_test_pressed && actions.debug_action == debug_session::Action::NONE &&
-            !emergency_pressed && !actions.stop_requested &&
+            !keyboard_routing.grenade_align_pressed && !keyboard_routing.grenade_throw_pressed &&
+            !keyboard_routing.grenade_menu_pressed &&
+            !emergency_pressed && !keyboard_routing.grenade_cancel_pressed && !actions.stop_requested &&
             !runtime_toggle_pressed && !actions.start_requested && !overlay.close_requested()) {
             if (report_lifecycle.stopping() || overlay.background_busy()) {
                 app_message = "后台停止或弹道任务未结束，本次测试快捷键忽略，不排队。";
@@ -691,6 +708,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             // 保存草稿不要求模型文件已经到位；实际启动/应用模型时再解析存在性。
             if (save_current_config(config_error)) {
                 voice_controller.cancel();
+                debug_workspace.cancel_grenade("配置已保存，请重新选择与对齐");
                 if (!same_gsi_config(active_gsi_config,config.gsi)) {
                     shared_gsi->stop(); active_gsi_config = config.gsi;
                     if (active_gsi_config.enabled && !shared_gsi->start(active_gsi_config))
@@ -774,7 +792,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             }
         }
         voice_controller.tick(make_debug_context(),keyboard_poll,active_keyboard_config,
-            emergency_pressed || actions.stop_requested || actions.training_stop_requested ||
+            emergency_pressed || keyboard_routing.grenade_cancel_pressed || actions.stop_requested || actions.training_stop_requested ||
             actions.start_requested || runtime_toggle_pressed || actions.save_config_requested ||
             actions.debug_action == debug_session::Action::CANCEL || overlay.close_requested() ||
             report_lifecycle.busy() || report_lifecycle.stop_pending() || overlay.background_busy(),

@@ -9,6 +9,7 @@
 #include "movement/recording.h"
 #include "debug_session/movement_library_internal.h"
 #include "source_context/source_context.h"
+#include "grenade_alignment/grenade_alignment.h"
 #include <cstdlib>
 #include <atomic>
 #include <chrono>
@@ -172,7 +173,44 @@ struct Session::Impl {
     std::atomic_uint64_t repeat_revision{0};
     std::future<Json> voice_load;
     Request voice_request;
-    std::uint64_t voice_revision = 0, voice_epoch = 0;
+    std::uint64_t voice_revision = 0, voice_epoch = 0, voice_grenade_epoch = 0;
+    std::atomic_uint64_t grenade_epoch{0};
+    std::atomic_bool grenade_operation{false};
+    struct AlignedGrenade {
+        std::uint64_t epoch = 0, repeat_revision = 0;
+        std::string reference_revision;
+        Context context;
+    };
+    std::atomic<std::shared_ptr<const AlignedGrenade>> aligned_grenade;
+    void guidance(const std::string& state, const std::string& message,
+                  const std::string& path = {}, std::optional<std::uint64_t> expected_epoch = {}) {
+        update([&](Snapshot& s) {
+            if (expected_epoch && grenade_epoch.load() != *expected_epoch) return;
+            s.grenade_guidance_state = state; s.grenade_guidance_message = message;
+            if (!path.empty()) {
+                const auto file = std::filesystem::u8path(path);
+                const auto id = file.filename().u8string(), reference = file.stem().u8string();
+                s.grenade_guidance_plan_id.assign(id.begin(), id.end());
+                s.grenade_guidance_reference_id.assign(reference.begin(), reference.end());
+            }
+            ++s.grenade_guidance_revision;
+        });
+    }
+    void invalidate_grenade(const std::string& reason) {
+        ++grenade_epoch; aligned_grenade.store(nullptr);
+        if (grenade_operation.load()) canceled = true;
+        guidance("hidden", reason);
+    }
+    void invalidate_repeat(const std::string& reason) {
+        ++repeat_revision;
+        repeat_plan.store(nullptr);
+        invalidate_grenade(reason);
+        update([&](Snapshot& s) {
+            s.repeat_ready = false; s.movement_test_enabled = false;
+            s.movement_voice_selected = false;
+            s.repeat_unavailable_reason = reason.empty() ? "测试模板已失效，请重新准备" : reason;
+        });
+    }
     void replace_hud(std::shared_ptr<CounterpulseHud> next = {}) {
         std::shared_ptr<CounterpulseHud> previous;
         { std::lock_guard lock(hud_mutex); previous = hud.exchange(std::move(next)); }
@@ -199,19 +237,20 @@ struct Session::Impl {
         }
     }
     bool busy() const { return view.load()->busy || (worker.valid() && worker.wait_for(0ms) != std::future_status::ready); }
-    template<class F> bool launch(State state, bool physical, F&& fn) {
+    template<class F> bool launch(State state, bool physical, F&& fn, bool retain_timeline = false) {
         if (busy()) return false;
         if (worker.valid()) {
             if (worker.wait_for(0ms) != std::future_status::ready) return false;
             worker.get();
         }
         canceled = false;
+        grenade_operation = retain_timeline;
         const auto current = ++generation;
         update([&](Snapshot& s) { s.state = state; s.busy = true; s.physical = physical;
             // generation与结果同次发布，不能让新准备代次携带上一次完成结果。
             s.generation = current; s.message = "后台处理中"; s.live.reset(); s.result.reset(); });
         try {
-            worker = std::async(std::launch::async, [this, current, physical, fn = std::forward<F>(fn)]() mutable {
+            worker = std::async(std::launch::async, [this, current, physical, retain_timeline, fn = std::forward<F>(fn)]() mutable {
                 try { fn(); }
                 catch (const DebugRunFailure& error) {
                     update([&](Snapshot& s) {
@@ -232,17 +271,21 @@ struct Session::Impl {
                 }
                 update([&](Snapshot& s) { if (s.generation == current) {
                     s.busy = false; s.movement_recording = false;
+                    if (retain_timeline && canceled && !s.cleanup_unknown) s.state = State::CANCELED;
                     if (canceled && s.state == State::PREPARED) {
                         s.state = State::CANCELED; s.prepared_id.clear(); s.message = "准备已取消，已生成文件仅留档";
                     }
-                    if (canceled || s.state == State::CANCELED || s.state == State::FAILED || s.cleanup_unknown) {
+                    if (s.cleanup_unknown || (!retain_timeline &&
+                        (canceled || s.state == State::CANCELED || s.state == State::FAILED))) {
                         repeat_plan.store(nullptr); s.repeat_ready = false; s.movement_test_enabled = false;
                         s.repeat_unavailable_reason = s.message;
                     }
                 } });
+                grenade_operation = false;
             });
             return true;
         } catch (...) {
+            grenade_operation = false;
             update([](Snapshot& s) { s.state = State::FAILED; s.busy = false; s.message = "后台任务创建失败"; });
             return false;
         }
@@ -320,7 +363,8 @@ struct Session::Impl {
             }
         });
     }
-    void run_movement(const Prepared& work) {
+    void run_movement(const Prepared& work, const std::function<void()>& before_execute = {},
+                      const std::function<bool()>& start_permitted = {}) {
         using namespace movement::timeline;
         Plan plan; std::string error;
         if (!parse_plan(work.plan,plan,error)) throw DebugRunFailure(error,true);
@@ -344,8 +388,15 @@ struct Session::Impl {
             if (!device.poll_input(input) || !input.state_valid) return false;
             for (int key : config.keyboard.emergency_virtual_keys)
                 if (key > 0 && key < 256 && input.virtual_keys[static_cast<std::size_t>(key)]) {
+                    // worker可能独自捕获很短的急停；不能依赖下一次UI轮询再次看到按住。
+                    invalidate_repeat("急停键已撤销测试许可，请重新启用");
                     canceled = true; return true;
                 }
+            if (work.request.mode == Mode::GRENADE_TEST && config.keyboard.grenade_assist_enabled)
+                for (int key : config.keyboard.grenade_cancel_virtual_keys)
+                    if (key > 0 && key < 256 && input.virtual_keys[static_cast<std::size_t>(key)]) {
+                        canceled = true; return true;
+                    }
             return false;
         };
         update([&](Snapshot& s) { s.state = State::RUNNING;
@@ -362,8 +413,11 @@ struct Session::Impl {
         }
         if (!ready) throw DebugRunFailure(canceled.load() ? label + "测试已取消，未开始输出" :
             "等待源焦点或设备输入超时，未开始输出",true);
+        // 在源焦点就绪后紧邻投掷复核新画面，不能在等待焦点前消费旧已对齐结果。
+        if (before_execute) before_execute();
         Callbacks callbacks;
         callbacks.canceled = emergency;
+        callbacks.first_output_permitted = start_permitted;
         callbacks.permitted = [&] {
             const auto focus = source.snapshot(); InputSnapshot input;
             return !canceled.load() && focus.available && focus.focused &&
@@ -592,13 +646,7 @@ void Session::cancel(const std::string& reason) noexcept {
 }
 
 void Session::invalidate_repeat(const std::string& reason) noexcept {
-    ++impl_->repeat_revision;
-    impl_->repeat_plan.store(nullptr);
-    try { impl_->update([&](Snapshot& s) {
-        s.repeat_ready = false; s.movement_test_enabled = false;
-        s.movement_voice_selected = false;
-        s.repeat_unavailable_reason = reason.empty() ? "测试模板已失效，请重新准备" : reason;
-    }); } catch (...) {}
+    try { impl_->invalidate_repeat(reason); } catch (...) {}
 }
 bool Session::update_movement_draft(const Request& request, const Context& context, bool manual) noexcept {
     if (impl_->shutting_down || !timeline_mode(request.mode)) return false;
@@ -606,10 +654,11 @@ bool Session::update_movement_draft(const Request& request, const Context& conte
     try {
         const auto plan = request_plan(request);
         const bool changed = current_plan(*snapshot(),request.mode) != plan;
+        if (changed && request.mode == Mode::GRENADE_TEST) impl_->invalidate_grenade("道具内容已改变，请保存后重新选择与对齐");
         if (manual && changed && owns_test()) ++impl_->repeat_revision;
         impl_->update([&](Snapshot& s) {
             current_plan(s,request.mode) = plan;
-            if (manual && changed && request.mode == Mode::MOVEMENT_TEST) s.movement_voice_selected = false;
+            if (manual && changed && s.movement_test_mode == request.mode) s.movement_voice_selected = false;
         });
         // 编辑另一页只更新该页草稿，不能接管或撤销当前F11模板。
         if (!owns_test()) return false;
@@ -620,6 +669,10 @@ bool Session::update_movement_draft(const Request& request, const Context& conte
             binding->config.keyboard.emergency_virtual_keys != context.config.keyboard.emergency_virtual_keys) {
             invalidate_repeat("测试运行环境已改变，请重新启用"); return false;
         }
+        // UI回填同一份已载入草稿不能撤销刚完成的对齐，也不创建新模板版本。
+        if (const auto prior = impl_->repeat_plan.load(); request.mode == Mode::GRENADE_TEST && !changed && prior &&
+            prior->request.mode == request.mode && prior->repeat_revision == impl_->repeat_revision.load() &&
+            prior->plan == plan) return true;
         const auto revision = ++impl_->repeat_revision;
         impl_->repeat_plan.store(nullptr);
         impl_->update([](Snapshot& s) { s.repeat_ready = false; s.repeat_unavailable_reason = "当前草稿无效，请修正参数"; });
@@ -638,7 +691,7 @@ bool Session::update_movement_draft(const Request& request, const Context& conte
         if (owner) { ++impl_->repeat_revision; impl_->repeat_plan.store(nullptr); }
         try { impl_->update([&](Snapshot& s) {
             current_plan(s,request.mode) = Json();
-            if (request.mode == Mode::MOVEMENT_TEST) s.movement_voice_selected = false;
+            if (s.movement_test_mode == request.mode) s.movement_voice_selected = false;
             if (owner) { s.repeat_ready = false; s.repeat_unavailable_reason = "当前草稿无效，请修正参数"; }
         }); } catch (...) {}
         return false;
@@ -648,6 +701,7 @@ void Session::update_map(const weapon::MapSnapshot& map) noexcept {
     try {
         const auto prior = snapshot();
         if (prior->movement_map.context_epoch == map.context_epoch && prior->movement_map.valid == map.valid) return;
+        impl_->invalidate_grenade("地图上下文已变化，请重新选择道具");
         if (prior->movement_voice_selected && (!map.valid || prior->movement_voice_epoch != map.context_epoch)) {
             ++impl_->repeat_revision; impl_->repeat_plan.store(nullptr);
             impl_->update([](Snapshot& s) { s.repeat_ready = false; s.repeat_unavailable_reason = "语音方案的地图已失效，请重新选择"; });
@@ -658,14 +712,16 @@ void Session::update_map(const weapon::MapSnapshot& map) noexcept {
 bool Session::select_voice(const Request& request, const Context& context) noexcept {
     try {
         const auto s = snapshot();
-        if (busy() || impl_->shutting_down || request.mode != Mode::MOVEMENT_TEST ||
-            s->movement_test_mode != Mode::MOVEMENT_TEST || !s->movement_test_enabled || !context.map.valid ||
-            s->movement_current != s->movement_baseline || !context.runtime_idle || !context.input_recording_idle ||
+        if (busy() || impl_->shutting_down || !timeline_mode(request.mode) ||
+            s->movement_test_mode != request.mode || !s->movement_test_enabled || !context.map.valid ||
+            current_plan(*s,request.mode) != baseline_plan(*s,request.mode) || !context.runtime_idle || !context.input_recording_idle ||
             !context.cleanup_known || !context.config.mouse.allow_send_input) return false;
-        admit(context, Mode::MOVEMENT_TEST);
+        admit(context, request.mode);
+        if (request.mode == Mode::GRENADE_TEST) impl_->invalidate_grenade("正在选择新的道具方案");
         impl_->voice_request = request;
         impl_->voice_revision = impl_->repeat_revision.load();
         impl_->voice_epoch = context.map.context_epoch;
+        impl_->voice_grenade_epoch = impl_->grenade_epoch.load();
         impl_->voice_load = std::async(std::launch::async, [request] {
             auto r = request;
             r.plan_text = read_document(std::filesystem::u8path(request.load_path),16*1024*1024).dump();
@@ -680,26 +736,201 @@ std::optional<bool> Session::finish_voice(const Context& context, bool still_cur
         const auto plan = impl_->voice_load.get();
         const auto s = snapshot();
         const auto& binding = impl_->movement_binding;
-        if (!still_current || impl_->shutting_down || !s->movement_test_enabled || s->movement_test_mode != Mode::MOVEMENT_TEST ||
+        const auto mode = impl_->voice_request.mode;
+        if (!still_current || impl_->shutting_down || !s->movement_test_enabled || s->movement_test_mode != mode ||
+            (mode == Mode::GRENADE_TEST && impl_->voice_grenade_epoch != impl_->grenade_epoch.load()) ||
             impl_->voice_revision != impl_->repeat_revision.load() || !context.map.valid ||
             impl_->voice_epoch != context.map.context_epoch || plan.value("map",std::string{}) != context.map.map_name ||
             !context.runtime_idle || !context.input_recording_idle || !context.cleanup_known ||
             !context.config.mouse.allow_send_input || !binding || binding->device != context.device ||
             binding->config.keyboard.debug_test_virtual_keys != context.config.keyboard.debug_test_virtual_keys ||
             binding->config.keyboard.emergency_virtual_keys != context.config.keyboard.emergency_virtual_keys ||
-            s->movement_current != s->movement_baseline) return false;
-        admit(context, Mode::MOVEMENT_TEST);
+            current_plan(*s,mode) != baseline_plan(*s,mode)) return false;
+        admit(context, mode);
         auto request = impl_->voice_request; request.plan_text = plan.dump();
         if (!update_movement_draft(request,context,false)) return false;
         impl_->update([&](Snapshot& next) {
-            next.draft_plan = plan; next.draft_plan_mode = Mode::MOVEMENT_TEST; ++next.draft_plan_revision;
-            publish_loaded_plan(next,Mode::MOVEMENT_TEST,plan);
-            next.movement_baseline = plan; next.movement_current = plan;
-            next.movement_selected_path = request.load_path; ++next.movement_catalog_revision;
+            next.draft_plan = plan; next.draft_plan_mode = mode; ++next.draft_plan_revision;
+            publish_loaded_plan(next,mode,plan);
+            baseline_plan(next,mode) = plan; current_plan(next,mode) = plan;
+            auto& path = mode == Mode::GRENADE_TEST ? next.grenade_selected_path : next.movement_selected_path;
+            auto& revision = mode == Mode::GRENADE_TEST ? next.grenade_catalog_revision : next.movement_catalog_revision;
+            path = request.load_path; ++revision;
             next.movement_voice_selected = true; next.movement_voice_epoch = context.map.context_epoch;
             next.message = "语音方案已载入，下一次测试使用当前方案";
         });
+        if (mode == Mode::GRENADE_TEST) impl_->guidance("selected","请按站位图定位，拿出道具后对齐",request.load_path);
         return true;
+    } catch (...) { return false; }
+}
+void Session::cancel_grenade(const std::string& reason) noexcept {
+    try {
+        const auto s = snapshot();
+        if (s->movement_test_mode != Mode::GRENADE_TEST) return;
+        const bool owns_worker = impl_->grenade_operation.load();
+        if (s->busy && s->physical && !owns_worker) return;
+        impl_->invalidate_grenade(reason);
+        // 局部取消只结束道具任务，保留当前已启用方案；全局cancel另行撤销许可。
+        impl_->update([&](Snapshot& next) {
+            next.message = reason;
+            if (next.busy && owns_worker) next.state = State::STOPPING;
+        });
+    } catch (...) {}
+}
+void Session::maintain_grenade(const Context& context, bool input_healthy) noexcept {
+    try {
+        const auto s = snapshot();
+        if (s->grenade_guidance_state == "hidden" && !impl_->grenade_operation.load()) return;
+        if (!s->movement_test_enabled || s->movement_test_mode != Mode::GRENADE_TEST ||
+            !context.config.keyboard.grenade_assist_enabled || !input_healthy || !context.runtime_idle ||
+            !context.input_recording_idle || !context.cleanup_known || !context.config.mouse.allow_send_input ||
+            !context.map.valid || s->grenade_current.value("map",std::string{}) != context.map.map_name ||
+            !impl_->movement_binding || impl_->movement_binding->device != context.device) {
+            cancel_grenade("道具辅助上下文已失效，请重新选择与对齐");
+            return;
+        }
+        if (const auto ready = impl_->aligned_grenade.load(); ready &&
+            (ready->context.map.context_epoch != context.map.context_epoch ||
+             ready->repeat_revision != impl_->repeat_revision.load() ||
+             ready->context.config.aim.counts_per_pixel_x != context.config.aim.counts_per_pixel_x ||
+             ready->context.config.aim.counts_per_pixel_y != context.config.aim.counts_per_pixel_y))
+            cancel_grenade("对齐参数或地图已改变，请重新对齐");
+    } catch (...) { cancel_grenade("道具辅助上下文不可用"); }
+}
+bool Session::align_grenade(const Context& context) noexcept {
+    try {
+        const auto s = snapshot();
+        const auto source = impl_->repeat_plan.load();
+        if (busy() || impl_->shutting_down) return false;
+        if (!context.config.keyboard.grenade_assist_enabled || !s->movement_test_enabled ||
+            s->movement_test_mode != Mode::GRENADE_TEST || !source ||
+            source->request.mode != Mode::GRENADE_TEST || source->repeat_revision != impl_->repeat_revision.load() ||
+            s->grenade_selected_path.empty() || s->grenade_current != s->grenade_baseline ||
+            !context.map.valid || s->grenade_current.value("map",std::string{}) != context.map.map_name)
+            throw std::runtime_error("请先启用道具辅助，保存并选择当前地图方案");
+        admit(context,Mode::GRENADE_TEST);
+        if (!context.config.mouse.allow_send_input || !source->context.config.mouse.allow_send_input ||
+            source->context.device != context.device) throw std::runtime_error("道具输出许可或设备已变化，请重新启用");
+        impl_->aligned_grenade.store(nullptr);
+        const auto epoch = ++impl_->grenade_epoch;
+        const auto revision = impl_->repeat_revision.load();
+        const auto path = s->grenade_selected_path;
+        impl_->guidance("aligning","正在对齐；左键取消",path);
+        return impl_->launch(State::RUNNING,true,[this,context,source,epoch,revision,path] {
+            const auto permitted = [this,epoch,revision] {
+                return !impl_->canceled.load() && impl_->grenade_epoch.load() == epoch &&
+                    impl_->repeat_revision.load() == revision;
+            };
+            try {
+                const auto reference = grenade_alignment::load_reference(std::filesystem::u8path(path),source->plan);
+                if (!permitted()) return;
+                const auto directory = new_directory(source->request.output_root);
+                impl_->update([&](Snapshot& next){next.report_directory=directory.string();});
+                const auto result = grenade_alignment::run(reference,context.config,context.device,impl_->canceled,false,permitted);
+                if (result.emergency_stop) cancel("急停键已取消对齐并撤销测试许可");
+                auto evidence = result.evidence;
+                evidence["code_identity"] = code_identity(); evidence["plan"] = source->plan;
+                evidence["reference_revision"] = reference.revision;
+                evidence["aligned"] = result.aligned; evidence["canceled"] = result.canceled;
+                evidence["error"] = result.error; evidence["physical_validation_passed"] = false;
+                write_document(directory/"grenade-alignment.json",evidence);
+                if (impl_->grenade_epoch.load() != epoch) return;
+                const bool aligned = result.aligned && permitted();
+                if (aligned) impl_->aligned_grenade.store(std::make_shared<const Impl::AlignedGrenade>(
+                    Impl::AlignedGrenade{epoch,revision,reference.revision,context}));
+                impl_->guidance(aligned?"aligned":result.canceled?"hidden":"failed",
+                    aligned?"对齐完成，按下键投掷":result.error,{},epoch);
+                impl_->update([&](Snapshot& next) {
+                    if (impl_->grenade_epoch.load() != epoch) return;
+                    next.state = result.canceled ? State::CANCELED : aligned ? State::COMPLETED : State::FAILED;
+                    next.message = aligned ? "对齐完成，等待下键；未执行投掷" : result.error;
+                    next.result = std::make_shared<const Json>(evidence);
+                });
+            } catch (const std::exception& error) {
+                if (impl_->grenade_epoch.load() != epoch) return;
+                impl_->guidance("failed",error.what(),{},epoch);
+                impl_->update([&](Snapshot& next){if(impl_->grenade_epoch.load()==epoch){next.state=State::FAILED;next.message=error.what();}});
+            }
+        },true);
+    } catch (const std::exception& error) {
+        try { impl_->update([&](Snapshot& s){s.message=error.what();}); } catch (...) {}
+        return false;
+    } catch (...) { return false; }
+}
+bool Session::throw_grenade(const Context& context) noexcept {
+    try {
+        const auto ready = impl_->aligned_grenade.load();
+        const auto source = impl_->repeat_plan.load();
+        const auto s = snapshot();
+        if (busy() || impl_->shutting_down) return false;
+        if (!ready || !source || !context.config.keyboard.grenade_assist_enabled ||
+            !s->movement_test_enabled || s->movement_test_mode != Mode::GRENADE_TEST ||
+            s->grenade_guidance_state != "aligned" || ready->epoch != impl_->grenade_epoch.load() ||
+            ready->repeat_revision != impl_->repeat_revision.load() ||
+            !context.map.valid || ready->context.map.context_epoch != context.map.context_epoch ||
+            source->plan.value("map",std::string{}) != context.map.map_name)
+            throw std::runtime_error("尚未完成当前道具对齐，请先按上键");
+        admit(context,Mode::GRENADE_TEST);
+        if (!context.config.mouse.allow_send_input || context.device != ready->context.device)
+            throw std::runtime_error("输出许可或设备已改变，请重新对齐");
+        const auto path = s->grenade_selected_path;
+        impl_->aligned_grenade.store(nullptr); // 下键只消费一次，重复按键不排队。
+        impl_->guidance("hidden","正在复核并投掷");
+        auto work = *source; work.context = context;
+        return impl_->launch(State::RUNNING,true,[this,ready,path,work=std::move(work)]() mutable {
+            const auto permitted = [this,ready] {
+                return !impl_->canceled.load() && impl_->grenade_epoch.load()==ready->epoch &&
+                    impl_->repeat_revision.load()==ready->repeat_revision;
+            };
+            Json check_evidence;
+            auto checked_at = std::chrono::steady_clock::time_point{};
+            bool entered_execution = false;
+            bool execution_returned = false;
+            try {
+                work.directory = new_directory(work.request.output_root);
+                const auto parent_id = work.id;
+                work.id = work.directory.filename().string();
+                write_document(work.directory/"prepare.json",{{"schema_version",1},{"prepared_id",work.id},
+                    {"repeat_of",parent_id},{"trigger","GRENADE_ALIGN_THROW"},{"code_identity",code_identity()},
+                    {"plan",work.plan},{"sampling",work.sampling},{"physical_output",true}});
+                write_document(work.directory/timeline_report(work.request.mode),work.plan);
+                write_document(work.directory/"sampling-settings.json",work.sampling);
+                impl_->update([&](Snapshot& next){next.report_directory=work.directory.string();next.prepared_id=work.id;});
+                entered_execution = true;
+                impl_->run_movement(work,[&] {
+                    const auto reference = grenade_alignment::load_reference(std::filesystem::u8path(path),work.plan);
+                    if (reference.revision != ready->reference_revision || !permitted())
+                        throw DebugRunFailure("参考资源或上下文已改变，请重新对齐",true);
+                    const auto check = grenade_alignment::run(reference,work.context.config,work.context.device,impl_->canceled,true,permitted);
+                    if (check.emergency_stop) cancel("急停键已取消投掷并撤销测试许可");
+                    check_evidence = check.evidence;
+                    if (!check.aligned || !permitted()) throw DebugRunFailure(
+                        check.error.empty()?"当前画面已偏离瞄点，请重新对齐":check.error,true);
+                    checked_at = check.verified_at;
+                },[&] {
+                    return permitted() && checked_at != std::chrono::steady_clock::time_point{} &&
+                        std::chrono::steady_clock::now()-checked_at < 200ms;
+                });
+                execution_returned = true;
+                // 最后一帧判定与动作开始之间不做文件IO；报告在动作清理之后落盘。
+                write_document(work.directory/"grenade-prethrow-check.json",check_evidence);
+                const auto result = snapshot();
+                if (result->state == State::FAILED || result->state == State::CLEANUP_UNKNOWN)
+                    impl_->guidance("failed",result->message,{},ready->epoch);
+            } catch (const DebugRunFailure& error) {
+                if (!check_evidence.is_null()) { try { write_document(work.directory/"grenade-prethrow-check.json",check_evidence); } catch (...) {} }
+                impl_->guidance("failed",error.what(),{},ready->epoch);
+                throw;
+            } catch (const std::exception& error) {
+                impl_->guidance("failed",error.what(),{},ready->epoch);
+                // 执行后的写报告异常不得伪装成零输出；只继承已经确认的清理事实。
+                throw DebugRunFailure(error.what(),!entered_execution,
+                    execution_returned && !snapshot()->cleanup_unknown);
+            }
+        },true);
+    } catch (const std::exception& error) {
+        try { impl_->update([&](Snapshot& s){s.message=error.what();}); } catch (...) {}
+        return false;
     } catch (...) { return false; }
 }
 bool Session::repeat(const Context& context) noexcept { return run_repeat(context,true); }
@@ -741,8 +972,10 @@ bool Session::run_repeat(const Context& context, bool keyboard_trigger) noexcept
              context.config.keyboard.emergency_virtual_keys != source->context.config.keyboard.emergency_virtual_keys))
             return reject("测试键或紧急停止键已改变，请重新准备");
         auto work = *source;
+        if (work.request.mode == Mode::GRENADE_TEST) impl_->invalidate_grenade("本次人工投掷消耗旧对齐结果");
         if(single_use_recoil_mode(work.request.mode))invalidate_repeat("本次标定或采集许可已使用，请完成本组后重新准备");
         impl_->prepared.reset();
+        const bool retain_grenade = work.request.mode == Mode::GRENADE_TEST;
         return impl_->launch(State::RUNNING,true,[this,work = std::move(work),keyboard_trigger]() mutable {
             work.directory = new_directory(work.request.output_root);
             const auto parent_id = work.id;
@@ -754,7 +987,7 @@ bool Session::run_repeat(const Context& context, bool keyboard_trigger) noexcept
             write_document(work.directory / "sampling-settings.json",work.sampling);
             impl_->update([&](Snapshot& s) { s.prepared_id = work.id; s.report_directory = work.directory.string(); });
             impl_->run(work,true,physical_confirmation());
-        });
+        },retain_grenade);
     } catch (const std::exception& error) {
         try { impl_->update([&](Snapshot& s) { s.message = error.what(); }); } catch (...) {}
         return false;
@@ -806,6 +1039,9 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
             impl_->prepared.reset(); impl_->movement_binding = context;
             impl_->update([&](Snapshot& s) { s.movement_test_enabled = true; s.movement_test_mode = request.mode; });
             update_movement_draft(request,context);
+            if (request.mode == Mode::GRENADE_TEST && context.config.keyboard.grenade_assist_enabled &&
+                !snapshot()->grenade_selected_path.empty())
+                impl_->guidance("selected","请按站位图定位，拿出道具后对齐",snapshot()->grenade_selected_path);
             return true;
         }
         if (action == Action::RUN_MOVEMENT_TEST) {
@@ -840,15 +1076,18 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
         } else if (action == Action::LOAD_PLAN && snapshot()->movement_test_mode == request.mode) {
             // 载入期间不留旧参数兜底；页面接收载入草稿后更新下一次测试。
             ++impl_->repeat_revision; impl_->repeat_plan.store(nullptr);
+            if (request.mode == Mode::GRENADE_TEST) impl_->invalidate_grenade("正在载入新的道具方案");
             impl_->update([](Snapshot& s) { s.repeat_ready = false; s.repeat_unavailable_reason = "等待载入当前方案"; });
         }
         const auto repeat_revision = impl_->repeat_revision.load();
         if (timeline_mode(request.mode) && action == Action::SAVE_PLAN) {
             const auto current = request_plan(request);
             impl_->update([&](Snapshot& s) { current_plan(s,request.mode) = current; });
+            if (request.mode == Mode::GRENADE_TEST) impl_->invalidate_grenade("道具保存后请重新对齐");
         }
+        const auto grenade_epoch = impl_->grenade_epoch.load();
         impl_->update([](Snapshot& s) { s.prepared_id.clear(); });
-        return impl_->launch(State::WORKING,false,[this,action,request,context,repeat_revision] {
+        return impl_->launch(State::WORKING,false,[this,action,request,context,repeat_revision,grenade_epoch] {
             const auto refresh_movement_library = [&](const std::string& selected) {
                 const auto entries = detail::list_movement_plans(timeline_library_root(request),request.output_root);
                 impl_->update([&](Snapshot& s) {
@@ -856,7 +1095,7 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
                     auto& path = request.mode == Mode::GRENADE_TEST ? s.grenade_selected_path : s.movement_selected_path;
                     auto& revision = request.mode == Mode::GRENADE_TEST ? s.grenade_catalog_revision : s.movement_catalog_revision;
                     catalog.clear();
-                    for (const auto& entry : entries) catalog.push_back({entry.path,entry.name,entry.map,entry.voice_command});
+                    for (const auto& entry : entries) catalog.push_back({entry.path,entry.name,entry.map,entry.voice_command,entry.raw_name});
                     path = selected; ++revision;
                 });
             };
@@ -876,6 +1115,10 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
                 refresh_movement_library(path);
                 impl_->update([&](Snapshot& s) { baseline_plan(s,request.mode) = plan;
                     s.state = State::COMPLETED; s.message = std::string(timeline_name(request.mode)) + "方案已保存，可从下拉框重新选择"; });
+                if (request.mode == Mode::GRENADE_TEST && snapshot()->movement_test_enabled &&
+                    snapshot()->movement_test_mode == request.mode) {
+                    impl_->guidance("selected","方案已保存，请核对参考图是否匹配当前版本",path,grenade_epoch);
+                }
                 return;
             }
             if (action == Action::SAVE_WEAPON_TIMING) {
@@ -929,10 +1172,13 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
                     s.state = State::COMPLETED; s.message = "文档已载入，请检查草稿并重新准备"; });
                 if (timeline_mode(request.mode)) {
                     impl_->update([&](Snapshot& s) { baseline_plan(s,request.mode) = value; current_plan(s,request.mode) = value;
-                        if (request.mode == Mode::MOVEMENT_TEST) s.movement_voice_selected = false; });
+                        if (s.movement_test_mode == request.mode) s.movement_voice_selected = false; });
                     auto loaded = request; loaded.plan_text = value.dump();
                     update_movement_draft(loaded,context,false);
                     refresh_movement_library(request.load_path);
+                    if (request.mode == Mode::GRENADE_TEST && snapshot()->movement_test_enabled &&
+                        snapshot()->movement_test_mode == request.mode && !impl_->canceled.load())
+                        impl_->guidance("selected","请按站位图定位，拿出道具后对齐",request.load_path,grenade_epoch);
                     impl_->update([&](Snapshot& s) { s.message = std::string(timeline_name(request.mode)) + "方案已载入，修改后可直接测试或保存"; });
                 }
                 return;

@@ -15,7 +15,13 @@ inline int hid_usage_to_virtual_key(std::uint8_t usage) noexcept {
     if (usage >= 0x1eU && usage <= 0x26U) {
         return 0x31 + static_cast<int>(usage - 0x1eU);
     }
+    // 数字区按物理 HID usage 区分，不依赖主辅机 NumLock；方向区仍使用独立 VK_UP 等键值。
+    if (usage >= 0x59U && usage <= 0x61U) {
+        return 0x61 + static_cast<int>(usage - 0x59U); // VK_NUMPAD1～VK_NUMPAD9
+    }
     switch (usage) {
+        case 0x62: return 0x60; // VK_NUMPAD0
+        case 0x63: return 0x6e; // VK_DECIMAL
         case 0x27: return 0x30;
         case 0x28: return 0x0d;
         case 0x29: return 0x1b;

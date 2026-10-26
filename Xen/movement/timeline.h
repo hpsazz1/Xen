@@ -40,6 +40,8 @@ struct Callbacks {
     std::function<bool()> permitted;
     std::function<bool()> canceled;
     std::function<void(const Progress&)> progress;
+    // 仅在首个实际设备调用前消费；等待动作开始的许可轮询不能冒充已经输出。
+    std::function<bool()> first_output_permitted;
 };
 enum class Outcome { COMPLETED, CANCELED, FAILED };
 struct Result {

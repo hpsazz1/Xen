@@ -1,4 +1,4 @@
-﻿param(
+param(
     [Parameter(Mandatory = $true)][string]$PackageRoot,
     [string]$BuildDirectory = '',
     [Parameter(Mandatory = $true)][ValidateSet('nvidia', 'directml', 'openvino')][string]$Runtime,
@@ -121,7 +121,8 @@ try {
     }
     if ($IncludeVoiceTools) {
         $relativeFiles += @('client.py', 'requirements.txt', 'install.ps1', 'start.ps1',
-            'empty_keywords.txt', 'README.md', 'LICENSES.md', 'prepare_model.py') |
+            'empty_keywords.txt', 'README.md', 'LICENSES.md', 'prepare_model.py',
+        'guidance.py', 'preview_window.py', 'reference_assets.py', 'reference_tool.py', 'screen_capture.py') |
             ForEach-Object { "tools/voice-switch/$_" }
     }
     if ($IncludeLauncher) { $relativeFiles += 'XenLauncher.exe' }

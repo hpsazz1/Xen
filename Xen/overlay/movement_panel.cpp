@@ -230,18 +230,18 @@ struct MovementPanel::Impl {
     }
     void editor(OverlayActions& actions, const movement::Config& config, const Snapshot* snapshot) {
         bool change = text_field(grenade() ? "道具名称" : "方案名称", plan.name, "本页独立方案文件的名称，不影响另一类方案。");
-        change |= text_field("地图（可选）", plan.map, grenade() ? "记录配方所属地图，供道具列表筛选；手动测试前请自行确认游戏地图。" : "语音候选仅匹配当前 GSI 地图标识；旧地图备注保留，手动方案不受地图限制。");
+        change |= text_field("地图（可选）", plan.map, "语音候选仅匹配当前 GSI 地图标识；旧地图备注保留，手动方案不受地图限制。");
         if (button("使用当前地图", "将有效 GSI 地图填入当前草稿，保存后写入本页方案库。", snapshot && snapshot->movement_map.valid)) {
             plan.map = snapshot->movement_map.map_name; change = true;
         }
-        if (!grenade()) change |= text_field("语音口令", plan.voice_command, "同一地图内口令必须唯一；清空可作为手动方案保存，未保存修改不会发布。");
+        change |= text_field("语音口令", plan.voice_command, "同一地图内口令必须唯一；清空可作为手动方案保存，未保存修改不会发布。语音只选择方案，不直接对齐或执行动作。");
         change |= text_field("点位（可选）", plan.location, "保存点位名称；每次测试前由用户对齐位置和朝向。");
         change |= text_field("起始说明", plan.notes, "记录起始朝向、站位和人工准备步骤；不参与设备执行。");
         auto command = console_command(plan.notes);
         if (!command.empty()) {
             ImGui::SetNextItemWidth(std::max(100.f, ImGui::GetContentRegionAvail().x * .7f));
             ImGui::InputText("定位与瞄角指令", &command, ImGuiInputTextFlags_ReadOnly);
-            tip("从起始说明提取的 setpos/setang；复制到游戏练习控制台自行定位，程序不会执行定位或调整准星。");
+            tip("从起始说明提取的 setpos/setang；只提供复制，不自动执行控制台命令。道具辅助另通过参考图对齐视角，仍需先手动站到固定点位。");
             if (button("复制定位指令", "只复制当前配方的精确坐标和瞄角；关闭控制台、确认站位后再按测试键执行当前动作。"))
                 ImGui::SetClipboardText(command.c_str());
         }
@@ -389,7 +389,20 @@ void MovementPanel::render(const AppConfig& config, const Snapshot* snapshot, Ov
             ImGui::Separator();
         }
         if (ui.grenade()) {
-            ImGui::TextWrapped("选择道具，复制指令到游戏控制台确认站位与瞄角；拿出对应道具后再启用测试。F11执行当前道具一次，End急停。投掷时序可在下方逐项调整。");
+            ImGui::TextWrapped("方向区右键打开主机清单，点选道具方案；按站位图定位并拿出对应道具，大致转向目标后上键对齐、下键投掷、左键取消，End全局急停。清单不依赖麦克风，语音可选；按键须启用并保存，F11手动测试仍保留。");
+            tip("道具辅助只调整视角，不替代固定站位；右键仅打开清单，点选不会自动对齐或投掷。四向为默认方向区布局，可在上方捕获实际数字区按键。对齐需要当前方案已配置有效参考资源，已通过的动作时序保持原样。");
+            if (snapshot) {
+                ImGui::TextWrapped("对齐状态：%s", snapshot->grenade_guidance_message.empty()
+                    ? "等待选择方案与参考资源" : snapshot->grenade_guidance_message.c_str());
+                tip("状态来自当前道具对齐会话。画面匹配完成只表示对齐判断通过，实际投掷结果仍需游戏内确认。");
+                if (!snapshot->grenade_guidance_reference_id.empty()) {
+                    ImGui::TextWrapped("参考资源：%s", snapshot->grenade_guidance_reference_id.c_str());
+                    tip("当前方案绑定的参考资源标识；原始全屏图和320×320裁图存放于方案资源目录，不写入程序二进制。");
+                } else {
+                    ImGui::TextDisabled("参考资源尚未就绪：先采集当前固定点位的原始全屏图。");
+                    tip("原图需保持与实时采集一致的画面尺寸、裁剪和视角设置；纯天空或缺少共同静态特征的方案暂不启用自动对齐。");
+                }
+            }
             ui.library(snapshot, actions, busy || recording);
         } else ImGui::TextWrapped("手动编排并行动作，保存为独立方案；每次执行前请对齐站位与朝向。修改只影响下次测试，当前执行使用启动时的参数。");
         ImGui::BeginDisabled(recording || (busy && snapshot->state == debug_session::State::WORKING));

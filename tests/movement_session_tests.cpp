@@ -120,8 +120,12 @@ class RecordingDevice final : public FakeDevice {
 public:
     FocusFixture* revoke_on_down = nullptr;
     std::atomic_int downs{0}, cleanups{0}, last_down_mask{0};
+    std::atomic_int single_press{0};
     bool poll_input(InputSnapshot& input) noexcept override {
-        input = {}; input.status = InputMonitorStatus::READY; input.state_valid = true; return true;
+        input = {}; input.status = InputMonitorStatus::READY; input.state_valid = true;
+        if (const auto key = single_press.exchange(0); key > 0 && key < 256)
+            input.virtual_keys[static_cast<std::size_t>(key)] = true;
+        return true;
     }
     KeyboardReceipt set_wasd_keyboard(std::uint8_t mask) noexcept override {
         if (mask) { last_down_mask = mask; ++downs; if (revoke_on_down) revoke_on_down->foreground = false; }
@@ -636,6 +640,76 @@ void test_grenade_domain_isolation(const std::filesystem::path& root) {
         "急停未撤销共享许可或未完成两次清理");
     require(!focus.failed && device->touches == 0, "域隔离专项误触设备或源fixture失败");
 }
+void test_grenade_guidance(const std::filesystem::path& root) {
+    auto device = std::make_shared<FakeDevice>();
+    auto context = context_for(device);
+    context.map.valid = true; context.map.map_name = "de_mirage"; context.map.context_epoch = 30;
+    context.config.keyboard.grenade_assist_enabled = true;
+    auto request = request_for(root / ("grenade-guidance-"+
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())));
+    request.mode = Mode::GRENADE_TEST;
+    auto plan = example_plan(); plan["map"] = "de_mirage"; plan["voice_command"] = "出生点一窗口烟";
+    request.plan_text = plan.dump();
+    Session session;
+    session.update_map(context.map);
+    submit(session,Action::SAVE_PLAN,request,context,State::COMPLETED);
+    request.load_path = session.snapshot()->grenade_selected_path;
+    require(session.dispatch(Action::ENABLE_MOVEMENT_TEST,request,context),"道具辅助启用fixture失败");
+    require(session.select_voice(request,context) && finish_voice(session,context),"道具语音未提交当前域");
+    const auto selected = session.snapshot();
+    require(selected->grenade_guidance_state=="selected" && !selected->grenade_guidance_plan_id.empty() &&
+        !selected->grenade_guidance_reference_id.empty() && selected->movement_current.is_null(),
+        "道具语音未发布独立双图身份或污染身法");
+    require(!session.throw_grenade(context),"下键未对齐仍执行");
+    require(session.align_grenade(context),"无资源路径应在后台报告缺失");
+    wait_idle(session);
+    require(session.snapshot()->state==State::FAILED && session.snapshot()->grenade_guidance_state=="failed" && session.snapshot()->movement_test_enabled &&
+        session.snapshot()->repeat_ready && !session.snapshot()->cleanup_unknown && device->touches==0,
+        "缺参考图触碰设备、误报清理未知或撤销原人工投掷方案");
+    session.cancel_grenade();
+    require(session.snapshot()->grenade_guidance_state=="hidden" && session.snapshot()->movement_test_enabled &&
+        session.snapshot()->repeat_ready && !session.throw_grenade(context),"左键取消未保留当前许可或复活已对齐");
+    require(session.select_voice(request,context),"局部取消后不能重新语音选择");
+    session.cancel_grenade();
+    require(!finish_voice(session,context) && session.snapshot()->grenade_guidance_state=="hidden",
+        "左键取消后迟到语音复活缩略图");
+    require(session.select_voice(request,context) && finish_voice(session,context),"重新选择失败");
+    session.maintain_grenade(context,false);
+    require(session.snapshot()->grenade_guidance_state=="hidden" && !session.throw_grenade(context),
+        "输入失信保留旧对齐状态");
+    require(session.select_voice(request,context) && finish_voice(session,context),"输入恢复后显式选择失败");
+    ++context.map.context_epoch; session.update_map(context.map);
+    require(session.snapshot()->grenade_guidance_state=="hidden" && !session.snapshot()->repeat_ready &&
+        session.snapshot()->movement_test_enabled,"地图变化未撤销道具语音模板或误关测试");
+    session.cancel();
+    require(!session.snapshot()->movement_test_enabled && device->touches==0,"End未保留全局撤销语义");
+}
+void test_grenade_worker_cancel(const std::filesystem::path& root) {
+    FocusFixture focus;
+    for (const bool global : {false,true}) {
+        auto device = std::make_shared<RecordingDevice>();
+        auto context = context_for(device);
+        context.config.source_context = focus.config;
+        context.config.keyboard.grenade_assist_enabled = true;
+        auto request = request_for(root / (global ? "grenade-global-cancel" : "grenade-local-cancel"));
+        request.mode = Mode::GRENADE_TEST;
+        Session session;
+        require(session.dispatch(Action::ENABLE_MOVEMENT_TEST,request,context),"worker取消fixture启用失败");
+        // 仅worker会看到一次按下，模拟短按在App下一帧之前已释放。
+        device->single_press = global ? context.config.keyboard.emergency_virtual_keys.front()
+                                     : context.config.keyboard.grenade_cancel_virtual_keys.front();
+        require(session.repeat(context),"worker取消fixture未启动");
+        wait_idle(session);
+        const auto result = session.snapshot();
+        require(result->state == State::CANCELED && !result->cleanup_unknown &&
+            device->single_press == 0 && device->downs == 0 && device->touches == 0,
+            "worker短按取消未停止或触碰输出");
+        require(result->movement_test_enabled == !global && result->repeat_ready == !global,
+            "worker捕获的End未撤销模板，或左键误撤销全局许可");
+        if (global) require(!session.repeat(context),"急停后仍能复用旧模板");
+    }
+    require(!focus.failed,"worker取消源fixture失败");
+}
 void test_passive_recording(const std::filesystem::path& root, bool incomplete) {
     auto device = std::make_shared<TraceDevice>();
     device->incomplete = incomplete;
@@ -722,6 +796,8 @@ int main(int argc, char** argv) {
         test_edit_while_running(root);
         test_voice_selection(root);
         test_grenade_domain_isolation(root);
+        test_grenade_guidance(root);
+        test_grenade_worker_cancel(root);
         test_passive_recording(root, false);
         test_passive_recording(root, true);
         std::cout << "身法会话测试通过（合成设备，未执行真实输出）\n";

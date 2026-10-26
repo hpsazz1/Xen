@@ -91,6 +91,8 @@ std::array<bool, 256> current_virtual_key_state() noexcept {
 }
 
 std::string virtual_key_name(int virtual_key) {
+    if (virtual_key >= VK_NUMPAD0 && virtual_key <= VK_NUMPAD9)
+        return "数字区 " + std::to_string(virtual_key - VK_NUMPAD0);
     switch (virtual_key) {
         case VK_LBUTTON: return "鼠标左键";
         case VK_RBUTTON: return "鼠标右键";
@@ -98,6 +100,10 @@ std::string virtual_key_name(int virtual_key) {
         case VK_XBUTTON1: return "鼠标侧键 1";
         case VK_XBUTTON2: return "鼠标侧键 2";
         case VK_ESCAPE: return "Esc";
+        case VK_RIGHT: return "方向区 右";
+        case VK_UP: return "方向区 上";
+        case VK_DOWN: return "方向区 下";
+        case VK_LEFT: return "方向区 左";
         default: break;
     }
     UINT scan_code = MapVirtualKeyW(
@@ -3284,6 +3290,38 @@ struct Overlay::Impl {
         }
         if (ImGui::BeginTabItem("道具测试")) {
             ImGui::PushID("grenade_test");
+            ImGui::BeginDisabled(!can_edit || (debug_snapshot && debug_snapshot->busy));
+            if (ImGui::Button("启用道具辅助按键")) {
+                if (config::detail::enable_grenade_assist_hotkeys(app_config, true, hotkey_capture_message))
+                    hotkey_capture_message = "已设置右键清单、上键对齐、下键投掷、左键取消；旧语音中的右键已清除，其他语音绑定保留。保存配置后生效，不依赖麦克风。";
+            }
+            show_help_tooltip("一次设置方向区右键打开清单、上键对齐、下键投掷、左键取消；四个道具绑定恢复默认，只清除旧语音中的方向区右键，其他语音绑定保留为可选。与其他已启用功能冲突时整组拒绝，不覆盖其他功能。保存后生效，不依赖麦克风，不立即对齐或投掷。");
+            if (begin_form("grenade_hotkey_form", 150.0f)) {
+                form_row("启用当前绑定", "只启停当前四个道具绑定，不重设可选语音键或自定义数字区绑定。清单点选不需要麦克风；保存后生效，禁用不会执行动作。");
+                bool enabled = app_config.keyboard.grenade_assist_enabled;
+                if (toggle_switch("##grenade_assist_enabled", &enabled)) {
+                    if (!enabled) app_config.keyboard.grenade_assist_enabled = false;
+                    else if (config::detail::enable_grenade_assist_hotkeys(app_config, false, hotkey_capture_message))
+                        hotkey_capture_message = "已启用当前道具按键布局；保存配置后生效。";
+                }
+                render_hotkey_row("道具清单（按下）", "##grenade_menu_keys",
+                    "打开主机道具清单，点选当前地图方案；不收音、不对齐、不投掷。默认方向区右键，可捕获后端数字区6，NumLock不改变物理键身份；按住不循环，Esc清空，保存后生效。",
+                    HotkeyBindingTarget::GRENADE_MENU, app_config.keyboard.grenade_menu_virtual_keys, key_active);
+                render_hotkey_row("可选语音（按住）", "##grenade_voice_keys",
+                    "可选入口：按住说话、松开选择当前地图已保存方案，不执行动作；必须有可用主机语音工具和麦克风。清单点选不依赖此绑定，不能与四个道具键共用；Esc清空，保存后生效。",
+                    HotkeyBindingTarget::VOICE, app_config.keyboard.voice_virtual_keys, key_active);
+                render_hotkey_row("自动对齐（按下）", "##grenade_align_keys",
+                    "启用道具辅助后，按下启动已选方案的画面对齐；不会自动走位或投掷。默认方向区上键，可捕获后端数字区8；按住不循环，故障恢复先释放，Esc清空。",
+                    HotkeyBindingTarget::GRENADE_ALIGN, app_config.keyboard.grenade_align_virtual_keys, key_active);
+                render_hotkey_row("投掷一次（按下）", "##grenade_throw_keys",
+                    "启用道具辅助且当前方案已对齐时执行已有动作一次。默认方向区下键，可捕获后端数字区2；忙碌时不排队，按住不重复，Esc清空。",
+                    HotkeyBindingTarget::GRENADE_THROW, app_config.keyboard.grenade_throw_virtual_keys, key_active);
+                render_hotkey_row("取消道具（按下）", "##grenade_cancel_keys",
+                    "取消当前对齐或投掷并清理本轮输入。默认方向区左键，可捕获后端数字区4；不替换End全局急停，Esc清空。",
+                    HotkeyBindingTarget::GRENADE_CANCEL, app_config.keyboard.grenade_cancel_virtual_keys, key_active);
+                ImGui::EndTable();
+            }
+            ImGui::EndDisabled();
             grenade_panel.render(app_config, debug_snapshot, actions);
             ImGui::PopID();
             ImGui::EndTabItem();
@@ -3758,6 +3796,14 @@ struct Overlay::Impl {
                 return &app_config.keyboard.anomaly_mark_virtual_keys;
             case HotkeyBindingTarget::VOICE:
                 return &app_config.keyboard.voice_virtual_keys;
+            case HotkeyBindingTarget::GRENADE_MENU:
+                return &app_config.keyboard.grenade_menu_virtual_keys;
+            case HotkeyBindingTarget::GRENADE_ALIGN:
+                return &app_config.keyboard.grenade_align_virtual_keys;
+            case HotkeyBindingTarget::GRENADE_THROW:
+                return &app_config.keyboard.grenade_throw_virtual_keys;
+            case HotkeyBindingTarget::GRENADE_CANCEL:
+                return &app_config.keyboard.grenade_cancel_virtual_keys;
             case HotkeyBindingTarget::AUTO_STOP_RELEASE:
                 return &app_config.auto_stop.release_virtual_keys;
             case HotkeyBindingTarget::AUTO_STOP:
@@ -3924,7 +3970,7 @@ struct Overlay::Impl {
                 app_config.keyboard.anomaly_mark_virtual_keys, key_active);
             render_hotkey_row(
                 "语音选择（按住）", "##voice_virtual_keys",
-                "由当前键鼠后端监听；按住说话、松开选择当前地图的已保存身法，不执行动作。默认未绑定，不与其他已启用功能共键；Esc清空，保存后生效。主机语音工具及候选准备完成后才开始收音。",
+                "可选语音入口，由当前键鼠后端监听；按住说话、松开选择当前地图的已保存方案，不执行动作。默认未绑定，不与其他已启用功能共键；Esc清空，保存后生效。道具清单点选不依赖麦克风；主机语音工具及候选准备完成后才开始收音。",
                 HotkeyBindingTarget::VOICE,
                 app_config.keyboard.voice_virtual_keys, key_active);
             ImGui::EndTable();

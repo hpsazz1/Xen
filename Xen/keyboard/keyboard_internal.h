@@ -15,11 +15,12 @@ struct KeyboardEventState {
     std::array<bool,256> voice_blocked_until_release{};
     std::array<bool,256> debug_blocked_until_release{};
     std::array<bool,256> anomaly_blocked_until_release{};
+    std::array<bool,256> grenade_blocked_until_release{};
     std::array<bool, 256> previous_key_active{};
 };
 
 struct KeyboardEventPollResult {
-    std::array<KeyboardEvent, 6> events{};
+    std::array<KeyboardEvent, 10> events{};
     std::size_t count = 0;
 };
 
@@ -87,6 +88,22 @@ inline KeyboardEventPollResult update_keyboard_events(
     }
     if (voice_hold_active != state.voice_hold_active)
         result.events[result.count++] = {KeyboardEventType::VOICE_HOLD_CHANGED, voice_hold_active};
+    const auto grenade_pressed = [&](const std::vector<int>& keys, KeyboardEventType type) {
+        bool pressed = false;
+        for (const int key : keys) {
+            const auto index = static_cast<std::size_t>(key);
+            if (!key_active[index]) state.grenade_blocked_until_release[index] = false;
+            if (config.grenade_assist_enabled && key_active[index] &&
+                !state.previous_key_active[index] && !state.grenade_blocked_until_release[index])
+                pressed = true;
+        }
+        // 按住不会重复，多个别名同次按下只发布一次；忙碌时是否接受由会话决定，不在监听层排队。
+        if (pressed) result.events[result.count++] = {type, true};
+    };
+    grenade_pressed(config.grenade_menu_virtual_keys, KeyboardEventType::GRENADE_MENU);
+    grenade_pressed(config.grenade_align_virtual_keys, KeyboardEventType::GRENADE_ALIGN);
+    grenade_pressed(config.grenade_throw_virtual_keys, KeyboardEventType::GRENADE_THROW);
+    grenade_pressed(config.grenade_cancel_virtual_keys, KeyboardEventType::GRENADE_CANCEL);
     state.voice_hold_active = voice_hold_active;
     state.aim_hold_active = aim_hold_active;
     state.previous_key_active = key_active;

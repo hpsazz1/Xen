@@ -6,12 +6,15 @@
 #include <algorithm>
 #include <array>
 #include <span>
+#include <string>
+#include <utility>
 
 namespace config::detail {
 
 enum class HotkeyTarget {
     NONE, RUNTIME_TOGGLE, AIM_HOLD, EMERGENCY, AUTO_STOP, AUTO_STOP_RELEASE,
-    TRIGGER, DEBUG_TEST, ANOMALY_MARK, MOVEMENT_SPIN, MOVEMENT_LARGE, VOICE
+    TRIGGER, DEBUG_TEST, ANOMALY_MARK, MOVEMENT_SPIN, MOVEMENT_LARGE, VOICE,
+    GRENADE_MENU, GRENADE_ALIGN, GRENADE_THROW, GRENADE_CANCEL
 };
 
 struct HotkeyBindingView {
@@ -25,8 +28,12 @@ inline auto hotkey_bindings(const AppConfig& config) noexcept {
     using Target = HotkeyTarget;
     const auto& keyboard = config.keyboard;
     const auto& move = config.movement;
-    return std::array<HotkeyBindingView, 11>{{
+    return std::array<HotkeyBindingView, 15>{{
         {Target::VOICE, keyboard.voice_virtual_keys, true},
+        {Target::GRENADE_MENU, keyboard.grenade_menu_virtual_keys, keyboard.grenade_assist_enabled},
+        {Target::GRENADE_ALIGN, keyboard.grenade_align_virtual_keys, keyboard.grenade_assist_enabled},
+        {Target::GRENADE_THROW, keyboard.grenade_throw_virtual_keys, keyboard.grenade_assist_enabled},
+        {Target::GRENADE_CANCEL, keyboard.grenade_cancel_virtual_keys, keyboard.grenade_assist_enabled},
         {Target::RUNTIME_TOGGLE, keyboard.runtime_toggle_virtual_keys, true},
         {Target::AIM_HOLD, keyboard.aim_hold_virtual_keys, true},
         {Target::EMERGENCY, keyboard.emergency_virtual_keys, true},
@@ -88,6 +95,29 @@ inline bool hotkey_config_conflicts(const AppConfig& config) noexcept {
 inline bool movement_hotkeys_conflict(const AppConfig& config) noexcept {
     return hotkey_binding_conflicts(config, HotkeyTarget::MOVEMENT_SPIN, config.movement.spin_virtual_key) ||
         hotkey_binding_conflicts(config, HotkeyTarget::MOVEMENT_LARGE, config.movement.large_virtual_key);
+}
+
+// 默认布局是用户显式选择的事务；右键转为清单，只移除旧语音中的同键绑定，保留其他可选语音键。
+// 先验证整组再写回，不覆盖其他功能，不依赖麦克风可用性。
+// 普通开关传 false，仅恢复已保存的自定义布局，数字区捕获不会被再次改回方向区。
+inline bool enable_grenade_assist_hotkeys(
+        AppConfig& config, bool use_direction_defaults, std::string& error) {
+    auto candidate = config;
+    candidate.keyboard.grenade_assist_enabled = true;
+    if (use_direction_defaults) {
+        std::erase(candidate.keyboard.voice_virtual_keys, 0x27);
+        candidate.keyboard.grenade_menu_virtual_keys = {0x27};
+        candidate.keyboard.grenade_align_virtual_keys = {0x26};
+        candidate.keyboard.grenade_throw_virtual_keys = {0x28};
+        candidate.keyboard.grenade_cancel_virtual_keys = {0x25};
+    }
+    if (!valid_keyboard_config(candidate.keyboard) || hotkey_config_conflicts(candidate)) {
+        error = "道具辅助按键与已有功能冲突或键值非法；未改动任何绑定，请先调整冲突键。";
+        return false;
+    }
+    config.keyboard = std::move(candidate.keyboard);
+    error.clear();
+    return true;
 }
 
 } // namespace config::detail

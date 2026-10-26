@@ -565,9 +565,13 @@ target_link_libraries(debug_runner PUBLIC config mouse capture source_context in
     PRIVATE user32 gdi32)
 add_library(debug_session STATIC Xen/debug_session/debug_session.cpp Xen/debug_session/movement_library_internal.cpp Xen/recoil/recoil_debug_run.cpp
     Xen/recoil_tuner/wall_capture_run.cpp)
+add_library(grenade_alignment STATIC Xen/grenade_alignment/grenade_alignment.cpp Xen/grenade_alignment/reference.cpp)
+target_include_directories(grenade_alignment PUBLIC ${PROJECT_SOURCE_DIR}/Xen ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(grenade_alignment PUBLIC capture movement source_context mouse nlohmann_json::nlohmann_json
+    PRIVATE log ${OpenCV_LIBS} bcrypt)
 target_include_directories(debug_session PUBLIC ${PROJECT_SOURCE_DIR}/Xen)
 target_link_libraries(debug_session PUBLIC runtime weapon nlohmann_json::nlohmann_json
-    PRIVATE debug_runner recoil_archive recoil_calibration_io recoil_tuner capture log Threads::Threads)
+    PRIVATE debug_runner grenade_alignment recoil_archive recoil_calibration_io recoil_tuner capture log Threads::Threads)
 target_compile_definitions(debug_session PRIVATE
     XEN_DEBUG_BUILD_COMMIT="${XEN_BUILD_GIT_COMMIT}"
     XEN_DEBUG_BUILD_DIRTY=${XEN_BUILD_GIT_DIRTY}
@@ -1559,8 +1563,14 @@ if(BUILD_TESTING)
     add_test(NAME movement_library_tests COMMAND movement_library_tests "${PROJECT_SOURCE_DIR}/temp/XEN-MOVEMENT-EDITOR-20261014-001/movement-library-fixtures")
     xen_deploy_runtime_dlls(movement_library_tests)
     add_executable(movement_session_tests tests/movement_session_tests.cpp)
+    add_executable(grenade_alignment_tests tests/grenade_alignment_tests.cpp)
+    target_link_libraries(grenade_alignment_tests PRIVATE grenade_alignment)
+    add_test(NAME grenade_alignment_tests COMMAND grenade_alignment_tests "${PROJECT_SOURCE_DIR}/temp/XEN-GRENADE-ALIGN-20261026-001/alignment-fixtures")
+    xen_deploy_runtime_dlls(grenade_alignment_tests OPENCV NDI)
+    set_tests_properties(grenade_alignment_tests PROPERTIES TIMEOUT 30)
     add_executable(voice_switch_tests tests/voice_switch_tests.cpp)
     add_test(NAME voice_switch_client_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" -X utf8 -B "${PROJECT_SOURCE_DIR}/tests/voice_switch_client_tests.py")
+    add_test(NAME grenade_reference_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" -X utf8 -B "${PROJECT_SOURCE_DIR}/tests/grenade_reference_tests.py")
     target_link_libraries(voice_switch_tests PRIVATE voice_switch ws2_32)
     add_test(NAME voice_switch_tests COMMAND voice_switch_tests)
     xen_deploy_runtime_dlls(voice_switch_tests OPENCV ORT NDI)

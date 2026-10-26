@@ -45,7 +45,7 @@ struct Request {
     int movement_record_motion_mode = 1;
     std::string movement_library_root = "cache/movement/plans";
 };
-struct MovementSavedPlan { std::string path, name, map, voice_command; };
+struct MovementSavedPlan { std::string path, name, map, voice_command, raw_name; };
 struct Snapshot {
     State state = State::IDLE;
     bool busy = false, physical = false, hud_visible = false, cleanup_unknown = false;
@@ -69,6 +69,10 @@ struct Snapshot {
     weapon::MapSnapshot movement_map;
     bool movement_voice_selected = false;
     std::uint64_t movement_voice_epoch = 0;
+    // 主机提示独立于一次收音轮次；仅对齐成功隐藏图片，不触发声音或投掷。
+    std::uint64_t grenade_guidance_revision = 0;
+    std::string grenade_guidance_state = "hidden";
+    std::string grenade_guidance_plan_id, grenade_guidance_reference_id, grenade_guidance_message;
     // 与普通进度消息分离，热键拒绝不能覆盖准备失败或失效原因。
     std::string repeat_unavailable_reason;
     bool hud_requested = false;
@@ -113,6 +117,11 @@ public:
     // 文件解析异步完成，App 在本帧停止/热键处理之后复核再提交。
     bool select_voice(const Request&, const Context&) noexcept;
     std::optional<bool> finish_voice(const Context&, bool still_current) noexcept;
+    bool align_grenade(const Context&) noexcept;
+    bool throw_grenade(const Context&) noexcept;
+    void cancel_grenade(const std::string& reason = "本次道具操作已取消") noexcept;
+    // App每帧提供实际输入健康与运行许可；关闭设置或换上下文立即撤销旧对齐。
+    void maintain_grenade(const Context&, bool input_healthy) noexcept;
     void invalidate_repeat(const std::string& reason = "测试模板已失效（参数或运行上下文变化），请重新准备") noexcept;
     // 原始输入面板沿用Runtime的记录/回看接口；开始、停止与归档等待均不占UI线程。
     bool record_inputs(Runtime& runtime, const std::string& root,

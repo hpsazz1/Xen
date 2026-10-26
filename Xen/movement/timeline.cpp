@@ -203,13 +203,21 @@ Result run_plan(IMouseController& device, const Plan& p, const movement::Config&
         const auto allowed = [&] {
             return callbacks.permitted && callbacks.permitted() && (!callbacks.canceled || !callbacks.canceled());
         };
+        bool first_output = true;
+        const auto admit_output = [&] {
+            if (!allowed() || (first_output && callbacks.first_output_permitted && !callbacks.first_output_permitted())) {
+                result.outcome = Outcome::CANCELED;
+                throw std::runtime_error("动作输出许可或首次画面复核已失效");
+            }
+            first_output = false;
+        };
         const auto command = [&](auto operation) {
-            if (!allowed()) { result.outcome = Outcome::CANCELED; throw std::runtime_error("身法执行已取消或输出许可撤回"); }
+            admit_output();
             debt = true;
             if (!ack(operation())) throw std::runtime_error("身法键盘操作未确认");
         };
         const auto button_command = [&](unsigned button, bool down) {
-            if (!allowed()) { result.outcome = Outcome::CANCELED; throw std::runtime_error("身法执行已取消或输出许可撤回"); }
+            admit_output();
             // 未确认的按下同样承担释放责任，且左右按钮各自清理。
             button_debt[button] = true;
             const auto receipt = button == 0 ? device.set_left_button(down) : device.set_right_button(down);
@@ -306,7 +314,7 @@ Result run_plan(IMouseController& device, const Plan& p, const movement::Config&
                 const auto& a = p.actions[i];
                 if (a.kind == ActionKind::WHEEL) {
                     if (!seen[i] && elapsed >= a.start_ms) {
-                        if (!allowed()) { result.outcome = Outcome::CANCELED; throw std::runtime_error("身法执行已取消或输出许可撤回"); }
+                        admit_output();
                         if (!device.scroll_wheel(a.wheel)) throw std::runtime_error("身法滚轮发送失败");
                         seen[i] = true;
                     }
@@ -322,7 +330,7 @@ Result run_plan(IMouseController& device, const Plan& p, const movement::Config&
                 const int delta = std::clamp(target - sent[i], -32767, 32767);
                 const int delta_y = std::clamp(target_y - sent_y[i], -32767, 32767);
                 if (delta || delta_y) {
-                    if (!allowed()) { result.outcome = Outcome::CANCELED; throw std::runtime_error("身法执行已取消或输出许可撤回"); }
+                    admit_output();
                     if (!device.move({delta, delta_y})) throw std::runtime_error("身法鼠标发送失败");
                     sent[i] += delta; sent_y[i] += delta_y; result.sent_dx += delta;
                 }

@@ -108,6 +108,8 @@ int main() {
         return Json{};
     };
     auto send = [&](Json value) { const auto line=value.dump()+"\n"; ::send(client,line.data(),static_cast<int>(line.size()),0); };
+    const auto guidance=receive("guidance");
+    expect(guidance.is_object() && guidance.value("state",std::string{})=="hidden", "首次连接独立同步隐藏引导状态");
     const auto catalog=receive("catalog"); expect(catalog.is_object() && catalog["entries"].size()==1,"连接同步当前地图候选");
     if(!catalog.is_object()) {closesocket(client);return 1;}
     const auto revision=catalog["revision"];
@@ -154,6 +156,73 @@ int main() {
     const auto changed=receive("catalog");expect(changed.is_object()&&changed["entries"].empty(),"换图不回退全库");
     expect(session.snapshot()->movement_test_enabled && !session.snapshot()->repeat_ready, "换图撤销语音模板但保留显式测试许可");
     expect(fake->outputs==0,"完整语音交互未执行设备动作");
+    plan.name="测试烟"; plan.voice_command="测试烟"; plan.map="de_inferno";
+    const auto grenade_u8=(root / "cache" / "grenade" / "plans").u8string();
+    const std::string grenade_library(grenade_u8.begin(),grenade_u8.end());
+    const auto grenade_path=debug_session::detail::save_movement_plan(movement::timeline::plan_json(plan),"",false,grenade_library);
+    request.mode=debug_session::Mode::GRENADE_TEST; request.movement_library_root=grenade_library; request.load_path=grenade_path;
+    expect(session.dispatch(debug_session::Action::LOAD_PLAN,request,context),"载入道具建立独立干净草稿");
+    for(int i=0;i<400 && session.busy();++i){tick();std::this_thread::sleep_for(std::chrono::milliseconds(5));}
+    request.plan_text=movement::timeline::plan_json(plan).dump();
+    expect(session.dispatch(debug_session::Action::ENABLE_MOVEMENT_TEST,request,context),"显式将执行域切换到道具");
+    auto grenade_catalog=receive("catalog");
+    if(grenade_catalog.is_object() && grenade_catalog["entries"].empty()) grenade_catalog=receive("catalog");
+    expect(grenade_catalog.is_object() && grenade_catalog["entries"].size()==1 &&
+        grenade_catalog["entries"][0]["command"]=="测试烟", "道具执行域只发布当前地图道具口令");
+    if(grenade_catalog.is_object() && !grenade_catalog["entries"].empty()) {
+        send({{"type","ready"},{"epoch",2},{"revision",grenade_catalog["revision"]}});
+        input.capture_virtual_keys['V']=false;
+        for(int i=0;i<10;++i){tick();std::this_thread::sleep_for(std::chrono::milliseconds(5));}
+        input.capture_virtual_keys['V']=true;input.events={{KeyboardEventType::VOICE_HOLD_CHANGED,true}};tick();
+        const auto voice_begin=receive("begin"); expect(voice_begin.is_object(),"道具目录就绪后可开始语音");
+        if(voice_begin.is_object()) {
+            input.capture_virtual_keys['V']=false;input.events={{KeyboardEventType::VOICE_HOLD_CHANGED,false}};tick();
+            expect(receive("end").is_object(),"道具语音松开结束收音");
+            send({{"type","select"},{"id",voice_begin["id"]},{"map","de_inferno"},{"epoch",2},
+                {"revision",grenade_catalog["revision"]},{"plan_id",grenade_catalog["entries"][0]["id"]}});
+            const auto selected_grenade=receive("result");
+            expect(selected_grenade.is_object() && selected_grenade.value("ok",false),"道具语音复用Session异步选择成功");
+            expect(session.snapshot()->grenade_selected_path==grenade_path &&
+                session.snapshot()->grenade_current==movement::timeline::plan_json(plan),"语音结果只更新道具草稿");
+            expect(fake->outputs==0,"选择道具不执行动作");
+        }
+    }
+    plan.name="测试 T1 窗烟";plan.voice_command.clear();
+    const auto menu_path=debug_session::detail::save_movement_plan(movement::timeline::plan_json(plan),"",false,grenade_library);
+    expect(session.dispatch(debug_session::Action::LIST_MOVEMENT_PLANS,request,context),"刷新空语音口令道具清单");
+    const auto menu_catalog=receive("catalog");
+    expect(menu_catalog.is_object() && menu_catalog["entries"].size()==2 && menu_catalog.value("domain",std::string{})=="grenade",
+        "完整道具清单保留无语音口令的方案");
+    if(menu_catalog.is_object()) {
+        std::string empty_command_id;
+        for(const auto& entry:menu_catalog["entries"]) if(entry["command"]=="") {
+            empty_command_id=entry["id"].get<std::string>();
+            expect(entry["team"]=="T" && entry["name"]==plan.name,"阵营只来自名称中明确的来源编号");
+        }
+        keyboard.voice_virtual_keys.clear();
+        send({{"type","ready"},{"epoch",2},{"revision",menu_catalog["revision"]},{"voice_enabled",false}});
+        for(int i=0;i<10;++i){tick();std::this_thread::sleep_for(std::chrono::milliseconds(5));}
+        input.events={{KeyboardEventType::GRENADE_MENU,true}};tick();
+        const auto shown=receive("catalog_show");
+        expect(shown.is_object() && shown["revision"]==menu_catalog["revision"],"独立菜单键无需语音键或模型即可打开清单");
+        send({{"type","catalog_select"},{"id",1},{"map","de_inferno"},{"epoch",2},
+            {"revision",menu_catalog["revision"]},{"plan_id",empty_command_id}});
+        send({{"type","fail"},{"id",1},{"reason","迟到语音消息"}});
+        const auto menu_result=receive("catalog_result");
+        expect(menu_result.is_object() && menu_result.value("ok",false) && menu_result["plan_id"]==empty_command_id,
+            "无口令道具可独立点选，迟到同编号语音消息不干扰菜单请求");
+        expect(session.snapshot()->grenade_selected_path==menu_path,"菜单异步选择复用正式道具Session");
+        const auto loaded=session.snapshot()->grenade_loaded_revision;
+        send({{"type","catalog_select"},{"id",1},{"map","de_inferno"},{"epoch",2},
+            {"revision",menu_catalog["revision"]},{"plan_id",empty_command_id}});
+        for(int i=0;i<20;++i){tick();std::this_thread::sleep_for(std::chrono::milliseconds(5));}
+        expect(session.snapshot()->grenade_loaded_revision==loaded,"重复菜单请求不再次选择或排队");
+        send({{"type","catalog_select"},{"id",2},{"map","de_inferno"},{"epoch",1},
+            {"revision",menu_catalog["revision"]},{"plan_id",empty_command_id}});
+        const auto stale_result=receive("catalog_result");
+        expect(stale_result.is_object() && !stale_result.value("ok",true),"旧地图菜单请求明确拒绝");
+        expect(fake->outputs==0,"完整菜单与语音选择不输出物理动作");
+    }
     controller.cancel();closesocket(client);server.stop();
     session.request_shutdown();session.poll();
     std::filesystem::current_path(original_cwd);

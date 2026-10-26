@@ -38,6 +38,14 @@ KeyboardRoutingResult route_keyboard_events(
             result.debug_test_pressed = true;
         } else if (event.type == KeyboardEventType::ANOMALY_MARK && event.active) {
             result.anomaly_mark_pressed = true;
+        } else if (event.type == KeyboardEventType::GRENADE_MENU && event.active) {
+            result.grenade_menu_pressed = true;
+        } else if (event.type == KeyboardEventType::GRENADE_ALIGN && event.active) {
+            result.grenade_align_pressed = true;
+        } else if (event.type == KeyboardEventType::GRENADE_THROW && event.active) {
+            result.grenade_throw_pressed = true;
+        } else if (event.type == KeyboardEventType::GRENADE_CANCEL && event.active) {
+            result.grenade_cancel_pressed = true;
         }
     }
     return result;

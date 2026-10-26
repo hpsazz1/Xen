@@ -46,10 +46,11 @@ class Audio:
 
 class ClientTests(unittest.TestCase):
     def setUp(self):
-        self.sent, self.tones = [], []
+        self.sent, self.tones, self.guidance = [], [], []
         self.engine, self.audio = Engine(), Audio()
         self.now = 0
-        self.c = Controller(self.engine, self.audio, self.sent.append, self.tones.append, lambda: self.now)
+        self.c = Controller(self.engine, self.audio, self.sent.append, self.tones.append,
+                            lambda: self.now, self.guidance.append)
 
     def catalog(self, epoch=1, revision=1, name="de_test"):
         self.c.handle({"type": "catalog", "map": name, "epoch": epoch, "revision": revision,
@@ -169,6 +170,116 @@ class ClientTests(unittest.TestCase):
     def test_boolean_id_is_rejected(self):
         with self.assertRaises(ValueError):
             self.c.handle({"type": "begin", "id": True})
+
+    def guide(self, revision, state="selected", identity="smoke-a"):
+        self.c.handle({"type": "guidance", "revision": revision, "state": state,
+                       "plan_id": identity + ".json", "reference_id": identity, "message": ""})
+
+    def test_guidance_lives_beyond_voice_round_and_never_plays_tone(self):
+        self.catalog()
+        self.begin()
+        self.end()
+        self.c.handle({"type": "result", "id": 1, "ok": True, "plan_id": "plan-a"})
+        self.guide(1)
+        self.guide(2, "aligning")
+        self.guide(3, "aligned")
+        self.assertIsNone(self.c.round)
+        self.assertEqual([item["state"] for item in self.guidance], ["selected", "aligning", "aligned"])
+        self.assertEqual(self.tones, [True])
+
+    def test_guidance_rejects_late_revision_and_wrong_selection(self):
+        self.guide(2)
+        self.guide(2, "aligned")
+        self.guide(1, "hidden")
+        self.guide(3, "selected", "smoke-b")
+        self.guide(4, "aligned", "smoke-a")
+        self.assertEqual(len(self.guidance), 2)
+        self.guide(5, "aligned", "smoke-b")
+        self.assertEqual(self.guidance[-1]["state"], "aligned")
+
+    def test_disconnect_hides_and_new_connection_accepts_initial_revision(self):
+        self.guide(50)
+        self.c.disconnected()
+        self.assertEqual(self.guidance[-1]["state"], "hidden")
+        self.guide(0, "aligning")
+        self.assertEqual(self.guidance[-1]["state"], "aligning")
+        self.assertFalse(self.tones)
+
+    def test_guidance_cannot_submit_paths_or_invalid_revision(self):
+        for identity in ("../outside", "x/y", "C:\\image", "CON"):
+            with self.assertRaises(ValueError):
+                self.guide(1, identity=identity)
+        with self.assertRaises(ValueError):
+            self.guide(True)
+        self.assertFalse(self.guidance)
+
+    def menu_catalog(self, revision=1):
+        self.c.handle({"type": "catalog", "domain": "grenade", "map": "de_test", "epoch": 1,
+                       "revision": revision, "entries": [
+                           {"id": "smoke-a.json", "command": "", "name": "测试 T1 窗烟", "team": "T"},
+                           {"id": "smoke-b.json", "command": "二号窗烟", "name": "测试 CT来源5号 烟", "team": "CT"}]})
+
+    def pick(self, identity="smoke-a.json", revision=1, generation=None):
+        self.c.handle_ui({"type": "catalog_pick", "plan_id": identity, "map": "de_test", "epoch": 1,
+                          "revision": revision, "generation": self.c.ui_generation if generation is None else generation})
+
+    def test_menu_mode_does_not_require_engine_or_microphone(self):
+        self.c = Controller(None, self.audio, self.sent.append, self.tones.append,
+                            lambda: self.now, self.guidance.append, voice_enabled=False)
+        self.menu_catalog()
+        self.assertEqual(len(self.c.catalog.entries), 2)
+        self.assertFalse(self.c.catalog.labels)
+        self.assertFalse(self.sent[-1]["voice_enabled"])
+        self.c.handle({"type": "catalog_show", "map": "de_test", "epoch": 1, "revision": 1})
+        self.assertEqual(self.guidance[-1]["type"], "catalog_show")
+        self.pick()
+        self.assertEqual(self.sent[-1]["type"], "catalog_select")
+        self.assertEqual(self.sent[-1]["plan_id"], "smoke-a.json")
+        self.c.handle({"type": "catalog_result", "id": 1, "plan_id": "smoke-a.json", "ok": True})
+        self.assertIsNone(self.c.menu_pending)
+        self.assertEqual(self.audio.started, 0)
+        self.assertFalse(self.tones)
+
+    def test_menu_catalog_retains_empty_commands_but_kws_does_not(self):
+        self.menu_catalog()
+        self.assertEqual(self.c.catalog.labels, {"k0": "smoke-b.json"})
+        self.assertEqual(len(self.c.catalog.entries), 2)
+
+    def test_stale_catalog_or_old_ui_connection_cannot_select(self):
+        self.menu_catalog()
+        self.pick(revision=0)
+        self.pick(generation=-1)
+        self.pick(identity="missing.json")
+        self.assertFalse(any(item["type"] == "catalog_select" for item in self.sent))
+        before = len(self.guidance)
+        self.c.handle({"type": "catalog_show", "map": "de_test", "epoch": 1, "revision": 0})
+        self.assertEqual(len(self.guidance), before)
+
+    def test_menu_select_is_single_flight_and_wrong_result_never_succeeds(self):
+        self.menu_catalog()
+        self.pick()
+        self.pick("smoke-b.json")
+        self.assertEqual(sum(item["type"] == "catalog_select" for item in self.sent), 1)
+        self.c.handle({"type": "catalog_result", "id": 9, "plan_id": "smoke-a.json", "ok": True})
+        self.assertIsNotNone(self.c.menu_pending)
+        self.c.handle({"type": "catalog_result", "id": 1, "plan_id": "smoke-b.json", "ok": True})
+        self.assertEqual(self.guidance[-1]["type"], "catalog_error")
+        self.assertIsNone(self.c.menu_pending)
+        self.assertFalse(self.tones)
+
+    def test_menu_timeout_and_catalog_change_do_not_play_voice_tones(self):
+        self.menu_catalog()
+        self.pick()
+        self.now = 9
+        self.c.tick()
+        self.assertEqual(self.guidance[-1]["type"], "catalog_error")
+        self.pick()
+        self.menu_catalog(revision=2)
+        self.assertIsNone(self.c.menu_pending)
+        count = len(self.guidance)
+        self.c.handle({"type": "catalog_result", "id": 2, "plan_id": "smoke-a.json", "ok": True})
+        self.assertEqual(len(self.guidance), count)
+        self.assertFalse(self.tones)
 
 
 class RealModelTests(unittest.TestCase):

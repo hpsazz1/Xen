@@ -1,6 +1,8 @@
 #include "keyboard/keyboard.h"
+#include "mouse/input_internal.h"
 #include "overlay/overlay_internal.h"
 #include <iostream>
+#include <utility>
 
 namespace {
 class Device final : public IMouseController {
@@ -17,7 +19,7 @@ int failures = 0;
 void expect(bool condition, const char* message) {
     if (!condition) { ++failures; std::cerr << message << '\n'; }
 }
-void side_button(int key) {
+void device_key(int key) {
     using namespace overlay::detail;
     auto device = std::make_shared<Device>();
     device->input.state_valid = true;
@@ -40,7 +42,7 @@ void side_button(int key) {
     poll = keyboard.poll();
     const auto result = update_hotkey_capture(state, local, keys(poll));
     expect(result.type == HotkeyCaptureResultType::ASSIGNED && result.virtual_key == key,
-        "本机全零时必须捕获后端鼠标侧键");
+        "本机全零时必须捕获后端物理键");
     begin_hotkey_capture(state, local, keys(poll));
     expect(update_hotkey_capture(state, local, keys(poll)).type == HotkeyCaptureResultType::NONE,
         "捕获开始前按住的后端键不能重复绑定");
@@ -64,8 +66,66 @@ void side_button(int key) {
     expect(update_hotkey_capture(state, local, keys(poll)).type == HotkeyCaptureResultType::CLEARED,
         "本机Esc优先于同时到达的后端侧键");
 }
+void grenade_keys() {
+    const std::array<std::pair<int, KeyboardEventType>, 4> bindings{{
+        {0x27, KeyboardEventType::GRENADE_MENU},
+        {0x26, KeyboardEventType::GRENADE_ALIGN},
+        {0x28, KeyboardEventType::GRENADE_THROW},
+        {0x25, KeyboardEventType::GRENADE_CANCEL}}};
+    for (const auto& [key, type] : bindings) {
+        auto device = std::make_shared<Device>();
+        KeyboardConfig config;
+        config.grenade_assist_enabled = true;
+        KeyboardListener listener(config, device);
+        expect(listener.open(), "有效道具键配置应打开监听");
+        const auto count = [&](const KeyboardPollResult& result) {
+            return std::count_if(result.events.begin(), result.events.end(),
+                [&](const auto& event) { return event.type == type && event.active; });
+        };
+        device->input.status = InputMonitorStatus::READY;
+        device->input.state_valid = true; device->input.sequence = 1;
+        device->input.virtual_keys[key] = true;
+        expect(count(listener.poll()) == 0, "初始按住道具键不得补发动作");
+        device->input.virtual_keys[key] = false; ++device->input.sequence;
+        expect(count(listener.poll()) == 0, "释放只解除道具键阻塞");
+        device->input.virtual_keys[key] = true; ++device->input.sequence;
+        expect(count(listener.poll()) == 1, "新按下道具键只生成一次对应事件");
+        expect(count(listener.poll()) == 0, "同一输入事实不重复道具事件");
+        ++device->input.sequence;
+        expect(count(listener.poll()) == 0, "持续按住不循环或累计道具事件");
+        device->input.status = InputMonitorStatus::STALE; ++device->input.sequence;
+        expect(count(listener.poll()) == 0, "失信输入不得补发道具事件");
+        device->input.status = InputMonitorStatus::READY; ++device->input.sequence;
+        expect(count(listener.poll()) == 0, "故障恢复时按住道具键必须先释放");
+        device->input.virtual_keys[key] = false; ++device->input.sequence; listener.poll();
+        device->input.virtual_keys[key] = true; ++device->input.sequence;
+        expect(count(listener.poll()) == 1, "恢复后释放重按道具键才启动新动作");
+        listener.close(); expect(listener.open(), "道具监听可重建");
+        expect(count(listener.poll()) == 0, "监听重建不得重放当前按住的道具键");
+        config.grenade_assist_enabled = false;
+        KeyboardListener disabled(config, device); expect(disabled.open(), "禁用道具保留合法草稿");
+        device->input.virtual_keys[key] = false; ++device->input.sequence; disabled.poll();
+        device->input.virtual_keys[key] = true; ++device->input.sequence;
+        expect(count(disabled.poll()) == 0, "辅助开关关闭时新按下也不发道具事件");
+    }
+}
+void numeric_keypad_mapping() {
+    std::array<bool, 256> keys{};
+    const std::array<std::uint8_t, 8> usages{0x4f, 0x52, 0x51, 0x50, 0x5e, 0x60, 0x5a, 0x5c};
+    mouse::detail::apply_hid_keyboard_report(0, usages.data(), usages.size(), keys);
+    for (const int key : {0x27, 0x26, 0x28, 0x25, 0x66, 0x68, 0x62, 0x64})
+        expect(keys[key], "方向区与数字区四向必须独立映射且可以同时捕获");
+    const std::array<std::uint8_t, 2> numlock_and_up{0x53, 0x60};
+    mouse::detail::apply_hid_keyboard_report(0, numlock_and_up.data(), numlock_and_up.size(), keys);
+    expect(keys[0x68] && !keys[0x26], "NumLock键出现不把物理数字区8别名为方向区上键");
+    const std::uint8_t up = 0x60;
+    mouse::detail::apply_hid_keyboard_report(0, &up, 1, keys);
+    expect(keys[0x68] && !keys[0x26], "NumLock释放后数字区8仍保持独立物理键身份");
+}
 }
 int main() {
+    grenade_keys();
+    numeric_keypad_mapping();
     {
         auto device = std::make_shared<Device>();
         KeyboardConfig config; config.voice_virtual_keys = {'J', 'K'};
@@ -130,6 +190,7 @@ int main() {
         device->input.status = InputMonitorStatus::READY; ++device->input.sequence;
         expect(!has_mark(listener.poll()), "失信恢复按住F9不得伪造标记边沿");
     }
-    side_button(5); side_button(6);
+    device_key(5); device_key(6);
+    for (const int key : {0x66, 0x68, 0x62, 0x64}) device_key(key);
     return failures ? 1 : 0;
 }

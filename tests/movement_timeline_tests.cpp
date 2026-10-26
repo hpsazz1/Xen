@@ -195,6 +195,28 @@ void failures_and_cancel() {
     r = run_plan(thrown, p, scale(), cb);
     require(r.outcome == Outcome::FAILED && thrown.cleanups == 1, "宿主异常未收敛并清理");
 }
+void first_output_admission() {
+    // 首动作前的空等待不能提前消费画面新鲜窗。
+    Fake device; Plan p; p.mask.enabled = false; p.actions = {key(Key::A,40,30)};
+    auto cb = permission(); bool expired = false; int checks = 0;
+    cb.progress = [&](const Progress& progress) { if(progress.elapsed_ms >= 10) expired = true; };
+    cb.first_output_permitted = [&] { ++checks; return !expired; };
+    auto result = run_plan(device,p,scale(),cb);
+    require(result.outcome == Outcome::CANCELED && checks == 1 && device.events.empty(),
+        "等待首动作时提前消费验证结果或拒绝后仍输出");
+    for (const auto kind : {ActionKind::KEY,ActionKind::BUTTON,ActionKind::MOVE,ActionKind::WHEEL}) {
+        Fake denied; Action action; action.kind=kind; action.start_ms=0; action.duration_ms=20;
+        action.dx=10; action.wheel=1; p.actions={action}; cb=permission();
+        cb.first_output_permitted=[] {return false;};
+        result=run_plan(denied,p,scale(),cb);
+        require(result.outcome==Outcome::CANCELED && denied.events.empty() && denied.dx==0 && denied.wheel_calls==0,
+            "一种实际设备输出绕过首次许可或虚构清理责任");
+    }
+    Fake accepted; p.actions={key(Key::A,0,30)}; cb=permission(); checks=0;
+    cb.first_output_permitted=[&] {++checks;return true;};
+    require(run_plan(accepted,p,scale(),cb).outcome==Outcome::COMPLETED && checks==1 && accepted.cleanups==1,
+        "首次许可未保持一次消费及原动作清理");
+}
 void missed_interval_and_mask_window() {
     Fake covered; covered.delay_key = true; Plan overlap; overlap.mask.enabled = false;
     overlap.actions = {key(Key::A, 0, 100), key(Key::A, 10, 1)};
@@ -317,6 +339,7 @@ int main(int argc, char** argv) {
         }
         json_contract(); parallel_union_and_restore(); failures_and_cancel(); missed_interval_and_mask_window(); recorded_tracks();
         button_contract_and_jump_order(); button_failure_cleanup_and_missed_interval();
+        first_output_admission();
         std::cout << "身法时间轴专项通过\n"; return 0;
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

@@ -6,7 +6,7 @@
 #include <vector>
 
 namespace debug_session::detail {
-struct SavedMovementPlan { std::string path, name, map, voice_command; };
+struct SavedMovementPlan { std::string path, name, map, voice_command, raw_name; };
 // 只扫描显式保存的方案库；保留旧参数兼容调用，不枚举调试快照。路径使用 UTF-8。
 std::vector<SavedMovementPlan> list_movement_plans(
     const std::string& library_root = "cache/movement/plans",

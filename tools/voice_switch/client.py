@@ -18,6 +18,13 @@ import threading
 import time
 import wave
 
+try:
+    from .guidance import GuidanceState, GuidanceWindow
+    from .reference_assets import DEFAULT_ROOT
+except ImportError:
+    from guidance import GuidanceState, GuidanceWindow
+    from reference_assets import DEFAULT_ROOT
+
 
 LOG = logging.getLogger("voice_switch")
 MAX_LINE = 65536
@@ -58,6 +65,8 @@ class Catalog:
     revision: int
     keywords: str
     labels: dict
+    entries: tuple = ()
+    domain: str = "movement"
 
 
 @dataclass
@@ -73,12 +82,17 @@ class Round:
 class Controller:
     """轮次与回执契约；可用生产接口注入音频和识别器做专项验证。"""
 
-    def __init__(self, engine, audio, send, tone, clock=time.monotonic):
+    def __init__(self, engine, audio, send, tone, clock=time.monotonic, guidance=None, voice_enabled=True):
         self.engine, self.audio = engine, audio
         self.send, self.tone, self.clock = send, tone, clock
         self.catalog = None
         self.round = None
         self.last_id = -1
+        self.guidance = GuidanceState(guidance)
+        self.display = guidance or (lambda value: None)
+        self.voice_enabled = voice_enabled
+        self.menu_next_id, self.menu_pending = 0, None
+        self.ui_generation = time.monotonic_ns()
 
     def finish(self, ok, reason):
         current = self.round
@@ -104,35 +118,64 @@ class Controller:
         self.finish(False, "disconnected")
         self.catalog = None
         self.last_id = -1
+        self.guidance.hide(reset=True)
+        self.menu_pending = None
 
     def handle(self, message):
         kind = message.get("type")
+        if kind == "guidance":
+            self.guidance.handle(message)
+            return
+        if kind == "catalog_show":
+            catalog = self.catalog
+            if (catalog and catalog.domain == "grenade" and (message.get("map"), message.get("epoch"),
+                    message.get("revision")) == (catalog.map, catalog.epoch, catalog.revision)):
+                self.display({"type": "catalog_show", "map": catalog.map, "epoch": catalog.epoch,
+                              "revision": catalog.revision, "entries": catalog.entries,
+                              "generation": self.ui_generation})
+            return
+        if kind == "catalog_result":
+            if not unsigned(message.get("id")):
+                raise ValueError("清单回执编号无效")
+            pending = self.menu_pending
+            if pending is None or message.get("id") != pending["id"]:
+                return
+            self.menu_pending = None
+            if message.get("ok") is not True or message.get("plan_id") != pending["plan_id"]:
+                self.display({"type": "catalog_error", "message": message.get("reason", "方案载入未确认")})
+            return
         if kind == "catalog":
             map_name = message.get("map")
             epoch, revision = message.get("epoch"), message.get("revision")
             entries = message.get("entries")
+            domain = message.get("domain", "movement")
             if (not isinstance(map_name, str) or not unsigned(epoch)
-                    or not unsigned(revision) or not isinstance(entries, list)):
+                    or not unsigned(revision) or not isinstance(entries, list) or domain not in ("movement", "grenade")):
                 raise ValueError("目录格式无效")
             identities = set()
             for entry in entries:
                 if (not isinstance(entry, dict) or not isinstance(entry.get("id"), str)
                         or not entry["id"] or entry["id"] in identities
                         or not isinstance(entry.get("command"), str)
-                        or not entry["command"].strip()):
+                        or not isinstance(entry.get("name", entry["id"]), str)
+                        or not isinstance(entry.get("map", map_name), str)
+                        or entry.get("team", "") not in ("T", "CT", "")):
                     raise ValueError("目录条目无效")
                 identities.add(entry["id"])
             if self.catalog and (map_name, epoch, revision) == (
                     self.catalog.map, self.catalog.epoch, self.catalog.revision):
                 # 相同版本重传不取消当前轮次；正式服务端保证版本对应相同内容。
-                self.send({"type": "ready", "epoch": epoch, "revision": revision})
+                self.send({"type": "ready", "epoch": epoch, "revision": revision, "voice_enabled": self.voice_enabled})
                 return
             if self.round:
                 self.fail("catalog_changed")
+            if self.catalog:
+                self.guidance.hide()
+            self.menu_pending = None
             self.catalog = None
-            keywords, labels = self.engine.prepare(entries)
-            self.catalog = Catalog(map_name, epoch, revision, keywords, labels)
-            self.send({"type": "ready", "epoch": epoch, "revision": revision})
+            keywords, labels = self.engine.prepare([entry for entry in entries if entry["command"].strip()]) if self.voice_enabled else ("", {})
+            self.catalog = Catalog(map_name, epoch, revision, keywords, labels, tuple(entries), domain)
+            self.send({"type": "ready", "epoch": epoch, "revision": revision, "voice_enabled": self.voice_enabled})
             LOG.info("目录就绪 地图=%s 候选=%s 版本=%s/%s", map_name, len(labels), epoch, revision)
             return
         ident = message.get("id")
@@ -144,6 +187,9 @@ class Controller:
             self.last_id = ident
             c = self.catalog
             self.round = Round(ident, c, self.clock(), deadline=self.clock() + 10.0)
+            if not self.voice_enabled:
+                self.fail("voice_disabled")
+                return
             if c is None or not c.map or (message.get("map"), message.get("epoch"),
                     message.get("revision")) != (c.map, c.epoch, c.revision):
                 self.fail("not_ready")
@@ -209,6 +255,28 @@ class Controller:
         self.pump_audio()
         if self.round and self.clock() >= self.round.deadline:
             self.fail("capture_timeout" if self.round.phase == "capture" else "result_timeout")
+        if self.menu_pending and self.clock() >= self.menu_pending["deadline"]:
+            self.menu_pending = None
+            self.display({"type": "catalog_error", "message": "选择回执超时，请重新打开清单核对"})
+
+    def handle_ui(self, message):
+        if message.get("type") != "catalog_pick":
+            return
+        catalog = self.catalog
+        if (self.menu_pending or self.round or not catalog or catalog.domain != "grenade"
+                or message.get("generation") != self.ui_generation
+                or (message.get("map"), message.get("epoch"), message.get("revision"))
+                != (catalog.map, catalog.epoch, catalog.revision)
+                or not any(item["id"] == message.get("plan_id") for item in catalog.entries)):
+            self.display({"type": "catalog_error", "message": "清单已变化或当前请求忙碌，请重新打开"})
+            return
+        if self.menu_next_id >= 2**64 - 1:
+            return
+        self.menu_next_id += 1
+        request = {"type": "catalog_select", "id": self.menu_next_id, "map": catalog.map,
+                   "epoch": catalog.epoch, "revision": catalog.revision, "plan_id": message["plan_id"]}
+        self.menu_pending = {**request, "deadline": self.clock() + 8.0}
+        self.send(request)
 
 
 class SherpaEngine:
@@ -359,12 +427,14 @@ class Tones:
                 self.queue.task_done()
 
 
-def run(host, port, model):
-    # 初始化时加载音频依赖，按下时才打开麦克风，避免首次导入延迟吞掉首音。
-    import sounddevice
-    engine = SherpaEngine(model)
-    tones = Tones()
-    audio = Microphone()
+def run(host, port, model, reference_root=DEFAULT_ROOT, corner="right", voice=False):
+    # 默认目录模式完全不导入音频/模型依赖；用户显式 --voice 才启用收音。
+    if voice:
+        import sounddevice
+        engine, tones, audio = SherpaEngine(model), Tones(), Microphone()
+    else:
+        engine, tones, audio = None, lambda ok: None, Microphone()
+    guidance = GuidanceWindow(reference_root, corner)
     controller = None
     try:
         while True:
@@ -376,7 +446,7 @@ def run(host, port, model):
                         if len(payload) > MAX_LINE:
                             raise ValueError("发送帧超过 64 KiB")
                         connection.sendall(payload + b"\n")
-                    controller = Controller(engine, audio, send, tones)
+                    controller = Controller(engine, audio, send, tones, guidance=guidance.publish, voice_enabled=voice)
                     parser = JsonLines()
                     LOG.info("已连接辅机，等待目录")
                     while True:
@@ -387,6 +457,8 @@ def run(host, port, model):
                             for message in parser.feed(data):
                                 controller.handle(message)
                         controller.tick()
+                        for message in guidance.poll():
+                            controller.handle_ui(message)
             except (OSError, ValueError, RuntimeError):
                 LOG.exception("连接不可用，三秒后重新连接；不重放旧请求")
                 if controller:
@@ -396,14 +468,19 @@ def run(host, port, model):
         if controller:
             controller.disconnected()
         audio.stop()
-        tones.queue.join()
+        guidance.close()
+        if voice:
+            tones.queue.join()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Xen 本地语音切换；Ctrl+C 退出")
+    parser = argparse.ArgumentParser(description="Xen 道具清单与参考图；--voice 可选语音，Ctrl+C 退出")
     parser.add_argument("--host", required=True, help="辅机地址")
     parser.add_argument("--port", type=int, default=5014)
     parser.add_argument("--model", type=Path, default=Path(__file__).resolve().parent / "model")
+    parser.add_argument("--references", type=Path, default=DEFAULT_ROOT, help="本机道具双图资源根目录")
+    parser.add_argument("--corner", choices=("left", "right"), default="right", help="双图提示窗左上或右上")
+    parser.add_argument("--voice", action="store_true", help="显式启用本地语音模型和麦克风依赖")
     args = parser.parse_args()
     log_directory = Path(__file__).resolve().parent / "logs"
     log_directory.mkdir(parents=True, exist_ok=True)
@@ -411,7 +488,7 @@ def main():
         handlers=[logging.StreamHandler(), RotatingFileHandler(log_directory / "voice.log",
             maxBytes=2*1024*1024, backupCount=2, encoding="utf-8")])
     try:
-        run(args.host, args.port, args.model)
+        run(args.host, args.port, args.model, args.references, args.corner, args.voice)
     except KeyboardInterrupt:
         LOG.info("语音工具已退出")
     except Exception:

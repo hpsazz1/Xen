@@ -246,7 +246,7 @@ void grenade_interactions() {
     expect(actions.debug_action == Action::ENABLE_MOVEMENT_TEST && actions.debug_request.mode == Mode::GRENADE_TEST,
         "道具页必须显式启用自己的F11域");
     const auto initial = Json::parse(actions.debug_request.plan_text);
-    expect(initial.at("voice_command").get<std::string>().empty(), "道具默认不能发布身法语音口令");
+    expect(initial.at("voice_command").get<std::string>().empty(), "新道具默认不臆造语音口令");
 
     movement::timeline::Plan grenade;
     grenade.name = "Mirage T1 VIP R1"; grenade.map = "de_mirage";
@@ -308,6 +308,19 @@ void grenade_interactions() {
     expect(Json::parse(actions.debug_request.plan_text).at("name") == pending_grenade.name &&
         actions.debug_request.load_path == snapshot.grenade_selected_path,
         "异步跨页载入不能挤掉未显示的道具草稿并用旧内容覆盖新文件");
+    click("语音口令");
+    auto& io = ImGui::GetIO(); io.AddInputCharactersUTF8("一号VIP");
+    actions = frame();
+    expect(actions.movement_draft_changed && !actions.debug_plan_edited &&
+        Json::parse(actions.debug_request.plan_text).at("voice_command") == "一号VIP" &&
+        Json::parse(actions.debug_request.plan_text).at("actions") ==
+            movement::timeline::plan_json(pending_grenade).at("actions"),
+        "道具语音口令须可在真实控件编辑，且不改动已保存动作时序");
+    actions = click("保存方案");
+    expect(actions.debug_action == Action::SAVE_PLAN && actions.debug_request.mode == Mode::GRENADE_TEST &&
+        actions.debug_request.load_path == snapshot.grenade_selected_path &&
+        Json::parse(actions.debug_request.plan_text).at("voice_command") == "一号VIP",
+        "道具口令编辑必须沿用独立道具库保存路径");
     snapshot.movement_test_mode = Mode::MOVEMENT_TEST; frame();
     actions = click("启用道具测试");
     expect(actions.debug_action == Action::ENABLE_MOVEMENT_TEST && actions.debug_request.mode == Mode::GRENADE_TEST,

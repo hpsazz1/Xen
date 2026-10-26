@@ -49,7 +49,7 @@ void append_plan(std::vector<SavedMovementPlan>& result, const fs::path& path, c
         if (!plan.map.empty()) name += " / " + plan.map;
         if (!plan.location.empty()) name += " / " + plan.location;
         result.push_back({utf8(fs::absolute(path).lexically_normal()), name + " [" + suffix + "]",
-            plan.map, plan.voice_command});
+            plan.map, plan.voice_command, plan.name});
     } catch (const std::exception&) { /* 单个坏文件不阻断方案下拉列表。 */ }
 }
 }

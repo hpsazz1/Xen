@@ -1,4 +1,4 @@
-﻿param(
+param(
     [Parameter(Mandatory = $true)][string]$PackageRoot,
     [Parameter(Mandatory = $true)][string]$StageName,
     [switch]$CheckOnly,
@@ -35,7 +35,8 @@ $modelReviewFiles = @('tools/model-data/model_data_pipeline.py', 'tools/model-da
 $aimTools = @('tools/invoke_aim_manual_acceptance.ps1', 'tools/aim_report.ps1',
     'tools/aim_control_diagnostics.ps1', 'tools/aim_fixed_scene_analysis.ps1')
 $voiceTools = @('client.py', 'requirements.txt', 'install.ps1', 'start.ps1',
-    'empty_keywords.txt', 'README.md', 'LICENSES.md', 'prepare_model.py') |
+    'empty_keywords.txt', 'README.md', 'LICENSES.md', 'prepare_model.py',
+        'guidance.py', 'preview_window.py', 'reference_assets.py', 'reference_tool.py', 'screen_capture.py') |
     ForEach-Object { "tools/voice-switch/$_" }
 $allowed = @($workerRelative, 'tools/acceptance/WORKER-UPDATE.json',
     'tools/acceptance/PACKAGE-NOTES.md', 'tools/acceptance/MANUAL-ACCEPTANCE.md',
