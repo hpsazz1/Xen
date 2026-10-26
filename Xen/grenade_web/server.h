@@ -40,7 +40,10 @@ public:
                          const AppConfig& controls, bool available, const std::string& reason = {}) noexcept;
     std::optional<SelectionRequest> poll_selection() noexcept;
     bool selection_current(const SelectionRequest& request) const noexcept;
-    void finish_selection(const SelectionRequest& request, bool ok, const std::string& reason = {}) noexcept;
+    // 成功快照与选择回执一并发布；空快照表示载入失败，不能先回执成功再等待下一帧补图。
+    void finish_selection(const SelectionRequest& request,
+                          std::shared_ptr<const debug_session::Snapshot> selection,
+                          const std::string& reason = {}) noexcept;
     void stop() noexcept;
     Snapshot snapshot() const;
 private:

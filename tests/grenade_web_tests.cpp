@@ -170,11 +170,26 @@ void selection_tests(const std::filesystem::path& root) {
     expect(request && request->plan_id=="t.json" && std::filesystem::u8path(request->plan_path)==path &&
         server.selection_current(*request) && !server.poll_selection(),"App只收到一次可信库路径请求");
     expect(select_plan(port,"t.json",generation).status==409,"在途请求不排队");
-    if (request) server.finish_selection(*request,true);
-    expect(get(port,"/selection.json").json().value("state",std::string{})=="selected","仅App完成后发布已选中");
     debug_session::Snapshot selected;selected.movement_test_enabled=true;selected.movement_test_mode=debug_session::Mode::GRENADE_TEST;
     selected.grenade_selected_path=utf8(path);selected.grenade_current=plan;selected.grenade_baseline=plan;
-    selected.grenade_guidance_state="aligning";selected.grenade_guidance_plan_id="t.json";selected.grenade_guidance_message="正在对齐";
+    selected.grenade_guidance_state="selected";selected.grenade_guidance_plan_id="t.json";selected.grenade_guidance_message="请按站位图定位";
+    if (request) server.finish_selection(*request,std::make_shared<const debug_session::Snapshot>(selected));
+    const auto completed=get(port,"/selection.json").json();
+    expect(completed.value("state",std::string{})=="selected" && completed.value("actual_plan_id",std::string{})=="t.json" &&
+        completed["guidance"]["state"]=="selected","成功回执原子带回实际方案与引导，不等待下一帧心跳");
+    for (const auto* previous_state:{"hidden","aligned"}) {
+        selected.grenade_guidance_state=previous_state;
+        server.publish_capture(std::make_shared<const debug_session::Snapshot>(selected),AppConfig{},true);
+        expect(select_plan(port,"t.json",generation).status==202,"允许人工重选同一方案");
+        const auto repeated=server.poll_selection();
+        selected.grenade_guidance_state="selected";
+        if(repeated)server.finish_selection(*repeated,std::make_shared<const debug_session::Snapshot>(selected));
+        const auto reselection=get(port,"/selection.json").json();
+        expect(repeated && reselection.value("request_id",std::string{})==std::to_string(repeated->id) &&
+            reselection.value("state",std::string{})=="selected" && reselection["guidance"]["state"]=="selected",
+            "同方案重选回执不能夹带上次隐藏或对齐状态");
+    }
+    selected.grenade_guidance_state="aligning";selected.grenade_guidance_message="正在对齐";
     server.publish_capture(std::make_shared<const debug_session::Snapshot>(selected),AppConfig{},true);
     const auto guidance=get(port,"/selection.json").json();
     expect(guidance.value("actual_plan_id",std::string{})=="t.json" && guidance["guidance"]["state"]=="aligning",
@@ -202,15 +217,15 @@ void selection_tests(const std::filesystem::path& root) {
     expect(post_context(gsi_config.port,timestamp+1,"de_mirage","CT"),"在途选择时换边");
     expect(old && !server.selection_current(*old),"App提交前立即观察GSI换边");
     get(port,"/context.json");
-    if(old)server.finish_selection(*old,true);
+    if(old)server.finish_selection(*old,std::make_shared<const debug_session::Snapshot>(selected));
     expect(get(port,"/selection.json").json().value("state",std::string{})=="failed","旧回执不能在换边后变成成功");
     expect(post_context(gsi_config.port,timestamp+2,"de_mirage","T"),"重新回到T阵营");
     const auto restored=get(port,"/context.json").json().value("generation",std::string{});
     expect(restored!=generation && select_plan(port,"t.json",generation).status==409,"T到CT再T不能复活旧请求");
     expect(select_plan(port,"t.json",restored).status==202,"新页面身份重新选择");
-    const auto current=server.poll_selection();if(old)server.finish_selection(*old,false,"过期回执");
+    const auto current=server.poll_selection();if(old)server.finish_selection(*old,nullptr,"过期回执");
     expect(current && server.selection_current(*current),"旧完成回执不覆盖新在途请求");
-    if(current)server.finish_selection(*current,false,"尚有未保存修改");
+    if(current)server.finish_selection(*current,nullptr,"尚有未保存修改");
     expect(get(port,"/selection.json").json().value("reason",std::string{})=="尚有未保存修改","手机显示App返回的选择失败原因");
     server.stop();gsi->stop();
     for(const auto* name:{"standing.png","aim.png","reference.json"})std::filesystem::remove(resources/name);

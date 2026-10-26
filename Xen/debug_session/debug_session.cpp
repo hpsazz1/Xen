@@ -965,7 +965,8 @@ bool Session::throw_grenade(const Context& context) noexcept {
                 if (control && result->cleanup_unknown) control->finish(false);
                 if (result->state == State::FAILED || result->state == State::CLEANUP_UNKNOWN)
                     impl_->guidance("failed",result->message,{},ready->epoch);
-                else impl_->guidance(result->state==State::CANCELED?"hidden":"selected",
+                // 完成后持续隐藏；轮询端即使错过投掷中间态，也不能恢复已消费的提示。
+                else impl_->guidance("hidden",
                     result->state==State::CANCELED?"本次投掷已取消":"投掷动作已完成；下次先按上键找点",{},ready->epoch);
             } catch (const DebugRunFailure& error) {
                 if (control && !error.output_not_started && !error.cleanup_confirmed) control->finish(false);

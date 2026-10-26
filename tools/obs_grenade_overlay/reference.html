@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=344, initial-scale=1">
+<title>Xen 道具参考</title>
+<style>
+  :root { color-scheme:light; --surface:#fff; --ink:#1a1c1f; --accent:#3a83f7; --muted:#626973; }
+  * { box-sizing:border-box; }
+  html,body { width:344px; height:576px; margin:0; overflow:hidden; background:transparent; }
+  body { color:var(--ink); font:13px/1.4 "Segoe UI","Microsoft YaHei UI",sans-serif; }
+  .card { width:344px; height:576px; padding:12px; display:flex; flex-direction:column; gap:10px;
+    background:rgba(255,255,255,.97); box-shadow:inset 0 0 0 1px rgba(26,28,31,.08); }
+  header { display:flex; align-items:center; justify-content:space-between; gap:8px; height:24px; flex:none; }
+  h1 { margin:0; font-size:16px; font-weight:600; line-height:24px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .state { flex:none; padding:2px 7px; color:#2468cb; background:#edf4ff; border-radius:5px; font-size:11px; line-height:18px; }
+  section { flex:none; }
+  h2 { display:flex; align-items:center; justify-content:space-between; margin:0 0 6px; color:var(--muted); font-size:12px; font-weight:500; line-height:18px; }
+  .annotation { color:#7a8088; font-size:11px; }
+  .frame { position:relative; width:320px; height:180px; overflow:hidden; border-radius:7px; background:#f0f3f7; }
+  .frame img,.frame svg { position:absolute; inset:0; display:block; width:100%; height:100%; }
+  .frame img { object-fit:contain; }
+  .frame svg { pointer-events:none; }
+  .placeholder { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:13px; text-align:center; padding:16px; }
+  .frame[data-status="ready"] .placeholder { display:none; }
+  .frame:not([data-status="ready"]) img,.frame:not([data-status="ready"]) svg { visibility:hidden; }
+  footer { margin-top:auto; display:flex; flex-direction:column; gap:6px; min-height:0; }
+  .note,.message { margin:0; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; line-height:18px; overflow-wrap:anywhere; }
+  .note { color:var(--ink); }
+  .note:empty { display:none; }
+  .message { color:var(--muted); }
+</style>
+</head>
+<body>
+<main class="card" aria-label="道具参考">
+  <header><h1 id="title">道具参考</h1><span id="state" class="state">参考</span></header>
+  <section aria-label="站位参考">
+    <h2>站位参考</h2>
+    <div id="standing" class="frame" data-status="missing">
+      <img id="standing-image" alt="站位图">
+      <svg id="standing-markers" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet" aria-hidden="true"></svg>
+      <div id="standing-placeholder" class="placeholder">站位图待采集</div>
+    </div>
+  </section>
+  <section aria-label="瞄点参考">
+    <h2>瞄点参考<span class="annotation">蓝框为 320 × 320 区域</span></h2>
+    <div id="aim" class="frame" data-status="missing">
+      <img id="aim-image" alt="瞄点图">
+      <svg id="aim-markers" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet" aria-hidden="true"></svg>
+      <div id="aim-placeholder" class="placeholder">瞄点图待采集</div>
+    </div>
+  </section>
+  <footer><p id="note" class="note"></p><p id="message" class="message">选择道具后显示参考图。</p></footer>
+</main>
+<script>
+(() => {
+  'use strict';
+  // 扁平协议：/reference.json 原字段，加 title/state/message/standing_url/aim_url/reason。
+  // 原生插件仅在状态或资源版本变化时替换 payload；此页不轮询、不选择方案、不发送输入。
+  const svgNamespace='http://www.w3.org/2000/svg';
+  const $=id=>document.getElementById(id);
+  const finite=value=>typeof value==='number'&&Number.isFinite(value);
+  const string=value=>typeof value==='string'?value:'';
+  const element=(tag,attributes)=>{
+    const node=document.createElementNS(svgNamespace,tag);
+    for(const [key,value] of Object.entries(attributes))node.setAttribute(key,String(value));
+    return node;
+  };
+  const outline=(svg,tag,attributes)=>{
+    svg.append(element(tag,{...attributes,fill:'none',stroke:'rgba(255,255,255,.9)','stroke-width':4.5,'vector-effect':'non-scaling-stroke'}),
+      element(tag,{...attributes,fill:'none',stroke:'#3a83f7','stroke-width':2.5,'vector-effect':'non-scaling-stroke'}));
+  };
+  const clamp=(value,low,high)=>Math.max(low,Math.min(high,value));
+  let value;
+  try {
+    value=JSON.parse(new URLSearchParams(location.search).get('payload')||'null');
+    if(!value||Array.isArray(value)||typeof value!=='object')throw Error('payload');
+  } catch {
+    $('message').textContent='参考信息暂不可用，请重新选择方案。';
+    return;
+  }
+  $('title').textContent=string(value.title)||'道具参考';
+  $('title').title=$('title').textContent;
+  $('state').textContent={aligning:'找点中',failed:'请调整',selected:'参考'}[value.state]||'参考';
+  $('note').textContent=string(value.standing_note);
+  $('message').textContent=string(value.message)||string(value.reason)||'站好位置后，按 ↑ 找点。';
+
+  function drawStanding(svg,width,height) {
+    const marker=value.standing_marker;
+    if(!marker||!finite(marker.x)||!finite(marker.y)||marker.x<0||marker.x>1||marker.y<0||marker.y>1)return;
+    const scale=Math.min(320/width,180/height),cx=marker.x*(width-1),cy=marker.y*(height-1);
+    outline(svg,'circle',{cx,cy,r:11/scale});
+    const label=string(marker.label).slice(0,16);
+    if(!label)return;
+    const labelWidth=Math.min(128,Math.max(28,Array.from(label).length*8+12))/scale;
+    const x=clamp(cx+15/scale,0,width-labelWidth),y=clamp(cy-11/scale,0,height-22/scale);
+    svg.append(element('rect',{x,y,width:labelWidth,height:22/scale,rx:4/scale,fill:'rgba(255,255,255,.94)'}));
+    const text=element('text',{x:x+6/scale,y:y+15.5/scale,fill:'#2468cb','font-size':12/scale,'font-weight':600});
+    text.textContent=label;svg.append(text);
+  }
+
+  function drawAim(svg,width,height) {
+    const g=value.geometry;
+    if(!g||![g.roi_x,g.roi_y,g.scale_x,g.scale_y].every(finite)||g.scale_x<=0||g.scale_y<=0)return;
+    const roiWidth=(finite(g.roi_width)?g.roi_width:320)*g.scale_x;
+    const roiHeight=(finite(g.roi_height)?g.roi_height:320)*g.scale_y;
+    if(roiWidth<=0||roiHeight<=0)return;
+    outline(svg,'rect',{x:g.roi_x,y:g.roi_y,width:roiWidth,height:roiHeight});
+    const tx=finite(value.target_x)?value.target_x:160,ty=finite(value.target_y)?value.target_y:160;
+    const cx=g.roi_x+tx*g.scale_x,cy=g.roi_y+ty*g.scale_y,arm=6/Math.min(320/width,180/height);
+    outline(svg,'path',{d:`M ${cx-arm} ${cy} H ${cx+arm} M ${cx} ${cy-arm} V ${cy+arm}`});
+  }
+
+  function loadImage(kind,draw) {
+    const frame=$(kind),image=$(kind+'-image'),svg=$(kind+'-markers'),placeholder=$(kind+'-placeholder');
+    const failed=()=>{frame.dataset.status='failed';placeholder.textContent=kind==='standing'?'站位图加载失败':'瞄点图加载失败';svg.replaceChildren();};
+    if(value.ready!==true){placeholder.textContent=kind==='standing'?'站位图待采集':'瞄点图待采集';return;}
+    let url;
+    try {url=new URL(string(value[kind+'_url']));if(!['http:','https:'].includes(url.protocol))throw Error('image URL');}
+    catch {failed();return;}
+    image.onload=()=>{
+      const width=image.naturalWidth,height=image.naturalHeight;
+      if(!width||!height){failed();return;}
+      // 两张图可以有不同尺寸；img 的 contain 与 SVG 的 meet 使用同一实际图片坐标系。
+      svg.setAttribute('viewBox',`0 0 ${width} ${height}`);svg.replaceChildren();
+      draw(svg,width,height);frame.dataset.status='ready';
+    };
+    image.onerror=failed;image.src=url.href;
+  }
+  loadImage('standing',drawStanding);
+  loadImage('aim',drawAim);
+})();
+</script>
+</body>
+</html>

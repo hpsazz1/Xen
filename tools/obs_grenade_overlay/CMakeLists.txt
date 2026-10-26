@@ -1,0 +1,45 @@
+cmake_minimum_required(VERSION 3.24)
+project(xen_obs_grenade_overlay LANGUAGES CXX)
+
+if(NOT WIN32 OR NOT MSVC)
+  message(FATAL_ERROR "本插件仅验证 Windows x64 / MSVC")
+endif()
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+set(OBS_SDK_ROOT "" CACHE PATH "匹配 OBS 32.1 的本地头文件和导入库")
+set(XEN_JSON_INCLUDE "" CACHE PATH "现有 nlohmann/json include")
+foreach(required "${OBS_SDK_ROOT}/source/libobs/obs.h" "${OBS_SDK_ROOT}/lib/obs.lib"
+                 "${OBS_SDK_ROOT}/lib/obs-frontend-api.lib" "${XEN_JSON_INCLUDE}/nlohmann/json.hpp")
+  if(NOT EXISTS "${required}")
+    message(FATAL_ERROR "缺少构建输入: ${required}")
+  endif()
+endforeach()
+set(OBS_RELEASE_CANDIDATE 4)
+set(OBS_BETA 0)
+set(OBS_DATA_PATH "data")
+set(OBS_PLUGIN_PATH "obs-plugins")
+set(OBS_PLUGIN_DESTINATION "obs-plugins/64bit")
+configure_file("${OBS_SDK_ROOT}/source/libobs/obsconfig.h.in" "generated/obsconfig.h")
+
+add_library(xen_obs_overlay_model STATIC model.cpp)
+target_include_directories(xen_obs_overlay_model PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${XEN_JSON_INCLUDE}")
+target_compile_options(xen_obs_overlay_model PRIVATE /utf-8 /W4 /permissive-)
+
+add_library(xen-grenade-overlay MODULE overlay.cpp)
+target_include_directories(xen-grenade-overlay PRIVATE "${OBS_SDK_ROOT}/source/libobs"
+  "${OBS_SDK_ROOT}/source/frontend/api" "${CMAKE_CURRENT_BINARY_DIR}/generated")
+target_compile_definitions(xen-grenade-overlay PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+target_compile_options(xen-grenade-overlay PRIVATE /utf-8 /W4 /permissive-)
+target_link_libraries(xen-grenade-overlay PRIVATE xen_obs_overlay_model
+  "${OBS_SDK_ROOT}/lib/obs.lib" "${OBS_SDK_ROOT}/lib/obs-frontend-api.lib" user32 winhttp)
+set_target_properties(xen-grenade-overlay PROPERTIES PREFIX "" RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin")
+
+include(CTest)
+add_executable(obs_grenade_overlay_tests tests.cpp)
+target_compile_options(obs_grenade_overlay_tests PRIVATE /utf-8 /W4 /permissive-)
+target_link_libraries(obs_grenade_overlay_tests PRIVATE xen_obs_overlay_model)
+add_test(NAME obs_grenade_overlay_tests COMMAND obs_grenade_overlay_tests)
+
+install(TARGETS xen-grenade-overlay RUNTIME DESTINATION obs-plugins/64bit LIBRARY DESTINATION obs-plugins/64bit)
+install(FILES reference.html README.md LICENSE.GPL-2.0 DESTINATION data/obs-plugins/xen-grenade-overlay)

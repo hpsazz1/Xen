@@ -288,6 +288,31 @@ struct Server::Impl {
     Clock::time_point selection_deadline{};
     std::map<std::string,std::pair<std::string,std::string>> reference_cache;
 
+    // 调用方持有mutex；普通心跳和手机选择完成共用同一快照/版本发布规则。
+    void publish_capture_locked(std::shared_ptr<const debug_session::Snapshot> selection,
+                                bool available, const std::string& reason, Clock::time_point now) {
+        const auto& old = capture_selection;
+        const bool changed = capture_available != available || capture_reason != reason ||
+            now >= capture_received + kCaptureHeartbeat || static_cast<bool>(old) != static_cast<bool>(selection) ||
+            (old && selection && old != selection &&
+                (old->generation != selection->generation || old->state != selection->state ||
+                 old->busy != selection->busy || old->physical != selection->physical ||
+                 old->cleanup_unknown != selection->cleanup_unknown || old->movement_recording != selection->movement_recording ||
+                 old->movement_test_enabled != selection->movement_test_enabled || old->movement_test_mode != selection->movement_test_mode ||
+                 old->grenade_selected_path != selection->grenade_selected_path ||
+                 old->grenade_loaded_revision != selection->grenade_loaded_revision ||
+                 old->grenade_current != selection->grenade_current || old->grenade_baseline != selection->grenade_baseline));
+        if (changed) {
+            if (capture_revision == std::numeric_limits<std::uint64_t>::max()) {
+                capture_selection.reset(); capture_available = false;
+                capture_reason = "采集状态代际已耗尽"; return;
+            }
+            ++capture_revision;
+        }
+        capture_selection = std::move(selection); capture_received = now;
+        capture_available = available; capture_reason = reason;
+    }
+
     void update_context() {
         current = gsi->map_snapshot();
         const auto now = Clock::now();
@@ -751,26 +776,7 @@ void Server::publish_capture(std::shared_ptr<const debug_session::Snapshot> sele
         available = available && !conflict;
         const auto now = Clock::now();
         std::lock_guard lock(impl_->mutex);
-        const auto& old = impl_->capture_selection;
-        const bool changed = impl_->capture_available != available || impl_->capture_reason != message ||
-            now >= impl_->capture_received + kCaptureHeartbeat || static_cast<bool>(old) != static_cast<bool>(selection) ||
-            (old && selection && old != selection &&
-                (old->generation != selection->generation || old->state != selection->state ||
-                 old->busy != selection->busy || old->physical != selection->physical ||
-                 old->cleanup_unknown != selection->cleanup_unknown || old->movement_recording != selection->movement_recording ||
-                 old->movement_test_enabled != selection->movement_test_enabled || old->movement_test_mode != selection->movement_test_mode ||
-                 old->grenade_selected_path != selection->grenade_selected_path ||
-                 old->grenade_loaded_revision != selection->grenade_loaded_revision ||
-                 old->grenade_current != selection->grenade_current || old->grenade_baseline != selection->grenade_baseline));
-        if (changed) {
-            if (impl_->capture_revision == std::numeric_limits<std::uint64_t>::max()) {
-                impl_->capture_selection.reset(); impl_->capture_available = false;
-                impl_->capture_reason = "采集状态代际已耗尽"; return;
-            }
-            ++impl_->capture_revision;
-        }
-        impl_->capture_selection = std::move(selection); impl_->capture_received = now;
-        impl_->capture_available = available; impl_->capture_reason = message;
+        impl_->publish_capture_locked(std::move(selection),available,message,now);
     } catch (...) {
         std::lock_guard lock(impl_->mutex);
         impl_->capture_selection.reset(); impl_->capture_available = false;
@@ -799,13 +805,17 @@ bool Server::selection_current(const SelectionRequest& request) const noexcept {
             weapon::team_name(map.local_team) == request.team;
     } catch (...) { return false; }
 }
-void Server::finish_selection(const SelectionRequest& request, bool ok, const std::string& reason) noexcept {
+void Server::finish_selection(const SelectionRequest& request,
+                              std::shared_ptr<const debug_session::Snapshot> selection,
+                              const std::string& reason) noexcept {
     try {
         const auto valid = selection_current(request);
         std::lock_guard lock(impl_->mutex);
         if (!impl_->selection_request || impl_->selection_request->id != request.id ||
             impl_->selection_request->generation != request.generation || impl_->selection_state != "pending") return;
-        ok = ok && valid && impl_->selection_context == request.generation;
+        const bool ok = selection && valid && impl_->selection_context == request.generation;
+        if (ok) impl_->publish_capture_locked(std::move(selection),impl_->capture_available,
+                                             impl_->capture_reason,Clock::now());
         impl_->selection_state = ok ? "selected" : "failed";
         impl_->selection_reason = ok ? "" : !valid ? "地图、阵营或请求已改变，请重新选择" :
             reason.empty() ? "当前状态不允许切换方案" : reason.substr(0,512);

@@ -663,6 +663,7 @@ void test_grenade_domain_isolation(const std::filesystem::path& root) {
         read_json(std::filesystem::u8path(snap->report_directory)/"grenade-run-plan.json") == Json::parse(grenade.plan_text) &&
         !std::filesystem::exists(std::filesystem::u8path(snap->report_directory)/"movement-run-plan.json"),
         "道具F11误执行身法或报告归属错误");
+    require(snap->grenade_guidance_state=="hidden","F11投掷完成后没有持续隐藏参考提示");
     session.cancel();
     require(!session.snapshot()->movement_test_enabled && !session.repeat(context) && device->cleanups == 2,
         "急停未撤销共享许可或未完成两次清理");

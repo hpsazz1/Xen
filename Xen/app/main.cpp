@@ -821,7 +821,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             const bool current=!interface_blocked && !actions.hotkey_capture_consumed &&
                 mobile_web.selection_current(*mobile_selection);
             if (const auto completed=debug_workspace.finish_voice(interface_context,current)) {
-                mobile_web.finish_selection(*mobile_selection,*completed,
+                mobile_web.finish_selection(*mobile_selection,*completed ? debug_workspace.snapshot() : nullptr,
                     *completed ? "方案已切换" : "方案或游戏状态已变化，请重新点选");
                 mobile_selection.reset();
             }
@@ -831,7 +831,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             request.load_path=selected->plan_path;
             if (!interface_blocked && !actions.hotkey_capture_consumed && mobile_web.selection_current(*selected) &&
                 debug_workspace.select_grenade(request,interface_context)) mobile_selection=std::move(selected);
-            else mobile_web.finish_selection(*selected,false,"当前操作未结束，或道具辅助尚未启用，请稍后点选");
+            else mobile_web.finish_selection(*selected,nullptr,"当前操作未结束，或道具辅助尚未启用，请稍后点选");
         }
         // 重采原子发布后只检查小清单时间，撤销旧对齐；图片由手机按资源版本刷新。
         const auto reference_now=std::chrono::steady_clock::now();

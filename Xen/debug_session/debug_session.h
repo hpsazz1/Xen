@@ -69,7 +69,7 @@ struct Snapshot {
     weapon::MapSnapshot movement_map;
     bool movement_voice_selected = false;
     std::uint64_t movement_voice_epoch = 0;
-    // 主机提示独立于一次收音轮次；仅对齐成功隐藏图片，不触发声音或投掷。
+    // 主机提示独立于一次收音轮次；对齐、取消和投掷完成均隐藏，不触发声音或投掷。
     std::uint64_t grenade_guidance_revision = 0;
     std::string grenade_guidance_state = "hidden";
     std::string grenade_guidance_plan_id, grenade_guidance_reference_id, grenade_guidance_message;
