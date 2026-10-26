@@ -4,9 +4,9 @@ import ctypes as c
 from ctypes import wintypes as w
 
 try:
-    from .reference_assets import load_reference
+    from .reference_assets import load_reference, png_size
 except ImportError:
-    from reference_assets import load_reference
+    from reference_assets import load_reference, png_size
 
 
 class PreviewWindow:
@@ -15,6 +15,7 @@ class PreviewWindow:
         self.user, self.gdi = c.WinDLL("user32"), c.WinDLL("gdi32")
         self.plus, self.kernel = c.WinDLL("gdiplus"), c.WinDLL("kernel32")
         self.images, self.reference, self.message = [], None, ""
+        self.image_sizes = []
         self.width, self.height = 344, 120
         p, i, u = c.c_void_p, c.c_int, c.c_uint
         def bind(library, name, result, *arguments):
@@ -44,6 +45,7 @@ class PreviewWindow:
         bind(self.gdi, "SetStretchBltMode", i, p, i)
         bind(self.gdi, "StretchBlt", w.BOOL, p, i, i, i, i, p, i, i, i, i, w.DWORD)
         bind(self.gdi, "Rectangle", w.BOOL, p, i, i, i, i)
+        bind(self.gdi, "Ellipse", w.BOOL, p, i, i, i, i)
         bind(self.gdi, "MoveToEx", w.BOOL, p, i, i, p)
         bind(self.gdi, "LineTo", w.BOOL, p, i, i)
         bind(self.gdi, "CreateFontW", p, *([i] * 5), *([w.DWORD] * 8), w.LPCWSTR)
@@ -104,6 +106,7 @@ class PreviewWindow:
         for bitmap in self.images:
             self.gdi.DeleteObject(bitmap)
         self.images.clear()
+        self.image_sizes.clear()
 
     def _text(self, dc, text, top, height, color=0x00F7E8DC):
         rectangle = w.RECT(12, top, 332, top + height)
@@ -123,11 +126,12 @@ class PreviewWindow:
                 return
             reference, g = self.reference, self.reference["geometry"]
             self._text(dc, reference["plan"].get("name", "道具参考"), 10, 40)
-            width, height = g["source_width"], g["source_height"]
-            scale = min(320 / width, 180 / height)
-            dw, dh = round(width * scale), round(height * scale)
-            x, y = (344 - dw) // 2, 54
+            y = 54
             for index, bitmap in enumerate(self.images):
+                width, height = self.image_sizes[index]
+                scale = min(320 / width, 180 / height)
+                dw, dh = round(width * scale), round(height * scale)
+                x = (344 - dw) // 2
                 self._text(dc, "站位参考" if index == 0 else "瞄点参考 · 方框为 320×320 ROI", y, 22, 0x00CEB8A8)
                 y += 24
                 source = self.gdi.CreateCompatibleDC(dc)
@@ -136,6 +140,20 @@ class PreviewWindow:
                 self.gdi.StretchBlt(dc, x, y, dw, dh, source, 0, 0, width, height, 0x00CC0020)
                 self.gdi.SelectObject(source, previous)
                 self.gdi.DeleteDC(source)
+                if index == 0 and "standing_marker" in reference:
+                    marker = reference["standing_marker"]
+                    cx = x + round(marker["x"] * (dw - 1))
+                    cy = y + round(marker["y"] * (dh - 1))
+                    pen = self.gdi.CreatePen(0, 3, 0x0000D7FF)
+                    old_pen = self.gdi.SelectObject(dc, pen)
+                    old_brush = self.gdi.SelectObject(dc, self.gdi.GetStockObject(5))
+                    self.gdi.Ellipse(dc, cx - 11, cy - 11, cx + 12, cy + 12)
+                    self.gdi.SelectObject(dc, old_pen); self.gdi.SelectObject(dc, old_brush)
+                    self.gdi.DeleteObject(pen)
+                    label = w.RECT(max(x, min(cx + 14, x + dw - 65)),
+                                   max(y, min(cy - 10, y + dh - 21)), x + dw, y + dh)
+                    self.gdi.SetTextColor(dc, 0x0000D7FF)
+                    self.user.DrawTextW(dc, marker["label"], -1, c.byref(label), 0x20 | 0x800)
                 if index == 1:
                     sx, sy = dw / width, dh / height
                     left, top = round(x + g["roi_x"] * sx), round(y + g["roi_y"] * sy)
@@ -169,10 +187,10 @@ class PreviewWindow:
                 finally:
                     self.plus.GdipDisposeImage(image)
                 self.images.append(bitmap.value)
+                self.image_sizes.append(png_size(directory / reference[key]))
             self.reference = reference
-            g = reference["geometry"]
-            image_height = round(g["source_height"] * min(320 / g["source_width"], 180 / g["source_height"]))
-            self.height = 54 + 2 * (24 + image_height + 12) + 90
+            self.height = 54 + sum(24 + round(height * min(320 / width, 180 / height)) + 12
+                                   for width, height in self.image_sizes) + 90
             self.message = {"selected": "站好位置、朝向接近后，按小键盘上键对齐。",
                             "aligning": "正在对齐；完成后参考图自动隐藏。",
                             "failed": value.get("message") or "未完成对齐，请调整后再试。"}[value["state"]]

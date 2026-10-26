@@ -2,9 +2,13 @@
 #define WIN32_LEAN_AND_MEAN
 #include <WinSock2.h>
 #include <WS2tcpip.h>
+#ifdef ERROR
+#undef ERROR
+#endif
 #include "grenade_web/server.h"
 #include "weapon/weapon.h"
 #include "movement/timeline.h"
+#include "debug_session/debug_session.h"
 #include <nlohmann/json.hpp>
 #include <charconv>
 #include <chrono>
@@ -111,6 +115,90 @@ void write_plan(const std::filesystem::path& path, const std::string& name, cons
     std::ofstream file(path,std::ios::binary);
     file << movement::timeline::plan_json(plan).dump();
     if (!file) throw std::runtime_error("测试方案写入失败");
+}
+void capture_context_tests(const std::filesystem::path& root) {
+    const auto directory = root / "capture-context";
+    std::filesystem::create_directory(directory);
+    const auto path = directory / "selected.json";
+    const std::string raw = R"({"schema_version":3,"name":"T1 VIP","map":"de_mirage","location":"","notes":"","voice_command":"","actions":[{"type":"key","key":"SPACE","start_ms":0,"duration_ms":100}],"mask":{"enabled":false,"wasd":0,"start_ms":-1,"duration_ms":0}})";
+    { std::ofstream file(path,std::ios::binary); file << raw; }
+    auto gsi = std::make_shared<weapon::GsiReceiver>();
+    weapon::GsiConfig gsi_config; gsi_config.enabled = true; gsi_config.port = unused_port(); gsi_config.ttl_ms = 700;
+    expect(gsi->start(gsi_config),"F10只读上下文使用独立回环GSI夹具");
+    grenade_web::Server server;
+    grenade_web::Config config; config.bind_address = "127.0.0.1"; config.port = 0; config.plans_root = utf8(directory);
+    expect(server.start(config,gsi),"F10只读上下文服务启动");
+    const auto port = server.snapshot().port;
+    AppConfig controls;
+    debug_session::Snapshot selected;
+    selected.movement_test_enabled = true; selected.movement_test_mode = debug_session::Mode::GRENADE_TEST;
+    selected.grenade_selected_path = utf8(path); selected.grenade_current = Json::parse(raw);
+    selected.grenade_baseline = selected.grenade_current;
+    const auto publish = [&](bool available = true) {
+        server.publish_capture(std::make_shared<const debug_session::Snapshot>(selected),controls,available,"Runtime尚未停止");
+    };
+    const auto read = [&] { return get(port,"/capture-context.json").json(); };
+    const auto rejected = [&] {
+        const auto value = read();
+        expect(value.is_object() && !value.value("ready",true) && value.value("remaining_ms",1)==0 &&
+            value["plan"].is_object() && value["plan"].empty() && value.value("plan_id",std::string("old")).empty() &&
+            value.value("plan_sha256",std::string("old")).empty() && !value.value("reason",std::string{}).empty(),
+            "未就绪的F10上下文清空方案和摘要并给出原因");
+        return value;
+    };
+    rejected();
+    publish(); rejected();
+    const auto timestamp = utc_seconds();
+    expect(post_context(gsi_config.port,timestamp,"de_mirage","T"),"F10夹具建立有效本地GSI");
+    const auto ready = read();
+    expect(ready.value("ready",false) && ready.value("plan_id",std::string{})=="selected.json" &&
+        ready["plan"]==Json::parse(raw) && ready.value("plan_sha256",std::string{})==
+            "8bfc1ece2235cf8cea469335b9ee07126792aac7b822b36972defe94450b24ac" &&
+        ready.value("remaining_ms",0)>0 && ready.value("remaining_ms",701)<=700 && ready.size()==9,
+        "F10返回实际启用方案的原JSON和SHA，不暴露路径或其他Session字段");
+    publish();
+    expect(read()["generation"]==ready["generation"],"相同选择与心跳刷新不制造新采集身份");
+    selected.grenade_current["name"] = "T1 未保存"; publish(); rejected();
+    selected.grenade_current = selected.grenade_baseline; publish();
+    expect(read().value("ready",false) && read()["generation"]!=ready["generation"],"脏草稿恢复不能复活旧采集身份");
+    selected.busy = true; selected.physical = true; selected.state = debug_session::State::RUNNING; publish(); rejected();
+    selected.busy = false; selected.state = debug_session::State::COMPLETED; publish();
+    expect(read().value("ready",false),"试投成功且已清理后允许F10，physical历史属性不阻断采图");
+    selected.cleanup_unknown = true; publish(); rejected(); selected.cleanup_unknown = false;
+    selected.movement_test_enabled = false; publish(); rejected(); selected.movement_test_enabled = true;
+    selected.movement_test_mode = debug_session::Mode::MOVEMENT_TEST; publish(); rejected();
+    selected.movement_test_mode = debug_session::Mode::GRENADE_TEST;
+    publish(false); rejected();
+    controls.keyboard.debug_test_enabled = true; controls.keyboard.debug_test_virtual_keys = {0x79}; publish();
+    expect(rejected().value("reason",std::string{}).find("F10")!=std::string::npos,"设备侧自定义F10与采集热键冲突时拒绝");
+    controls.keyboard.debug_test_enabled = false; publish();
+    expect(read().value("ready",false),"未启用的F10草稿绑定不占用采集键");
+    controls.trigger.enabled = true; controls.trigger.fire_enabled = true; controls.trigger.hold_virtual_key = 0x79; publish(); rejected();
+    controls.trigger.enabled = false; publish();
+    const auto before_bytes_change = read();
+    { std::ofstream file(path,std::ios::binary | std::ios::app); file << '\n'; }
+    const auto bytes_changed = read();
+    expect(bytes_changed.value("ready",false) && bytes_changed["plan"]==ready["plan"] &&
+        bytes_changed["plan_sha256"]!=before_bytes_change["plan_sha256"] &&
+        bytes_changed["generation"]!=before_bytes_change["generation"],"源文件仅格式变化仍更新原始字节摘要与采集身份");
+    write_plan(path,"T1 已变更","de_mirage"); rejected();
+    { std::ofstream file(path,std::ios::binary); file << raw; }
+    selected.grenade_selected_path = utf8(root / "t.json"); publish(); rejected();
+    selected.grenade_selected_path = utf8(path); publish();
+    expect(post_context(gsi_config.port,timestamp+1,"de_nuke","T"),"F10换图输入成功"); rejected();
+    expect(post_context(gsi_config.port,timestamp+2,"de_mirage","T"),"F10地图恢复输入成功"); publish();
+    expect(read().value("ready",false),"地图恢复后重新取得当前采集上下文");
+    std::this_thread::sleep_for(1050ms);
+    expect(post_context(gsi_config.port,timestamp+3,"de_mirage","T"),"只刷新GSI而不续App心跳");
+    expect(rejected().value("reason",std::string{}).find("界面状态")!=std::string::npos,"App心跳过期时有效GSI不能续命旧选择");
+    publish(); expect(read().value("ready",false),"App新心跳恢复当前选择");
+    std::this_thread::sleep_for(750ms); publish(); rejected();
+    gsi->stop(); publish(); rejected();
+    server.stop();
+    expect(server.start(config,gsi),"F10服务对象可以重启");
+    expect(!get(server.snapshot().port,"/capture-context.json").json().value("ready",true),"服务重启不继承旧App选择心跳");
+    server.stop();
+    std::filesystem::remove(path); std::filesystem::remove(directory);
 }
 void catalog_limits(const std::filesystem::path& root, const std::shared_ptr<weapon::GsiReceiver>& gsi) {
     const auto directory = root / "catalog-limits";
@@ -278,6 +366,7 @@ int main(int argc, char** argv) {
     server.stop();
     expect(post_context(gsi_config.port,timestamp+4,"de_mirage","T") && gsi->map_snapshot().valid,"网页停止不关闭共享GSI");
     catalog_limits(root,gsi);
+    capture_context_tests(root);
     gsi->stop();
     auto invalid = config; invalid.bind_address = "203.0.113.8";
     expect(!server.start(invalid,gsi) && !server.snapshot().error.empty(),"公开地址绑定在创建监听前拒绝");

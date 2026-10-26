@@ -11,10 +11,10 @@ import re
 import time
 
 try:
-    from .reference_assets import DEFAULT_ROOT, geometry_for, load_reference, manifest_revision, png_size, resource_directory
+    from .reference_assets import DEFAULT_ROOT, geometry_for, load_reference, manifest_revision, png_size, resource_directory, validate_standing_marker
     from .screen_capture import capture_primary
 except ImportError:
-    from reference_assets import DEFAULT_ROOT, geometry_for, load_reference, manifest_revision, png_size, resource_directory
+    from reference_assets import DEFAULT_ROOT, geometry_for, load_reference, manifest_revision, png_size, resource_directory, validate_standing_marker
     from screen_capture import capture_primary
 
 
@@ -26,7 +26,7 @@ def write_json(path, value):
     temporary.replace(path)
 
 
-def begin(root, plan_path, verified, standing_note=""):
+def begin(root, plan_path, verified, standing_note="", standing_marker=None):
     if not verified:
         raise ValueError("必须先人工完成一次成功投掷，再明确传入 --verified")
     source = Path(plan_path).resolve()
@@ -35,6 +35,8 @@ def begin(root, plan_path, verified, standing_note=""):
     plan = json.loads(source.read_text(encoding="utf-8-sig"))
     if not isinstance(plan, dict) or not plan.get("actions") or not plan.get("map"):
         raise ValueError("方案必须包含地图和既有动作")
+    if standing_marker is not None:
+        validate_standing_marker(standing_marker)
     directory = resource_directory(root, source.stem)
     directory.mkdir(parents=True, exist_ok=True)
     if any(directory.iterdir()):
@@ -44,6 +46,8 @@ def begin(root, plan_path, verified, standing_note=""):
              "confirmed_at_utc": datetime.now(timezone.utc).isoformat(),
              "standing_note": standing_note, "standing_image": "standing.png", "aim_image": "aim.png",
              "target_x": 160, "target_y": 160}
+    if standing_marker is not None:
+        draft["standing_marker"] = dict(standing_marker)
     write_json(directory / "draft.json", draft)
     return source.stem
 
@@ -75,11 +79,10 @@ def add_image(root, identity, role, image=None, capture=False, delay=5.0,
             png_size(image)
             temporary.write_bytes(Path(image).read_bytes())
         width, height = png_size(temporary)
-        if min(width, height) < 320:
+        if role == "aim" and min(width, height) < 320:
             raise ValueError("需要完整原始全屏图，不接收缩略图")
-        if role == "aim" and png_size(directory / "standing.png") != (width, height):
-            raise ValueError("站位图与瞄点图分辨率不同")
-        geometry = geometry_for(width, height, roi_x, roi_y, scale_x, scale_y)
+        # 共用站位图只作定位说明；不裁剪或缩放来凑瞄点图的分辨率。
+        geometry = geometry_for(width, height, roi_x, roi_y, scale_x, scale_y) if role == "aim" else None
         temporary.replace(target)
         if role == "standing":
             return False

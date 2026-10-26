@@ -2,12 +2,13 @@
 
 from pathlib import Path
 import json
+import hashlib
 import sys
 import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tools.voice_switch.reference_assets import load_reference, png_size, resource_directory
+from tools.voice_switch.reference_assets import load_reference, manifest_revision, png_size, resource_directory
 from tools.voice_switch.reference_tool import add_image, begin
 from tools.voice_switch.screen_capture import png_rgb
 
@@ -77,17 +78,60 @@ class ReferenceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             add_image(self.root, identity, "aim", self.image)
 
-    def test_mismatched_image_size_or_invalid_geometry_does_not_publish(self):
+    def test_invalid_aim_geometry_does_not_publish(self):
         identity = begin(self.root, self.plan, True)
         add_image(self.root, identity, "standing", self.image)
-        smaller = self.base / "different.png"
-        smaller.write_bytes(png_rgb(640, 480, [bytes([0, 0, 0]) * 640] * 480))
-        with self.assertRaisesRegex(ValueError, "分辨率"):
-            add_image(self.root, identity, "aim", smaller)
         with self.assertRaisesRegex(ValueError, "ROI"):
             add_image(self.root, identity, "aim", self.image, roi_x=600)
         self.assertFalse((self.root / identity / "reference.json").exists())
         self.assertFalse((self.root / identity / "aim.png").exists())
+
+    def test_shared_standing_keeps_own_size_and_marker_without_changing_pixels(self):
+        shared = self.base / "spawn-points.png"
+        shared.write_bytes(png_rgb(2560, 1440, [bytes([20, 60, 90]) * 2560] * 1440))
+        marker = {"x": 0.25, "y": 0.5, "label": "T1"}
+        identity = begin(self.root, self.plan, True, "使用出生点总图", standing_marker=marker)
+        add_image(self.root, identity, "standing", shared)
+        add_image(self.root, identity, "aim", self.image)
+        value, directory = load_reference(self.root, identity, self.plan.name)
+        self.assertEqual(value["standing_marker"], marker)
+        self.assertEqual(png_size(directory / "standing.png"), (2560, 1440))
+        self.assertEqual(png_size(directory / "aim.png"), (640, 360))
+        self.assertEqual((value["geometry"]["source_width"], value["geometry"]["source_height"]), (640, 360))
+        self.assertEqual((directory / "standing.png").read_bytes(), shared.read_bytes())
+        self.assertEqual((directory / "aim.png").read_bytes(), self.image.read_bytes())
+
+    def test_aim_mismatch_still_rejected_when_standing_can_differ(self):
+        identity = self.complete()
+        directory = self.root / identity
+        target = directory / "aim.png"
+        target.write_bytes(png_rgb(640, 480, [bytes([20, 30, 40]) * 640] * 480))
+        manifest = directory / "reference.json"
+        value = json.loads(manifest.read_text(encoding="utf-8"))
+        value["image_sha256"]["aim_image"] = hashlib.sha256(target.read_bytes()).hexdigest()
+        value["reference_revision"] = manifest_revision(value)
+        manifest.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "瞄点图尺寸"):
+            load_reference(self.root, identity)
+
+    def test_bad_standing_marker_is_rejected_at_creation_and_load(self):
+        markers = [None, {}, {"x": True, "y": 0.5, "label": "T1"},
+                   {"x": -0.1, "y": 0.5, "label": "T1"},
+                   {"x": 0.5, "y": 1.1, "label": "T1"},
+                   {"x": float("nan"), "y": 0.5, "label": "T1"},
+                   {"x": 0.5, "y": 0.5, "label": "T1\n"}]
+        for marker in markers[1:]:
+            with self.subTest(marker=marker), self.assertRaisesRegex(ValueError, "站位标记"):
+                begin(self.root, self.plan, True, standing_marker=marker)
+        identity = self.complete()
+        manifest = self.root / identity / "reference.json"
+        original = json.loads(manifest.read_text(encoding="utf-8"))
+        for marker in markers:
+            value = dict(original, standing_marker=marker)
+            value["reference_revision"] = manifest_revision(value)
+            manifest.write_text(json.dumps(value), encoding="utf-8")
+            with self.subTest(marker=marker), self.assertRaisesRegex(ValueError, "站位标记"):
+                load_reference(self.root, identity)
 
     def test_path_escape_and_truncated_png_are_rejected(self):
         for identity in ("..", "../x", "C:\\x", "x/y", "NUL", "x..y"):

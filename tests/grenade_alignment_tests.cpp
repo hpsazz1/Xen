@@ -255,7 +255,36 @@ void reference_resources(const std::filesystem::path& root) {
         bool rejected=false;try {grenade_alignment::load_reference(plans/"sample.json",expected);}
         catch (const std::exception&) {rejected=true;}expect(rejected,message);
     };
-    auto changed=manifest;changed["manual_throw_verified"]=false;save(directory/"reference.json",changed.dump());
+    std::vector<unsigned char> shared_standing;
+    cv::imencode(".png",cv::Mat(360,640,CV_8UC3,cv::Scalar(30,60,90)),shared_standing);
+    {
+        std::ofstream output(directory/"standing.png",std::ios::binary);
+        output.write(reinterpret_cast<const char*>(shared_standing.data()),shared_standing.size());
+    }
+    manifest["image_sha256"]["standing_image"]=digest(shared_standing);
+    manifest["standing_marker"]={{"x",0.25},{"y",0.5},{"label","T1"}};
+    save(directory/"reference.json",manifest.dump());
+    const auto shared_loaded=grenade_alignment::load_reference(plans/"sample.json",expected);
+    expect(shared_loaded.standing_image.size()==cv::Size(640,360)&&shared_loaded.aim_image.size()==cv::Size(320,320),
+        "共用站位图可独立分辨率，瞄点图仍绑定采集几何");
+    auto changed=manifest;changed["standing_marker"]["x"]=-0.01;save(directory/"reference.json",changed.dump());
+    rejects("站位标记越界必须拒绝");
+    changed=manifest;changed["standing_marker"]["x"]=true;save(directory/"reference.json",changed.dump());
+    rejects("站位标记不能把布尔值当坐标");
+    changed=manifest;changed["standing_marker"]["label"]="T1\n";save(directory/"reference.json",changed.dump());
+    rejects("站位标记名称不能包含控制字符");
+    {
+        std::ofstream output(directory/"aim.png",std::ios::binary);
+        output.write(reinterpret_cast<const char*>(shared_standing.data()),shared_standing.size());
+    }
+    changed=manifest;changed["image_sha256"]["aim_image"]=digest(shared_standing);
+    save(directory/"reference.json",changed.dump());
+    rejects("允许站位图尺寸独立不能放宽瞄点图几何约束");
+    {
+        std::ofstream output(directory/"aim.png",std::ios::binary);
+        output.write(reinterpret_cast<const char*>(image.data()),image.size());
+    }
+    changed=manifest;changed["manual_throw_verified"]=false;save(directory/"reference.json",changed.dump());
     rejects("未人工通过的资源不得加载");
     changed=manifest;changed["plan"]["name"]="另一方案";save(directory/"reference.json",changed.dump());
     rejects("参考资源不能绑定到不同方案");

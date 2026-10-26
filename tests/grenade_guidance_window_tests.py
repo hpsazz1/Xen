@@ -63,8 +63,10 @@ class WindowTests(unittest.TestCase):
                                        "actions": [{"type": "button", "button": "left", "duration_ms": 1000}]}), encoding="utf-8")
             image = base / "synthetic.png"
             image.write_bytes(png_rgb(640, 360, [bytes([10, 50, 90]) * 640] * 360))
-            identity = begin(base / "references", plan, True)
-            add_image(base / "references", identity, "standing", image)
+            standing = base / "synthetic-standing.png"
+            standing.write_bytes(png_rgb(800, 800, [bytes([60, 90, 10]) * 800] * 800))
+            identity = begin(base / "references", plan, True, standing_marker={"x": 0.4, "y": 0.7, "label": "T1"})
+            add_image(base / "references", identity, "standing", standing)
             add_image(base / "references", identity, "aim", image)
             original_popen = subprocess.Popen
             def launch(arguments, **kwargs):

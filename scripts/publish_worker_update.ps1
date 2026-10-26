@@ -269,7 +269,8 @@ if ($IncludeVoiceTools) {
     # 主机工具仅发布固定源码；模型与虚拟环境由主机安装入口管理，不进入 Worker 运行库。
     foreach ($tool in @('client.py', 'requirements.txt', 'install.ps1', 'start.ps1',
         'empty_keywords.txt', 'README.md', 'LICENSES.md', 'prepare_model.py',
-        'guidance.py', 'preview_window.py', 'reference_assets.py', 'reference_tool.py', 'screen_capture.py')) {
+        'guidance.py', 'preview_window.py', 'reference_assets.py', 'reference_tool.py', 'screen_capture.py',
+        'capture_workflow.py', 'capture_hotkey.py', 'capture_references.ps1', 'standing/mirage-t-spawns.png')) {
         $relative = "tools/voice-switch/$tool"
         $overrides[$relative] = Resolve-UpdateFile (Join-Path $sourceRoot "tools/voice_switch/$tool")
         if (-not $records.ContainsKey($relative)) {

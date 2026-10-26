@@ -6,8 +6,10 @@
 #endif
 #include <Windows.h>
 #include <bcrypt.h>
+#include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -62,6 +64,38 @@ std::filesystem::path image_path(const std::filesystem::path& directory,
         throw std::runtime_error("参考图片不能引用资源目录之外的文件");
     return path;
 }
+cv::Size png_dimensions(const std::vector<unsigned char>& bytes) {
+    const std::array<unsigned char, 8> signature{137,80,78,71,13,10,26,10};
+    if (bytes.size() < 33 || !std::equal(signature.begin(),signature.end(),bytes.begin()) ||
+        bytes[8] != 0 || bytes[9] != 0 || bytes[10] != 0 || bytes[11] != 13 ||
+        bytes[12] != 'I' || bytes[13] != 'H' || bytes[14] != 'D' || bytes[15] != 'R')
+        throw std::runtime_error("参考图片必须为有效PNG");
+    const auto read = [&](std::size_t offset) {
+        return (static_cast<std::uint32_t>(bytes[offset]) << 24) |
+            (static_cast<std::uint32_t>(bytes[offset+1]) << 16) |
+            (static_cast<std::uint32_t>(bytes[offset+2]) << 8) | bytes[offset+3];
+    };
+    const auto width = read(16), height = read(20);
+    if (width == 0 || height == 0 || width > 8192 || height > 8192)
+        throw std::runtime_error("参考PNG尺寸超出范围");
+    return {static_cast<int>(width),static_cast<int>(height)};
+}
+void validate_standing_marker(const Json& marker) {
+    if (!marker.is_object()) throw std::runtime_error("站位标记格式无效");
+    for (const auto* field : {"x", "y"}) {
+        if (!marker.contains(field) || !marker[field].is_number())
+            throw std::runtime_error("站位标记坐标无效");
+        const auto value = marker[field].get<double>();
+        if (!std::isfinite(value) || value < 0 || value > 1)
+            throw std::runtime_error("站位标记必须位于原图范围内");
+    }
+    if (!marker.contains("label") || !marker["label"].is_string())
+        throw std::runtime_error("站位标记名称无效");
+    const auto label = marker["label"].get<std::string>();
+    if (label.empty() || label.size() > 64 || std::any_of(label.begin(),label.end(),[](unsigned char value) {
+        return value < 32 || value == 127;
+    })) throw std::runtime_error("站位标记名称无效");
+}
 }
 
 Reference load_reference(const std::filesystem::path& plan_path,
@@ -89,6 +123,7 @@ Reference load_reference(const std::filesystem::path& plan_path,
             !manifest.at("manual_throw_verified").is_boolean() ||
             !manifest.at("manual_throw_verified").get<bool>())
             throw std::runtime_error("参考资源尚未绑定人工投掷成功记录");
+        if (manifest.contains("standing_marker")) validate_standing_marker(manifest.at("standing_marker"));
         reference.plan = canonical_plan(manifest.at("plan"));
         if (reference.plan != expected)
             throw std::runtime_error("参考资源与当前道具方案版本不一致");
@@ -125,11 +160,15 @@ Reference load_reference(const std::filesystem::path& plan_path,
         if (manifest.at("image_sha256").at("standing_image").get<std::string>()!=standing_hash ||
             manifest.at("image_sha256").at("aim_image").get<std::string>()!=aim_hash)
             throw std::runtime_error("参考图片摘要与人工确认时不一致，请重新登记参考资源");
+        const auto standing_size = png_dimensions(standing), aim_size = png_dimensions(aim);
+        if (aim_size != cv::Size(g.source_width,g.source_height))
+            throw std::runtime_error("瞄点图不是声明分辨率的原始全屏图");
         reference.standing_image = cv::imdecode(standing, cv::IMREAD_COLOR);
         reference.aim_image = cv::imdecode(aim, cv::IMREAD_COLOR);
-        for (const auto* image : {&reference.standing_image, &reference.aim_image})
-            if (image->empty() || image->cols != g.source_width || image->rows != g.source_height)
-                throw std::runtime_error("参考图片不是声明分辨率的原始全屏图");
+        // 站位说明允许共用另一张原图；仅瞄点图参与匹配并绑定当前采集几何。
+        if (reference.standing_image.empty() || reference.standing_image.size() != standing_size ||
+            reference.aim_image.empty() || reference.aim_image.size() != aim_size)
+            throw std::runtime_error("参考PNG解码尺寸与图片头不一致");
         const auto digest = sha256(manifest_bytes) + standing_hash + aim_hash;
         reference.revision = sha256(std::vector<unsigned char>(digest.begin(), digest.end()));
         return reference;

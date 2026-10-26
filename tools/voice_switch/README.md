@@ -49,7 +49,23 @@ UTF-8 JSON 行、每行最多 64 KiB、单 TCP 连接。辅机发送 `catalog/ca
 
 每次新状态和显示期间的文件变更都会重新读取清单并核对图片 SHA-256；资源不一致时显示未就绪，不能继续显示旧图片。
 
-## 逐套建立站位图与瞄点图
+## F10 自动制作与发送
+
+制作时在游戏主机启动一次：
+
+```powershell
+pwsh -NoProfile -File .\capture_references.ps1 -HostAddress 192.168.3.20
+```
+
+辅机先运行新版 Xen，在道具测试页选中、保存并启用本次方案，Runtime 保持停止。你人工试投成功后，恢复该方案的原站位和正确瞄角、关闭控制台并切回 CS2，按 **F10**。F10 本身就是人工试投确认；工具自动读取辅机实际选择、截当前主屏、绑定原方案、生成双图与短名 ZIP，再发送并回读校验，不弹出二次确认、不自动投掷。忙时重复按键忽略，Ctrl+C 结束制作监听；F10被其他程序或Xen控制键占用时明确拒绝。
+
+Mirage 的 T1～T5 共用 `standing/mirage-t-spawns.png`，显示时自动圈出对应站位；其他站位将你截取的 PNG 放到程序根 `cache/grenade/standing/<方案文件stem>.png`。站位图和瞄点图可不同尺寸，原图均不改；瞄点显示层自动标记中央原生320×320 ROI和中心点。默认名称如“T1 B小烟”“T1 VIP烟”，备用瞄角等区别保留。
+
+本地成品在 `cache/grenade/references/<方案stem>/`，资源包在 `cache/grenade/packages/<地图>/<简短名称>.zip`。默认发送到辅机 `\\192.168.3.20\XenLab$\releases\Xen-current\cache\grenade`，可用 `-DestinationRoot` 指定现有共享目标，`-WebPort` 默认5015。只写该方案参考资源与资源包，不覆盖辅机方案；发送前后核对方案JSON、源SHA和图片摘要。重采旧件保留备份，发送失败保留本地成品及待发送记录；“已发送”只表示文件回读通过，不等于真实对齐或投掷验收。不会设置系统服务、改防火墙或安装语音模型。
+
+网页手机选择仍是预览；F10绑定的是辅机道具测试页实际启用的方案。首次使用此制作入口需要新版辅机程序提供 `/capture-context.json`。
+
+## 命令行分步采集入口
 
 先人工确认当前方案成功投掷，再依次采站位图、复位采瞄点图。工具不会输入坐标、移动鼠标或投掷，也不会自动添加“人工通过”。以下命令从程序根运行；`--root` 可指定与客户端相同的本机资源根。
 
@@ -68,11 +84,11 @@ py -3 -X utf8 -B tools/voice_switch/reference_tool.py aim --id mirage-t1-vip-r2 
 py -3 -X utf8 -B tools/voice_switch/reference_tool.py validate --id mirage-t1-vip-r2
 ```
 
-已有原始全屏 PNG 可分别使用 `standing --id <stem> --image <站位.png>` 和 `aim --id <stem> --image <瞄点.png>`，代替 `--capture`。两图必须保持相同分辨率，不裁剪、不缩放、不往原图画框；主机提示窗绘制参考 ROI 框和瞄点。需要把两图与 `reference.json` 一起原样同步到辅机同名资源目录。
+已有原始 PNG 可分别使用 `standing --id <stem> --image <站位.png>` 和 `aim --id <stem> --image <瞄点.png>`，代替 `--capture`。站位图可共用另一分辨率的说明图；瞄点图须保持当前采集源的全屏原始分辨率，不裁剪、不缩放、不往原图画框。主机提示窗按各图实际尺寸显示，并绘制参考 ROI 框和瞄点。需要把两图与 `reference.json` 一起原样同步到辅机同名资源目录。
 
 默认 ROI 是全屏中央原生 320×320，瞄点为 ROI 坐标 `(160,160)`。如果 Runtime 来源发生裁剪或缩放，按实际几何在 `aim` 步骤显式提供 `--roi-x/--roi-y/--scale-x/--scale-y`：ROI 左上角使用原图坐标，scale 表示每个 ROI 像素覆盖的原图像素数；程序不推测缩放关系。与当前 Capture 几何不一致时不能自动对齐。采图仅支持 Windows 主屏；多屏或独占全屏无法得到正确图像时，使用游戏原始 PNG 导入并人工核对，不把黑图当成功参考。
 
-完成目录为 `cache/grenade/references/<方案stem>/`，含 `standing.png`、`aim.png`、`reference.json`；`draft.json` 保留采集起点。清单含原始完整 `plan`、`plan_id`、`manual_throw_verified=true`、两图文件名和原文件 SHA-256、源尺寸与 ROI 几何、瞄点、可选站位说明。未显式确认、缺图、不同尺寸、内容被改或越界路径均拒绝。现有完整资源和已采单图不会被工具覆盖；为新版本方案使用新文件名，保留旧人工资源。
+完成目录为 `cache/grenade/references/<方案stem>/`，含 `standing.png`、`aim.png`、`reference.json`；`draft.json` 保留采集起点。清单含原始完整 `plan`、`plan_id`、`manual_throw_verified=true`、两图文件名和原文件 SHA-256、源尺寸与 ROI 几何、瞄点、可选站位说明。未显式确认、缺图、瞄点图与采集源尺寸不符、内容被改或越界路径均拒绝；站位图允许独立尺寸。此分步入口不覆盖现有完整资源和已采单图；F10入口重采时自动备份旧资源。
 
 主机实用入口不要求再次打开控制台逐次投掷；上述坐标只用于首次建立或重新建立人工参考。资源核对和自动对齐结果不代替真实投掷落点验收。
 

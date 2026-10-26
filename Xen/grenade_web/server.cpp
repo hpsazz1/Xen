@@ -2,16 +2,19 @@
 #define WIN32_LEAN_AND_MEAN
 #include <WinSock2.h>
 #include <WS2tcpip.h>
+#include <bcrypt.h>
 #ifdef ERROR
 #undef ERROR
 #endif
 #include "grenade_web/server.h"
 #include "grenade_mobile_page.h"
 #include "movement/timeline.h"
+#include "debug_session/debug_session.h"
 #include "weapon/weapon.h"
 #include "log/log.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <charconv>
 #include <chrono>
@@ -37,6 +40,8 @@ constexpr std::size_t kMaximumPlanBytes = 16 * 1024 * 1024;
 constexpr std::size_t kMaximumCatalogBytes = 32 * 1024 * 1024;
 constexpr auto kCatalogTimeout = std::chrono::milliseconds(750);
 constexpr auto kRequestTimeout = std::chrono::seconds(2);
+constexpr auto kCaptureHeartbeat = std::chrono::seconds(1);
+constexpr std::size_t kMaximumCapturePlan = 1024 * 1024;
 std::atomic<std::uint64_t> service_sequence{0};
 
 struct ScopedSocket {
@@ -88,6 +93,34 @@ class CatalogLimit final : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
+std::string sha256(std::string_view bytes) {
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    if (BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0) < 0)
+        throw std::runtime_error("方案摘要初始化失败");
+    struct Close { BCRYPT_ALG_HANDLE value; ~Close() { BCryptCloseAlgorithmProvider(value,0); } } close{algorithm};
+    std::array<unsigned char,32> digest{};
+    if (BCryptHash(algorithm,nullptr,0,reinterpret_cast<PUCHAR>(const_cast<char*>(bytes.data())),
+                   static_cast<ULONG>(bytes.size()),digest.data(),static_cast<ULONG>(digest.size())) < 0)
+        throw std::runtime_error("方案摘要计算失败");
+    std::string result;
+    for (const auto byte : digest) { result += "0123456789abcdef"[byte >> 4]; result += "0123456789abcdef"[byte & 15]; }
+    return result;
+}
+bool f10_conflicts(const AppConfig& config) {
+    const auto contains = [](const auto& keys) { return std::find(keys.begin(),keys.end(),0x79) != keys.end(); };
+    const auto& key = config.keyboard;
+    if (contains(key.aim_hold_virtual_keys) || contains(key.emergency_virtual_keys) ||
+        contains(key.runtime_toggle_virtual_keys) || contains(key.anomaly_mark_virtual_keys) ||
+        contains(key.voice_virtual_keys) || (key.debug_test_enabled && contains(key.debug_test_virtual_keys))) return true;
+    if (key.grenade_assist_enabled && (contains(key.grenade_menu_virtual_keys) || contains(key.grenade_align_virtual_keys) ||
+        contains(key.grenade_throw_virtual_keys) || contains(key.grenade_cancel_virtual_keys))) return true;
+    return (config.trigger.enabled && config.trigger.fire_enabled && config.trigger.hold_virtual_key == 0x79) ||
+        (config.recoil.enabled && config.recoil.hold_virtual_key == 0x79) ||
+        (config.auto_stop.enabled && (config.auto_stop.activation_virtual_key == 0x79 || contains(config.auto_stop.release_virtual_keys))) ||
+        (config.movement.enabled && ((config.movement.spin_enabled && config.movement.spin_trigger == movement::Trigger::KEY &&
+            config.movement.spin_virtual_key == 0x79) || (config.movement.large_enabled &&
+            config.movement.large_trigger == movement::Trigger::KEY && config.movement.large_virtual_key == 0x79)));
+}
 // 复用正式 Plan 解析；库文件格式/重复字段/注释规则与正式库保持一致。
 // 网页额外限制总扫描量，并在分块读取及 JSON 事件间协作停止。
 template<class Check>
@@ -184,6 +217,12 @@ struct Server::Impl {
     weapon::MapSnapshot current;
     std::string catalog;
     Clock::time_point next_catalog{};
+    std::shared_ptr<const debug_session::Snapshot> capture_selection;
+    Clock::time_point capture_received{};
+    bool capture_available = false;
+    std::string capture_reason;
+    std::uint64_t capture_revision = 0, capture_generation = 0;
+    std::optional<std::tuple<std::uint64_t,std::uint64_t,bool,std::string>> capture_identity;
 
     void update_context() {
         current = gsi->map_snapshot();
@@ -219,6 +258,112 @@ struct Server::Impl {
             {"team",valid && current.local_team != weapon::Team::UNKNOWN ? weapon::team_name(current.local_team) : ""},
             {"epoch",std::to_string(current.context_epoch)},{"generation",prefix + "-" + std::to_string(generation)},
             {"remaining_ms",valid ? std::min<std::int64_t>(remaining,10000) : 0}}.dump();
+    }
+    std::string capture_context_json(Clock::time_point request_deadline) {
+        update_context();
+        std::shared_ptr<const debug_session::Snapshot> selected;
+        Clock::time_point received;
+        std::uint64_t revision;
+        bool available;
+        std::string reason;
+        {
+            std::lock_guard lock(mutex);
+            selected = capture_selection; received = capture_received; revision = capture_revision;
+            available = capture_available; reason = capture_reason;
+        }
+        Json result{{"ready",false},{"reason",""},{"map",""},{"team",""},{"generation",""},
+            {"remaining_ms",0},{"plan_id",""},{"plan",Json::object()},{"plan_sha256",""}};
+        try {
+            const auto initial_generation = generation;
+            const auto check = [&] {
+                update_context();
+                const auto now = Clock::now();
+                if (stopping || now >= request_deadline) throw std::runtime_error("采集方案读取已停止或超时");
+                if (!selected || received == Clock::time_point{} || now < received || now >= received + kCaptureHeartbeat)
+                    throw std::runtime_error("辅机界面状态未就绪或已过期");
+                if (!current.valid || current.local_team == weapon::Team::UNKNOWN || generation != initial_generation)
+                    throw std::runtime_error("游戏地图或本地阵营未就绪");
+                std::lock_guard lock(mutex);
+                if (revision != capture_revision) throw std::runtime_error("采集期间当前方案或状态已改变");
+            };
+            check();
+            if (!available) throw std::runtime_error(reason.empty() ? "辅机当前不允许制作采集" : reason);
+            // physical记录上次任务种类，成功试投后仍可能为true；只拒绝在途输出与清理未知。
+            if (selected->busy || selected->cleanup_unknown || selected->movement_recording ||
+                selected->state == debug_session::State::RUNNING || selected->state == debug_session::State::STOPPING)
+                throw std::runtime_error("请先结束当前运行或录制，再按F10采集");
+            if (!selected->movement_test_enabled || selected->movement_test_mode != debug_session::Mode::GRENADE_TEST)
+                throw std::runtime_error("请先在辅机启用当前道具方案测试");
+            if (selected->grenade_selected_path.empty() || !selected->grenade_current.is_object() ||
+                selected->grenade_current != selected->grenade_baseline)
+                throw std::runtime_error("当前道具尚未保存或存在未保存修改");
+            const auto root = std::filesystem::canonical(std::filesystem::u8path(config.plans_root));
+            const auto path = std::filesystem::u8path(selected->grenade_selected_path);
+            if (path.extension() != ".json" || std::filesystem::is_symlink(path) ||
+                std::filesystem::canonical(path).parent_path() != root ||
+                std::filesystem::absolute(path).lexically_normal().parent_path() != root)
+                throw std::runtime_error("当前道具不在正式方案库中");
+            check();
+            if (std::filesystem::file_size(path) > kMaximumCapturePlan) throw std::runtime_error("采集方案超过1MiB");
+            std::ifstream input(path,std::ios::binary);
+            if (!input) throw std::runtime_error("当前道具文件不可读");
+            std::string bytes;
+            while (input) {
+                check();
+                char buffer[16384];
+                input.read(buffer,std::min<std::size_t>(sizeof(buffer),kMaximumCapturePlan - bytes.size() + 1));
+                bytes.append(buffer,static_cast<std::size_t>(input.gcount()));
+                if (bytes.size() > kMaximumCapturePlan) throw std::runtime_error("采集方案超过1MiB");
+            }
+            if (input.bad()) throw std::runtime_error("当前道具文件读取失败");
+            std::vector<std::set<std::string>> keys;
+            const auto plan = Json::parse(bytes,[&](int depth, Json::parse_event_t event, Json& value) {
+                check();
+                if (depth > 32) throw std::runtime_error("道具方案嵌套过深");
+                if (event == Json::parse_event_t::object_start) keys.emplace_back();
+                if (event == Json::parse_event_t::key && !keys.back().insert(value.get<std::string>()).second)
+                    throw std::runtime_error("道具方案字段重复");
+                if (event == Json::parse_event_t::object_end) keys.pop_back();
+                return true;
+            },true,true);
+            movement::timeline::Plan parsed, expected;
+            std::string error;
+            if (!movement::timeline::parse_plan(plan,parsed,error) ||
+                !movement::timeline::parse_plan(selected->grenade_current,expected,error) ||
+                movement::timeline::plan_json(parsed) != movement::timeline::plan_json(expected))
+                throw std::runtime_error("磁盘道具方案与已启用方案不一致，请重新载入");
+            if (parsed.map != current.map_name || plan_team(parsed.name) != weapon::team_name(current.local_team))
+                throw std::runtime_error("当前方案与游戏地图或本地阵营不匹配");
+            const auto name = path.filename().u8string();
+            const std::string plan_id(name.begin(),name.end());
+            if (plan_id.size() > 160 || plan_id.find_first_of("/\\:") != std::string::npos)
+                throw std::runtime_error("当前方案文件名不能用于采集");
+            const auto hash = sha256(bytes);
+            check();
+            const auto until = std::min(current.valid_until,received + kCaptureHeartbeat);
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(until - Clock::now()).count();
+            if (remaining <= 0) throw std::runtime_error("采集上下文已经过期");
+            result.update({{"ready",true},{"map",current.map_name},{"team",weapon::team_name(current.local_team)},
+                {"remaining_ms",remaining},{"plan_id",plan_id},{"plan",plan},{"plan_sha256",hash}});
+        } catch (const std::exception&) {
+            // 错误正文不回传系统路径、原始JSON或配置；诊断只使用受控中文状态。
+            try { throw; }
+            catch (const std::filesystem::filesystem_error&) { result["reason"] = "当前方案文件不存在或不可读"; }
+            catch (const Json::exception&) { result["reason"] = "当前方案文件格式无效"; }
+            catch (const std::exception& error) { result["reason"] = error.what(); }
+        }
+        const auto next = std::make_tuple(revision,generation,result["ready"].get<bool>(),
+            result["ready"].get<bool>() ? result["plan_sha256"].get<std::string>() : result["reason"].get<std::string>());
+        if (!capture_identity || next != *capture_identity) {
+            if (capture_generation == std::numeric_limits<std::uint64_t>::max()) throw std::runtime_error("采集代际已耗尽");
+            ++capture_generation; capture_identity = next;
+        }
+        result["generation"] = prefix + "-capture-" + std::to_string(capture_generation);
+        auto encoded = result.dump();
+        if (encoded.size() > kMaximumResponse) return Json{{"ready",false},{"reason","采集方案响应超过大小限制"},
+            {"map",""},{"team",""},{"generation",result["generation"]},{"remaining_ms",0},
+            {"plan_id",""},{"plan",Json::object()},{"plan_sha256",""}}.dump();
+        return encoded;
     }
     bool refresh_catalog(Clock::time_point request_deadline) {
         if (Clock::now() < next_catalog) return !catalog.empty();
@@ -309,6 +454,7 @@ struct Server::Impl {
             if (status != 200) respond(client,status,"text/plain; charset=utf-8","此服务只提供固定只读页面",deadline);
             else if (target == "/") respond(client,200,"text/html; charset=utf-8",kMobilePage,deadline);
             else if (target == "/context.json") respond(client,200,"application/json; charset=utf-8",context_json(),deadline);
+            else if (target == "/capture-context.json") respond(client,200,"application/json; charset=utf-8",capture_context_json(deadline),deadline);
             else if (target == "/catalog.json") {
                 if (refresh_catalog(deadline)) respond(client,200,"application/json; charset=utf-8",catalog,deadline);
                 else respond(client,503,"text/plain; charset=utf-8","道具清单读取失败",deadline);
@@ -366,9 +512,12 @@ bool Server::start(const Config& config, std::shared_ptr<weapon::GsiReceiver> gs
         impl_->prefix = std::to_string(GetCurrentProcessId()) + "-" + std::to_string(++service_sequence) + "-" +
             std::to_string(Clock::now().time_since_epoch().count());
         impl_->identity.reset(); impl_->generation = 0; impl_->catalog.clear(); impl_->next_catalog = {};
+        impl_->capture_identity.reset(); impl_->capture_generation = 0;
         {
             std::lock_guard lock(impl_->mutex);
             impl_->state = {true,ntohs(address.sin_port),{},local_urls(config,ntohs(address.sin_port))};
+            impl_->capture_selection.reset(); impl_->capture_received = {}; impl_->capture_available = false;
+            impl_->capture_reason.clear(); impl_->capture_revision = 0;
         }
         impl_->stopping = false;
         impl_->worker = std::thread([this] { impl_->run(); });
@@ -380,6 +529,40 @@ bool Server::start(const Config& config, std::shared_ptr<weapon::GsiReceiver> gs
         stop(); std::lock_guard lock(impl_->mutex); impl_->state.error = "网页服务启动异常"; return false;
     }
 }
+void Server::publish_capture(std::shared_ptr<const debug_session::Snapshot> selection,
+                            const AppConfig& controls, bool available, const std::string& reason) noexcept {
+    try {
+        const auto conflict = f10_conflicts(controls);
+        const auto message = conflict ? "F10已被辅机控制快捷键占用，请先调整该绑定" : reason;
+        available = available && !conflict;
+        const auto now = Clock::now();
+        std::lock_guard lock(impl_->mutex);
+        const auto& old = impl_->capture_selection;
+        const bool changed = impl_->capture_available != available || impl_->capture_reason != message ||
+            now >= impl_->capture_received + kCaptureHeartbeat || static_cast<bool>(old) != static_cast<bool>(selection) ||
+            (old && selection && old != selection &&
+                (old->generation != selection->generation || old->state != selection->state ||
+                 old->busy != selection->busy || old->physical != selection->physical ||
+                 old->cleanup_unknown != selection->cleanup_unknown || old->movement_recording != selection->movement_recording ||
+                 old->movement_test_enabled != selection->movement_test_enabled || old->movement_test_mode != selection->movement_test_mode ||
+                 old->grenade_selected_path != selection->grenade_selected_path ||
+                 old->grenade_loaded_revision != selection->grenade_loaded_revision ||
+                 old->grenade_current != selection->grenade_current || old->grenade_baseline != selection->grenade_baseline));
+        if (changed) {
+            if (impl_->capture_revision == std::numeric_limits<std::uint64_t>::max()) {
+                impl_->capture_selection.reset(); impl_->capture_available = false;
+                impl_->capture_reason = "采集状态代际已耗尽"; return;
+            }
+            ++impl_->capture_revision;
+        }
+        impl_->capture_selection = std::move(selection); impl_->capture_received = now;
+        impl_->capture_available = available; impl_->capture_reason = message;
+    } catch (...) {
+        std::lock_guard lock(impl_->mutex);
+        impl_->capture_selection.reset(); impl_->capture_available = false;
+        impl_->capture_received = {};
+    }
+}
 void Server::stop() noexcept {
     impl_->stopping = true;
     if (impl_->worker.joinable()) impl_->worker.join();
@@ -389,6 +572,7 @@ void Server::stop() noexcept {
     if (impl_->winsock) WSACleanup();
     impl_->winsock = false; impl_->gsi.reset();
     std::lock_guard lock(impl_->mutex); impl_->state.running = false;
+    impl_->capture_selection.reset(); impl_->capture_available = false; impl_->capture_received = {};
 }
 Snapshot Server::snapshot() const { std::lock_guard lock(impl_->mutex); return impl_->state; }
 }

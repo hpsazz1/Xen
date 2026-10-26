@@ -93,6 +93,19 @@ def validate_geometry(geometry):
         raise ValueError("ROI 超出原图")
 
 
+def validate_standing_marker(marker):
+    if not isinstance(marker, dict):
+        raise ValueError("站位标记必须包含归一化坐标与名称")
+    for field in ("x", "y"):
+        coordinate = marker.get(field)
+        if type(coordinate) not in (int, float) or not math.isfinite(coordinate) or not 0 <= coordinate <= 1:
+            raise ValueError("站位标记坐标必须位于原图范围内")
+    label = marker.get("label")
+    if (not isinstance(label, str) or not label or len(label.encode("utf-8")) > 64
+            or any(ord(char) < 32 or ord(char) == 127 for char in label)):
+        raise ValueError("站位标记名称无效")
+
+
 def load_reference(root, identity, plan_id=None):
     directory = resource_directory(root, identity)
     manifest_path = directory / "reference.json"
@@ -112,6 +125,8 @@ def load_reference(root, identity, plan_id=None):
     if plan_id is not None and value.get("plan_id") != plan_id:
         raise ValueError("参考资源绑定了其他方案")
     validate_geometry(value.get("geometry"))
+    if "standing_marker" in value:
+        validate_standing_marker(value["standing_marker"])
     for key, limit in (("target_x", 320), ("target_y", 320)):
         coordinate = value.get(key, 160)
         if type(coordinate) not in (int, float) or not math.isfinite(coordinate) or not 0 <= coordinate < limit:
@@ -119,8 +134,10 @@ def load_reference(root, identity, plan_id=None):
     for field, expected in (("standing_image", "standing.png"), ("aim_image", "aim.png")):
         if value.get(field) != expected or (directory / expected).resolve().parent != directory:
             raise ValueError("参考图路径无效")
-        if png_size(directory / expected) != (value["geometry"]["source_width"], value["geometry"]["source_height"]):
-            raise ValueError("双图尺寸必须与源几何一致")
+        size = png_size(directory / expected)
+        # 站位图可跨方案共用；只有用于匹配的瞄点原图绑定 Capture 几何。
+        if field == "aim_image" and size != (value["geometry"]["source_width"], value["geometry"]["source_height"]):
+            raise ValueError("瞄点图尺寸必须与源几何一致")
         if value.get("image_sha256", {}).get(field) != hashlib.sha256((directory / expected).read_bytes()).hexdigest():
             raise ValueError("参考图片已改变，需要重新确认资源")
     if value.get("reference_revision") != manifest_revision(value):

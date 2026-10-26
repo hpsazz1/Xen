@@ -804,12 +804,20 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                 app_message = config_error;
             }
         }
-        voice_controller.tick(make_debug_context(),keyboard_poll,active_keyboard_config,
+        auto interface_context = make_debug_context();
+        const bool interface_blocked =
             emergency_pressed || keyboard_routing.grenade_cancel_pressed || actions.stop_requested || actions.training_stop_requested ||
             actions.start_requested || runtime_toggle_pressed || actions.save_config_requested ||
             actions.debug_action == debug_session::Action::CANCEL || overlay.close_requested() ||
-            report_lifecycle.busy() || report_lifecycle.stop_pending() || overlay.background_busy(),
-            actions.hotkey_capture_consumed);
+            report_lifecycle.busy() || report_lifecycle.stop_pending() || overlay.background_busy();
+        voice_controller.tick(interface_context,keyboard_poll,active_keyboard_config,
+            interface_blocked,actions.hotkey_capture_consumed);
+        // F10只读当前已保存选择；每轮心跳撤销旧许可，不在网页线程访问可变App状态。
+        interface_context.config.keyboard = active_keyboard_config;
+        mobile_web.publish_capture(debug_workspace.snapshot(),interface_context.config,
+            snapshot.state == RuntimeState::STOPPED && interface_context.input_recording_idle && interface_context.cleanup_known &&
+            !debug_workspace.busy() && !interface_blocked && !actions.hotkey_capture_consumed,
+            "请先停止Runtime并结束当前调试或配置操作，再按F10采集");
         // 本轮键盘与界面停止/急停优先，不能先自动重启再清除刚收到的急停。
         const auto restart_target = report_lifecycle.take_restart(debug_workspace.busy() || overlay.background_busy() ||
                 model_workspace.poll().job_running,

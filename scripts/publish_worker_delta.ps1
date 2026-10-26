@@ -122,7 +122,8 @@ try {
     if ($IncludeVoiceTools) {
         $relativeFiles += @('client.py', 'requirements.txt', 'install.ps1', 'start.ps1',
             'empty_keywords.txt', 'README.md', 'LICENSES.md', 'prepare_model.py',
-        'guidance.py', 'preview_window.py', 'reference_assets.py', 'reference_tool.py', 'screen_capture.py') |
+        'guidance.py', 'preview_window.py', 'reference_assets.py', 'reference_tool.py', 'screen_capture.py',
+        'capture_workflow.py', 'capture_hotkey.py', 'capture_references.ps1', 'standing/mirage-t-spawns.png') |
             ForEach-Object { "tools/voice-switch/$_" }
     }
     if ($IncludeLauncher) { $relativeFiles += 'XenLauncher.exe' }

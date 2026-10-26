@@ -11,7 +11,8 @@ $modelReviewNames = @('model_data_pipeline.py', 'model_data_review.html',
     'model_training_environment.py', 'model_training_requirements.txt')
 $voiceToolNames = @('client.py', 'requirements.txt', 'install.ps1', 'start.ps1',
     'empty_keywords.txt', 'README.md', 'LICENSES.md', 'prepare_model.py',
-        'guidance.py', 'preview_window.py', 'reference_assets.py', 'reference_tool.py', 'screen_capture.py')
+        'guidance.py', 'preview_window.py', 'reference_assets.py', 'reference_tool.py', 'screen_capture.py',
+        'capture_workflow.py', 'capture_hotkey.py', 'capture_references.ps1', 'standing/mirage-t-spawns.png')
 $script:passed = 0
 function Assert-UpdateTest([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw "FAIL: $Message" }
