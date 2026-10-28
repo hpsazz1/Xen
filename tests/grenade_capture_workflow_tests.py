@@ -25,7 +25,7 @@ from tools.grenade_capture.screen_capture import png_rgb
 
 class CaptureTests(unittest.TestCase):
     def setUp(self):
-        fixtures = Path(__file__).resolve().parents[1] / "temp/XEN-GRENADE-CATALOG-F9-20261028-001/backend-tests"
+        fixtures = Path(__file__).resolve().parents[1] / "temp/XEN-GRENADE-TEXTURE-SPAWN-20261028-001/backend-tests"
         fixtures.mkdir(parents=True, exist_ok=True)
         self.temporary = tempfile.TemporaryDirectory(prefix="run-", dir=fixtures)
         self.addCleanup(self.temporary.cleanup)
@@ -71,16 +71,16 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(manifest["display_name"], "T1 VIP烟")
         self.assertEqual(manifest["confirmation_source"], "host_f10")
         self.assertTrue(manifest["manual_throw_verified"])
-        self.assertFalse(manifest["capture_complete"])
-        self.assertNotIn("standing_image", manifest)
-        self.assertNotIn("standing_marker", manifest)
-        self.assertFalse((directory / "standing.png").exists())
+        self.assertTrue(manifest["capture_complete"])
+        self.assertEqual(manifest["standing_image"], "standing.png")
+        self.assertEqual(manifest["standing_marker"]["label"], "T1")
+        self.assertEqual((directory / "standing.png").read_bytes(), self.standing.read_bytes())
         self.assertEqual((directory / "aim.png").read_bytes(), self.aim.read_bytes())
         self.assertEqual((manifest["geometry"]["source_width"], manifest["geometry"]["source_height"]), (640, 360))
         archive = self.root / captured["package"]
         self.assertEqual(archive.name, "T1 VIP烟.zip")
         with zipfile.ZipFile(archive) as package:
-            self.assertEqual(len(package.namelist()), 4)
+            self.assertEqual(len(package.namelist()), 5)
             self.assertIsNone(package.testzip())
             self.assertEqual(json.loads(package.read("plans/" + self.plan_path.name)), self.plan)
 
@@ -104,6 +104,123 @@ class CaptureTests(unittest.TestCase):
         with zipfile.ZipFile(self.root / captured["package"]) as package:
             self.assertFalse(any(name.endswith("aim.png") for name in package.namelist()))
             self.assertEqual(len(package.namelist()), 4)
+
+    def add_plan(self, name, identity, map_name="de_mirage"):
+        plan = deepcopy(self.plan)
+        plan["name"], plan["map"] = name, map_name
+        path = self.remote / "plans" / (identity + ".json")
+        path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {**deepcopy(self.context), "plan": plan, "map": map_name, "plan_id": path.name,
+                "plan_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+    def test_spawn_standing_updates_same_map_team_preserving_every_aim(self):
+        second = self.add_plan("T2 B小烟", "mirage-t2-catwalk")
+        third = self.add_plan("T10 VIP烟", "mirage-t10-vip")
+        self.add_plan("CT1 B小烟", "mirage-ct1-catwalk")
+        self.add_plan("T1 B小烟", "dust-t1-catwalk", "de_dust2")
+        self.add_plan("B小 B烟", "mirage-catwalk-b")
+        self.complete(lambda: deepcopy(second))
+        original, directory = load_reference(self.root / "references", "mirage-t2-catwalk")
+        original_aim = (directory / "aim.png").read_bytes()
+        captures = capture_workflow.share_spawn_standing(self.root, self.context, self.standing,
+                                                         self.remote / "plans")
+        self.assertEqual({item["plan_id"] for item in captures},
+                         {self.plan_path.name, second["plan_id"], third["plan_id"]})
+        for item in captures:
+            identity = item["plan_id"][:-5]
+            manifest, directory = load_reference(self.root / "references", identity, allow_partial=True)
+            self.assertEqual((directory / "standing.png").read_bytes(), self.standing.read_bytes())
+            self.assertNotIn("standing_marker", manifest)
+            transfer_capture(self.root, identity, self.remote)
+            remote, _ = load_reference(self.remote / "references", identity, allow_partial=True)
+            self.assertEqual(remote, manifest)
+        updated, directory = load_reference(self.root / "references", "mirage-t2-catwalk")
+        self.assertEqual((directory / "aim.png").read_bytes(), original_aim)
+        for key in ("aim_plan", "geometry", "confirmed_at_utc", "manual_throw_verified"):
+            self.assertEqual(updated[key], original[key])
+        self.assertFalse((self.root / "references/mirage-ct1-catwalk").exists())
+        self.assertFalse((self.root / "references/dust-t1-catwalk").exists())
+        self.assertFalse((self.root / "references/mirage-catwalk-b").exists())
+        self.assertFalse(load_reference(self.root / "references", "mirage-t10-vip", allow_partial=True)[0]["manual_throw_verified"])
+
+    def test_new_spawn_f10_reuses_shared_picture_but_other_standing_remains_independent(self):
+        capture_workflow.share_spawn_standing(self.root, self.context, self.standing, self.remote / "plans")
+        new = self.add_plan("T11 B小烟", "mirage-t11-catwalk")
+        self.complete(lambda: deepcopy(new))
+        manifest, directory = load_reference(self.root / "references", "mirage-t11-catwalk")
+        self.assertTrue(manifest["capture_complete"])
+        self.assertEqual((directory / "standing.png").read_bytes(), self.standing.read_bytes())
+        other = self.add_plan("B小 B烟", "mirage-catwalk-b")
+        self.complete(lambda: deepcopy(other))
+        manifest, directory = load_reference(self.root / "references", "mirage-catwalk-b")
+        self.assertNotIn("standing_image", manifest)
+        self.assertFalse((directory / "standing.png").exists())
+
+    def test_obs_f9_distributes_one_capture_to_same_spawn_group(self):
+        second = self.add_plan("T2 B小烟", "mirage-t2-catwalk")
+        result, status = self.run_worker("standing")
+        self.assertEqual(result, 0)
+        self.assertEqual(self.capture_count, 1)
+        self.assertEqual((status["state"], status["terminal"]), ("sent", True))
+        manifest, directory = load_reference(self.remote / "references", second["plan_id"][:-5], allow_partial=True)
+        self.assertEqual((directory / "standing.png").read_bytes(), self.aim.read_bytes())
+        self.assertFalse(manifest["manual_throw_verified"])
+
+    def test_shared_standing_preserves_auxiliary_newer_aim_and_backups_previous_picture(self):
+        second = self.add_plan("T2 B小烟", "mirage-t2-catwalk")
+        self.complete(lambda: deepcopy(second))
+        transfer_capture(self.root, second["plan_id"][:-5], self.remote)
+        remote_context = deepcopy(second)
+        remote_context["plan"]["notes"] = "另一份已采瞄角"
+        self.aim.write_bytes(png_rgb(640, 360, [bytes([77, 55, 33]) * 640] * 360))
+        capture_once(lambda: deepcopy(remote_context), self.remote, self.fake_capture, self.standing)
+        latest, remote_directory = load_reference(self.remote / "references", second["plan_id"][:-5])
+        latest_aim = (remote_directory / "aim.png").read_bytes()
+        captures = capture_workflow.share_spawn_standing(self.root, self.context, self.standing, self.remote / "plans")
+        manifest, directory = load_reference(self.root / "references", second["plan_id"][:-5], allow_partial=True)
+        self.assertEqual((directory / "aim.png").read_bytes(), latest_aim)
+        self.assertEqual(manifest["aim_plan"], latest["aim_plan"])
+        self.assertNotEqual(manifest["aim_plan"], manifest["plan"])
+        for item in captures:
+            transfer_capture(self.root, item["plan_id"][:-5], self.remote)
+        self.standing.write_bytes(png_rgb(800, 600, [bytes([12, 13, 14]) * 800] * 600))
+        capture_workflow.share_spawn_standing(self.root, self.context, self.standing, self.remote / "plans")
+        renewed, directory = load_reference(self.root / "references", second["plan_id"][:-5], allow_partial=True)
+        self.assertEqual((directory / "aim.png").read_bytes(), latest_aim)
+        self.assertEqual(renewed["aim_plan"], latest["aim_plan"])
+        self.assertEqual(len(list((self.root / "standing/backups/de_mirage-T").glob("*.png"))), 1)
+        self.assertTrue(list((self.root / "reference-backups" / second["plan_id"][:-5]).glob("*/standing.png")))
+
+    def test_obs_group_transfer_failure_does_not_report_early_sent(self):
+        self.add_plan("T2 B小烟", "mirage-t2-catwalk")
+        states = []
+        original_write = worker.write_json
+        def record(path, value):
+            states.append(value["state"])
+            original_write(path, value)
+        original_transfer = transfer_capture
+        def interrupted(root, identity, destination, **kwargs):
+            if identity == "mirage-t2-catwalk":
+                raise OSError("synthetic second transfer failure")
+            return original_transfer(root, identity, destination, **kwargs)
+        with patch.object(worker, "write_json", side_effect=record), \
+             patch.object(worker, "transfer_capture", side_effect=interrupted):
+            result, status = self.run_worker("standing")
+        self.assertEqual(result, 2)
+        self.assertEqual((status["state"], status["terminal"]), ("pending", True))
+        self.assertNotIn("sent", states)
+
+    def test_shared_standing_keeps_unsent_local_aim_instead_of_remote_old_image(self):
+        second = self.add_plan("T2 B小烟", "mirage-t2-catwalk")
+        self.complete(lambda: deepcopy(second))
+        transfer_capture(self.root, second["plan_id"][:-5], self.remote)
+        self.aim.write_bytes(png_rgb(640, 360, [bytes([99, 88, 77]) * 640] * 360))
+        self.complete(lambda: deepcopy(second))
+        current, _ = load_reference(self.root / "references", second["plan_id"][:-5])
+        capture_workflow.share_spawn_standing(self.root, self.context, self.standing, self.remote / "plans")
+        manifest, directory = load_reference(self.root / "references", second["plan_id"][:-5])
+        self.assertEqual((directory / "aim.png").read_bytes(), self.aim.read_bytes())
+        self.assertEqual(manifest["confirmed_at_utc"], current["confirmed_at_utc"])
 
     def test_f9_then_f10_preserves_custom_standing_without_spawn_marker(self):
         self.capture_standing()

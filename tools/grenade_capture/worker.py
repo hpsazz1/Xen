@@ -10,9 +10,9 @@ import sys
 import time
 
 try:
-    from .capture_workflow import ContextReader, SHARED_STANDING, LocalSavePending, capture_once, transfer_capture, write_json
+    from .capture_workflow import ContextReader, SHARED_STANDING, LocalSavePending, capture_once, share_spawn_standing, transfer_capture, write_json
 except ImportError:
-    from capture_workflow import ContextReader, SHARED_STANDING, LocalSavePending, capture_once, transfer_capture, write_json
+    from capture_workflow import ContextReader, SHARED_STANDING, LocalSavePending, capture_once, share_spawn_standing, transfer_capture, write_json
 
 
 def foreground_identity():
@@ -55,8 +55,24 @@ def run_worker(args):
         metadata = capture_once(ContextReader(args.host, args.web_port, role=args.role), args.root,
                                 shared_standing=args.shared_standing, foreground=foreground_identity,
                                 expected_foreground=expected, report=report, role=args.role)
-        transfer_capture(args.root, metadata["plan_id"][:-5], args.destination,
-                         deadline=time.monotonic() + 20, report=report)
+        captures = []
+        if args.role == "standing":
+            image = args.root / "references" / metadata["plan_id"][:-5] / "standing.png"
+            captures = share_spawn_standing(args.root, metadata, image, args.destination / "plans", report)
+        if not captures:
+            captures = [metadata]
+        deadline = time.monotonic() + 20
+        def transfer_report(state, message):
+            # 一组站位图全部发送完成才报告终态，不能把首个方案当成整组成功。
+            report("sending" if state == "sent" else state, message)
+        for item in captures:
+            transfer_capture(args.root, item["plan_id"][:-5], args.destination,
+                             deadline=deadline, report=transfer_report)
+        if len(captures) > 1:
+            message = f"出生点站位图已同步，共用 {len(captures)} 个方案"
+        else:
+            message = ("站位图" if args.role == "standing" else "瞄点图") + "已发送并回读通过：" + metadata["display_name"]
+        report("sent", message)
         return 0
     except Exception as error:
         pending = bool(metadata) or isinstance(error, LocalSavePending)

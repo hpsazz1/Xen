@@ -89,48 +89,7 @@ double subpixel(const cv::Mat& scores, const cv::Point& at, bool horizontal) {
     if (!std::isfinite(a) || !std::isfinite(b) || !std::isfinite(c) || denominator >= -1e-6) return 0;
     return std::clamp(0.5 * (a - c) / denominator, -0.5, 0.5);
 }
-Match match(const cv::Mat& reference, const cv::Mat& current_bgr, cv::Point2d center) {
-    cv::Mat current;
-    cv::cvtColor(current_bgr, current, cv::COLOR_BGR2GRAY);
-    cv::GaussianBlur(current, current, {5,5}, 1.0);
-    const int side = reference.cols, width = side / 5, search_radius = static_cast<int>(side * kSearchRatio);
-    const std::array<cv::Point, 6> origins{{{24,24}, {128,24}, {232,24}, {24,120}, {232,120}, {24,208}}};
-    std::vector<PatchMatch> matches;
-    for (const auto origin : origins) {
-        const cv::Rect patch(origin.x * side / 320, origin.y * side / 320, width, width);
-        if (!safe_patch(patch, center, side)) continue;
-        cv::Scalar mean, deviation;
-        cv::meanStdDev(reference(patch), mean, deviation);
-        if (deviation[0] < 6.0) continue;
-        const int min_x = std::max(0, patch.x - search_radius), min_y = std::max(0, patch.y - search_radius);
-        const int max_x = std::min(side - width, patch.x + search_radius);
-        const int max_y = std::min(side - width, patch.y + search_radius);
-        const cv::Rect search(min_x, min_y, max_x - min_x + width, max_y - min_y + width);
-        cv::Mat scores;
-        cv::matchTemplate(current(search), reference(patch), scores, cv::TM_CCOEFF_NORMED);
-        double best = -1, second = -1;
-        cv::Point best_at;
-        for (int y = 0; y < scores.rows; ++y)
-            for (int x = 0; x < scores.cols; ++x) {
-                const double value = scores.at<float>(y, x);
-                if (std::isfinite(value) && value > best &&
-                    safe_patch({min_x+x, min_y+y, width, width}, center, side)) {
-                    best = value; best_at = {x,y};
-                }
-            }
-        if (best < 0.82) continue;
-        for (int y = 0; y < scores.rows; ++y)
-            for (int x = 0; x < scores.cols; ++x) {
-                if (std::abs(x-best_at.x) <= 3 && std::abs(y-best_at.y) <= 3) continue;
-                const double value = scores.at<float>(y,x);
-                if (std::isfinite(value) && safe_patch({min_x+x,min_y+y,width,width},center,side))
-                    second = std::max(second,value);
-            }
-        if (best - second < 0.06) continue;
-        matches.push_back({{min_x + best_at.x - patch.x + subpixel(scores,best_at,true),
-                            min_y + best_at.y - patch.y + subpixel(scores,best_at,false)},
-                           {patch.x + width*0.5, patch.y + width*0.5},best});
-    }
+Match combine_matches(const std::vector<PatchMatch>& matches, int side) {
     if (matches.size() < 2) return {false,{},0,0,"共同纹理不足或匹配存在歧义，请靠近参考瞄点"};
     std::vector<double> xs, ys;
     for (const auto& value : matches) { xs.push_back(value.shift.x); ys.push_back(value.shift.y); }
@@ -154,6 +113,69 @@ Match match(const cv::Mat& reference, const cv::Mat& current_bgr, cv::Point2d ce
     result.valid = std::abs(result.shift.x) < side*kSearchRatio && std::abs(result.shift.y) < side*kSearchRatio;
     if (!result.valid) result.error = "瞄点偏移超过本次局部对齐范围";
     return result;
+}
+Match match(const cv::Mat& reference, const cv::Mat& current_bgr, cv::Point2d center) {
+    cv::Mat current;
+    cv::cvtColor(current_bgr, current, cv::COLOR_BGR2GRAY);
+    cv::GaussianBlur(current, current, {5,5}, 1.0);
+    const int side = reference.cols, width = side / 5, search_radius = static_cast<int>(side * kSearchRatio);
+    const std::array<cv::Point, 6> origins{{{24,24}, {128,24}, {232,24}, {24,120}, {232,120}, {24,208}}};
+    std::vector<PatchMatch> matches;
+    const auto match_patch = [&](const cv::Rect& patch) {
+        if (!safe_patch(patch, center, side)) return;
+        cv::Scalar mean, deviation;
+        cv::meanStdDev(reference(patch), mean, deviation);
+        if (deviation[0] < 6.0) return;
+        const int min_x = std::max(0, patch.x - search_radius), min_y = std::max(0, patch.y - search_radius);
+        const int max_x = std::min(side - width, patch.x + search_radius);
+        const int max_y = std::min(side - width, patch.y + search_radius);
+        const cv::Rect search(min_x, min_y, max_x - min_x + width, max_y - min_y + width);
+        cv::Mat scores;
+        cv::matchTemplate(current(search), reference(patch), scores, cv::TM_CCOEFF_NORMED);
+        double best = -1, second = -1;
+        cv::Point best_at;
+        for (int y = 0; y < scores.rows; ++y)
+            for (int x = 0; x < scores.cols; ++x) {
+                const double value = scores.at<float>(y, x);
+                if (std::isfinite(value) && value > best &&
+                    safe_patch({min_x+x, min_y+y, width, width}, center, side)) {
+                    best = value; best_at = {x,y};
+                }
+            }
+        if (best < 0.82) return;
+        for (int y = 0; y < scores.rows; ++y)
+            for (int x = 0; x < scores.cols; ++x) {
+                if (std::abs(x-best_at.x) <= 3 && std::abs(y-best_at.y) <= 3) continue;
+                const double value = scores.at<float>(y,x);
+                if (std::isfinite(value) && safe_patch({min_x+x,min_y+y,width,width},center,side))
+                    second = std::max(second,value);
+            }
+        if (best - second < 0.06) return;
+        matches.push_back({{min_x + best_at.x - patch.x + subpixel(scores,best_at,true),
+                            min_y + best_at.y - patch.y + subpixel(scores,best_at,false)},
+                           {patch.x + width*0.5, patch.y + width*0.5},best});
+    };
+    for (const auto origin : origins)
+        match_patch({origin.x * side / 320, origin.y * side / 320, width, width});
+    const auto fixed = combine_matches(matches,side);
+    if (fixed.valid) return fixed;
+
+    // 天空等稀疏场景的细节可能恰好落在固定块之间。仅在原取样不能定位时补查网格，
+    // 继续使用同一相关峰、二维位移和精度要求；相邻重叠块不能重复计作独立区域。
+    const int step=width/2, last_y=side*7/8-width;
+    for (int y=0;;y=std::min(y+step,last_y)) {
+        for (int x=0;x+width<=side;x+=step) {
+            const cv::Rect patch(x,y,width,width);
+            const cv::Point2d patch_center(x+width*0.5,y+width*0.5);
+            if (std::any_of(matches.begin(),matches.end(),[&](const auto& value) {
+                const auto delta=value.center-patch_center;
+                return cv::norm(delta)<side*0.25 || (std::abs(delta.x)<width && std::abs(delta.y)<width);
+            })) continue;
+            match_patch(patch);
+        }
+        if(y==last_y) break;
+    }
+    return combine_matches(matches,side);
 }
 struct CaptureCloser {
     ICapture* capture = nullptr;

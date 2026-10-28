@@ -135,7 +135,27 @@ def _identity(value):
     return {key: value[key] for key in ("map", "team", "generation", "plan_id", "plan", "plan_sha256")}
 
 
+def spawn_group(plan):
+    """方案已有Tn/CTn前缀表示出生位；不把普通点位猜成出生点。"""
+    if not isinstance(plan, dict) or not isinstance(plan.get("name"), str) or not plan["name"].strip():
+        return None
+    map_name = plan.get("map", "")
+    if not isinstance(map_name, str) or not re.fullmatch(r"de_[a-z0-9_]{1,80}", map_name):
+        return None
+    point = re.match(r"^(CT|T)[1-9]\d*(?:\s|$)", short_name(plan.get("name", ""), map_name))
+    return map_name + "-" + point[1] if point else None
+
+
+def _shared_standing_path(root, group):
+    return Path(root) / "standing" / "shared" / (group + ".png")
+
+
 def standing_for(context, root, shared_standing=SHARED_STANDING):
+    group = spawn_group(context["plan"])
+    shared = _shared_standing_path(root, group) if group else None
+    if shared and shared.is_file():
+        png_size(shared)
+        return shared, None
     existing = resource_directory(Path(root) / "references", context["plan_id"][:-5])
     if (existing / "reference.json").is_file():
         value, directory = load_reference(Path(root) / "references", context["plan_id"][:-5], context["plan_id"], allow_partial=True)
@@ -234,16 +254,7 @@ def _finish_local(root, identity, journal):
     return metadata
 
 
-def capture_once(fetch_context, root=DEFAULT_ROOT, capture=capture_primary, shared_standing=SHARED_STANDING,
-                 foreground=None, expected_foreground=None, report=lambda *args: None, role="aim"):
-    """F9/F10各自只更新一张图片；可注入合成采图做离线回归。"""
-    if role not in ("standing", "aim"):
-        raise ValueError("采集类型必须为站位或瞄点")
-    root = Path(root).resolve()
-    before = validate_context(fetch_context())
-    validate_context(before, before.get("_deadline"))
-    if foreground and foreground() != expected_foreground:
-        raise ValueError("游戏已失焦，未采集")
+def _prepare_capture(root, before, role, reference_root=None):
     identity, capture_id = before["plan_id"][:-5], uuid.uuid4().hex
     transactions = root / "capture-transactions" / identity
     transactions.mkdir(parents=True, exist_ok=True)
@@ -253,6 +264,13 @@ def capture_once(fetch_context, root=DEFAULT_ROOT, capture=capture_primary, shar
             _finish_local(root, identity, journal)
         except Exception as error:
             raise LocalSavePending("上次本地采图已保留，但保存尚未恢复：" + str(error)) from error
+    if reference_root is not None and Path(reference_root).resolve() != root:
+        local_record = root / "captures" / (identity + ".json")
+        if local_record.is_file():
+            pending = _json(local_record)
+            if pending.get("status") == "pending" and pending.get("capture_role") == "aim":
+                # 新瞄点已在主机保存但尚未发送时，不能被辅机旧副本覆盖。
+                reference_root = root
     stage = root / "capture-staging" / capture_id
     stage.mkdir(parents=True)
     plan_path = stage / before["plan_id"]
@@ -260,9 +278,10 @@ def capture_once(fetch_context, root=DEFAULT_ROOT, capture=capture_primary, shar
     refs = stage / "references"
     directory = resource_directory(refs, identity)
     directory.mkdir(parents=True)
-    current = resource_directory(root / "references", identity)
+    reference_root = Path(reference_root) if reference_root is not None else root
+    current = resource_directory(reference_root / "references", identity)
     if (current / "reference.json").is_file():
-        manifest, previous = load_reference(root / "references", identity, before["plan_id"], allow_partial=True)
+        manifest, previous = load_reference(reference_root / "references", identity, before["plan_id"], allow_partial=True)
         # F9更新整体方案身份时，旧瞄点仍属于它采集时的方案，不能被站位采集重新确认。
         if "aim_image" in manifest:
             manifest.setdefault("aim_plan", manifest["plan"])
@@ -274,6 +293,20 @@ def capture_once(fetch_context, root=DEFAULT_ROOT, capture=capture_primary, shar
                     "manual_throw_verified": False, "standing_note": "按站位参考图定位",
                     "target_x": 160, "target_y": 160, "image_sha256": {}}
     manifest["plan"] = before["plan"]
+    return stage, directory, manifest
+
+
+def capture_once(fetch_context, root=DEFAULT_ROOT, capture=capture_primary, shared_standing=SHARED_STANDING,
+                 foreground=None, expected_foreground=None, report=lambda *args: None, role="aim"):
+    """F9/F10各自只采一张图片；F10可复用已确认的同组站位图。"""
+    if role not in ("standing", "aim"):
+        raise ValueError("采集类型必须为站位或瞄点")
+    root = Path(root).resolve()
+    before = validate_context(fetch_context())
+    validate_context(before, before.get("_deadline"))
+    if foreground and foreground() != expected_foreground:
+        raise ValueError("游戏已失焦，未采集")
+    stage, directory, manifest = _prepare_capture(root, before, role)
     report("capturing", "正在采集当前" + ("站位" if role == "standing" else "瞄点") + "画面")
     # 不因获取上下文/读取已有图片耗时复活旧状态。
     validate_context(before, before.get("_deadline"))
@@ -291,6 +324,20 @@ def capture_once(fetch_context, root=DEFAULT_ROOT, capture=capture_primary, shar
         manifest["manual_throw_verified"] = True
         manifest["confirmed_at_utc"] = captured_at
         manifest["confirmation_source"] = "host_f10"
+        group = spawn_group(before["plan"])
+        shared = _shared_standing_path(root, group) if group else None
+        if (shared and shared.is_file()) or "standing_image" not in manifest:
+            try:
+                standing, marker = standing_for(before, root, shared_standing)
+            except ValueError:
+                # 普通点位没有站位图时，F10仍独立完成，不生成占位图片。
+                if shared and shared.is_file():
+                    raise
+            else:
+                _set_standing(manifest, directory, standing, marker=marker,
+                              group=group if shared and shared.is_file() else None)
+                if shared and shared.is_file():
+                    manifest["standing_source"] = "shared_spawn"
     else:
         manifest.pop("standing_marker", None)
         manifest["standing_note"] = "按站位参考图定位"
@@ -302,6 +349,13 @@ def capture_once(fetch_context, root=DEFAULT_ROOT, capture=capture_primary, shar
     validate_context(after, after.get("_deadline"))
     if _identity(before) != _identity(after):
         raise ValueError("采集期间方案或游戏状态改变，图片未发布")
+    return _save_capture(root, before, role, stage, directory, manifest, captured_at, report)
+
+
+def _save_capture(root, before, role, stage, directory, manifest, captured_at, report):
+    identity, capture_id = before["plan_id"][:-5], stage.name
+    plan_path, refs = stage / before["plan_id"], stage / "references"
+    journal = root / "capture-transactions" / identity / "pending.json"
     manifest["display_name"] = short_name(before["plan"]["name"], before["map"])
     manifest["capture_complete"] = "standing_image" in manifest and "aim_image" in manifest
     manifest["reference_revision"] = manifest_revision(manifest)
@@ -347,6 +401,65 @@ def capture_once(fetch_context, root=DEFAULT_ROOT, capture=capture_primary, shar
         raise LocalSavePending("本地采图与资源包已暂存，保存尚未完成：" + str(error)) from error
     report("pending", "本地资源已保存，正在发送辅机")
     return metadata
+
+
+def _set_standing(manifest, directory, image, marker=None, captured_at=None, group=None):
+    png_size(image)
+    target = directory / "standing.png"
+    target.write_bytes(Path(image).read_bytes())
+    manifest["standing_image"] = target.name
+    manifest["image_sha256"]["standing_image"] = _sha(target)
+    manifest.pop("standing_marker", None)
+    if marker:
+        manifest["standing_marker"] = marker
+    manifest["standing_note"] = "出生点共用站位图" if group else "按站位参考图定位"
+    if captured_at:
+        manifest["standing_source"] = "host_f9"
+        manifest["standing_captured_at_utc"] = captured_at
+    if group:
+        manifest["standing_group"] = group
+
+
+def share_spawn_standing(root, context, image, plans_root=None, report=lambda *args: None, source="host_f9"):
+    """把已采俯视图应用到同地图同阵营出生点；不采屏、不修改瞄点或方案文件。"""
+    root = Path(root).resolve()
+    group = spawn_group(context["plan"])
+    if not group:
+        return []
+    png_size(image)
+    plans_root = Path(plans_root) if plans_root is not None else root / "plans"
+    # 清单以辅机现役方案为准；选中方案沿用截图时的快照与摘要。
+    members = {context["plan_id"]: context}
+    for path in sorted(plans_root.glob("*.json")):
+        plan = _json(path)
+        if path.name == context["plan_id"] or spawn_group(plan) != group:
+            continue
+        resource_directory(root / "references", path.stem)
+        members[path.name] = {"plan_id": path.name, "plan": plan, "plan_sha256": _sha(path), "map": plan["map"]}
+    shared = _shared_standing_path(root, group)
+    shared.parent.mkdir(parents=True, exist_ok=True)
+    transaction = uuid.uuid4().hex
+    temporary = shared.with_name(shared.name + ".pending-" + transaction)
+    temporary.write_bytes(Path(image).read_bytes())
+    if shared.is_file():
+        backup = root / "standing" / "backups" / group / (transaction + ".png")
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        backup.write_bytes(shared.read_bytes())
+    temporary.replace(shared)
+    captured_at = datetime.now(timezone.utc).isoformat()
+    captures = []
+    for member in members.values():
+        # 非当前方案先取辅机已有资源，避免主机旧副本覆盖辅机最新瞄点。
+        reference_root = root
+        if member["plan_id"] != context["plan_id"]:
+            remote = plans_root.parent / "references" / member["plan_id"][:-5] / "reference.json"
+            if remote.is_file():
+                reference_root = plans_root.parent
+        stage, directory, manifest = _prepare_capture(root, member, "standing", reference_root)
+        _set_standing(manifest, directory, shared, captured_at=captured_at, group=group)
+        manifest["standing_source"] = source
+        captures.append(_save_capture(root, member, "standing", stage, directory, manifest, captured_at, report))
+    return captures
 
 
 def _safe_relative(root, relative):

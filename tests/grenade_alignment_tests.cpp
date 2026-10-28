@@ -50,7 +50,7 @@ struct Scene {
     bool stale=false,repeated=false,geometry_change=false,receiver_change=false;
     bool no_frame=false,no_response=false,unrelated=false,network=false,source_clock_missing=false;
     bool focus=true,moved=false,read_motion=false,command_failed=false,clock_warming=false;
-    bool emergency=false,local_cancel=false;
+    bool emergency=false,local_cancel=false,compressed=false;
     std::atomic_bool canceled{false};
     int moves=0,opened=0,closed=0;
     std::chrono::milliseconds close_delay{0};
@@ -102,6 +102,11 @@ public:
         frame={};frame.width=frame.height=frame.source_width=frame.source_height=320;
         frame.encoded_width=frame.encoded_height=320;
         frame.bgr=scene_.unrelated?texture(7788):translated(scene_.original,scene_.x,scene_.y);
+        if(scene_.compressed) {
+            std::vector<unsigned char> bytes;
+            cv::imencode(".jpg",frame.bgr,bytes,{cv::IMWRITE_JPEG_QUALITY,90});
+            frame.bgr=cv::imdecode(bytes,cv::IMREAD_COLOR);
+        }
         // 与场景无关的屏幕准星和底边改变不能产生假匹配或强迫零位移。
         cv::rectangle(frame.bgr,{146,146,28,28},{0,255,255},-1);
         cv::rectangle(frame.bgr,{0,282,320,38},{255,0,0},-1);
@@ -208,6 +213,31 @@ Json precision_control(const cv::Mat& original=texture()) {
     evidence.push_back({{"quantized_unreachable",unreachable.evidence}});
     return evidence;
 }
+Json image_coverage(const cv::Mat& original) {
+    Json evidence=Json::array();
+    for (const bool compressed:{false,true})
+        for (const auto offset:std::array<cv::Point2d,7>{{{0,0},{0.8,0},{-1.4,0.3},
+                                                     {12,-8},{-12,8},{24,-18},{-24,18}}}) {
+            Scene scene;scene.original=original;scene.x=offset.x;scene.y=offset.y;
+            scene.compressed=compressed;
+            scene.response_counts_per_pixel_x=1/0.38;scene.response_counts_per_pixel_y=1/0.55;
+            scene.configured_counts_per_pixel_x=0.425;scene.configured_counts_per_pixel_y=0.4;
+            const auto started=Clock::now();
+            const auto result=run(scene);
+            const auto elapsed=std::chrono::duration<double,std::milli>(Clock::now()-started).count();
+            expect(result.aligned&&std::max(std::abs(scene.x),std::abs(scene.y))<=0.4,
+                "已采图局部偏移须精确收敛 x="+std::to_string(offset.x)+" y="+std::to_string(offset.y)+
+                " compressed="+std::to_string(compressed)+" final="+std::to_string(scene.x)+","+
+                std::to_string(scene.y)+" "+result.error);
+            const auto moves=scene.moves;
+            const auto checked=run(scene,true);
+            expect(checked.aligned&&scene.moves==moves,"已采图收敛后应通过零位移复核");
+            evidence.push_back({{"initial_x",offset.x},{"initial_y",offset.y},{"compressed",compressed},
+                {"final_x",scene.x},{"final_y",scene.y},{"wall_ms",elapsed},
+                {"alignment",result.evidence},{"prethrow",checked.evidence}});
+        }
+    return evidence;
+}
 void image_failures() {
     Scene flat;flat.original.setTo(cv::Scalar::all(100));
     expect(!run(flat).aligned&&flat.moves==0,"低纹理画面不能冒充对齐");
@@ -224,6 +254,25 @@ void image_failures() {
     expect(!result.aligned&&stuck.moves>0&&stuck.moves<=48,"没有视角响应不得无限输出");
     Scene failure;failure.x=20;failure.command_failed=true;
     expect(!run(failure).aligned&&failure.moves==1,"设备命令失败不得重试");
+}
+void sparse_texture_coverage() {
+    // 两处地图细节都落在原六块固定取样之间；模拟天空中天线/屋檐等稀疏纹理。
+    Scene scene;scene.original.setTo(cv::Scalar::all(90));
+    const auto detail=texture(219);
+    detail(cv::Rect(0,0,24,24)).copyTo(scene.original(cv::Rect(100,220,24,24)));
+    detail(cv::Rect(32,0,24,24)).copyTo(scene.original(cv::Rect(224,232,24,24)));
+    scene.x=8.4;scene.y=-6.4;
+    scene.response_counts_per_pixel_x=scene.response_counts_per_pixel_y=2.5;
+    scene.configured_counts_per_pixel_x=scene.configured_counts_per_pixel_y=2.5;
+    const auto result=run(scene);
+    expect(result.aligned&&scene.moves>0&&std::max(std::abs(scene.x),std::abs(scene.y))<=0.4,
+        "稀疏有效纹理落在固定取样之间仍须找点收敛："+result.error);
+    const auto moves=scene.moves;
+    expect(run(scene,true).aligned&&scene.moves==moves,"稀疏纹理完成后复核不产生位移");
+    Scene edge;
+    for(int y=0;y<320;++y) for(int x=0;x<320;++x)
+        edge.original.at<cv::Vec3b>(y,x)=cv::Vec3b::all(x<110?60:180);
+    expect(!run(edge).aligned&&edge.moves==0,"只有一条直边不能提供二维对齐证据");
 }
 void timing_geometry_and_cancellation() {
     Scene cold;cold.network=true;cold.clock_warming=true;cold.first_frame_at=cold.now+2500ms;
@@ -392,7 +441,13 @@ int main(int argc,char** argv) {
             save(argv[4],report.dump(2));
             return failures?1:0;
         }
-        aligned_and_control();precision_control();image_failures();timing_geometry_and_cancellation();
+        if (argc==5&&std::string(argv[1])=="--coverage-image"&&std::string(argv[3])=="--report") {
+            const auto image=cv::imread(argv[2]);
+            if (image.cols!=2560||image.rows!=1440) throw std::runtime_error("实图覆盖回放要求本次2560×1440原图");
+            save(argv[4],image_coverage(image(cv::Rect(1120,560,320,320)).clone()).dump(2));
+            return failures?1:0;
+        }
+        aligned_and_control();precision_control();image_failures();sparse_texture_coverage();timing_geometry_and_cancellation();
         const auto root=argc==2?std::filesystem::path(argv[1]):
             argc==3&&std::string(argv[1])=="--output-root"?std::filesystem::path(argv[2]):
             std::filesystem::path("temp/XEN-GRENADE-ALIGN-20261026-001/reference-tests");
