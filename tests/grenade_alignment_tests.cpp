@@ -500,6 +500,46 @@ void reference_resources(const std::filesystem::path& root) {
     const auto loaded=grenade_alignment::load_reference(plans/"sample.json",expected);
     expect(loaded.revision.size()==64&&loaded.target.x==160&&loaded.aim_image.cols==320,
         "真实资源加载须规范化方案并计算原图摘要");
+    {
+        auto legacy = expected; legacy["name"] = "Mirage T1 VIP烟";
+        auto legacy_manifest = manifest;
+        legacy_manifest["plan"] = legacy; legacy_manifest["aim_plan"] = legacy;
+        save(directory/"reference.json",legacy_manifest.dump());
+        save(plans/"sample.json",legacy.dump());
+        const auto prior = grenade_alignment::load_reference(plans/"sample.json",legacy);
+        auto explicit_t = legacy; explicit_t["team"] = "T";
+        save(plans/"sample.json",explicit_t.dump());
+        bool same_team_loaded = false;
+        try {
+            const auto saved = grenade_alignment::load_reference(plans/"sample.json",explicit_t);
+            same_team_loaded = saved.plan.value("team",std::string{}) == "T" && saved.revision == prior.revision &&
+                cv::norm(saved.aim_image,prior.aim_image,cv::NORM_INF) == 0 &&
+                cv::norm(saved.standing_image,prior.standing_image,cv::NORM_INF) == 0;
+        } catch (const std::exception&) {}
+        expect(same_team_loaded,"旧T1参考及瞄点绑定在保存显式同阵营后仍可加载且原图摘要保持");
+        const auto reject_saved = [&](const Json& saved, const char* message) {
+            save(plans/"sample.json",saved.dump());
+            bool rejected = false;
+            try { grenade_alignment::load_reference(plans/"sample.json",saved); }
+            catch (const std::exception&) { rejected = true; }
+            expect(rejected,message);
+        };
+        auto changed = explicit_t; changed["team"] = "CT";
+        reject_saved(changed,"显式改为CT不能沿用旧T1参考");
+        changed = explicit_t; changed["map"] = "de_nuke";
+        reject_saved(changed,"阵营语义规范化不能放宽地图绑定");
+        changed = explicit_t; changed["actions"][0]["duration_ms"] = 123;
+        reject_saved(changed,"阵营语义规范化不能放宽动作绑定");
+        save(plans/"sample.json",explicit_t.dump());
+        legacy_manifest["aim_plan"]["team"] = "CT";
+        save(directory/"reference.json",legacy_manifest.dump());
+        bool aim_rejected = false;
+        try { grenade_alignment::load_reference(plans/"sample.json",explicit_t); }
+        catch (const std::exception&) { aim_rejected = true; }
+        expect(aim_rejected,"当前参考同为T时仍拒绝原瞄点的显式CT阵营");
+        save(plans/"sample.json",expected.dump());
+        save(directory/"reference.json",manifest.dump());
+    }
     const auto rejects=[&](const std::string& message) {
         bool rejected=false;try {grenade_alignment::load_reference(plans/"sample.json",expected);}
         catch (const std::exception&) {rejected=true;}expect(rejected,message);

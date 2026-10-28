@@ -57,6 +57,38 @@ class ReferenceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_reference(self.root, identity, "other.json")
 
+    def test_legacy_same_team_metadata_does_not_invalidate_existing_aim(self):
+        identity = self.complete()
+        manifest = self.root / identity / "reference.json"
+        original = json.loads(manifest.read_text(encoding="utf-8"))
+        for name, team in (("T1 VIP烟", "T"), ("Mirage CT5 匪口烟", "CT"),
+                           ("Mirage T来源12号 连接烟", "T"), ("T1 对照 CT5", "CT")):
+            for legacy in (None, ""):
+                with self.subTest(name=name, legacy=legacy):
+                    value = {**original, "plan": {**original["plan"], "name": name, "team": team},
+                             "aim_plan": {**original["plan"], "name": name}}
+                    if legacy is not None:
+                        value["aim_plan"]["team"] = legacy
+                    value["reference_revision"] = manifest_revision(value)
+                    manifest.write_text(json.dumps(value), encoding="utf-8")
+                    loaded, directory = load_reference(self.root, identity)
+                    self.assertEqual(loaded, value)
+                    self.assertEqual((directory / "aim.png").read_bytes(), self.image.read_bytes())
+
+    def test_real_team_or_plan_change_still_invalidates_existing_aim(self):
+        identity = self.complete()
+        manifest = self.root / identity / "reference.json"
+        original = json.loads(manifest.read_text(encoding="utf-8"))
+        old_plan = {**original["plan"], "name": "T1 VIP烟"}
+        for change in ({"team": "CT"}, {"map": "de_nuke"}, {"name": "T2 VIP烟"},
+                       {"actions": [{"type": "button", "button": "right", "duration_ms": 1000}]}):
+            with self.subTest(change=change):
+                value = {**original, "plan": {**old_plan, **change}, "aim_plan": old_plan}
+                value["reference_revision"] = manifest_revision(value)
+                manifest.write_text(json.dumps(value), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "当前方案不一致"):
+                    load_reference(self.root, identity)
+
     def partial(self, role):
         identity = self.complete()
         directory = self.root / identity

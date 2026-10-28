@@ -51,6 +51,8 @@ Json canonical_plan(const Json& value) {
     std::string error;
     if (!movement::timeline::parse_plan(value, plan, error))
         throw std::runtime_error("参考绑定方案不合法：" + error);
+    // 同阵营的显式字段与旧名称身份等价，其余方案字段仍完整参与绑定。
+    plan.team = movement::timeline::plan_team(plan);
     return movement::timeline::plan_json(plan);
 }
 std::filesystem::path image_path(const std::filesystem::path& directory,

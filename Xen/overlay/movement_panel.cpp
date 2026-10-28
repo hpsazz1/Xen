@@ -31,6 +31,9 @@ constexpr std::array<GrenadePreset,6> kGrenadePresets{{
     {"蹲 W 跳投",true,true,true,false},
     {"左右双键 W 跳投",true,true,false,true}
 }};
+constexpr std::array<std::string_view,15> kGrenadeMaps{"de_mirage","de_dust2","de_inferno","de_ancient",
+    "de_anubis","de_nuke","de_overpass","de_train","de_vertigo","de_cache",
+    "cs_office","cs_italy","ar_baggage","ar_shoots","ar_pool_day"};
 
 void apply_grenade_preset(Plan& plan, const GrenadePreset& preset) {
     // 六套时序逐项复用现役道具库；只替换动作，不从图片推测投法或覆盖点位身份。
@@ -117,9 +120,7 @@ int natural_compare(std::string_view a, std::string_view b) {
 }
 int grenade_map_rank(std::string_view map) {
     // 与按地图采集清单保持一致；未列出的自定义地图稳定排在后面。
-    constexpr std::array<std::string_view,10> maps{"de_mirage","de_dust2","de_inferno","de_ancient",
-        "de_anubis","de_nuke","de_overpass","de_train","de_vertigo","de_cache"};
-    return static_cast<int>(std::find(maps.begin(),maps.end(),map) - maps.begin());
+    return static_cast<int>(std::find(kGrenadeMaps.begin(),kGrenadeMaps.end(),map) - kGrenadeMaps.begin());
 }
 const std::string& grenade_name(const MovementSavedPlan& item) {
     return item.raw_name.empty() ? item.name : item.raw_name;
@@ -175,9 +176,10 @@ void timeline(const Plan& plan) {
 struct MovementPanel::Impl {
     Plan plan;
     Request request;
-    std::string error, map_filter;
+    std::string error, map_filter, gsi_map, gsi_team;
     bool grenade() const { return request.mode == Mode::GRENADE_TEST; }
     bool initialized = false, catalog_requested = false, seen_loaded_slot = false;
+    bool initial_draft = true, custom_map = false;
     std::uint64_t seen_draft = 0, seen_catalog = 0;
 
     explicit Impl(Mode mode) {
@@ -205,7 +207,24 @@ struct MovementPanel::Impl {
         actions.movement_draft_changed = true;
         actions.debug_request = request;
     }
+    std::string selected_team() const {
+        const auto side = movement::timeline::plan_team(plan);
+        return !side.empty() ? side : plan.map == gsi_map ? gsi_team : std::string{};
+    }
     void send(Action action, OverlayActions& actions, bool save_as = false) {
+        if (grenade() && action == Action::SAVE_PLAN) {
+            const auto side = selected_team();
+            const auto valid_map = !plan.map.empty() && plan.map.size() <= 83 &&
+                plan.map.front() >= 'a' && plan.map.front() <= 'z' &&
+                std::all_of(plan.map.begin(),plan.map.end(),[](char c) {
+                    return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
+                });
+            if (!valid_map || side.empty()) {
+                error = "请选择地图和T/CT阵营；自定义地图标识仅使用小写字母、数字和下划线";
+                return;
+            }
+            plan.team = side;
+        }
         if (action != Action::CANCEL && action != Action::LOAD_PLAN && action != Action::LIST_MOVEMENT_PLANS &&
             action != Action::START_MOVEMENT_RECORDING && action != Action::STOP_MOVEMENT_RECORDING &&
             !update_request()) return;
@@ -215,7 +234,13 @@ struct MovementPanel::Impl {
     }
     void sync(const Snapshot* snapshot, OverlayActions& actions) {
         if (!initialized) { initialized = true; update_request(); }
+        gsi_map.clear(); gsi_team.clear();
         if (!snapshot) return;
+        if (snapshot->movement_map.valid) {
+            gsi_map = snapshot->movement_map.map_name;
+            if (snapshot->movement_map.local_team != weapon::Team::UNKNOWN)
+                gsi_team = weapon::team_name(snapshot->movement_map.local_team);
+        }
         const auto revision = grenade() ? snapshot->grenade_catalog_revision : snapshot->movement_catalog_revision;
         if (revision != seen_catalog) {
             seen_catalog = revision;
@@ -232,8 +257,14 @@ struct MovementPanel::Impl {
             seen_loaded_slot |= loaded_revision != 0;
             Plan loaded;
             if (movement::timeline::parse_plan(legacy ? snapshot->draft_plan : loaded_draft, loaded, error)) {
-                plan = std::move(loaded); update_request();
+                plan = std::move(loaded); initial_draft = false; custom_map = false; update_request();
             }
+        }
+        // 初始空草稿只补空值；载入和手动选择之后不随GSI换图、换边改写方案。
+        if (grenade() && initial_draft) {
+            if (plan.map.empty() && !custom_map) plan.map = gsi_map;
+            if (plan.team.empty()) plan.team = gsi_team;
+            update_request();
         }
     }
     void library(const Snapshot* snapshot, OverlayActions& actions, bool busy) {
@@ -317,10 +348,49 @@ struct MovementPanel::Impl {
         plan = std::move(copy); error.clear(); changed(actions);
     }
     void editor(OverlayActions& actions, const movement::Config& config, const Snapshot* snapshot) {
+        const auto prior_team = grenade() ? selected_team() : std::string{};
         bool change = text_field(grenade() ? "道具名称" : "方案名称", plan.name, "本页独立方案文件的名称，不影响另一类方案。");
-        change |= text_field("地图（可选）", plan.map, "道具菜单按当前GSI地图筛选；保存地图标识，手动身法方案不受地图限制。");
-        if (button("使用当前地图", "将有效 GSI 地图填入当前草稿，保存后写入本页方案库。", snapshot && snapshot->movement_map.valid)) {
-            plan.map = snapshot->movement_map.map_name; change = true;
+        if (grenade()) {
+            if (change && plan.team.empty()) plan.team = prior_team;
+            ImGui::SetNextItemWidth(std::max(80.f,ImGui::GetContentRegionAvail().x * .7f));
+            if (ImGui::BeginCombo("地图", custom_map ? "自定义地图" : plan.map.empty() ? "请选择地图" : plan.map.c_str())) {
+                std::vector<std::string> maps;
+                for (const auto map : kGrenadeMaps) maps.emplace_back(map);
+                if (!gsi_map.empty()) maps.push_back(gsi_map);
+                if (!plan.map.empty()) maps.push_back(plan.map);
+                if (snapshot) for (const auto& item : snapshot->grenade_saved_plans)
+                    if (!item.map.empty()) maps.push_back(item.map);
+                std::sort(maps.begin(),maps.end(),[](const auto& a, const auto& b) {
+                    const auto left = grenade_map_rank(a), right = grenade_map_rank(b);
+                    return left != right ? left < right : a < b;
+                });
+                maps.erase(std::unique(maps.begin(),maps.end()),maps.end());
+                for (const auto& map : maps)
+                    if (ImGui::Selectable(map.c_str(),!custom_map && plan.map == map)) {
+                        plan.map = map; custom_map = false; change = true;
+                    }
+                if (ImGui::Selectable("自定义地图",custom_map)) { custom_map = true; change = true; }
+                ImGui::EndCombo();
+            }
+            tip("选择方案所属地图，包含预置地图、GSI当前地图和方案库地图；其他地图可填写自定义标识。新草稿默认GSI，手动选择后保持，保存不会切换游戏地图。");
+            if (custom_map)
+                change |= text_field("自定义地图标识",plan.map,"填写游戏GSI使用的地图标识，最多83字节，仅小写字母、数字和下划线，例如de_my_map；不填写路径。");
+            const auto side = selected_team();
+            ImGui::SetNextItemWidth(std::max(80.f,ImGui::GetContentRegionAvail().x * .7f));
+            if (ImGui::BeginCombo("阵营",side == "T" ? "T / 匪" : side == "CT" ? "CT / 警" : "请选择阵营")) {
+                if (ImGui::Selectable("T / 匪",side == "T")) { plan.team = "T"; change = true; }
+                if (ImGui::Selectable("CT / 警",side == "CT")) { plan.team = "CT"; change = true; }
+                ImGui::EndCombo();
+            }
+            tip("保存独立T/CT阵营，名称可自由填写。新草稿默认GSI；旧方案优先保留已存阵营或原名称识别，同图且未指定时采用GSI。采集时仍核对实际游戏地图与阵营。");
+            if (button("使用当前地图与阵营","把有效GSI地图及本地T/CT填入当前草稿；保存后生效，不执行游戏操作。",!gsi_map.empty() && !gsi_team.empty())) {
+                plan.map = gsi_map; plan.team = gsi_team; custom_map = false; change = true;
+            }
+        } else {
+            change |= text_field("地图（可选）", plan.map, "保存地图标识，手动身法方案不受地图限制。");
+            if (button("使用当前地图", "将有效 GSI 地图填入当前草稿，保存后写入本页方案库。", snapshot && snapshot->movement_map.valid)) {
+                plan.map = snapshot->movement_map.map_name; change = true;
+            }
         }
         if (!grenade())
             change |= text_field("点位（可选）", plan.location, "保存点位名称；每次测试前由用户对齐位置和朝向。");

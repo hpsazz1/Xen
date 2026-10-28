@@ -94,17 +94,6 @@ std::vector<std::string> local_urls(const Config& config, std::uint16_t port) {
     result.push_back(url("127.0.0.1"));
     return result;
 }
-std::string plan_team(const std::string& name) {
-    const auto title = " " + name;
-    for (const auto* side : {"CT", "T"}) {
-        const std::string token = std::string(" ") + side;
-        const auto start = title.find(token);
-        if (start == std::string::npos) continue;
-        const auto suffix = title.substr(start + token.size());
-        if ((!suffix.empty() && suffix.front() >= '0' && suffix.front() <= '9') || suffix.starts_with("来源")) return side;
-    }
-    return {};
-}
 class CatalogLimit final : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
@@ -548,7 +537,7 @@ struct Server::Impl {
                 !movement::timeline::parse_plan(selected->grenade_current,expected,error) ||
                 movement::timeline::plan_json(parsed) != movement::timeline::plan_json(expected))
                 throw std::runtime_error("磁盘道具方案与已启用方案不一致，请重新载入");
-            if (parsed.map != current.map_name || plan_team(parsed.name) != weapon::team_name(current.local_team))
+            if (parsed.map != current.map_name || movement::timeline::plan_team(parsed) != weapon::team_name(current.local_team))
                 throw std::runtime_error("当前方案与游戏地图或本地阵营不匹配");
             const auto name = path.filename().u8string();
             const std::string plan_id(name.begin(),name.end());
@@ -607,7 +596,7 @@ struct Server::Impl {
                     const auto plan = read_catalog_plan(entry.path(),total,check);
                     const auto filename = entry.path().filename().u8string();
                     const std::string id(filename.begin(),filename.end());
-                    auto encoded = Json{{"id",id},{"name",plan.name},{"map",plan.map},{"team",plan_team(plan.name)}}.dump();
+                    auto encoded = Json{{"id",id},{"name",plan.name},{"map",plan.map},{"team",movement::timeline::plan_team(plan)}}.dump();
                     check();
                     response_bytes += encoded.size() + (entries.empty() ? 0 : 1);
                     if (response_bytes > kMaximumResponse) throw CatalogLimit("网页道具清单超过响应上限");

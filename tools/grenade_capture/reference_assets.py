@@ -111,6 +111,27 @@ def resource_files(value):
     return tuple(value[field] for field in ("standing_image", "aim_image") if field in value) + ("reference.json",)
 
 
+def _plan_identity(plan):
+    # 与生产方案解析一致：补存同阵营元数据不使既有瞄点失效，其他字段仍逐项比较。
+    result = dict(plan)
+    team = result.get("team", "")
+    if team not in ("", "T", "CT") or not isinstance(result.get("name", ""), str):
+        raise ValueError("参考资源方案阵营或名称无效")
+    if not team:
+        title = " " + result.get("name", "")
+        for side in ("CT", "T"):
+            token = " " + side
+            start = title.find(token)
+            if start < 0:
+                continue
+            suffix = title[start + len(token):]
+            if (suffix and "0" <= suffix[0] <= "9") or suffix.startswith("来源"):
+                team = side
+                break
+    result["team"] = team
+    return result
+
+
 def load_reference(root, identity, plan_id=None, allow_partial=False):
     directory = resource_directory(root, identity)
     manifest_path = directory / "reference.json"
@@ -140,7 +161,7 @@ def load_reference(root, identity, plan_id=None, allow_partial=False):
         aim_plan = value.get("aim_plan", value["plan"])
         if not isinstance(aim_plan, dict) or not aim_plan.get("actions"):
             raise ValueError("瞄点资源缺少采集时的方案")
-        if not allow_partial and aim_plan != value["plan"]:
+        if not allow_partial and _plan_identity(aim_plan) != _plan_identity(value["plan"]):
             raise ValueError("参考资源与当前方案不一致，请重新采集瞄点图")
         validate_geometry(value.get("geometry"))
     elif not allow_partial:

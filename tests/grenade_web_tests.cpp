@@ -293,6 +293,26 @@ void capture_context_tests(const std::filesystem::path& root) {
         "F10返回实际启用方案的原JSON和SHA，不暴露路径或其他Session字段");
     publish();
     expect(read()["generation"]==ready["generation"],"相同选择与心跳刷新不制造新采集身份");
+    const auto set_selected = [&](const Json& plan) {
+        { std::ofstream file(path,std::ios::binary); file << plan.dump(); }
+        selected.grenade_current = selected.grenade_baseline = plan; publish();
+    };
+    auto custom = Json::parse(raw);
+    custom["name"] = "T垃圾桶左 拱门烟"; custom["team"] = "T";
+    set_selected(custom);
+    expect(read().value("ready",false) && read()["plan"]==custom &&
+        get(port,"/capture-context.json?role=standing").json().value("ready",false),
+        "自定义名称使用显式T阵营，F9/F10均可采集");
+    const auto custom_catalog = get(port,"/catalog.json").json();
+    expect(custom_catalog.is_array() && custom_catalog.size()==1 && custom_catalog[0].value("team",std::string{})=="T",
+        "OBS菜单清单导出自定义道具的显式阵营");
+    custom["team"] = "CT"; custom["name"] = "T1 名称不能覆盖阵营"; set_selected(custom);
+    expect(rejected().value("reason",std::string{})=="当前方案与游戏地图或本地阵营不匹配",
+        "显式CT不能因名称T1绕过当前T阵营校验");
+    custom["team"] = "T"; custom["name"] = "完全自由的名称"; set_selected(custom);
+    expect(read().value("ready",false),"无阵营前缀的名称也可使用显式阵营采集");
+    { std::ofstream file(path,std::ios::binary); file << raw; }
+    selected.grenade_current = selected.grenade_baseline = Json::parse(raw); publish();
     selected.grenade_current["name"] = "T1 未保存"; publish(); rejected();
     selected.grenade_current = selected.grenade_baseline; publish();
     expect(read().value("ready",false) && read()["generation"]!=ready["generation"],"脏草稿恢复不能复活旧采集身份");

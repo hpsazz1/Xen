@@ -29,6 +29,7 @@ MARKERS = {"T1": (.223, .498), "T2": (.664, .493), "T3": (.598, .344),
 MAP_NAMES = {"de_mirage": "Mirage", "de_dust2": "Dust II", "de_inferno": "Inferno",
              "de_ancient": "Ancient", "de_anubis": "Anubis", "de_nuke": "Nuke",
              "de_vertigo": "Vertigo", "de_train": "Train", "de_cache": "Cache", "de_overpass": "Overpass"}
+MAP_IDENTIFIER = re.compile(r"[a-z][a-z0-9_]{0,82}")
 
 
 def write_json(path, value):
@@ -80,9 +81,10 @@ def validate_context(value, deadline=None, clock=time.monotonic):
     if (not isinstance(ident, str) or not ident.endswith(".json") or Path(ident).name != ident
             or not isinstance(plan, dict) or not plan.get("actions")
             or not isinstance(plan.get("name"), str) or not plan["name"].strip()
-            or not isinstance(value.get("map"), str) or not re.fullmatch(r"de_[a-z0-9_]{1,80}", value["map"])
+            or not isinstance(value.get("map"), str) or not MAP_IDENTIFIER.fullmatch(value["map"])
             or plan.get("map") != value["map"]
             or value.get("team") not in ("T", "CT")
+            or ("team" in plan and plan["team"] != "" and plan["team"] != value["team"])
             or not isinstance(value.get("generation"), str) or not value["generation"]
             or type(value.get("remaining_ms")) is not int or not 0 < value["remaining_ms"] <= 10000
             or not re.fullmatch(r"[0-9a-f]{64}", value.get("plan_sha256", ""))):
@@ -140,10 +142,15 @@ def spawn_group(plan):
     if not isinstance(plan, dict) or not isinstance(plan.get("name"), str) or not plan["name"].strip():
         return None
     map_name = plan.get("map", "")
-    if not isinstance(map_name, str) or not re.fullmatch(r"de_[a-z0-9_]{1,80}", map_name):
+    if not isinstance(map_name, str) or not MAP_IDENTIFIER.fullmatch(map_name):
         return None
     point = re.match(r"^(CT|T)[1-9]\d*(?:\s|$)", short_name(plan.get("name", ""), map_name))
-    return map_name + "-" + point[1] if point else None
+    if not point:
+        return None
+    team = plan.get("team", point[1])
+    if team == "":
+        team = point[1]
+    return map_name + "-" + team if team in ("T", "CT") else None
 
 
 def _shared_standing_path(root, group):
@@ -167,7 +174,7 @@ def standing_for(context, root, shared_standing=SHARED_STANDING):
         return custom, None
     name = short_name(context["plan"]["name"], context["map"])
     point = re.match(r"^(T[1-5])(?:\s|$)", name)
-    if context["map"] == "de_mirage" and point:
+    if context["map"] == "de_mirage" and context.get("team") == "T" and group == "de_mirage-T" and point:
         label = point[1]
         x, y = MARKERS[label]
         path, marker = Path(shared_standing), {"x": x, "y": y, "label": label}
@@ -213,7 +220,7 @@ def _finish_local(root, identity, journal):
     metadata = record["metadata"]
     if (record.get("identity") != identity or metadata.get("plan_id") != identity + ".json"
             or not re.fullmatch(r"[0-9a-f]{32}", metadata.get("capture_id", ""))
-            or not re.fullmatch(r"de_[a-z0-9_]{1,80}", metadata.get("map", ""))
+            or not MAP_IDENTIFIER.fullmatch(metadata.get("map", ""))
             or not metadata.get("package", "").startswith("packages/" + metadata["map"] + "/")):
         raise ValueError("本地恢复记录身份无效")
     stage = root / "capture-staging" / metadata["capture_id"]
@@ -497,7 +504,7 @@ def transfer_capture(root, identity, destination, deadline=None, report=lambda *
     resource_directory(root / "references", identity)
     metadata = _json(root / "captures" / (identity + ".json"))
     if (metadata.get("plan_id") != identity + ".json"
-            or not re.fullmatch(r"de_[a-z0-9_]{1,80}", metadata.get("map", ""))
+            or not MAP_IDENTIFIER.fullmatch(metadata.get("map", ""))
             or not re.fullmatch(r"[0-9a-f]{64}", metadata.get("plan_sha256", ""))
             or not metadata.get("package", "").startswith("packages/" + metadata["map"] + "/")):
         raise ValueError("本地采集记录身份无效")

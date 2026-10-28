@@ -59,12 +59,26 @@ int duration_ms(const Plan& p) noexcept {
             end = std::max(end, a.start_ms + a.duration_ms);
     return end;
 }
+std::string plan_team(const Plan& p) {
+    if (!p.team.empty()) return p.team;
+    const auto title = " " + p.name;
+    for (const auto* side : {"CT", "T"}) {
+        const std::string token = std::string(" ") + side;
+        const auto start = title.find(token);
+        if (start == std::string::npos) continue;
+        const auto suffix = title.substr(start + token.size());
+        if ((!suffix.empty() && suffix.front() >= '0' && suffix.front() <= '9') || suffix.starts_with("来源")) return side;
+    }
+    return {};
+}
 bool validate_plan(const Plan& p, std::string& error) noexcept {
     try {
         error.clear();
         if (p.name.empty() || p.name.size() > 256 || p.map.size() > 256 || p.location.size() > 256 ||
             p.voice_command.size() > 256 || p.notes.size() > 4096)
             throw std::runtime_error("名称不能为空，名称/地图/点位/口令最多256字节，说明最多4096字节");
+        if (!p.team.empty() && p.team != "T" && p.team != "CT")
+            throw std::runtime_error("方案阵营只能为空、T或CT");
         if (p.actions.empty() || p.actions.size() > 16384) throw std::runtime_error("方案需要1至16384个动作");
         for (std::size_t i = 0; i < p.actions.size(); ++i) {
             const auto& a = p.actions[i];
@@ -107,12 +121,15 @@ bool parse_plan(const nlohmann::json& j, Plan& out, std::string& error) noexcept
     try {
         const int version = integer(j.at("schema_version"));
         if (version != 1 && version != 2 && version != 3) throw std::runtime_error("不支持的方案版本");
-        if (version == 3)
+        if (version == 3 && j.contains("team"))
+            fields(j, {"schema_version", "name", "map", "location", "notes", "voice_command", "actions", "mask", "team"});
+        else if (version == 3)
             fields(j, {"schema_version", "name", "map", "location", "notes", "voice_command", "actions", "mask"});
         else fields(j, {"schema_version", "name", "map", "location", "notes", "actions", "mask"});
         Plan p;
         p.name = j.at("name").get<std::string>(); p.map = j.at("map").get<std::string>();
         if (version == 3) p.voice_command = j.at("voice_command").get<std::string>();
+        if (version == 3 && j.contains("team")) p.team = j.at("team").get<std::string>();
         p.location = j.at("location").get<std::string>(); p.notes = j.at("notes").get<std::string>();
         const auto& list = j.at("actions");
         if (!list.is_array() || list.size() > 16384) throw std::runtime_error("动作必须是最多16384项的数组");
@@ -171,10 +188,12 @@ nlohmann::json plan_json(const Plan& p) {
         else { item["type"] = "wheel"; item["wheel"] = a.wheel; }
         actions.push_back(std::move(item));
     }
-    return {{"schema_version", 3}, {"name", p.name}, {"map", p.map}, {"location", p.location}, {"notes", p.notes},
+    nlohmann::json result{{"schema_version", 3}, {"name", p.name}, {"map", p.map}, {"location", p.location}, {"notes", p.notes},
         {"voice_command", p.voice_command},
         {"actions", actions}, {"mask", {{"enabled", p.mask.enabled}, {"wasd", p.mask.wasd},
             {"start_ms", p.mask.start_ms}, {"duration_ms", p.mask.duration_ms}}}};
+    if (!p.team.empty()) result["team"] = p.team;
+    return result;
 }
 
 Result run_plan(IMouseController& device, const Plan& p, const movement::Config& scale, const Callbacks& callbacks) noexcept {

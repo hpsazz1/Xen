@@ -63,6 +63,73 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(short_name("Ancient T来源5号 中路烟 [S102]", "de_ancient"), "T5 中路烟")
         self.assertEqual(short_name("未知站位 A烟"), "未知站位 A烟")
 
+    def test_explicit_team_context_matches_and_rejects_invalid_or_mismatched_team(self):
+        value = deepcopy(self.context)
+        value["plan"]["team"] = "T"
+        self.assertIs(validate_context(value), value)
+        value["plan"]["team"] = ""
+        self.assertIs(validate_context(value), value)
+        for team in ("CT", "t", "SPECTATOR", None, 1, ["T"]):
+            with self.subTest(team=team):
+                value = deepcopy(self.context)
+                value["plan"]["team"] = team
+                with self.assertRaisesRegex(ValueError, "采集上下文字段无效"):
+                    validate_context(value)
+
+    def test_spawn_group_prefers_explicit_team_without_grouping_custom_points(self):
+        self.assertEqual(capture_workflow.spawn_group(self.plan), "de_mirage-T")
+        self.assertEqual(capture_workflow.spawn_group({**self.plan, "team": ""}), "de_mirage-T")
+        self.assertEqual(capture_workflow.spawn_group({**self.plan, "team": "CT"}), "de_mirage-CT")
+        self.assertIsNone(capture_workflow.spawn_group({**self.plan, "name": "T垃圾桶左 拱门烟", "team": "T"}))
+        for team in ("SPECTATOR", None, ["T"]):
+            with self.subTest(team=team):
+                self.assertIsNone(capture_workflow.spawn_group({**self.plan, "team": team}))
+
+    def test_explicit_ct_does_not_reuse_mirage_t_fallback_picture(self):
+        self.plan["team"] = "CT"
+        self.context["team"] = "CT"
+        self.complete()
+        manifest, directory = load_reference(self.root / "references", self.plan_path.stem)
+        self.assertNotIn("standing_image", manifest)
+        self.assertNotIn("standing_marker", manifest)
+        self.assertFalse((directory / "standing.png").exists())
+
+    def test_spawn_standing_group_uses_explicit_team_before_name(self):
+        def add(name, identity, team):
+            value = self.add_plan(name, identity)
+            value["plan"]["team"] = team
+            path = self.remote / "plans" / value["plan_id"]
+            path.write_text(json.dumps(value["plan"], ensure_ascii=False), encoding="utf-8")
+            return value["plan_id"]
+        same_team = add("CT2 B小烟", "mirage-ct2-explicit-t", "T")
+        other_team = add("T2 B小烟", "mirage-t2-explicit-ct", "CT")
+        custom = add("T垃圾桶左 拱门烟", "mirage-custom-t", "T")
+        self.plan["team"] = "T"
+        captures = capture_workflow.share_spawn_standing(self.root, self.context, self.standing,
+                                                         self.remote / "plans")
+        self.assertEqual({item["plan_id"] for item in captures}, {self.plan_path.name, same_team})
+        self.assertFalse((self.root / "references" / other_team[:-5]).exists())
+        self.assertFalse((self.root / "references" / custom[:-5]).exists())
+
+    def test_non_de_map_custom_point_capture_transfer_round_trip(self):
+        self.plan.update(name="T垃圾桶左 拱门烟", map="cs_office", team="T")
+        self.context["map"] = "cs_office"
+        self.plan_path.write_text(json.dumps(self.plan, ensure_ascii=False), encoding="utf-8")
+        self.context["plan_sha256"] = hashlib.sha256(self.plan_path.read_bytes()).hexdigest()
+        captured = self.complete()
+        self.assertTrue(captured["package"].startswith("packages/cs_office/"))
+        transfer_capture(self.root, self.plan_path.stem, self.remote)
+        manifest, directory = load_reference(self.remote / "references", self.plan_path.stem)
+        self.assertEqual(manifest["plan"], self.plan)
+        self.assertEqual((directory / "aim.png").read_bytes(), self.aim.read_bytes())
+        self.assertNotIn("standing_image", manifest)
+        self.assertEqual((self.remote / captured["package"]).read_bytes(),
+                         (self.root / captured["package"]).read_bytes())
+        for map_name in ("cs_office", "ar_pool_day", "workshop_arena_1"):
+            with self.subTest(map=map_name):
+                self.assertEqual(capture_workflow.spawn_group({**self.plan, "name": "T1 烟", "map": map_name}),
+                                 map_name + "-T")
+
     def test_f10_capture_preserves_originals_and_packages_matching_name(self):
         captured = self.complete()
         manifest, directory = load_reference(self.root / "references", self.plan_path.stem, self.plan_path.name)

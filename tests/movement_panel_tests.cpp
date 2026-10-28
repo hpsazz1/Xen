@@ -3,8 +3,10 @@
 #include "movement/timeline.h"
 #include <imgui.h>
 #include <imgui_internal.h>
+#include <chrono>
 #include <cmath>
 #include <iostream>
+#include <memory>
 #include <string>
 
 namespace {
@@ -431,8 +433,11 @@ void grenade_editor_cleanup_interactions() {
         occurrences("点位（可选）") == 0 && occurrences("起始说明") == 0 && occurrences("方案名称") == 0,
         "道具页只渲染一个名称和一个定位指令框，不重复显示旧点位或起始说明");
     auto actions = click("保存方案");
-    expect(Json::parse(actions.debug_request.plan_text) == snapshot.grenade_loaded_draft,
-        "仅打开和保存精简界面不得迁移或改写旧location、notes及动作");
+    auto original_saved = Json::parse(actions.debug_request.plan_text);
+    expect(!original_saved.contains("team") || original_saved["team"] == "T", "旧编号方案保存只能补入原T阵营");
+    original_saved.erase("team");
+    expect(original_saved == snapshot.grenade_loaded_draft,
+        "仅打开和保存精简界面除独立阵营外不得迁移或改写旧location、notes及动作");
     actions = edit("道具名称", "T1 VIP烟 自定义");
     expect(actions.movement_draft_changed && actions.debug_action == Action::NONE,
         "单一名称输入框可以直接编辑且不自动保存");
@@ -452,6 +457,9 @@ void grenade_editor_cleanup_interactions() {
     io.SetClipboardTextFn = old_set_clipboard; io.ClipboardUserData = old_clipboard_data;
     actions = click("保存方案");
     auto expected = snapshot.grenade_loaded_draft; expected["name"] = "T1 VIP烟 自定义"; expected["notes"] = changed_notes;
+    const auto saved_team = Json::parse(actions.debug_request.plan_text).value("team",std::string{});
+    if (!saved_team.empty()) expected["team"] = saved_team;
+    expect(saved_team.empty() || saved_team == "T", "编辑名称和指令不得改变已知阵营");
     expect(actions.debug_action == Action::SAVE_PLAN && actions.debug_request.load_path == snapshot.grenade_selected_path &&
         Json::parse(actions.debug_request.plan_text) == expected,
         "保存仅更新编辑过的名称与指令，隐藏的旧location、动作和保存目标不变");
@@ -507,6 +515,136 @@ void grenade_editor_cleanup_interactions() {
         "列表点击未获载入回执前，不改变草稿或原保存目标");
 }
 
+void grenade_map_team_interactions() {
+    using namespace debug_session;
+    auto panel = std::make_unique<MovementPanel>(Mode::GRENADE_TEST);
+    AppConfig config;
+    Snapshot snapshot;
+    const char* title = "道具地图阵营交互回归";
+    const auto gsi = [&](const char* map, weapon::Team team) {
+        snapshot.movement_map.valid = true;
+        snapshot.movement_map.map_name = map;
+        snapshot.movement_map.local_team = team;
+        snapshot.movement_map.status = weapon::Status::READY;
+        snapshot.movement_map.valid_until = weapon::Clock::now() + std::chrono::seconds(30);
+        ++snapshot.movement_map.context_epoch;
+    };
+    auto frame = [&](const char* focus = nullptr, bool popup_focus = false) {
+        ImGui::NewFrame();
+        if (auto* prior = ImGui::FindWindowByName(popup_focus ? "##Combo_00" : title); focus && prior)
+            ImGui::SetFocusID(prior->GetID(focus),prior);
+        ImGui::SetNextWindowPos({0,0}); ImGui::SetNextWindowSize({1100,2000});
+        ImGui::Begin(title,nullptr,ImGuiWindowFlags_NoSavedSettings);
+        OverlayActions actions; panel->render(config,&snapshot,actions);
+        ImGui::End(); ImGui::Render(); return actions;
+    };
+    auto click = [&](const char* label) {
+        auto& io = ImGui::GetIO(); io.AddMousePosEvent(-100,-100); frame(label);
+        auto* window = ImGui::FindWindowByName(title);
+        expect(window && ImGui::GetCurrentContext()->NavId == window->GetID(label),"地图阵营交互须定位真实控件");
+        if (!window) return OverlayActions{};
+        const auto rect = ImGui::WindowRectRelToAbs(window,window->NavRectRel[ImGuiNavLayer_Main]);
+        io.AddMousePosEvent(rect.GetCenter().x,rect.GetCenter().y); frame();
+        io.AddMouseButtonEvent(0,true); frame(); io.AddMouseButtonEvent(0,false); return frame();
+    };
+    auto select = [&](const char* label, const char* option) {
+        click(label); frame();
+        auto* popup = ImGui::FindWindowByName("##Combo_00");
+        expect(popup && popup->Active,"地图和阵营必须使用真实下拉列表");
+        if (!popup || !popup->Active) return OverlayActions{};
+        frame(option,true);
+        auto rect = ImGui::WindowRectRelToAbs(popup,popup->NavRectRel[ImGuiNavLayer_Main]);
+        ImGui::ScrollToRect(popup,rect,ImGuiScrollFlags_KeepVisibleEdgeY); frame(option,true);
+        rect = ImGui::WindowRectRelToAbs(popup,popup->NavRectRel[ImGuiNavLayer_Main]);
+        expect(popup->InnerClipRect.Contains(rect.GetCenter()),"下拉目标须先滚动到可见区域再点击");
+        auto& io = ImGui::GetIO(); io.AddMousePosEvent(rect.GetCenter().x,rect.GetCenter().y); frame();
+        io.AddMouseButtonEvent(0,true); frame(); io.AddMouseButtonEvent(0,false); return frame();
+    };
+    auto edit = [&](const char* label, const char* value) {
+        click(label); auto& io = ImGui::GetIO();
+        io.AddKeyEvent(ImGuiMod_Ctrl,true); io.AddKeyEvent(ImGuiKey_A,true); frame();
+        io.AddKeyEvent(ImGuiKey_A,false); io.AddKeyEvent(ImGuiMod_Ctrl,false);
+        io.AddInputCharactersUTF8(value); return frame();
+    };
+    const auto value = [](const OverlayActions& actions) {
+        return actions.debug_request.plan_text.empty() ? Json::object() : Json::parse(actions.debug_request.plan_text);
+    };
+    gsi("de_mirage",weapon::Team::T);
+    auto actions = frame();
+    expect(!actions.movement_draft_changed,"GSI默认填充不伪装手动编辑或接管另一测试域");
+    actions = click("启用道具测试");
+    expect(value(actions).value("map",std::string{}) == "de_mirage" && value(actions).value("team",std::string{}) == "T",
+        "新道具地图与阵营默认采用有效GSI");
+    actions = edit("道具名称","T垃圾桶左 拱门烟");
+    expect(value(actions).value("name",std::string{}) == "T垃圾桶左 拱门烟" && value(actions).value("team",std::string{}) == "T",
+        "用户实际自定义名称保存独立阵营，不要求T后接数字");
+    actions = select("地图","de_cache");
+    expect(actions.movement_draft_changed && actions.debug_action == Action::NONE &&
+        value(actions).value("map",std::string{}) == "de_cache","没有已保存方案的地图也能从完整下拉选取");
+    actions = select("阵营","CT / 警");
+    expect(actions.movement_draft_changed && value(actions).value("team",std::string{}) == "CT",
+        "手动阵营下拉将CT写入当前草稿");
+    gsi("de_inferno",weapon::Team::T); frame();
+    actions = click("保存方案");
+    expect(actions.debug_action == Action::SAVE_PLAN && value(actions).value("map",std::string{}) == "de_cache" &&
+        value(actions).value("team",std::string{}) == "CT","GSI后续变更不能覆盖已经选择的地图与阵营");
+    actions = click("使用当前地图与阵营");
+    expect(actions.movement_draft_changed && value(actions).value("map",std::string{}) == "de_inferno" &&
+        value(actions).value("team",std::string{}) == "T","明确使用当前GSI时同时更新地图与阵营");
+    actions = select("地图","cs_office");
+    expect(value(actions).value("map",std::string{}) == "cs_office","完整地图下拉包含非de前缀地图");
+    select("地图","自定义地图");
+    edit("自定义地图标识","workshop_smoke_training"); actions = click("保存方案");
+    expect(actions.debug_action == Action::SAVE_PLAN && value(actions).value("map",std::string{}) == "workshop_smoke_training",
+        "地图下拉保留自定义标识输入，未知地图不被GSI自动覆盖");
+
+    panel = std::make_unique<MovementPanel>(Mode::GRENADE_TEST); snapshot = Snapshot{}; frame();
+    select("地图","de_mirage"); select("阵营","T / 匪");
+    edit("道具名称","T垃圾桶左 拱门烟"); actions = click("保存方案");
+    expect(actions.debug_action == Action::SAVE_PLAN && value(actions).value("map",std::string{}) == "de_mirage" &&
+        value(actions).value("team",std::string{}) == "T","没有GSI时仍可手动选择全部地图和阵营并保存");
+
+    movement::timeline::Plan custom;
+    custom.name = "T垃圾桶左 拱门烟"; custom.map = "de_mirage";
+    movement::timeline::Action throw_action; throw_action.kind = movement::timeline::ActionKind::BUTTON;
+    throw_action.duration_ms = 1000; custom.actions.push_back(throw_action);
+    const auto load = [&](Json saved) {
+        snapshot.grenade_loaded_draft = std::move(saved); ++snapshot.grenade_loaded_revision;
+        snapshot.grenade_selected_path = "cache/grenade/plans/custom.json"; ++snapshot.grenade_catalog_revision;
+        return frame();
+    };
+    gsi("de_mirage",weapon::Team::T);
+    const auto old_custom = movement::timeline::plan_json(custom);
+    actions = load(old_custom);
+    expect(!actions.movement_draft_changed,"载入缺阵营的旧自定义方案不自动发布改动");
+    actions = click("启用道具测试");
+    expect(value(actions) == old_custom,"展示GSI默认阵营不能在保存前改写载入的旧JSON");
+    actions = click("保存方案");
+    auto repaired = old_custom; repaired["team"] = "T";
+    expect(actions.debug_action == Action::SAVE_PLAN && value(actions) == repaired,
+        "旧自定义方案同图时保存GSI默认阵营，保留名称及原动作");
+    auto explicit_ct = old_custom; explicit_ct["team"] = "CT";
+    actions = load(explicit_ct);
+    expect(!actions.movement_draft_changed,"已保存显式阵营的载入不产生编辑事件");
+    actions = click("保存方案");
+    expect(value(actions) == explicit_ct,"显式CT阵营优先于名称与当前GSI的T默认");
+    custom.name = "T1 兼容旧方案";
+    const auto legacy_t = movement::timeline::plan_json(custom);
+    gsi("de_mirage",weapon::Team::CT); load(legacy_t); actions = click("保存方案");
+    auto expected_t = legacy_t; expected_t["team"] = "T";
+    expect(value(actions) == expected_t,"旧T1名称推断优先于当前GSI的CT默认");
+
+    panel = std::make_unique<MovementPanel>(Mode::GRENADE_TEST); snapshot = Snapshot{};
+    gsi("de_user_gsi",weapon::Team::T);
+    snapshot.grenade_saved_plans = {{"cache/grenade/plans/library-custom.json","T1 库内地图","de_user_library",""}};
+    frame(); actions = click("保存方案");
+    expect(value(actions).value("map",std::string{}) == "de_user_gsi","当前GSI的未知地图可作为新方案默认");
+    actions = select("地图","de_user_library");
+    expect(value(actions).value("map",std::string{}) == "de_user_library","方案库中未知地图也能直接下拉选择");
+    actions = select("地图","de_user_gsi");
+    expect(value(actions).value("map",std::string{}) == "de_user_gsi","当前GSI未知地图同时出现在地图下拉中");
+}
+
 }
 
 int main() {
@@ -517,6 +655,7 @@ int main() {
     interactions();
     grenade_interactions();
     grenade_editor_cleanup_interactions();
+    grenade_map_team_interactions();
     for (const auto mode : {debug_session::Mode::MOVEMENT_TEST, debug_session::Mode::GRENADE_TEST})
     for (const ImVec2 size : {ImVec2{620, 480}, ImVec2{820, 600}}) {
         io.DisplaySize = size; MovementPanel panel(mode);

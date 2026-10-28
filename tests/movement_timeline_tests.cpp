@@ -105,6 +105,51 @@ void json_contract() {
     require(!parse_plan(legacy, read, error), "V1未知字段被接受");
     p.actions.push_back(turn(20, 50, 12)); require(!validate_plan(p, error), "旋转重叠未拒绝");
 }
+void plan_team_json_contract() {
+    Plan p; p.name = "T垃圾桶左 拱门烟"; p.map = "de_mirage";
+    p.actions = {key(Key::SPACE, 0, 20)};
+    const auto original = plan_json(p);
+    require(!original.contains("team"), "未指定阵营的旧方案被增加字段");
+    auto explicit_team = original; explicit_team["team"] = "T";
+    Plan restored; std::string error;
+    require(parse_plan(explicit_team, restored, error) && plan_json(restored) == explicit_team,
+        "自定义名称方案的显式阵营无法解析或往返");
+    require(restored.team == "T" && plan_team(restored) == "T", "自定义名称方案未使用显式T阵营");
+    explicit_team["name"] = "Mirage T1 VIP烟"; explicit_team["team"] = "CT";
+    require(parse_plan(explicit_team, restored, error) && plan_team(restored) == "CT" &&
+        plan_json(restored) == explicit_team, "显式CT阵营未优先于旧名称推断或往返丢失");
+    const auto preserved = plan_json(restored);
+    for (const nlohmann::json invalid : {nlohmann::json("t"), nlohmann::json("UNKNOWN"),
+            nlohmann::json(" T"), nlohmann::json(1), nlohmann::json(nullptr)}) {
+        auto bad = explicit_team; bad["team"] = invalid;
+        require(!parse_plan(bad, restored, error) && plan_json(restored) == preserved,
+            "非法阵营被接受或解析失败破坏已有方案");
+    }
+    p.team = "UNKNOWN";
+    require(!validate_plan(p, error), "内存方案的非法阵营未拒绝");
+    p.team.clear();
+    auto empty_team = original; empty_team["team"] = "";
+    require(parse_plan(empty_team, restored, error) && restored.team.empty() && plan_json(restored) == original,
+        "显式空阵营未恢复旧方案序列化结构");
+    restored.team = "CT";
+    require(parse_plan(original, restored, error) && restored.team.empty() && plan_json(restored) == original,
+        "载入无阵营旧方案未清空上一个显式阵营");
+    for (const int version : {1, 2}) {
+        auto legacy = original; legacy["schema_version"] = version; legacy.erase("voice_command");
+        require(parse_plan(legacy, restored, error) && restored.team.empty(), "旧版本无阵营方案不兼容");
+        legacy["team"] = "T";
+        require(!parse_plan(legacy, restored, error), "旧版本意外接受显式阵营字段");
+    }
+    const auto legacy_name = [&](const char* name, const char* expected) {
+        p.name = name;
+        require(plan_team(p) == expected, "旧方案名称的阵营推断行为变化");
+    };
+    legacy_name("Mirage T1 VIP烟", "T"); legacy_name("CT5 匪口烟", "CT");
+    legacy_name("Mirage T来源烟", "T"); legacy_name("Mirage CT来源烟", "CT");
+    legacy_name("T垃圾桶左 拱门烟", ""); legacy_name("Mirage T 自定义烟", "");
+    legacy_name("MirageCT1 烟", ""); legacy_name("T未知 T1 烟", "");
+    legacy_name("T1 CT2 烟", "CT");
+}
 void recorded_tracks() {
     Plan p; p.mask.enabled = false;
     Action physical = key(Key::W, 0, 400); physical.physical = true;
@@ -337,7 +382,7 @@ int main(int argc, char** argv) {
             validate_directory(std::filesystem::u8path(argv[2]));
             return 0;
         }
-        json_contract(); parallel_union_and_restore(); failures_and_cancel(); missed_interval_and_mask_window(); recorded_tracks();
+        json_contract(); plan_team_json_contract(); parallel_union_and_restore(); failures_and_cancel(); missed_interval_and_mask_window(); recorded_tracks();
         button_contract_and_jump_order(); button_failure_cleanup_and_missed_interval();
         first_output_admission();
         std::cout << "身法时间轴专项通过\n"; return 0;

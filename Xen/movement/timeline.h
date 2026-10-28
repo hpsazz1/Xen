@@ -30,10 +30,12 @@ struct Plan {
     std::string name = "新身法方案", map, location, notes, voice_command;
     std::vector<Action> actions;
     Mask mask;
+    std::string team; // 空值保留旧方案按名称推断阵营的行为。
 };
 bool validate_plan(const Plan&, std::string& error) noexcept;
 bool parse_plan(const nlohmann::json&, Plan&, std::string& error) noexcept;
 nlohmann::json plan_json(const Plan&);
+std::string plan_team(const Plan&);
 int duration_ms(const Plan&) noexcept;
 struct Progress { int elapsed_ms = 0, total_ms = 0, sent_dx = 0; };
 struct Callbacks {
