@@ -337,6 +337,20 @@ void test_grenade_save_identity(const std::filesystem::path& root) {
     require(session.snapshot()->grenade_selected_path==saved&&read_json(std::filesystem::u8path(saved))==candidate&&
         session.snapshot()->message.find("已更新")!=std::string::npos,
         "新建回执之后同名动作和姿态修改应更新自身，不连续另存");
+    request.grenade_update_selected=true;
+    candidate["name"]="明确改名后的下烟";candidate["actions"][0]["duration_ms"]=230;
+    request.plan_text=candidate.dump();
+    submit(session,Action::SAVE_PLAN,request,context,State::COMPLETED);
+    require(session.snapshot()->grenade_selected_path==saved&&read_json(std::filesystem::u8path(saved))==candidate&&
+        read_json(path)==original&&session.snapshot()->message.find("已更新")!=std::string::npos,
+        "明确更新当前道具必须允许改名和动作，保持当前ID且不覆盖另一道具");
+    request.load_path=old_path;
+    require(!session.dispatch(Action::SAVE_PLAN,request,context)&&read_json(path)==original,
+        "显式更新不得用过时目标覆盖另一方案，必须先载入对应道具");
+    request.load_path=saved;request.movement_save_as=true;
+    submit(session,Action::SAVE_PLAN,request,context,State::COMPLETED);
+    require(session.snapshot()->grenade_selected_path!=saved&&read_json(std::filesystem::u8path(saved))==candidate,
+        "复制意图优先于更新标志，必须生成新ID并保留原文件");
     require(device->touches==0,"保存身份保护不得触发设备输入");
 }
 void test_grenade_delete(const std::filesystem::path& root) {

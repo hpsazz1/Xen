@@ -216,6 +216,7 @@ struct MovementPanel::Impl {
         return true;
     }
     void changed(OverlayActions& actions) {
+        request.grenade_update_selected = false;
         update_request();
         actions.movement_draft_changed = true;
         actions.debug_request = request;
@@ -228,10 +229,7 @@ struct MovementPanel::Impl {
         return {value.name,value.map,value.location,movement::timeline::plan_team(value)};
     }
     bool updates_current_grenade() const {
-        if (request.load_path.empty() || !grenade_baseline) return false;
-        auto current = identity(plan);
-        if (current.team.empty()) current.team = selected_team();
-        return current == *grenade_baseline;
+        return !request.load_path.empty() && !new_grenade_draft;
     }
     void new_grenade(OverlayActions& actions) {
         plan = Plan{}; plan.name = "新道具方案"; plan.map = gsi_map; plan.team = gsi_team;
@@ -243,6 +241,7 @@ struct MovementPanel::Impl {
         changed(actions);
     }
     void send(Action action, OverlayActions& actions, bool save_as = false) {
+        request.grenade_update_selected = false;
         if (action == Action::DELETE_PLAN && (!grenade() || request.load_path.empty())) return;
         if (grenade() && action == Action::SAVE_PLAN) {
             const auto side = selected_team();
@@ -267,6 +266,7 @@ struct MovementPanel::Impl {
             else if (action == Action::LOAD_PLAN || action == Action::DELETE_PLAN) pending_grenade_save.reset();
         }
         request.movement_save_as = save_as;
+        request.grenade_update_selected = grenade() && action == Action::SAVE_PLAN && !save_as && updates_current_grenade();
         actions.debug_action = action;
         actions.debug_request = request;
     }
@@ -682,8 +682,8 @@ void MovementPanel::render(const AppConfig& config, const Snapshot* snapshot, Ov
         if (ui.grenade()) {
             const bool updating = ui.updates_current_grenade();
             if (button(updating ? "更新当前道具" : "保存新道具",
-                    updating ? "名称、地图、点位和阵营仍是原身份，只更新当前文件的动作、姿态或说明。" :
-                        "当前没有保存目标，或名称、地图、点位、阵营已改变；保存为新文件，保留原方案及参考图。",
+                    updating ? "将当前名称、地图、点位、阵营和动作更新到已载入的道具文件。" :
+                        "当前没有保存目标，将草稿保存为新的道具文件。",
                     !busy && !recording)) ui.send(Action::SAVE_PLAN,actions,!updating);
             if (updating) {
                 ImGui::SameLine();

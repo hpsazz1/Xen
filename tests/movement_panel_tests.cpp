@@ -455,14 +455,15 @@ void grenade_editor_cleanup_interactions() {
         !actions.movement_draft_changed && actions.debug_action == Action::NONE,
         "编辑后的复制只取setpos/setang，不含附注或后续命令且不执行动作");
     io.SetClipboardTextFn = old_set_clipboard; io.ClipboardUserData = old_clipboard_data;
-    actions = click("保存新道具");
+    actions = click("更新当前道具");
     auto expected = snapshot.grenade_loaded_draft; expected["name"] = "T1 VIP烟 自定义"; expected["notes"] = changed_notes;
     const auto saved_team = Json::parse(actions.debug_request.plan_text).value("team",std::string{});
     if (!saved_team.empty()) expected["team"] = saved_team;
     expect(saved_team.empty() || saved_team == "T", "编辑名称和指令不得改变已知阵营");
-    expect(actions.debug_action == Action::SAVE_PLAN && actions.debug_request.load_path == snapshot.grenade_selected_path &&
+    expect(actions.debug_action == Action::SAVE_PLAN && !actions.debug_request.movement_save_as &&
+        actions.debug_request.grenade_update_selected && actions.debug_request.load_path == snapshot.grenade_selected_path &&
         Json::parse(actions.debug_request.plan_text) == expected,
-        "改名保存为独立道具，隐藏的旧location和动作保持，原保存目标不被覆盖");
+        "改名明确更新原道具文件，隐藏的旧location和动作保持");
 
     const auto saved = [](const char* id, const char* name, const char* map) {
         return MovementSavedPlan{"cache/grenade/plans/" + std::string(id) + ".json",
@@ -510,7 +511,7 @@ void grenade_editor_cleanup_interactions() {
     actions = popup_click(3);
     expect(actions.debug_action == Action::LOAD_PLAN && actions.debug_request.load_path == "cache/grenade/plans/vip-backup.json",
         "筛选后备用瞄角仍保持相邻顺序并载入对应文件");
-    actions = click("保存新道具");
+    actions = click("更新当前道具");
     expect(actions.debug_request.load_path == snapshot.grenade_selected_path && Json::parse(actions.debug_request.plan_text) == expected,
         "列表点击未获载入回执前，不改变草稿或原保存目标");
 }
@@ -619,9 +620,10 @@ void grenade_map_team_interactions() {
     expect(!actions.movement_draft_changed,"载入缺阵营的旧自定义方案不自动发布改动");
     actions = click("启用道具测试");
     expect(value(actions) == old_custom,"展示GSI默认阵营不能在保存前改写载入的旧JSON");
-    actions = click("保存新道具");
+    actions = click("更新当前道具");
     auto repaired = old_custom; repaired["team"] = "T";
-    expect(actions.debug_action == Action::SAVE_PLAN && value(actions) == repaired,
+    expect(actions.debug_action == Action::SAVE_PLAN && !actions.debug_request.movement_save_as &&
+        actions.debug_request.grenade_update_selected && value(actions) == repaired,
         "旧自定义方案同图时保存GSI默认阵营，保留名称及原动作");
     auto explicit_ct = old_custom; explicit_ct["team"] = "CT";
     actions = load(explicit_ct);
@@ -780,8 +782,11 @@ void grenade_save_intent_interactions() {
     snapshot.grenade_selected_path="cache/grenade/plans/original.json"; snapshot.grenade_catalog_revision=1;
     snapshot.grenade_guidance_reference_id="old-tested-reference";
     gsi("de_mirage",weapon::Team::T); frame();
-    auto actions=click("新增道具");
-    expect(actions.movement_draft_changed && actions.debug_action==Action::NONE && actions.debug_request.load_path.empty(),
+    auto actions=click("更新当前道具");
+    expect(actions.debug_request.grenade_update_selected,"已载入目标的更新操作必须明确携带更新意图");
+    actions=click("新增道具");
+    expect(actions.movement_draft_changed && actions.debug_action==Action::NONE && actions.debug_request.load_path.empty() &&
+        !actions.debug_request.grenade_update_selected,
         "新增道具必须清空保存目标和已保存身份，只发布未保存草稿而不执行动作");
     if(!actions.movement_draft_changed || actions.debug_request.plan_text.empty()) return;
     const auto fresh=value(actions);
@@ -795,11 +800,12 @@ void grenade_save_intent_interactions() {
     // 无关目录回执仍带着旧路径/基线，不能反灌刚新建的草稿。
     ++snapshot.grenade_catalog_revision; frame();
     actions=click("刷新方案");
-    expect(actions.debug_action==Action::LIST_MOVEMENT_PLANS && actions.debug_request.load_path.empty(),
+    expect(actions.debug_action==Action::LIST_MOVEMENT_PLANS && actions.debug_request.load_path.empty() &&
+        !actions.debug_request.grenade_update_selected,
         "新增后刷新仍须传空目标，不能复活旧方案保存路径");
     snapshot.grenade_selected_path.clear(); ++snapshot.grenade_catalog_revision; frame();
     actions=click("保存新道具");
-    expect(actions.debug_action==Action::SAVE_PLAN && actions.debug_request.movement_save_as &&
+    expect(actions.debug_action==Action::SAVE_PLAN && actions.debug_request.movement_save_as && !actions.debug_request.grenade_update_selected &&
         actions.debug_request.load_path.empty() && value(actions)==fresh,"新增草稿通过保存新道具创建独立文件");
     const auto acknowledge=[&](const OverlayActions& saved,const char* path) {
         snapshot.grenade_baseline=value(saved); snapshot.grenade_selected_path=path; ++snapshot.grenade_catalog_revision;
@@ -807,41 +813,53 @@ void grenade_save_intent_interactions() {
     };
     acknowledge(actions,"cache/grenade/plans/new-one.json");
     actions=click("更新当前道具");
-    expect(actions.debug_action==Action::SAVE_PLAN && !actions.debug_request.movement_save_as &&
+    expect(actions.debug_action==Action::SAVE_PLAN && !actions.debug_request.movement_save_as && actions.debug_request.grenade_update_selected &&
         actions.debug_request.load_path==snapshot.grenade_selected_path && value(actions)==fresh,
         "首次保存回执只更新baseline/catalog，下一次必须更新刚保存的新文件而非连续另存");
     edit("定位与瞄角指令","修改同点参数"); actions=click("更新当前道具");
-    expect(actions.debug_action==Action::SAVE_PLAN && !actions.debug_request.movement_save_as,
+    expect(actions.debug_action==Action::SAVE_PLAN && !actions.debug_request.movement_save_as && actions.debug_request.grenade_update_selected,
         "原身份仅调整说明或动作仍更新当前道具");
-    edit("道具名称","另一个新道具"); actions=click("保存新道具");
-    expect(actions.debug_action==Action::SAVE_PLAN && actions.debug_request.movement_save_as &&
-        actions.debug_request.load_path=="cache/grenade/plans/new-one.json","改名必须新建，保留原保存目标供后台保护");
-    acknowledge(actions,"cache/grenade/plans/new-two.json");
+    actions=edit("道具名称","另一个新道具");
+    expect(actions.movement_draft_changed && !actions.debug_request.grenade_update_selected,
+        "改名草稿不能继承上次保存的显式更新意图");
+    click("添加动作"); actions=click("更新当前道具");
+    expect(actions.debug_action==Action::SAVE_PLAN && !actions.debug_request.movement_save_as && actions.debug_request.grenade_update_selected &&
+        actions.debug_request.load_path=="cache/grenade/plans/new-one.json" && value(actions)["actions"].size()==2,
+        "改名和动作编辑后仍须保留更新按钮，明确更新原保存目标");
+    acknowledge(actions,"cache/grenade/plans/new-one.json");
     actions=click("更新当前道具");
-    expect(actions.debug_action==Action::SAVE_PLAN && !actions.debug_request.movement_save_as &&
+    expect(actions.debug_action==Action::SAVE_PLAN && !actions.debug_request.movement_save_as && actions.debug_request.grenade_update_selected &&
         actions.debug_request.load_path==snapshot.grenade_selected_path && value(actions).value("name",std::string{})=="另一个新道具",
-        "改名另存成功后不得被原loaded_draft反灌或持续另存");
+        "改名更新成功后不得被原loaded_draft反灌或误判成另存");
+    actions=click("校验方案");
+    expect(actions.debug_action==Action::VALIDATE && !actions.debug_request.grenade_update_selected,
+        "校验及其他操作不能继承上次显式更新意图");
+    click("更新当前道具");
     actions=click("复制为新道具");
-    expect(actions.debug_action==Action::SAVE_PLAN && actions.debug_request.movement_save_as,
-        "同身份可显式复制为新道具，且不覆盖已有文件");
+    expect(actions.debug_action==Action::SAVE_PLAN && actions.debug_request.movement_save_as && !actions.debug_request.grenade_update_selected,
+        "复制为新道具必须清除显式更新意图且不覆盖已有文件");
     acknowledge(actions,"cache/grenade/plans/copy.json");
-    gsi("de_cache",weapon::Team::T); frame(); click("使用当前地图与阵营"); actions=click("保存新道具");
-    expect(actions.debug_action==Action::SAVE_PLAN && actions.debug_request.movement_save_as,
-        "只改变地图也必须保存新道具");
-    acknowledge(actions,"cache/grenade/plans/cache.json");
-    gsi("de_cache",weapon::Team::CT); frame(); click("使用当前地图与阵营"); actions=click("保存新道具");
-    expect(actions.debug_action==Action::SAVE_PLAN && actions.debug_request.movement_save_as,
-        "只改变阵营也必须保存新道具");
-    acknowledge(actions,"cache/grenade/plans/ct.json");
+    actions=click("校验方案");
+    expect(actions.debug_action==Action::VALIDATE && !actions.debug_request.grenade_update_selected,
+        "校验及其他操作不能携带显式更新意图");
+    gsi("de_cache",weapon::Team::T); frame(); click("使用当前地图与阵营"); actions=click("更新当前道具");
+    expect(actions.debug_action==Action::SAVE_PLAN && !actions.debug_request.movement_save_as && actions.debug_request.grenade_update_selected,
+        "已保存目标改变地图后仍提供明确更新选择");
+    acknowledge(actions,"cache/grenade/plans/copy.json");
+    gsi("de_cache",weapon::Team::CT); frame(); click("使用当前地图与阵营"); actions=click("更新当前道具");
+    expect(actions.debug_action==Action::SAVE_PLAN && !actions.debug_request.movement_save_as && actions.debug_request.grenade_update_selected,
+        "已保存目标改变阵营后仍提供明确更新选择");
+    acknowledge(actions,"cache/grenade/plans/copy.json");
     snapshot.grenade_baseline["location"]="后台新站位"; ++snapshot.grenade_catalog_revision; frame();
-    actions=click("保存新道具");
-    expect(actions.debug_action==Action::SAVE_PLAN && actions.debug_request.movement_save_as,
-        "保存基线点位改变后，旧UI草稿不得覆盖新身份");
+    actions=click("更新当前道具");
+    expect(actions.debug_action==Action::SAVE_PLAN && !actions.debug_request.movement_save_as && actions.debug_request.grenade_update_selected,
+        "更新操作仅依赖当前载入目标，不能因身份变化消失");
     original.team.clear(); original.crouch=false; snapshot.grenade_loaded_draft=movement::timeline::plan_json(original);
     snapshot.grenade_baseline=snapshot.grenade_loaded_draft; ++snapshot.grenade_loaded_revision;
     snapshot.grenade_selected_path="cache/grenade/plans/legacy.json"; ++snapshot.grenade_catalog_revision; frame();
     actions=click("更新当前道具");
-    expect(actions.debug_action==Action::SAVE_PLAN && !actions.debug_request.movement_save_as && value(actions).value("team",std::string{})=="T",
+    expect(actions.debug_action==Action::SAVE_PLAN && !actions.debug_request.movement_save_as && actions.debug_request.grenade_update_selected &&
+        value(actions).value("team",std::string{})=="T",
         "旧名推断T与显式T是同身份，补阵营仍更新当前道具");
     click("新增道具"); click("刷新方案");
     snapshot.grenade_selected_path.clear(); ++snapshot.grenade_catalog_revision; frame();
@@ -864,7 +882,7 @@ void grenade_save_intent_interactions() {
     snapshot.grenade_baseline=snapshot.grenade_loaded_draft; snapshot.grenade_selected_path=split_path;
     ++snapshot.grenade_catalog_revision; snapshot.busy=false; snapshot.state=State::COMPLETED; frame();
     actions=click("更新当前道具");
-    expect(actions.debug_action==Action::SAVE_PLAN && !actions.debug_request.movement_save_as &&
+    expect(actions.debug_action==Action::SAVE_PLAN && !actions.debug_request.movement_save_as && actions.debug_request.grenade_update_selected &&
         actions.debug_request.load_path==split_path,
         "分段载入回执必须撤销新建隔离并接住最终保存路径，不能误判为另存");
 }

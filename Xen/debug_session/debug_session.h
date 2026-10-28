@@ -42,6 +42,8 @@ struct Request {
     bool show_hud = true;
     bool override_sampling = false;
     bool movement_save_as = false;
+    // 只有“更新当前道具”显式设置；普通保存仍保留改身份另存护栏。
+    bool grenade_update_selected = false;
     int movement_record_motion_mode = 1;
     std::string movement_library_root = "cache/movement/plans";
 };

@@ -1227,6 +1227,9 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
         }
         const auto repeat_revision = impl_->repeat_revision.load();
         if (timeline_mode(request.mode) && action == Action::SAVE_PLAN) {
+            if (request.mode==Mode::GRENADE_TEST && request.grenade_update_selected && !request.movement_save_as &&
+                (request.load_path.empty() || request.load_path!=snapshot()->grenade_selected_path))
+                return reject("请先载入要更新的道具，再点更新当前道具");
             const auto current = request_plan(request);
             impl_->update([&](Snapshot& s) { current_plan(s,request.mode) = current; });
             if (request.mode == Mode::GRENADE_TEST) impl_->invalidate_grenade("道具保存后请重新对齐");
@@ -1287,7 +1290,7 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
                 const auto plan = request_plan(request);
                 std::string path;
                 try { path = detail::save_movement_plan(plan,request.load_path,request.movement_save_as,
-                    timeline_library_root(request),request.mode==Mode::GRENADE_TEST); }
+                    timeline_library_root(request),request.mode==Mode::GRENADE_TEST && !request.grenade_update_selected); }
                 catch (const std::exception& error) {
                     impl_->update([&](Snapshot& s) { s.state = State::COMPLETED; s.message = error.what(); });
                     return;
