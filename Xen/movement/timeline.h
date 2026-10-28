@@ -8,7 +8,7 @@
 // 调试编辑器和后续地图入口共用的数据与同步执行契约；调用方负责设备独占和线程。
 namespace movement::timeline {
 enum class ActionKind { KEY, TURN, MASK, MOVE, WHEEL, BUTTON };
-enum class Key { W, A, S, D, SPACE, CTRL };
+enum class Key { W, A, S, D, SPACE, CTRL, SHIFT };
 enum class Button { LEFT, RIGHT };
 struct Action {
     ActionKind kind = ActionKind::KEY;

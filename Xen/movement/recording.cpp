@@ -11,9 +11,12 @@ int physical_keys(const InputReportEvent& input) {
     int keys = input.wasd_mask;
     if (std::find(input.keyboard_usages.begin(), input.keyboard_usages.end(), 0x2c) != input.keyboard_usages.end()) keys |= 16;
     if (input.keyboard_modifiers & 1) keys |= 32;
+    if (input.keyboard_modifiers & 2) keys |= 64;
     return keys;
 }
-int software_keys(const MovementTraceEvent& event) { return event.wasd | (event.space ? 16 : 0) | (event.ctrl ? 32 : 0); }
+int software_keys(const MovementTraceEvent& event) {
+    return event.wasd | (event.space ? 16 : 0) | (event.ctrl ? 32 : 0) | (event.shift ? 64 : 0);
+}
 const char* kind_name(Kind kind) {
     switch (kind) {
     case Kind::INPUT: return "physical_report";
@@ -72,7 +75,7 @@ Result derive(const std::vector<MovementTraceEvent>& source, std::int64_t begin_
         auto& plan = result.plan;
         plan.name = "录制身法"; plan.mask.enabled = false;
         plan.notes = "按所选鼠标报告模式派生的接收域候选；鼠标每10ms合并，完整请求/回执及原始报告另存。按monitor为物理输入解释；若固件混入软件输出会重复计数，来源与游戏效果未实机标定。";
-        std::array<int,6> physical_start{},software_start{};
+        std::array<int,7> physical_start{},software_start{};
         std::array<int,4> mask_start{};
         physical_start.fill(-1); software_start.fill(-1); mask_start.fill(-1);
         int physical = 0,software = 0,masks = 0;

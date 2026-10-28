@@ -191,7 +191,7 @@ struct MovementTraceEvent {
     InputReportEvent input;
     int dx = 0, dy = 0, wheel = 0;
     std::uint8_t wasd = 0;
-    bool space = false, ctrl = false, masked = false, acknowledged = false;
+    bool space = false, ctrl = false, shift = false, masked = false, acknowledged = false;
     bool baseline = false;
 };
 struct MovementTraceBatch {
@@ -225,6 +225,9 @@ public:
     // 仅软件 Left Ctrl；不屏蔽物理修饰键，统一键盘清理负责释放。
     virtual bool supports_left_ctrl_key() const noexcept { return false; }
     virtual KeyboardReceipt set_left_ctrl_key(bool) noexcept { return {}; }
+    // 仅软件 Left Shift；与 Ctrl/WASD/Space 共享报告及清理责任。
+    virtual bool supports_left_shift_key() const noexcept { return false; }
+    virtual KeyboardReceipt set_left_shift_key(bool) noexcept { return {}; }
     // 左右软件按钮共享故障与清理责任；不能用一侧 up 隐藏另一侧未确认释放。
     virtual bool left_button_faulted() const noexcept { return false; }
     virtual bool left_button_cleanup_required() const noexcept { return false; }

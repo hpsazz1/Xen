@@ -21,6 +21,10 @@ public:
     bool space = false, ctrl = false, fail_key = false, fail_cleanup = false, fail_move = false;
     bool delay_key = false, ctrl_supported = true;
     bool ctrl_on_w = false, ctrl_on_jump = false, ctrl_at_cleanup = false;
+    bool shift = false, shift_supported = true, fail_shift_down = false;
+    bool shift_on_w = false, shift_on_jump = false, shift_on_ctrl = false;
+    bool shift_on_w_up = false, shift_on_jump_up = false, released_without_shift = false, shift_on_mouse_release = false;
+    int shift_downs = 0, shift_ups = 0;
     int ctrl_ups = 0;
     bool stood_before_button_release = false;
     bool button_supported = true, left = false, right = false;
@@ -33,10 +37,12 @@ public:
     bool poll_input(InputSnapshot&) noexcept override { return false; }
     bool supports_wasd_keyboard() const noexcept override { return true; }
     bool supports_left_ctrl_key() const noexcept override { return ctrl_supported; }
+    bool supports_left_shift_key() const noexcept override { return shift_supported; }
     bool supports_left_button() const noexcept override { return button_supported; }
     bool left_button_faulted() const noexcept override { return shared_button_fault; }
     ButtonReceipt set_left_button(bool down) noexcept override {
         if (!down && left && !ctrl) stood_before_button_release = true;
+        if (!down && left) {released_without_shift|=!shift;shift_on_mouse_release|=shift;}
         events.push_back(down ? "left_down" : "left_up");
         if (!down) ++left_ups;
         left = down;
@@ -44,6 +50,7 @@ public:
             ButtonDisposition::APPLICATION_UNKNOWN : ButtonDisposition::ACKNOWLEDGED};
     }
     ButtonReceipt set_right_button(bool down) noexcept override {
+        if (!down && right) {released_without_shift|=!shift;shift_on_mouse_release|=shift;}
         events.push_back(down ? "right_down" : "right_up");
         if (!down) ++right_ups;
         right = down;
@@ -58,18 +65,28 @@ public:
     }
     KeyboardReceipt set_wasd_keyboard(std::uint8_t value) noexcept override {
         if (value) ctrl_on_w = ctrl;
+        if (value) shift_on_w = shift;
+        if (!value && software) shift_on_w_up = shift;
         software = value; keys.push_back(value); events.push_back("keys");
         if (delay_key) std::this_thread::sleep_for(std::chrono::milliseconds(60));
         return {fail_key ? KeyboardDisposition::APPLICATION_UNKNOWN : KeyboardDisposition::ACKNOWLEDGED};
     }
     KeyboardReceipt set_space_key(bool value) noexcept override {
         if (value) ctrl_on_jump = ctrl;
+        if (value) shift_on_jump = shift;
+        if (!value && space) shift_on_jump_up = shift;
         space = value; events.push_back(value ? "space_down" : "space_up"); return {KeyboardDisposition::ACKNOWLEDGED};
     }
     KeyboardReceipt set_left_ctrl_key(bool value) noexcept override {
+        if (value) shift_on_ctrl = shift;
         if (!value) ++ctrl_ups;
         events.push_back(value ? "ctrl_down" : "ctrl_up");
         ctrl = value; return {KeyboardDisposition::ACKNOWLEDGED};
+    }
+    KeyboardReceipt set_left_shift_key(bool value) noexcept override {
+        if (value) ++shift_downs; else ++shift_ups;
+        events.push_back(value?"shift_down":"shift_up");shift=value;
+        return {value&&fail_shift_down?KeyboardDisposition::APPLICATION_UNKNOWN:KeyboardDisposition::ACKNOWLEDGED};
     }
     KeyboardReceipt set_wasd_mask(std::uint8_t key, bool value) noexcept override {
         mask_bits.push_back(key); if (value) masks |= key; else masks &= ~key;
@@ -79,7 +96,7 @@ public:
         ctrl_at_cleanup = ctrl;
         ++cleanups; events.push_back("cleanup");
         if (fail_cleanup) return {KeyboardDisposition::APPLICATION_UNKNOWN};
-        software = 0; space = ctrl = false; masks = 0; return {KeyboardDisposition::ACKNOWLEDGED};
+        software = 0; space = ctrl = shift = false; masks = 0; return {KeyboardDisposition::ACKNOWLEDGED};
     }
     int effective_keys() const { return software | (physical & ~masks); }
 };
@@ -90,6 +107,60 @@ Action button(Button value, int start, int duration) {
 }
 Callbacks permission() { return {[] { return true; }, {}, {}}; }
 movement::Config scale() { movement::Config c; c.sensitivity = 1; c.yaw_degrees_per_count = 0.1; return c; }
+void shift_json_contract() {
+    Plan original;original.actions={key(Key::W,0,100)};
+    const auto old_json=plan_json(original);
+    auto shifted=old_json;shifted["actions"][0]["key"]="SHIFT";
+    Plan parsed;std::string error;
+    require(parse_plan(shifted,parsed,error)&&plan_json(parsed)==shifted,
+        "SHIFT静步键JSON必须经过生产解析及往返，不能退化为WASD位");
+    const auto preserved=plan_json(parsed);
+    auto masked=shifted;masked["actions"][0]["type"]="mask";
+    require(!parse_plan(masked,parsed,error)&&plan_json(parsed)==preserved,
+        "SHIFT不能被当成WASD屏蔽位，拒绝时保留原方案");
+    require(parse_plan(old_json,parsed,error)&&plan_json(parsed)==old_json,
+        "新增SHIFT不能改写旧方案或旧按键索引");
+}
+void shift_execution_contract() {
+    Plan p;p.mask={true,15,0,0};
+    auto physical_shift=key(Key::SHIFT,20,30);physical_shift.physical=true;
+    p.actions={key(Key::SHIFT,0,160),physical_shift,key(Key::SHIFT,150,50),key(Key::CTRL,0,200),
+        key(Key::W,40,160),key(Key::SPACE,100,100),button(Button::RIGHT,0,99),button(Button::LEFT,0,100)};
+    Fake held;
+    const auto completed=run_plan(held,p,scale(),permission());
+    require(completed.outcome==Outcome::COMPLETED&&completed.cleanup_known&&held.shift_on_w&&held.shift_on_ctrl&&
+        held.shift_on_jump&&held.shift_on_w_up&&held.shift_on_jump_up&&held.shift_on_mouse_release&&!held.released_without_shift,
+        "静步组合须先持有SHIFT，再发W/Ctrl/Space并松鼠标，最后释放SHIFT");
+    require(held.shift_downs==1&&held.shift_ups==1&&held.cleanups==1&&!held.shift&&!held.ctrl&&!held.space&&
+        held.software==0&&std::all_of(held.keys.begin(),held.keys.end(),[](int value){return (value&~15)==0;}),
+        "重叠物理/软件SHIFT必须按并集合并，不进入WASD位，投后统一清理");
+    for (const bool lose_permission:{false,true}) {
+        Fake stopped;auto callbacks=permission();
+        if(lose_permission) callbacks.permitted=[&]{return !stopped.shift;};
+        else callbacks.canceled=[&]{return stopped.shift;};
+        const auto result=run_plan(stopped,p,scale(),callbacks);
+        require(result.outcome==Outcome::CANCELED&&result.cleanup_known&&stopped.cleanups==1&&!stopped.shift&&
+            stopped.software==0&&!stopped.ctrl&&!stopped.space,"SHIFT持有期间取消或失许可仍须统一释放，不查询已撤销许可");
+    }
+    Fake unknown;unknown.fail_shift_down=true;
+    const auto failed=run_plan(unknown,p,scale(),permission());
+    require(failed.outcome==Outcome::FAILED&&failed.cleanup_known&&unknown.shift_downs==1&&unknown.cleanups==1&&!unknown.shift,
+        "SHIFT按下未确认也须清理，不能重发按下或遗留静步");
+    Fake dirty;dirty.fail_cleanup=true;auto cancel=permission();cancel.canceled=[&]{return dirty.shift;};
+    const auto unclean=run_plan(dirty,p,scale(),cancel);
+    require(unclean.outcome==Outcome::FAILED&&!unclean.cleanup_known&&dirty.cleanups==1,
+        "SHIFT清理未确认不得报告成功或继续输出");
+    Fake unsupported;unsupported.shift_supported=false;
+    const auto rejected=run_plan(unsupported,p,scale(),permission());
+    require(rejected.outcome==Outcome::FAILED&&unsupported.events.empty()&&unsupported.cleanups==0,
+        "不支持Left Shift的后端必须在任何键鼠输出前拒绝");
+    Plan short_interval;short_interval.mask.enabled=false;
+    short_interval.actions={key(Key::W,0,100),key(Key::SHIFT,20,1)};
+    Fake delayed;delayed.delay_key=true;
+    const auto missed=run_plan(delayed,short_interval,scale(),permission());
+    require(missed.outcome==Outcome::FAILED&&missed.error.find("区间被错过")!=std::string::npos&&delayed.cleanups==1,
+        "未被其他SHIFT区间覆盖的静步动作整段错过时仍须报错并清理");
+}
 void json_contract() {
     Plan p; p.actions = {key(Key::SPACE, 0, 20), turn(0, 50, -12.3)};
     p.map = "本地训练图"; p.location = "测试点";
@@ -462,7 +533,7 @@ int main(int argc, char** argv) {
             validate_directory(std::filesystem::u8path(argv[2]));
             return 0;
         }
-        crouch_execution_contract(); crouch_json_contract();
+        shift_json_contract(); shift_execution_contract(); crouch_execution_contract(); crouch_json_contract();
         json_contract(); plan_team_json_contract(); parallel_union_and_restore(); failures_and_cancel(); missed_interval_and_mask_window(); recorded_tracks();
         button_contract_and_jump_order(); button_failure_cleanup_and_missed_interval();
         first_output_admission();

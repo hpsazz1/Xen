@@ -92,9 +92,31 @@ void incomplete_rejected() {
     require(ended.complete && action(ended.plan, timeline::ActionKind::KEY, timeline::Key::W, true).duration_ms == 20,
         "停止边界上的释放被提前截短");
 }
+void shift_tracks() {
+    auto baseline=input(0,1,true);baseline.input.keyboard_modifiers=2;
+    auto ctrl=input(5,1);ctrl.input.keyboard_modifiers=3;
+    auto held=software(Kind::KEYBOARD,10);held.wasd=8;held.space=held.ctrl=held.shift=true;
+    auto still_shift=software(Kind::KEYBOARD,20);still_shift.shift=true;
+    const std::vector<Event> events{baseline,ctrl,held,mask(12,1,true),still_shift,mask(20,1,false),input(25),software(Kind::KEYBOARD,30)};
+    const auto trace=recording::trace_json(events,kBegin,stamp(40),false,1);
+    require(trace.at("events")[0].at("keys")==65&&trace.at("events")[2].at("keys")==120,
+        "录制原始轨迹必须保留物理及软件Left Shift，且WASD/Space/Ctrl位不变");
+    const auto result=recording::derive(events,kBegin,stamp(40),false,1);
+    require(result.complete,"静步与W/Space/Ctrl组合轨迹应可派生");
+    const auto& physical=action(result.plan,timeline::ActionKind::KEY,timeline::Key::SHIFT,true);
+    const auto& software_shift=action(result.plan,timeline::ActionKind::KEY,timeline::Key::SHIFT);
+    require(physical.start_ms==0&&physical.duration_ms==25&&software_shift.start_ms==10&&software_shift.duration_ms==20,
+        "物理和软件SHIFT须保持独立来源及原边沿时间");
+    require(std::all_of(result.plan.actions.begin(),result.plan.actions.end(),[](const auto& a) {
+        return a.kind!=timeline::ActionKind::MASK||static_cast<unsigned>(a.key)<4;
+    }),"SHIFT轨道不能混入WASD屏蔽");
+    auto unclean=events;unclean.back().shift=true;
+    require(!recording::derive(unclean,kBegin,stamp(40),false,1).complete,
+        "录制结束软件SHIFT尚未释放时不能生成可执行回放");
+}
 void scoped_raw_trace() {
     auto e = input(0, 1, true); e.input.mouse_buttons = 31; e.input.keyboard_usages[0] = 0x04;
-    e.input.keyboard_modifiers = 2; e.input.raw_report.fill(0xff);
+    e.input.keyboard_modifiers = 4; e.input.raw_report.fill(0xff); // 无关Left Alt仍不能进入身法记录。
     auto move = software(Kind::MOVE, 2); move.completed_ns = stamp(3); move.dx = 4; move.dy = -1;
     const auto trace = recording::trace_json({e, move}, kBegin, stamp(20), true, 0);
     require(trace.at("motion_interpretation") == "raw_only" && trace.at("gap") == true &&
@@ -122,7 +144,7 @@ void stop_boundary() {
 }
 int main() {
     try {
-        longjump_tracks(); cumulative_wrap(); incomplete_rejected(); scoped_raw_trace(); stop_boundary();
+        shift_tracks();longjump_tracks(); cumulative_wrap(); incomplete_rejected(); scoped_raw_trace(); stop_boundary();
         std::cout << "身法录制派生专项通过\n"; return 0;
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

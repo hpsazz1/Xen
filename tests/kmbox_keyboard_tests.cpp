@@ -62,6 +62,9 @@ void test_win32_input_stays_unverified_without_owned_source() {
     expect(!mouse->supports_left_ctrl_key() &&
         mouse->set_left_ctrl_key(true).disposition == KeyboardDisposition::UNSUPPORTED,
         "不支持Ctrl的后端不得换键或假成功");
+    expect(!mouse->supports_left_shift_key() &&
+        mouse->set_left_shift_key(true).disposition == KeyboardDisposition::UNSUPPORTED,
+        "不支持Shift的后端不得换键或假成功");
     expect(!mouse->supports_wasd_keyboard() &&
         mouse->set_wasd_keyboard(1).disposition == KeyboardDisposition::UNSUPPORTED &&
         !mouse->set_wasd_event_subscription(true),
@@ -314,6 +317,116 @@ MouseConfig config_for(int port) {
     config.kmbox_command_timeout_ms = 40;
     return config;
 }
+void test_left_shift_composes_and_traces_without_replacing_other_keys() {
+    FakeKmboxDevice device(std::vector<AckMode>(13, AckMode::VALID));
+    auto mouse = create_test_mouse(config_for(device.port()));
+    expect(mouse && !mouse->supports_left_shift_key() &&
+        mouse->set_left_shift_key(true).disposition == KeyboardDisposition::REJECTED,
+        "未取得lease不能声明或发送Shift能力");
+    expect(mouse && mouse->open() && mouse->supports_left_shift_key(), "KMBOX声明Left Shift能力");
+    if (!mouse) return;
+    expect(mouse->begin_movement_trace(), "Shift组合录制开始");
+    std::array<std::uint8_t, 20> report{};
+    report[9] = 0xc3; // 左Ctrl/Shift和范围外右侧修饰键，不能转成软件保活。
+    device.send_monitor_packet(report);
+    InputSnapshot input;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    do {
+        mouse->poll_input(input);
+        if (input.state_valid && input.virtual_keys[VK_LSHIFT]) break;
+        std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < deadline);
+    expect(input.state_valid && input.virtual_keys[VK_LSHIFT] && input.virtual_keys[VK_LCONTROL],
+        "monitor保留物理Left Shift和Ctrl");
+    const auto ack = [&](KeyboardReceipt receipt) {
+        expect(receipt.disposition == KeyboardDisposition::ACKNOWLEDGED, "Shift组合键盘事务得到ACK");
+    };
+    ack(mouse->set_wasd_keyboard(1));
+    ack(mouse->set_space_key(true));
+    ack(mouse->set_left_shift_key(true));
+    ack(mouse->set_left_ctrl_key(true));
+    ack(mouse->set_left_shift_key(false));
+    ack(mouse->set_left_shift_key(true));
+    ack(mouse->set_left_ctrl_key(false));
+    ack(mouse->set_space_key(false));
+    ack(mouse->set_wasd_keyboard(0));
+    ack(mouse->cleanup_wasd_keyboard());
+    const auto packets = device.packets();
+    expect(packets.size() == 12, "Shift复用单一键盘报告且不安装物理屏蔽");
+    if (packets.size() == 12) {
+        expect(packets[4][16] == 2 && packets[4][18] == 0x1a && packets[4][19] == 0x2c,
+            "Left Shift使用modifier bit1且保留W和Space");
+        expect(packets[5][16] == 3 && packets[5][18] == 0x1a && packets[5][19] == 0x2c,
+            "Ctrl和Shift合并在同一modifier报告");
+        expect(packets[6][16] == 1 && packets[6][18] == 0x1a && packets[6][19] == 0x2c,
+            "Shift up只释放Shift并保留Ctrl/W/Space");
+        expect(packets[8][16] == 2 && packets[8][18] == 0x1a && packets[8][19] == 0x2c,
+            "Ctrl up只释放Ctrl并保留Shift/W/Space");
+        expect(packets[9][16] == 2 && packets[9][18] == 0x1a && packets[9][19] == 0 &&
+            packets[10][16] == 2 && packets[10][18] == 0,
+            "Space及WASD分别释放不得清掉Shift");
+        expect(std::all_of(packets[11].begin() + 16, packets[11].end(), [](auto b) { return b == 0; }),
+            "cleanup清除Shift及全部软件键且不复制物理修饰键");
+    }
+    mouse->end_movement_trace();
+    MovementTraceBatch trace;
+    expect(mouse->read_movement_trace(trace) && !trace.gap && trace.events.size() == 11,
+        "Shift物理输入与软件请求全部进入trace");
+    if (trace.events.size() == 11) {
+        expect(trace.events[0].input.keyboard_modifiers == 3,
+            "trace仅扩展记录物理左Shift，不保留范围外修饰键");
+        expect(trace.events[3].shift && !trace.events[3].ctrl && trace.events[3].space && trace.events[3].wasd == 1 &&
+            trace.events[4].shift && trace.events[4].ctrl && !trace.events[5].shift && trace.events[5].ctrl &&
+            trace.events[7].shift && !trace.events[7].ctrl,
+            "软件trace记录每次完整Shift/Ctrl/W/Space事实");
+        expect(!trace.events[10].shift && !trace.events[10].ctrl && !trace.events[10].space &&
+            trace.events[10].wasd == 0 && trace.events[10].acknowledged,
+            "trace明确记录Shift清理ACK");
+    }
+    mouse->poll_input(input);
+    expect(input.virtual_keys[VK_LSHIFT] && input.virtual_keys[VK_LCONTROL],
+        "软件释放不改写物理Shift/Ctrl快照");
+    mouse->close(); device.finish();
+}
+
+void test_left_shift_unknown_release_survives_owner_recreation() {
+    std::vector<AckMode> responses(11, AckMode::VALID);
+    for (std::size_t i = 2; i <= 5; ++i) responses[i] = AckMode::NONE;
+    FakeKmboxDevice device(std::move(responses));
+    const auto config = config_for(device.port());
+    auto mouse = create_test_mouse(config);
+    expect(mouse && mouse->open(), "Shift清理债务回环连接");
+    if (!mouse) return;
+    expect(mouse->set_left_shift_key(true).disposition == KeyboardDisposition::APPLICATION_UNKNOWN,
+        "Shift down丢ACK必须为应用未知");
+    expect(mouse->set_left_shift_key(false).disposition == KeyboardDisposition::APPLICATION_UNKNOWN &&
+        !mouse->begin_movement_trace(), "Shift up丢ACK不能清债或开始新录制");
+    expect(mouse->cleanup_wasd_keyboard().disposition == KeyboardDisposition::APPLICATION_UNKNOWN,
+        "Shift cleanup丢ACK继续承担释放责任");
+    mouse.reset(); // close的零报告仍丢ACK；新owner必须继承同一端点的释放责任。
+    mouse = create_test_mouse(config);
+    expect(mouse && mouse->open() && mouse->begin_movement_trace(),
+        "新owner确认继承的Shift零报告后才可READY和录制");
+    if (mouse) {
+        mouse->end_movement_trace();
+        mouse->close();
+    }
+    device.finish();
+    const auto packets = device.packets();
+    expect(packets.size() == 11, "Shift未知释放跨owner仍只使用原键盘清理链");
+    if (packets.size() == 11) {
+        expect(packets[2][16] == 2, "未知Shift按下确实发送modifier bit1");
+        for (std::size_t i : {3U, 4U, 5U, 8U})
+            expect(packets[i].size() == 28 &&
+                read_u32_le(packets[i].data() + 12) == 0x123c2c2fU &&
+                std::all_of(packets[i].begin() + 16, packets[i].end(), [](auto b) { return b == 0; }),
+                "释放、cleanup、close和新owner均只发全零报告偿还Shift债务");
+        expect(read_u32_le(packets[7].data() + 12) == kConnectCommand &&
+            read_u32_le(packets[9].data() + 12) == kMonitorCommand,
+            "重建先握手再清Shift债务，确认后才配置监听");
+    }
+}
+
 void test_left_ctrl_composes_and_preserves_physical_state() {
     FakeKmboxDevice device(std::vector<AckMode>(11, AckMode::VALID));
     auto mouse = create_test_mouse(config_for(device.port()));
@@ -453,7 +566,8 @@ void test_all_combinations_and_disabled_output() {
         "只读录制收到物理W与跳跃，不需要允许输出");
     mouse->end_movement_trace();
     expect(mouse->set_wasd_keyboard(1).disposition == KeyboardDisposition::REJECTED &&
-        mouse->set_wasd_mask(1,true).disposition == KeyboardDisposition::REJECTED,
+        mouse->set_wasd_mask(1,true).disposition == KeyboardDisposition::REJECTED &&
+        mouse->set_left_shift_key(true).disposition == KeyboardDisposition::REJECTED,
         "输出禁用时不得发送键盘或屏蔽命令");
     mouse->close(); readonly_device.finish();
     const auto readonly_packets = readonly_device.packets();
@@ -720,7 +834,7 @@ void test_movement_trace_includes_physical_and_internal_cleanup() {
         expect(base.baseline && base.input.wasd_mask == 1 && base.at_ns >= base.input.received_at_steady_ns,
                "已按住W在录制开始形成基线");
         expect(!physical.baseline && physical.input.raw_x == 7 && physical.input.raw_y == -2 &&
-               physical.input.raw_wheel == 1 && physical.input.keyboard_modifiers == 1 &&
+               physical.input.raw_wheel == 1 && physical.input.keyboard_modifiers == 3 &&
                physical.input.mouse_buttons == 0 && physical.input.keyboard_usages[1] == 0,
                "保留指定身法范围，不录Q和鼠标按钮");
         expect(batch.events[6].space && batch.events[6].ctrl && batch.events[6].wasd == 8,
@@ -832,6 +946,8 @@ void test_event_journal() {
 int main() {
     WSADATA data{};
     if (WSAStartup(MAKEWORD(2,2), &data) != 0) return 2;
+    test_left_shift_composes_and_traces_without_replacing_other_keys();
+    test_left_shift_unknown_release_survives_owner_recreation();
     test_left_ctrl_composes_and_preserves_physical_state();
     test_left_ctrl_unknown_release_keeps_cleanup_debt();
     test_packets_and_owned_cleanup();

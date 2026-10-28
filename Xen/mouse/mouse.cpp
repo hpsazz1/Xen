@@ -248,6 +248,13 @@ public:
         if (!inner_ || !output_owner_.held()) return {KeyboardDisposition::REJECTED};
         return inner_->set_left_ctrl_key(down);
     }
+    bool supports_left_shift_key() const noexcept override {
+        return inner_ && output_owner_.held() && inner_->supports_left_shift_key();
+    }
+    KeyboardReceipt set_left_shift_key(bool down) noexcept override {
+        if (!inner_ || !output_owner_.held()) return {KeyboardDisposition::REJECTED};
+        return inner_->set_left_shift_key(down);
+    }
     bool supports_left_button() const noexcept override {
         return inner_ && output_owner_.held() && inner_->supports_left_button();
     }

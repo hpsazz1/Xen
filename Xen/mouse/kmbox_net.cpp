@@ -400,6 +400,7 @@ private:
 public:
     bool supports_wasd_keyboard() const noexcept override { return true; }
     bool supports_left_ctrl_key() const noexcept override { return true; }
+    bool supports_left_shift_key() const noexcept override { return true; }
     bool supports_left_button() const noexcept override { return true; }
     ButtonReceipt set_right_button(bool down) noexcept override {
         std::lock_guard<std::mutex> lock(io_mutex_);
@@ -407,11 +408,15 @@ public:
     }
     KeyboardReceipt set_space_key(bool down) noexcept override {
         std::lock_guard<std::mutex> lock(io_mutex_);
-        return keyboard_locked(software_wasd_, down, software_left_ctrl_);
+        return keyboard_locked(software_wasd_, down, software_left_ctrl_, software_left_shift_);
     }
     KeyboardReceipt set_left_ctrl_key(bool down) noexcept override {
         std::lock_guard<std::mutex> lock(io_mutex_);
-        return keyboard_locked(software_wasd_, software_space_, down);
+        return keyboard_locked(software_wasd_, software_space_, down, software_left_shift_);
+    }
+    KeyboardReceipt set_left_shift_key(bool down) noexcept override {
+        std::lock_guard<std::mutex> lock(io_mutex_);
+        return keyboard_locked(software_wasd_, software_space_, software_left_ctrl_, down);
     }
     bool left_button_faulted() const noexcept override {
         std::lock_guard<std::mutex> lock(io_mutex_);
@@ -428,7 +433,7 @@ public:
 
     KeyboardReceipt set_wasd_keyboard(std::uint8_t mask) noexcept override {
         std::lock_guard<std::mutex> lock(io_mutex_);
-        return keyboard_locked(mask, software_space_, software_left_ctrl_);
+        return keyboard_locked(mask, software_space_, software_left_ctrl_, software_left_shift_);
     }
     KeyboardReceipt set_wasd_mask(std::uint8_t key, bool masked) noexcept override {
         std::lock_guard<std::mutex> lock(io_mutex_);
@@ -505,7 +510,7 @@ public:
         if ((device_status != MouseStatus::READY && device_status != MouseStatus::DISABLED) ||
             monitor_stop_.load(std::memory_order_acquire) || monitor_failed_ ||
             keyboard_dirty_ || owned_masks_ || software_wasd_ || software_space_ ||
-            software_left_ctrl_ || button_dirty_) return false;
+            software_left_ctrl_ || software_left_shift_ || button_dirty_) return false;
         if (!movement_trace_.begin()) return false;
         if (monitor_received_ && latest_trace_input_.state_valid) {
             MovementTraceEvent trace;
@@ -662,12 +667,13 @@ private:
         return result;
     }
     KeyboardReceipt keyboard_locked(std::uint8_t mask, bool space = false,
-                                    bool left_ctrl = false) noexcept {
+                                    bool left_ctrl = false, bool left_shift = false) noexcept {
         MovementTraceEvent trace;
         trace.kind = MovementTraceEvent::Kind::KEYBOARD;
         trace.wasd = mask;
         trace.space = space;
         trace.ctrl = left_ctrl;
+        trace.shift = left_shift;
         trace.at_ns = mouse::detail::movement_trace_now_ns();
         const auto receipt = [&]() noexcept -> KeyboardReceipt {
             if (mask > 15 || !config_.allow_send_input || socket_ == INVALID_SOCKET)
@@ -675,8 +681,8 @@ private:
             constexpr std::uint32_t command = 0x123c2c2fU;
             std::array<std::uint8_t, 28> packet{};
             write_header(packet.data(), command, ++sequence_);
-            // HID modifier bit 0；不复制 monitor 的物理修饰键，不安装 Ctrl 屏蔽。
-            packet[16] = left_ctrl ? 0x01 : 0x00;
+            // HID Left Ctrl/Shift 分别为 bit 0/1；不复制物理修饰键，不安装修饰键屏蔽。
+            packet[16] = (left_ctrl ? 0x01 : 0x00) | (left_shift ? 0x02 : 0x00);
             std::size_t index = 18;
             for (std::uint8_t bit = 1; bit <= 8; bit <<= 1)
                 if (mask & bit) packet[index++] = wasd_usage(bit);
@@ -690,8 +696,10 @@ private:
                 software_wasd_ = mask;
                 software_space_ = space;
                 software_left_ctrl_ = left_ctrl;
+                software_left_shift_ = left_shift;
             }
-            if (result.disposition == KeyboardDisposition::ACKNOWLEDGED && mask == 0 && !space && !left_ctrl)
+            if (result.disposition == KeyboardDisposition::ACKNOWLEDGED && mask == 0 &&
+                !space && !left_ctrl && !left_shift)
                 keyboard_dirty_ = false;
             // 已有条目的更新不分配；若记账失败，发送前的保守责任仍保留在端点表中。
             save_keyboard_debt_locked({keyboard_dirty_, owned_masks_});
@@ -1077,7 +1085,7 @@ private:
                     trace.input = report;
                     // 只保留用户选定的身法范围，不归档其他按键或鼠标按钮。
                     trace.input.mouse_buttons = 0;
-                    trace.input.keyboard_modifiers &= 0x01;
+                    trace.input.keyboard_modifiers &= 0x03;
                     for (auto& usage : trace.input.keyboard_usages)
                         if (usage != 0x1a && usage != 0x04 && usage != 0x16 &&
                             usage != 0x07 && usage != 0x2c) usage = 0;
@@ -1138,6 +1146,7 @@ private:
     std::uint8_t software_wasd_ = 0;
     bool software_space_ = false;
     bool software_left_ctrl_ = false;
+    bool software_left_shift_ = false;
     bool button_dirty_ = false;
     bool button_faulted_ = false;
     SOCKET socket_ = INVALID_SOCKET;

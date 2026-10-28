@@ -10,7 +10,7 @@
 namespace movement::timeline {
 namespace {
 constexpr int kMaxTime = 60000;
-constexpr std::array<const char*, 6> kKeys{"W", "A", "S", "D", "SPACE", "CTRL"};
+constexpr std::array<const char*, 7> kKeys{"W", "A", "S", "D", "SPACE", "CTRL", "SHIFT"};
 bool ack(const KeyboardReceipt& r) { return r.disposition == KeyboardDisposition::ACKNOWLEDGED; }
 bool ack(const ButtonReceipt& r) { return r.disposition == ButtonDisposition::ACKNOWLEDGED; }
 void fields(const nlohmann::json& j, std::initializer_list<const char*> allowed,
@@ -221,6 +221,8 @@ Result run_plan(IMouseController& device, const Plan& p, const movement::Config&
                 throw std::runtime_error("单次旋转超过1000000 counts，请检查灵敏度");
             if (a.kind == ActionKind::KEY && a.key == Key::CTRL && !device.supports_left_ctrl_key())
                 throw std::runtime_error("设备不支持Left Ctrl");
+            if (a.kind == ActionKind::KEY && a.key == Key::SHIFT && !device.supports_left_shift_key())
+                throw std::runtime_error("设备不支持Left Shift");
             if (a.kind == ActionKind::BUTTON && !device.supports_left_button())
                 throw std::runtime_error("设备不支持鼠标按钮输出");
         }
@@ -251,7 +253,7 @@ Result run_plan(IMouseController& device, const Plan& p, const movement::Config&
         const auto begin = Clock::now();
         const int total = duration_ms(p), mask_begin = mask_start(p);
         const int mask_end = p.mask.duration_ms ? mask_begin + p.mask.duration_ms : total;
-        int keys = 0, masked = 0; bool space = false, ctrl = false;
+        int keys = 0, masked = 0; bool space = false, ctrl = false, shift = false;
         std::array<bool, 2> buttons{};
         for (;;) {
             if (!allowed()) { result.outcome = Outcome::CANCELED; result.error = "身法执行已取消或输出许可撤回"; break; }
@@ -265,12 +267,13 @@ Result run_plan(IMouseController& device, const Plan& p, const movement::Config&
                     command([&] { return device.set_wasd_mask(static_cast<std::uint8_t>(bit), true); });
                 masked |= want_mask;
             }
-            int want_keys = 0; bool want_space = false, want_ctrl = p.crouch;
+            int want_keys = 0; bool want_space = false, want_ctrl = p.crouch, want_shift = false;
             for (std::size_t i = 0; i < p.actions.size(); ++i) {
                 const auto& a = p.actions[i];
                 if (a.kind != ActionKind::KEY) continue;
                 // 找点姿态覆盖整段；短CTRL动作不能制造提前站起或“已错过”的假故障。
                 const bool already_held = a.key == Key::SPACE ? space : a.key == Key::CTRL ? (ctrl || p.crouch) :
+                    a.key == Key::SHIFT ? shift :
                     (keys & (1 << static_cast<unsigned>(a.key))) != 0;
                 // 完整落在其他同键持有段内的短动作已由并集满足，不制造误报。
                 if (elapsed >= a.start_ms + a.duration_ms && already_held) seen[i] = true;
@@ -283,8 +286,11 @@ Result run_plan(IMouseController& device, const Plan& p, const movement::Config&
                 if (a.physical && static_cast<unsigned>(a.key) < 4 && (want_mask & (1 << static_cast<unsigned>(a.key)))) continue;
                 if (a.key == Key::SPACE) want_space = true;
                 else if (a.key == Key::CTRL) want_ctrl = true;
+                else if (a.key == Key::SHIFT) want_shift = true;
                 else want_keys |= 1 << static_cast<unsigned>(a.key);
             }
+            // 先静步再按方向；结束时保留到同轮方向/跳跃和鼠标释放之后，不制造短暂跑动。
+            if (want_shift && !shift) { command([&] { return device.set_left_shift_key(true); }); shift = true; }
             if (keys != want_keys) { command([&] { return device.set_wasd_keyboard(static_cast<std::uint8_t>(want_keys)); }); keys = want_keys; }
             if (space != want_space) { command([&] { return device.set_space_key(want_space); }); space = want_space; }
             if (ctrl != want_ctrl) { command([&] { return device.set_left_ctrl_key(want_ctrl); }); ctrl = want_ctrl; }
@@ -327,6 +333,7 @@ Result run_plan(IMouseController& device, const Plan& p, const movement::Config&
                     }
                     button_command(button, want_buttons[button]); buttons[button] = want_buttons[button];
                 }
+            if (shift && !want_shift) { command([&] { return device.set_left_shift_key(false); }); shift = false; }
             // 先更新/释放这一时刻的软件键，再归还物理直通；不制造已结束方向的短暂叠加。
             if ((masked & ~want_mask) && elapsed < total) {
                 for (int bit = 1; bit <= 8; bit <<= 1) if (masked & ~want_mask & bit)

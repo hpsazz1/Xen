@@ -20,35 +20,62 @@ using movement::timeline::Key;
 using movement::timeline::Button;
 using TimelineAction = movement::timeline::Action;
 
+enum class Grip { LEFT, RIGHT, BOTH };
+enum class Travel { STILL, STEP, WALK, RUN };
 struct GrenadePreset {
     const char* name;
-    bool jump, forward, crouch, both_buttons;
+    bool jump, crouch;
+    Grip grip;
+    Travel travel;
 };
-constexpr std::array<GrenadePreset,6> kGrenadePresets{{
-    {"左键投掷",false,false,false,false},
-    {"左键跳投",true,false,false,false},
-    {"W 跳投",true,true,false,false},
-    {"蹲跳投",true,false,true,false},
-    {"蹲 W 跳投",true,true,true,false},
-    {"左右双键 W 跳投",true,true,false,true}
+constexpr std::array<GrenadePreset,24> kGrenadePresets{{
+    {"左键投掷",false,false,Grip::LEFT,Travel::STILL},
+    {"左键跳投",true,false,Grip::LEFT,Travel::STILL},
+    {"W 跳投",true,false,Grip::LEFT,Travel::STEP},
+    {"蹲跳投",true,true,Grip::LEFT,Travel::STILL},
+    {"蹲 W 跳投",true,true,Grip::LEFT,Travel::STEP},
+    {"左右双键 W 跳投",true,false,Grip::BOTH,Travel::STEP},
+    {"右键投掷",false,false,Grip::RIGHT,Travel::STILL},
+    {"左右双键投掷",false,false,Grip::BOTH,Travel::STILL},
+    {"右键跳投",true,false,Grip::RIGHT,Travel::STILL},
+    {"左右双键跳投",true,false,Grip::BOTH,Travel::STILL},
+    {"W 前移投掷",false,false,Grip::LEFT,Travel::STEP},
+    {"蹲投掷",false,true,Grip::LEFT,Travel::STILL},
+    {"蹲 W 前移投掷",false,true,Grip::LEFT,Travel::STEP},
+    {"静步 W 投掷",false,false,Grip::LEFT,Travel::WALK},
+    {"静步 W 跳投",true,false,Grip::LEFT,Travel::WALK},
+    {"助跑 W 投掷",false,false,Grip::LEFT,Travel::RUN},
+    {"助跑 W 跳投",true,false,Grip::LEFT,Travel::RUN},
+    {"右键静步 W 投掷",false,false,Grip::RIGHT,Travel::WALK},
+    {"右键静步 W 跳投",true,false,Grip::RIGHT,Travel::WALK},
+    {"左右双键静步 W 投掷",false,false,Grip::BOTH,Travel::WALK},
+    {"左右双键静步 W 跳投",true,false,Grip::BOTH,Travel::WALK},
+    {"右键助跑 W 跳投",true,false,Grip::RIGHT,Travel::RUN},
+    {"左右双键助跑 W 跳投",true,false,Grip::BOTH,Travel::RUN},
+    {"蹲静步 W 跳投",true,true,Grip::LEFT,Travel::WALK}
 }};
 constexpr std::array<std::string_view,15> kGrenadeMaps{"de_mirage","de_dust2","de_inferno","de_ancient",
     "de_anubis","de_nuke","de_overpass","de_train","de_vertigo","de_cache",
     "cs_office","cs_italy","ar_baggage","ar_shoots","ar_pool_day"};
 
 void apply_grenade_preset(Plan& plan, const GrenadePreset& preset) {
-    // 六套时序逐项复用现役道具库；只替换动作，不从图片推测投法或覆盖点位身份。
+    // 原六套参数保持；新增组合只提供可微调初稿，不推断任何地图点位的已验时序。
     plan.actions.clear();
     const auto button = [&](Button value, int duration) {
         TimelineAction action;
         action.kind = ActionKind::BUTTON; action.button = value; action.duration_ms = duration;
         plan.actions.push_back(action);
     };
-    if (preset.both_buttons) button(Button::RIGHT,1000);
-    button(Button::LEFT,preset.both_buttons ? 1001 : 1000);
+    if (preset.grip != Grip::LEFT) button(Button::RIGHT,1000);
+    if (preset.grip != Grip::RIGHT) button(Button::LEFT,preset.grip == Grip::BOTH ? 1001 : 1000);
     if (preset.jump) plan.actions.push_back({ActionKind::KEY,Key::SPACE,1000,40,0});
-    if (preset.forward) plan.actions.push_back({ActionKind::KEY,Key::W,1000,100,0});
-    if (preset.crouch) plan.actions.push_back({ActionKind::KEY,Key::CTRL,0,preset.forward ? 1100 : 1040,0});
+    const bool moving = preset.travel != Travel::STILL;
+    if (moving) {
+        const int start = preset.travel == Travel::WALK ? 800 : preset.travel == Travel::RUN ? 700 : 1000;
+        plan.actions.push_back({ActionKind::KEY,Key::W,start,1100-start,0});
+    }
+    if (preset.crouch) plan.actions.push_back({ActionKind::KEY,Key::CTRL,0,moving ? 1100 : 1040,0});
+    if (preset.travel == Travel::WALK) plan.actions.push_back({ActionKind::KEY,Key::SHIFT,0,1100,0});
     plan.mask = {true,15,0,0};
 }
 
@@ -83,6 +110,7 @@ std::string action_label(const TimelineAction& action) {
     case Key::D: return prefix + "D";
     case Key::SPACE: return prefix + "空格";
     case Key::CTRL: return prefix + "Ctrl";
+    case Key::SHIFT: return prefix + "Left Shift";
     }
     return "未知";
 }
@@ -492,11 +520,11 @@ struct MovementPanel::Impl {
             if (ImGui::BeginCombo("投掷动作", "选择动作预设…")) {
                 for (const auto& preset : kGrenadePresets) {
                     if (ImGui::Selectable(preset.name)) { apply_grenade_preset(plan,preset); change = true; }
-                    tip("套用现有方案的整组动作和方向键屏蔽；保留名称、地图、瞄点姿态、坐标及保存目标，只修改草稿，不自动保存或投掷。");
+                    tip("套用动作和方向键屏蔽；保留名称、地图、瞄点姿态、坐标及保存目标，只修改草稿，不自动保存或投掷。新增组合是待按点位调试的初稿。");
                 }
                 ImGui::EndCombo();
             }
-            tip("按投法选择即可填好按键和时序，下面仍可微调；站位和瞄点图片不能确定投法，套用后用F11试投。");
+            tip("静步使用左Shift，W默认提前200ms；助跑W默认提前300ms。可在下面按点位调整起点与时长，套用后用F11试投；不是遗迹CT所有点位的通用时序。");
         }
         if (button("添加动作", "添加独立动作；时间从脚本启动起算，与其他行可以重叠。")) {
             plan.actions.push_back({}); change = true;
@@ -508,18 +536,20 @@ struct MovementPanel::Impl {
             ImGui::TableSetupColumn("动作"); ImGui::TableSetupColumn("开始 / ms");
             ImGui::TableSetupColumn("时长 / ms"); ImGui::TableSetupColumn("动作参数");
             ImGui::TableSetupColumn("编辑"); ImGui::TableHeadersRow();
-            const char* types[]{"W", "A", "S", "D", "空格 / 跳跃", "Left Ctrl / 蹲", "鼠标左转", "鼠标右转", "屏蔽 W", "屏蔽 A", "屏蔽 S", "屏蔽 D", "鼠标位移", "滚轮", "鼠标左键", "鼠标右键"};
+            const char* types[]{"W", "A", "S", "D", "空格 / 跳跃", "Left Ctrl / 蹲", "鼠标左转", "鼠标右转", "屏蔽 W", "屏蔽 A", "屏蔽 S", "屏蔽 D", "鼠标位移", "滚轮", "鼠标左键", "鼠标右键", "Left Shift / 静步"};
             for (std::size_t i = 0; i < plan.actions.size(); ++i) {
                 auto& action = plan.actions[i];
                 ImGui::PushID(static_cast<int>(i)); ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0);
-                int kind = action.kind == ActionKind::TURN ? (action.angle_degrees < 0 ? 6 : 7) :
+                int kind = action.kind == ActionKind::KEY && action.key == Key::SHIFT ? 16 :
+                    action.kind == ActionKind::TURN ? (action.angle_degrees < 0 ? 6 : 7) :
                     action.kind == ActionKind::MASK ? 8 + static_cast<int>(action.key) :
                     action.kind == ActionKind::MOVE ? 12 : action.kind == ActionKind::WHEEL ? 13 :
                     action.kind == ActionKind::BUTTON ? (action.button == Button::LEFT ? 14 : 15) : static_cast<int>(action.key);
                 ImGui::SetNextItemWidth(-1);
-                if (ImGui::Combo("##action", &kind, types, 16)) {
-                    action.kind = kind < 6 ? ActionKind::KEY : kind < 8 ? ActionKind::TURN : kind < 12 ? ActionKind::MASK : kind == 12 ? ActionKind::MOVE : kind == 13 ? ActionKind::WHEEL : ActionKind::BUTTON;
+                if (ImGui::Combo("##action", &kind, types, 17)) {
+                    action.kind = kind < 6 || kind == 16 ? ActionKind::KEY : kind < 8 ? ActionKind::TURN : kind < 12 ? ActionKind::MASK : kind == 12 ? ActionKind::MOVE : kind == 13 ? ActionKind::WHEEL : ActionKind::BUTTON;
                     if (kind < 6) action.key = static_cast<Key>(kind);
+                    else if (kind == 16) action.key = Key::SHIFT;
                     else if (kind < 8) action.angle_degrees = (kind == 6 ? -1 : 1) * std::max(1.0, std::abs(action.angle_degrees));
                     else if (kind < 12) action.key = static_cast<Key>(kind - 8);
                     else if (kind >= 14) action.button = kind == 14 ? Button::LEFT : Button::RIGHT;

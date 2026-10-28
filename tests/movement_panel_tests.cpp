@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <string>
 
@@ -371,6 +372,98 @@ void grenade_interactions() {
     expect(actions.debug_action == Action::CANCEL, "道具测试必须可以撤销许可和清理");
 }
 
+void grenade_extended_presets() {
+    using namespace debug_session;
+    MovementPanel panel(Mode::GRENADE_TEST); AppConfig config; Snapshot snapshot;
+    const char* title="静步及扩展投法交互回归";
+    auto frame=[&](const char* focus=nullptr,bool popup=false) {
+        ImGui::NewFrame();
+        if(auto* prior=ImGui::FindWindowByName(popup?"##Combo_00":title);focus&&prior)
+            ImGui::SetFocusID(prior->GetID(focus),prior);
+        ImGui::SetNextWindowPos({0,0});ImGui::SetNextWindowSize({1100,2000});
+        ImGui::Begin(title,nullptr,ImGuiWindowFlags_NoSavedSettings);
+        OverlayActions actions;panel.render(config,&snapshot,actions);
+        ImGui::End();ImGui::Render();return actions;
+    };
+    auto click=[&](const char* label) {
+        auto& io=ImGui::GetIO();io.AddMousePosEvent(-100,-100);frame(label);
+        auto* window=ImGui::FindWindowByName(title);
+        const auto rect=ImGui::WindowRectRelToAbs(window,window->NavRectRel[ImGuiNavLayer_Main]);
+        io.AddMousePosEvent(rect.GetCenter().x,rect.GetCenter().y);frame();
+        io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);return frame();
+    };
+    movement::timeline::Plan plan;plan.name="CT1 测试投法";plan.map="de_ancient";plan.team="CT";
+    plan.notes="setpos 1 2 3;setang 4 5 0";plan.location="原点位";plan.crouch=true;
+    movement::timeline::Action left;left.kind=movement::timeline::ActionKind::BUTTON;plan.actions={left};
+    const auto original=movement::timeline::plan_json(plan);
+    snapshot.grenade_loaded_draft=original;snapshot.grenade_loaded_revision=1;
+    snapshot.grenade_selected_path="cache/grenade/plans/ct1.json";snapshot.grenade_catalog_revision=1;
+    frame();click("投掷动作");frame();
+    std::string entries;ImGui::NewFrame();ImGui::Begin(title);ImGui::LogToBuffer();
+    OverlayActions initial;panel.render(config,&snapshot,initial);entries=ImGui::GetCurrentContext()->LogBuffer.c_str();
+    ImGui::LogFinish();ImGui::End();ImGui::Render();
+    expect(entries.find("静步 W 跳投")!=std::string::npos,"投掷动作下拉必须提供静步W跳投");
+    if(entries.find("静步 W 跳投")==std::string::npos) {ImGui::NewFrame();ImGui::ClosePopupToLevel(0,true);ImGui::EndFrame();return;}
+    struct Example {const char* name;bool left,right,jump,crouch,walk;int move_start;};
+    const Example examples[]{
+        {"右键投掷",false,true,false,false,false,-1},
+        {"左右双键投掷",true,true,false,false,false,-1},
+        {"右键跳投",false,true,true,false,false,-1},
+        {"左右双键跳投",true,true,true,false,false,-1},
+        {"W 前移投掷",true,false,false,false,false,1000},
+        {"蹲投掷",true,false,false,true,false,-1},
+        {"蹲 W 前移投掷",true,false,false,true,false,1000},
+        {"静步 W 投掷",true,false,false,false,true,800},
+        {"静步 W 跳投",true,false,true,false,true,800},
+        {"助跑 W 投掷",true,false,false,false,false,700},
+        {"助跑 W 跳投",true,false,true,false,false,700},
+        {"右键静步 W 投掷",false,true,false,false,true,800},
+        {"右键静步 W 跳投",false,true,true,false,true,800},
+        {"左右双键静步 W 投掷",true,true,false,false,true,800},
+        {"左右双键静步 W 跳投",true,true,true,false,true,800},
+        {"右键助跑 W 跳投",false,true,true,false,false,700},
+        {"左右双键助跑 W 跳投",true,true,true,false,false,700},
+        {"蹲静步 W 跳投",true,false,true,true,true,800}
+    };
+    // 已有6项仍由原回归逐字节核对；这里选择实际新增18项，包括滚动区条目。
+    for(std::size_t index=0;index<std::size(examples);++index) {
+        const auto& example=examples[index];
+        if(index)click("投掷动作");
+        frame();
+        auto* popup=ImGui::FindWindowByName("##Combo_00");
+        expect(popup&&popup->Active,"扩展预设须通过真实下拉选择");if(!popup||!popup->Active)continue;
+        ImGui::SetScrollY(popup,static_cast<float>(index+6)*ImGui::GetTextLineHeightWithSpacing());frame();
+        frame(example.name,true);
+        expect(ImGui::GetCurrentContext()->NavId==popup->GetID(example.name),"须定位真实预设选项");
+        const auto rect=ImGui::WindowRectRelToAbs(popup,popup->NavRectRel[ImGuiNavLayer_Main]);
+        auto& io=ImGui::GetIO();io.AddMousePosEvent(rect.GetCenter().x,rect.GetCenter().y);frame();
+        io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);const auto actions=frame();
+        expect(actions.movement_draft_changed&&actions.debug_action==Action::NONE&&
+            actions.debug_request.load_path==snapshot.grenade_selected_path&&!actions.debug_request.grenade_update_selected,
+            "扩展投法仅编辑草稿，不更新文件或提前执行");
+        if(actions.debug_request.plan_text.empty())continue;
+        const auto value=Json::parse(actions.debug_request.plan_text);
+        for(const auto* field:{"name","map","team","location","notes","crouch"})
+            expect(value.at(field)==original.at(field),"扩展投法须保留站位、阵营、瞄点姿态和坐标");
+        auto key=[&](const char* name) -> Json {for(const auto& action:value.at("actions"))
+            if(action.value("type",std::string{})=="key"&&action.value("key",std::string{})==name)return action;return nullptr;};
+        bool has_left=false,has_right=false;
+        for(const auto& action:value.at("actions"))if(action.value("type",std::string{})=="button") {
+            has_left|=action.at("button")=="left";has_right|=action.at("button")=="right";
+        }
+        expect(has_left==example.left&&has_right==example.right,example.name);
+        expect(!key("SPACE").is_null()==example.jump&&!key("CTRL").is_null()==example.crouch&&
+            !key("SHIFT").is_null()==example.walk,"扩展投法须生成对应跳跃、蹲姿和LeftShift键轨");
+        if(example.move_start>=0) {
+            expect(!key("W").is_null()&&key("W").value("start_ms",-1)==example.move_start&&
+                key("W").value("duration_ms",0)+example.move_start==1100,"前移、静步、助跑的开始时间可独立微调");
+            if(example.walk)expect(key("SHIFT").value("start_ms",-1)==0&&key("SHIFT").value("duration_ms",0)==1100,
+                "静步在W前按下并保持到鼠标释放和动作结束");
+        }
+        movement::timeline::Plan parsed;std::string error;
+        expect(movement::timeline::parse_plan(value,parsed,error),"扩展预设必须经生产时间轴解析");
+    }
+}
 void grenade_editor_cleanup_interactions() {
     using namespace debug_session;
     MovementPanel panel(Mode::GRENADE_TEST);
@@ -897,6 +990,7 @@ int main() {
     interactions();
     grenade_save_intent_interactions();
     grenade_interactions();
+    grenade_extended_presets();
     grenade_editor_cleanup_interactions();
     grenade_map_team_interactions();
     grenade_crouch_delete_interactions();
