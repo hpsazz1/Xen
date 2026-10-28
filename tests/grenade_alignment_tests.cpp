@@ -42,6 +42,7 @@ cv::Mat translated(const cv::Mat& value,double x,double y) {
 struct Scene {
     Clock::time_point now=Clock::time_point(10s);
     cv::Mat original=texture();
+    cv::Mat observed;
     double x=0,y=0;
     // 分开表达配置换算与实际鼠标响应，覆盖实机末段的细步进和不可达量化点。
     double response_counts_per_pixel_x=0.4,response_counts_per_pixel_y=0.4;
@@ -57,6 +58,9 @@ struct Scene {
     Clock::time_point first_frame_at{};
     int stop_after_frames=0;
     std::vector<MouseMoveCommand> commands;
+    std::function<void(FrameTiming&)> transform_timing;
+    bool last_clock_trusted=true;
+    int untrusted_clock_moves=0;
 };
 class Device final : public IMouseController {
 public:
@@ -64,6 +68,7 @@ public:
     bool open() noexcept override { return true; }
     MouseMoveReceipt move(const MouseMoveCommand& value) noexcept override {
         ++scene_.moves;scene_.commands.push_back(value);
+        if (scene_.network&&!scene_.last_clock_trusted) ++scene_.untrusted_clock_moves;
         if (!scene_.no_response && !scene_.command_failed) {
             scene_.x-=value.dx_counts/scene_.response_counts_per_pixel_x;
             scene_.y-=value.dy_counts/scene_.response_counts_per_pixel_y;
@@ -101,7 +106,8 @@ public:
             return CaptureStatus::NO_FRAME;
         frame={};frame.width=frame.height=frame.source_width=frame.source_height=320;
         frame.encoded_width=frame.encoded_height=320;
-        frame.bgr=scene_.unrelated?texture(7788):translated(scene_.original,scene_.x,scene_.y);
+        frame.bgr=scene_.unrelated?texture(7788):translated(
+            scene_.observed.empty()?scene_.original:scene_.observed,scene_.x,scene_.y);
         if(scene_.compressed) {
             std::vector<unsigned char> bytes;
             cv::imencode(".jpg",frame.bgr,bytes,{cv::IMWRITE_JPEG_QUALITY,90});
@@ -126,6 +132,12 @@ public:
             frame.timing.source_clock_session_id=1;
             frame.timing.source_time_at=scene_.now-5ms;
         }
+        if (scene_.transform_timing) scene_.transform_timing(frame.timing);
+        const auto& timing=frame.timing;
+        scene_.last_clock_trusted=timing.source_time_timing_valid&&
+            timing.source_clock_status==SourceClockStatus::VALID&&timing.source_timestamp_valid&&
+            timing.source_clock_session_id!=0&&std::isfinite(timing.source_clock_uncertainty_ms)&&
+            timing.source_clock_uncertainty_ms>=0&&timing.source_clock_uncertainty_ms<=50;
         return CaptureStatus::FRAME;
     }
     void close() noexcept override {++scene_.closed;scene_.now+=scene_.close_delay;}
@@ -213,6 +225,21 @@ Json precision_control(const cv::Mat& original=texture()) {
     evidence.push_back({{"quantized_unreachable",unreachable.evidence}});
     return evidence;
 }
+void coupled_subpixel_precision() {
+    Scene scene;
+    const cv::Mat diagonal=(cv::Mat_<float>(3,3)<<1.f/3,0,0,0,1.f/3,0,0,0,1.f/3);
+    cv::filter2D(scene.original,scene.original,-1,diagonal);
+    scene.x=-0.4;scene.y=-0.25;
+    scene.response_counts_per_pixel_x=1/0.38;scene.response_counts_per_pixel_y=1/0.55;
+    scene.configured_counts_per_pixel_x=0.425;scene.configured_counts_per_pixel_y=0.4;
+    expect(!run(scene,true).aligned&&scene.moves==0,
+        "斜向纹理的相关峰不能低估两轴残差并提前通过");
+    const auto aligned=run(scene);
+    expect(aligned.aligned&&scene.moves>0&&std::abs(scene.x)<0.1&&std::abs(scene.y)<=0.35,
+        "精修须消除可达的水平残差，保持原量化容差："+aligned.error);
+    const auto moves=scene.moves;
+    expect(run(scene,true).aligned&&scene.moves==moves,"精细对齐后复核不得再发鼠标命令");
+}
 Json image_coverage(const cv::Mat& original) {
     Json evidence=Json::array();
     for (const bool compressed:{false,true})
@@ -237,6 +264,20 @@ Json image_coverage(const cv::Mat& original) {
                 {"alignment",result.evidence},{"prethrow",checked.evidence}});
         }
     return evidence;
+}
+Json paired_precision(const cv::Mat& original,const cv::Mat& observed) {
+    Scene scene;scene.original=original;scene.observed=observed;
+    scene.response_counts_per_pixel_x=1/0.38;scene.response_counts_per_pixel_y=1/0.55;
+    scene.configured_counts_per_pixel_x=0.425;scene.configured_counts_per_pixel_y=0.4;
+    const auto before=run(scene,true);
+    expect(!before.aligned&&scene.moves==0,"T4实际停住画面仍有约0.4像素残差，不能提前通过");
+    const auto result=run(scene);
+    expect(result.aligned&&scene.moves==1&&scene.commands.front().dx_counts==-1&&
+        scene.commands.front().dy_counts==0,"实际停点须继续一格水平细调，不能改变垂直轴："+result.error);
+    const auto after=run(scene,true);
+    expect(after.aligned&&scene.moves==1,"实际停点细调后须通过零输出复核");
+    return {{"before",before.evidence},{"alignment",result.evidence},{"prethrow",after.evidence},
+        {"simulated_correction_x",scene.x},{"simulated_correction_y",scene.y}};
 }
 void image_failures() {
     Scene flat;flat.original.setTo(cv::Scalar::all(100));
@@ -273,6 +314,113 @@ void sparse_texture_coverage() {
     for(int y=0;y<320;++y) for(int x=0;x<320;++x)
         edge.original.at<cv::Vec3b>(y,x)=cv::Vec3b::all(x<110?60:180);
     expect(!run(edge).aligned&&edge.moves==0,"只有一条直边不能提供二维对齐证据");
+}
+Json clock_recovery() {
+    Json evidence=Json::array();
+    const auto record=[&](const char* name,const Scene& scene,const grenade_alignment::Result& result) {
+        evidence.push_back({{"case",name},{"result",result.evidence},{"grabbed_frames",scene.sequence},
+            {"untrusted_clock_moves",scene.untrusted_clock_moves}});
+        expect(scene.untrusted_clock_moves==0,std::string(name)+"：无效时钟帧不得发出鼠标命令");
+    };
+    const auto invalidate=[](FrameTiming& timing,SourceClockStatus status=SourceClockStatus::INVALID) {
+        timing.source_time_timing_valid=false;timing.source_clock_status=status;
+        timing.source_clock_mapping_age_ms=1234.5;timing.source_clock_uncertainty_ms=7.25;
+        timing.source_clock_round_trip_ms=3.5;timing.source_clock_sample_count=8;
+    };
+    Scene initial;initial.network=true;initial.x=8.4;initial.y=-6.4;
+    initial.response_counts_per_pixel_x=initial.response_counts_per_pixel_y=2.5;
+    initial.configured_counts_per_pixel_x=initial.configured_counts_per_pixel_y=2.5;
+    initial.transform_timing=[&](FrameTiming& timing) {if(initial.sequence<=2) invalidate(timing);};
+    const auto initial_result=run(initial);
+    expect(initial_result.aligned&&initial.moves>0,"首帧INVALID后恢复须继续找点："+initial_result.error);
+    expect(initial_result.evidence.value("clock_rejections",0)==2,"首帧坏时钟计数须保留原始拒绝次数");
+    record("initial_invalid_recovery",initial,initial_result);
+
+    Scene moving;moving.network=true;moving.x=20;
+    moving.response_counts_per_pixel_x=moving.response_counts_per_pixel_y=2.5;
+    moving.configured_counts_per_pixel_x=moving.configured_counts_per_pixel_y=2.5;
+    int moves_before_bad=-1,moves_after_bad=-1;
+    moving.transform_timing=[&](FrameTiming& timing) {
+        if(moving.sequence==3) moves_before_bad=moving.moves;
+        if(moving.sequence>=3&&moving.sequence<=5) invalidate(timing,SourceClockStatus::STALE);
+        if(moving.sequence==6) moves_after_bad=moving.moves;
+    };
+    const auto moving_result=run(moving);
+    expect(moving_result.aligned&&moves_before_bad>0&&moves_after_bad==moves_before_bad,
+        "中途STALE期间必须暂停输出，恢复后继续同次找点："+moving_result.error);
+    record("midrun_stale_recovery",moving,moving_result);
+
+    Scene stable;stable.network=true;Clock::time_point recovered_at{};
+    stable.transform_timing=[&](FrameTiming& timing) {
+        if(stable.sequence==3) invalidate(timing);
+        if(stable.sequence==4) recovered_at=timing.source_time_at;
+    };
+    const auto stable_result=run(stable,true);
+    expect(stable_result.aligned&&stable.moves==0&&recovered_at!=Clock::time_point{}&&
+        stable_result.verified_at-recovered_at>=80ms&&stable.sequence>=7,
+        "坏帧必须清空稳定累计，恢复后重新满足三帧与80ms");
+    record("stable_window_reset",stable,stable_result);
+
+    for(const bool after_valid:{false,true}) {
+        Scene persistent;persistent.network=true;
+        persistent.transform_timing=[&](FrameTiming& timing) {
+            if(!after_valid||persistent.sequence>2) invalidate(timing);
+        };
+        const auto result=run(persistent);
+        expect(!result.aligned&&persistent.moves==0&&result.evidence.value("elapsed_ms",9999.0)>=350&&
+            result.evidence.value("elapsed_ms",9999.0)<500,
+            "持续INVALID须沿350ms无有效帧期限结束，不能立即失败或刷新预算");
+        const auto latest=result.evidence.value("last_clock_rejection",Json::object());
+        expect(result.evidence.value("clock_rejections",0)>1&&
+            latest.value("source_clock_status",-1)==static_cast<int>(SourceClockStatus::INVALID)&&
+            latest.value("source_clock_mapping_age_ms",0.0)==1234.5&&
+            latest.value("source_clock_uncertainty_ms",0.0)==7.25&&
+            latest.value("source_clock_round_trip_ms",0.0)==3.5&&
+            latest.value("source_clock_sample_count",0)==8,
+            "最终证据须保留最近坏帧的原始时钟质量字段");
+        record(after_valid?"persistent_after_valid":"persistent_initial",persistent,result);
+    }
+
+    Scene session;session.network=true;
+    for(const bool after_valid:{false,true}) {
+        Scene late;late.network=true;
+        late.transform_timing=[&](FrameTiming& timing) {
+            if(late.sequence<=11&&(!after_valid||late.sequence>1)) invalidate(timing);
+        };
+        const auto result=run(late);
+        expect(!result.aligned&&late.moves==0&&late.sequence==12,
+            "首张恢复帧超过既有350ms期限也不能重新开始输出");
+    }
+    session.transform_timing=[&](FrameTiming& timing) {
+        if(session.sequence==2) {invalidate(timing,SourceClockStatus::WARMING);timing.source_clock_session_id=2;}
+    };
+    const auto session_result=run(session);
+    expect(!session_result.aligned&&session.sequence==2&&session_result.error=="画面源时钟会话已变化",
+        "已知非零源会话变化须立即停止，WARMING不能掩盖换代");
+    record("session_change_during_warming",session,session_result);
+
+    Scene missing_session;missing_session.network=true;
+    missing_session.transform_timing=[&](FrameTiming& timing) {
+        if(missing_session.sequence==2) {invalidate(timing);timing.source_clock_session_id=0;}
+        if(missing_session.sequence>2) timing.source_clock_session_id=2;
+    };
+    const auto missing_result=run(missing_session);
+    expect(!missing_result.aligned&&missing_session.sequence==3&&missing_result.error=="画面源时钟会话已变化",
+        "未知会话0不得覆盖已确认会话，恢复时仍须识别换代");
+    record("unknown_session_preserves_baseline",missing_session,missing_result);
+
+    for(const bool future:{false,true}) {
+        Scene age;age.network=true;age.x=20;
+        age.transform_timing=[&](FrameTiming& timing) {
+            if(age.sequence==1) invalidate(timing);
+            else timing.source_time_at=age.now+(future?1ms:-500ms);
+        };
+        const auto result=run(age);
+        expect(!result.aligned&&age.sequence==2&&age.moves==0&&result.error=="道具画面已陈旧，不能用于鼠标输出",
+            "时钟状态恢复不能放过未来或陈旧源帧");
+        record(future?"recovery_future_frame":"recovery_stale_frame",age,result);
+    }
+    return evidence;
 }
 void timing_geometry_and_cancellation() {
     Scene cold;cold.network=true;cold.clock_warming=true;cold.first_frame_at=cold.now+2500ms;
@@ -434,6 +582,17 @@ void reference_resources(const std::filesystem::path& root) {
 
 int main(int argc,char** argv) {
     try {
+        if (argc==7&&std::string(argv[1])=="--reference-image"&&
+            std::string(argv[3])=="--observed-image"&&std::string(argv[5])=="--report") {
+            const auto roi=[](const char* path) {
+                const auto image=cv::imread(path);
+                if(image.size()==cv::Size(320,320)) return image;
+                if(image.size()==cv::Size(2560,1440)) return image(cv::Rect(1120,560,320,320)).clone();
+                throw std::runtime_error("实际停点回放要求320 ROI或2560×1440原图");
+            };
+            save(argv[6],paired_precision(roi(argv[2]),roi(argv[4])).dump(2));
+            return failures?1:0;
+        }
         if (argc==5&&std::string(argv[1])=="--precision-image"&&std::string(argv[3])=="--report") {
             const auto image=cv::imread(argv[2]);
             if (image.cols!=2560||image.rows!=1440) throw std::runtime_error("实图精度回放要求本次2560×1440原图");
@@ -447,11 +606,13 @@ int main(int argc,char** argv) {
             save(argv[4],image_coverage(image(cv::Rect(1120,560,320,320)).clone()).dump(2));
             return failures?1:0;
         }
-        aligned_and_control();precision_control();image_failures();sparse_texture_coverage();timing_geometry_and_cancellation();
+        aligned_and_control();precision_control();coupled_subpixel_precision();image_failures();sparse_texture_coverage();timing_geometry_and_cancellation();
+        const auto clock_evidence=clock_recovery();
         const auto root=argc==2?std::filesystem::path(argv[1]):
             argc==3&&std::string(argv[1])=="--output-root"?std::filesystem::path(argv[2]):
             std::filesystem::path("temp/XEN-GRENADE-ALIGN-20261026-001/reference-tests");
         reference_resources(root);
+        save(root/"clock-recovery.json",clock_evidence.dump(2));
     } catch (const std::exception& error) {++failures;std::cerr<<"[异常] "<<error.what()<<'\n';}
     if (!failures) std::cout<<"grenade alignment tests passed\n";
     return failures?1:0;

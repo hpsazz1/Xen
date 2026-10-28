@@ -10,6 +10,7 @@
 #include <thread>
 #include <vector>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/video/tracking.hpp>
 
 namespace grenade_alignment {
 namespace {
@@ -30,6 +31,7 @@ struct Match {
     double score = 0;
     int patches = 0;
     std::string error;
+    std::vector<cv::Point2d> centers;
 };
 struct PatchMatch { cv::Point2d shift, center; double score = 0; };
 bool near(double a, double b) { return std::isfinite(a) && std::isfinite(b) && std::abs(a - b) < 1e-6; }
@@ -112,9 +114,38 @@ Match combine_matches(const std::vector<PatchMatch>& matches, int side) {
     result.shift *= 1.0/result.patches;
     result.valid = std::abs(result.shift.x) < side*kSearchRatio && std::abs(result.shift.y) < side*kSearchRatio;
     if (!result.valid) result.error = "瞄点偏移超过本次局部对齐范围";
+    result.centers=std::move(centers);
     return result;
 }
-Match match(const cv::Mat& reference, const cv::Mat& current_bgr, cv::Point2d center) {
+Match refine_match(const cv::Mat& reference,const cv::Mat& current,Match coarse,
+                   cv::Point2d center,cv::Point2d target_offset) {
+    const auto error=coarse.shift+target_offset;
+    if(!coarse.valid||std::max(std::abs(error.x),std::abs(error.y))>2.0) return coarse;
+    // 相关峰的独立抛物线会低估斜向纹理的亚像素位移。只在末段用原认可块精修平移，
+    // 不重新搜索、不纳入准星/HUD；精修位移仍交给原0.35px及稳定帧判断。
+    const int side=reference.cols,width=side/5,margin=side/20+3;
+    cv::Mat template_mask=cv::Mat::zeros(reference.size(),CV_8U);
+    for(const auto point:coarse.centers)
+        template_mask(cv::Rect(cvRound(point.x-width*0.5),cvRound(point.y-width*0.5),width,width)).setTo(255);
+    cv::Mat input_mask=cv::Mat::zeros(current.size(),CV_8U);
+    input_mask(cv::Rect(3,3,side-6,side*7/8-6)).setTo(255);
+    const cv::Rect crosshair(cvRound(center.x)-margin,cvRound(center.y)-margin,margin*2+1,margin*2+1);
+    const auto excluded=crosshair&cv::Rect(0,0,side,side);
+    template_mask(excluded).setTo(0);input_mask(excluded).setTo(0);
+    cv::Mat warp=(cv::Mat_<float>(2,3)<<1,0,static_cast<float>(coarse.shift.x),
+                                        0,1,static_cast<float>(coarse.shift.y));
+    const double score=cv::findTransformECCWithMask(reference,current,template_mask,input_mask,warp,
+        cv::MOTION_TRANSLATION,{cv::TermCriteria::COUNT|cv::TermCriteria::EPS,30,1e-5},1);
+    const cv::Point2d refined(warp.at<float>(0,2),warp.at<float>(1,2));
+    if(!std::isfinite(score)||!std::isfinite(refined.x)||!std::isfinite(refined.y)||
+        std::abs(refined.x-coarse.shift.x)>side*kAgreementRatio||
+        std::abs(refined.y-coarse.shift.y)>side*kAgreementRatio)
+        return {false,{},0,0,"道具图像匹配失败，未继续输出"};
+    coarse.shift=refined;
+    return coarse;
+}
+Match match(const cv::Mat& reference, const cv::Mat& current_bgr, cv::Point2d center,
+            cv::Point2d target_offset) {
     cv::Mat current;
     cv::cvtColor(current_bgr, current, cv::COLOR_BGR2GRAY);
     cv::GaussianBlur(current, current, {5,5}, 1.0);
@@ -158,7 +189,7 @@ Match match(const cv::Mat& reference, const cv::Mat& current_bgr, cv::Point2d ce
     for (const auto origin : origins)
         match_patch({origin.x * side / 320, origin.y * side / 320, width, width});
     const auto fixed = combine_matches(matches,side);
-    if (fixed.valid) return fixed;
+    if (fixed.valid) return refine_match(reference,current,fixed,center,target_offset);
 
     // 天空等稀疏场景的细节可能恰好落在固定块之间。仅在原取样不能定位时补查网格，
     // 继续使用同一相关峰、二维位移和精度要求；相邻重叠块不能重复计作独立区域。
@@ -175,7 +206,7 @@ Match match(const cv::Mat& reference, const cv::Mat& current_bgr, cv::Point2d ce
         }
         if(y==last_y) break;
     }
-    return combine_matches(matches,side);
+    return refine_match(reference,current,combine_matches(matches,side),center,target_offset);
 }
 struct CaptureCloser {
     ICapture* capture = nullptr;
@@ -201,7 +232,7 @@ Result detail::run_with_dependencies(const Reference& reference, const AppConfig
     std::function<bool()> permitted, const Dependencies& dependencies) noexcept {
     Result result;
     Clock::time_point started{};
-    std::uint64_t frames = 0, commands = 0;
+    std::uint64_t frames = 0, commands = 0, clock_rejections = 0;
     bool physical_motion_observed = false;
     try {
         if (!dependencies.create_capture || !dependencies.now || !dependencies.sleep || !dependencies.source)
@@ -296,6 +327,8 @@ Result detail::run_with_dependencies(const Reference& reference, const AppConfig
         std::uint64_t last_sequence=0, receiver_generation=0, source_session=0;
         std::int64_t last_source_timestamp=0;
         auto last_source_time=Clock::time_point{}, last_fresh=dependencies.now(), stable_since=Clock::time_point{};
+        auto initial_frame_wait=Clock::time_point{};
+        bool clock_recovering=false;
         auto observe_after=started;
         double previous_error=std::numeric_limits<double>::infinity();
         double best_error=std::numeric_limits<double>::infinity();
@@ -309,7 +342,8 @@ Result detail::run_with_dependencies(const Reference& reference, const AppConfig
                 throw std::runtime_error("道具采集断流或失败："+capture->last_error());
             const auto now=dependencies.now();
             if (status!=CaptureStatus::FRAME || frame.timing.sequence<=last_sequence) {
-                if (last_sequence && now-last_fresh>kNoFrameDuration)
+                const auto wait_since=frames?last_fresh:initial_frame_wait;
+                if (last_sequence && wait_since!=Clock::time_point{} && now-wait_since>kNoFrameDuration)
                     throw std::runtime_error("未收到新的道具画面，对齐已停止");
                 dependencies.sleep(2ms); continue;
             }
@@ -319,28 +353,51 @@ Result detail::run_with_dependencies(const Reference& reference, const AppConfig
                 throw std::runtime_error("采集器已重连，对齐已停止");
             receiver_generation=timing.receiver_generation;
             last_sequence=timing.sequence;
+            if (initial_frame_wait==Clock::time_point{}) initial_frame_wait=now;
             const bool network=config.capture.backend!=CaptureBackend::DESKTOP_DUPLICATION;
+            // 已确认的源会话不能被暂时缺失的ID覆盖；换代也不能借暖机帧继续。
+            if (network && source_session && timing.source_clock_session_id &&
+                source_session!=timing.source_clock_session_id)
+                throw std::runtime_error("画面源时钟会话已变化");
             if (network && (!timing.source_time_timing_valid || timing.source_clock_status!=SourceClockStatus::VALID ||
                 !timing.source_timestamp_valid || timing.source_clock_session_id==0 ||
                 !std::isfinite(timing.source_clock_uncertainty_ms) || timing.source_clock_uncertainty_ms<0 ||
                 timing.source_clock_uncertainty_ms>50)) {
-                // 每个短时NDI接收器的mapper需要三次真实时钟交换。暖机只等候，
-                // 不产生匹配/稳定帧/鼠标命令；一旦消费过有效帧则不允许降级重暖。
-                if (!frames && now<deadline && !config.capture.ndi_clock_sync_url.empty() &&
+                ++clock_rejections;
+                result.evidence["last_clock_rejection"]={
+                    {"sequence",timing.sequence},{"receiver_generation",timing.receiver_generation},
+                    {"source_clock_status",static_cast<int>(timing.source_clock_status)},
+                    {"source_clock_status_name",SourceClockStatusName(timing.source_clock_status)},
+                    {"source_time_timing_valid",timing.source_time_timing_valid},
+                    {"source_timestamp_valid",timing.source_timestamp_valid},{"source_timestamp",timing.source_timestamp},
+                    {"source_clock_session_id",timing.source_clock_session_id},
+                    {"source_clock_mapping_age_ms",timing.source_clock_mapping_age_ms},
+                    {"source_clock_uncertainty_ms",timing.source_clock_uncertainty_ms},
+                    {"source_clock_round_trip_ms",timing.source_clock_round_trip_ms},
+                    {"source_clock_rate",timing.source_clock_rate},{"source_clock_sample_count",timing.source_clock_sample_count},
+                    {"observed_steady_ns",std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count()},
+                    {"source_time_steady_ns",std::chrono::duration_cast<std::chrono::nanoseconds>(timing.source_time_at.time_since_epoch()).count()}};
+                stable_frames=0;stable_since={};
+                // 首次暖机仍由整次期限约束；接受有效帧后不重新暖机。
+                if (!frames && !clock_recovering && !config.capture.ndi_clock_sync_url.empty() &&
                     (timing.source_clock_status==SourceClockStatus::WARMING ||
                      timing.source_clock_status==SourceClockStatus::UNSYNCHRONIZED)) {
-                    last_fresh=now;dependencies.sleep(5ms);continue;
+                    initial_frame_wait=now;dependencies.sleep(5ms);continue;
                 }
-                throw std::runtime_error("网络画面缺少可信源时钟，请先恢复现有NDI时钟同步");
+                clock_recovering=true;
+                // 坏帧不刷新有效源时间或输出观察边界，只等原350ms预算内的新可信帧。
+                if (now-(frames?last_fresh:initial_frame_wait)>kNoFrameDuration)
+                    throw std::runtime_error("网络画面时间信息持续无效，本次对齐已停止");
+                dependencies.sleep(2ms);continue;
             }
+            if (clock_recovering && now-(frames?last_fresh:initial_frame_wait)>kNoFrameDuration)
+                throw std::runtime_error("网络画面时间信息持续无效，本次对齐已停止");
             const auto observed_at=network?timing.source_time_at:timing.captured_at;
             const auto uncertainty=network?std::chrono::duration_cast<Clock::duration>(
                 std::chrono::duration<double,std::milli>(timing.source_clock_uncertainty_ms)):Clock::duration::zero();
             if (timing.captured_at==Clock::time_point{} || timing.captured_at>now || now-timing.captured_at>kFrameAge ||
                 observed_at==Clock::time_point{} || observed_at>now || now-observed_at+uncertainty>kFrameAge)
                 throw std::runtime_error("道具画面已陈旧，不能用于鼠标输出");
-            if (network && source_session && source_session!=timing.source_clock_session_id)
-                throw std::runtime_error("画面源时钟会话已变化");
             source_session=timing.source_clock_session_id;
             if (observed_at<=last_source_time || observed_at-uncertainty<=observe_after ||
                 (network && timing.source_timestamp<=last_source_timestamp)) {
@@ -348,7 +405,8 @@ Result detail::run_with_dependencies(const Reference& reference, const AppConfig
                 dependencies.sleep(2ms);continue;
             }
             last_source_time=observed_at;last_source_timestamp=timing.source_timestamp;last_fresh=now;++frames;
-            const auto measured=match(reference_gray,frame.bgr,center);
+            clock_recovering=false;
+            const auto measured=match(reference_gray,frame.bgr,center,reference.target-center);
             if (!measured.valid) throw std::runtime_error(measured.error);
             const auto error=reference.target+measured.shift-center;
             const double normalized=std::max(std::abs(error.x)/320.0,std::abs(error.y)/320.0);
@@ -411,6 +469,7 @@ Result detail::run_with_dependencies(const Reference& reference, const AppConfig
         result.evidence["emergency_stop"]=result.emergency_stop;
         result.evidence["error"]=result.error;result.evidence["frames"]=frames;
         result.evidence["commands"]=commands;
+        result.evidence["clock_rejections"]=clock_rejections;
         if (result.aligned) result.evidence["verified_at_steady_ns"]=
             std::chrono::duration_cast<std::chrono::nanoseconds>(result.verified_at.time_since_epoch()).count();
         result.evidence["physical_motion_monitor_verified"]=physical_motion_observed;
