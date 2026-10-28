@@ -11,10 +11,10 @@ struct SavedMovementPlan { std::string path, name, map, voice_command, raw_name;
 std::vector<SavedMovementPlan> list_movement_plans(
     const std::string& library_root = "cache/movement/plans",
     const std::string& legacy_root = "cache/debug");
-// 仅更新库内文件；旧调试报告与外部文件始终另存。异常交由 Session 后台边界报告。
+// 仅更新库内文件；旧调试报告与外部文件始终另存。道具护栏按磁盘身份决定更新或新建。
 std::string save_movement_plan(const nlohmann::json& plan,
     const std::string& selected_path, bool save_as,
-    const std::string& library_root = "cache/movement/plans");
+    const std::string& library_root = "cache/movement/plans", bool grenade_identity_guard = false);
 // 将库内方案与同stem独占资源移入同域备份，返回归档批次目录；失败尝试原位回滚。
 std::string archive_movement_plan(const std::string& selected_path,
     const std::string& library_root = "cache/movement/plans");

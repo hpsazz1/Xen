@@ -35,7 +35,7 @@ namespace {
 using Clock = std::chrono::steady_clock;
 using Json = xen_obs::Json;
 constexpr uint32_t kWidth = 344, kHeight = 576;
-constexpr uint32_t kMenuWidth = 800, kMenuHeight = 430;
+constexpr uint32_t kMenuWidth = 1120, kMenuHeight = 640;
 constexpr UINT kApplySettings = WM_APP + 21;
 constexpr wchar_t kWindowClass[] = L"XenObsGrenadeReference";
 constexpr char kSettingsSource[] = "xen_grenade_overlay_settings";
@@ -357,9 +357,12 @@ private:
                 throw std::runtime_error("菜单显示器尺寸不可用");
             const auto screen_width = info.rcMonitor.right - info.rcMonitor.left;
             const auto screen_height = info.rcMonitor.bottom - info.rcMonitor.top;
-            const auto width = std::min(std::clamp(screen_width * 5 / 16, 560L, 960L),
-                std::min(screen_width - 32, (screen_height - 32) * 80 / 43));
-            const auto height = width * static_cast<int>(kMenuHeight) / static_cast<int>(kMenuWidth);
+            const auto available_width = std::max(1L,screen_width-32);
+            const auto available_height = std::max(1L,screen_height-32);
+            const auto width = std::min(std::clamp(screen_width * 7 / 16,960L,static_cast<long>(kMenuWidth)),
+                std::min(available_width,available_height * static_cast<long>(kMenuWidth) / static_cast<long>(kMenuHeight)));
+            const auto height = std::min(available_height,std::max(1L,
+                width * static_cast<long>(kMenuHeight) / static_cast<long>(kMenuWidth)));
             // 每次呼出刷新GSI与清单；旧选择只作基线，不能立即关闭刚打开的菜单。
             obs_data_t* settings = obs_source_get_settings(menu_browser_);
             const auto url = target.base + "/obs-menu#open-" + std::to_string(++menu_open_count_);

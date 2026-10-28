@@ -9,6 +9,7 @@
 - 可用 `ctest --test-dir build/nvidia -C Release -N` 查看该目录已经配置的集合；DirectML/OpenVINO 换用对应固定目录。测试集合依赖本机模型与 SDK 配置，未注册不表示已通过。
 - [实际 EXE 退出](xen_exe_shutdown_validation_20261011.md)与[Runtime/弹窗组件组合](runtime_file_dialog_shutdown_validation_20261011.md)分别证明各自入口；桌面探针需要真实桌面操作，不是无人值守 CTest。
 - 测试中的 CPU、合成画面、回环 socket、假设备和 ACK 都不替代真实设备/游戏体验。
+- OBS菜单的分组和站位图来源可运行 `node tests/grenade_menu_tests.cjs`：直接执行 `Xen/grenade_web/page.html` 的真实JS函数，DOM仅作替身，不启动HTTP或游戏输入；覆盖自定义首token站位、完整落点、无空格独立分组、当前站位优先和既有出生点共图。文字换行与首屏布局另用实际浏览器检查。
 
 ## 夹具说明
 

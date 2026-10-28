@@ -82,6 +82,36 @@ void archive_contract(const fs::path& root) {
         bytes(capture) == "original capture" && bytes(standing) == "original standing",
         "归档方案被占用时必须恢复先前移出的独占资源");
 }
+void grenade_save_identity_contract(const fs::path& root) {
+    const auto domain=root/"grenade-save", plans=domain/"plans";
+    movement::timeline::Plan plan;plan.name="快跳台烟";plan.map="de_mirage";plan.location="快跳台";plan.team="T";
+    plan.actions.push_back({});
+    const auto original=movement::timeline::plan_json(plan);
+    const auto first=save_movement_plan(original,"",false,utf8(plans),true);
+    const auto source=fs::u8path(first), reference=domain/"references"/source.stem()/"reference.json";
+    write(reference,"original verified reference");
+    const auto old_bytes=bytes(source);
+    for(const auto* field:{"name","map","team","location"}) {
+        auto candidate=original;
+        candidate[field]=std::string(field)=="name"?"快跳台下烟":std::string(field)=="map"?"de_nuke":
+            std::string(field)=="team"?"CT":"快跳台下";
+        const auto saved=fs::u8path(save_movement_plan(candidate,first,false,utf8(plans),true));
+        require(saved!=source&&bytes(source)==old_bytes&&read(utf8(saved))==candidate&&
+            bytes(reference)=="original verified reference", "道具身份变化普通保存必须另存且保留原方案与参考字节");
+        require(!fs::exists(domain/"references"/saved.stem())&&!fs::exists(domain/"captures"/(saved.stem().wstring()+L".json")),
+            "自动另存不得复制旧参考或制造已采集记录");
+    }
+    auto tuning=original;tuning["notes"]="同名微调坐标和备注";tuning["crouch"]=true;
+    tuning["actions"][0]["duration_ms"]=250;
+    require(save_movement_plan(tuning,first,false,utf8(plans),true)==first&&read(first)==tuning,
+        "道具同身份动作、姿态和备注编辑仍应更新自身");
+    plan.name="T1 旧阵营方案";plan.team.clear();
+    const auto legacy=movement::timeline::plan_json(plan);
+    const auto legacy_path=save_movement_plan(legacy,"",false,utf8(plans),true);
+    auto explicit_team=legacy;explicit_team["team"]="T";
+    require(save_movement_plan(explicit_team,legacy_path,false,utf8(plans),true)==legacy_path,
+        "旧名称推断T与补存显式T不能误判为另一个道具");
+}
 void run(const fs::path& root) {
     const auto library = utf8(root / fs::u8path("身法方案"));
     const auto legacy = utf8(root / "legacy");
@@ -160,6 +190,7 @@ void run(const fs::path& root) {
     const auto migrated = save_movement_plan(legacy_plan, "", false, library);
     require(read(migrated) == document, "旧格式保存未保留动作及空口令");
     archive_contract(root);
+    grenade_save_identity_contract(root);
 }
 }
 int main(int argc, char** argv) {

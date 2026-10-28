@@ -304,6 +304,41 @@ void test_documents(const std::filesystem::path& root) {
     require(session.snapshot()->state == State::CANCELED && session.snapshot()->prepared_id.empty(),
         "取消未撤销准备身份");
 }
+void test_grenade_save_identity(const std::filesystem::path& root) {
+    Session session;
+    auto device=std::make_shared<FakeDevice>();
+    const auto context=context_for(device);
+    auto request=request_for(root/"grenade-save-identity");request.mode=Mode::GRENADE_TEST;
+    request.movement_library_root=utf8(root/"grenade-save-identity"/"plans");
+    auto original=example_plan();original["name"]="快跳台烟";original["map"]="de_mirage";
+    original["location"]="快跳台";original["team"]="T";request.plan_text=original.dump();
+    submit(session,Action::SAVE_PLAN,request,context,State::COMPLETED);
+    const auto old_path=session.snapshot()->grenade_selected_path;
+    const auto path=std::filesystem::u8path(old_path);
+    const auto reference=path.parent_path().parent_path()/"references"/path.stem()/"reference.json";
+    std::filesystem::create_directories(reference.parent_path());
+    {std::ofstream file(reference);file<<"original verified reference";}
+    request.load_path=old_path;
+    auto candidate=original;candidate["name"]="快跳台下烟";request.plan_text=candidate.dump();
+    request.movement_save_as=false;
+    submit(session,Action::SAVE_PLAN,request,context,State::COMPLETED);
+    const auto saved=session.snapshot()->grenade_selected_path;
+    require(saved!=old_path&&read_json(path)==original&&read_json(std::filesystem::u8path(saved))==candidate,
+        "道具改名后普通保存必须创建新ID，不能覆盖已采测的原方案");
+    std::ifstream old_reference(reference);std::string marker;std::getline(old_reference,marker);
+    require(marker=="original verified reference"&&
+        !std::filesystem::exists(reference.parent_path().parent_path()/std::filesystem::u8path(saved).stem()),
+        "新道具不能继承原道具的参考或采测事实");
+    require(session.snapshot()->message.find("已新建")!=std::string::npos,"道具自动另存应明确反馈已新建");
+    request.load_path=saved;
+    candidate["notes"]="同名修订";candidate["crouch"]=true;candidate["actions"][0]["duration_ms"]=210;
+    request.plan_text=candidate.dump();
+    submit(session,Action::SAVE_PLAN,request,context,State::COMPLETED);
+    require(session.snapshot()->grenade_selected_path==saved&&read_json(std::filesystem::u8path(saved))==candidate&&
+        session.snapshot()->message.find("已更新")!=std::string::npos,
+        "新建回执之后同名动作和姿态修改应更新自身，不连续另存");
+    require(device->touches==0,"保存身份保护不得触发设备输入");
+}
 void test_grenade_delete(const std::filesystem::path& root) {
     Session session;
     auto device = std::make_shared<FakeDevice>();
@@ -903,6 +938,7 @@ int main(int argc, char** argv) {
         require(argc == 2, "需要显式提供构建目录内的fixture目录");
         const auto root = std::filesystem::absolute(std::filesystem::u8path(argv[1]));
         test_documents(root);
+        test_grenade_save_identity(root);
         test_grenade_delete(root);
         test_invalid_plans(root);
         test_frozen_and_missing_source(root);

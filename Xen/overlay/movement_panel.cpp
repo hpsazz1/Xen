@@ -7,6 +7,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <regex>
 #include <string>
 #include <string_view>
@@ -174,12 +175,24 @@ void timeline(const Plan& plan) {
 }
 
 struct MovementPanel::Impl {
+    struct GrenadeIdentity {
+        std::string name, map, location, team;
+        bool operator==(const GrenadeIdentity&) const = default;
+    };
+    struct PendingGrenadeSave {
+        Json plan;
+        GrenadeIdentity identity;
+        std::uint64_t catalog = 0;
+    };
     Plan plan;
     Request request;
     std::string error, map_filter, gsi_map, gsi_team;
     bool grenade() const { return request.mode == Mode::GRENADE_TEST; }
     bool initialized = false, catalog_requested = false, seen_loaded_slot = false;
     bool initial_draft = true, custom_map = false;
+    bool new_grenade_draft = false;
+    std::optional<GrenadeIdentity> grenade_baseline;
+    std::optional<PendingGrenadeSave> pending_grenade_save;
     std::uint64_t seen_draft = 0, seen_catalog = 0;
 
     explicit Impl(Mode mode) {
@@ -211,6 +224,24 @@ struct MovementPanel::Impl {
         const auto side = movement::timeline::plan_team(plan);
         return !side.empty() ? side : plan.map == gsi_map ? gsi_team : std::string{};
     }
+    static GrenadeIdentity identity(const Plan& value) {
+        return {value.name,value.map,value.location,movement::timeline::plan_team(value)};
+    }
+    bool updates_current_grenade() const {
+        if (request.load_path.empty() || !grenade_baseline) return false;
+        auto current = identity(plan);
+        if (current.team.empty()) current.team = selected_team();
+        return current == *grenade_baseline;
+    }
+    void new_grenade(OverlayActions& actions) {
+        plan = Plan{}; plan.name = "新道具方案"; plan.map = gsi_map; plan.team = gsi_team;
+        TimelineAction action; action.kind = ActionKind::BUTTON; action.button = Button::LEFT; action.duration_ms = 1000;
+        plan.actions.push_back(action);
+        request.load_path.clear(); request.movement_save_as = false;
+        grenade_baseline.reset(); pending_grenade_save.reset();
+        new_grenade_draft = true; initial_draft = true; custom_map = false;
+        changed(actions);
+    }
     void send(Action action, OverlayActions& actions, bool save_as = false) {
         if (action == Action::DELETE_PLAN && (!grenade() || request.load_path.empty())) return;
         if (grenade() && action == Action::SAVE_PLAN) {
@@ -225,10 +256,16 @@ struct MovementPanel::Impl {
                 return;
             }
             plan.team = side;
+            save_as = save_as || !updates_current_grenade();
         }
         if (action != Action::CANCEL && action != Action::LOAD_PLAN && action != Action::LIST_MOVEMENT_PLANS && action != Action::DELETE_PLAN &&
             action != Action::START_MOVEMENT_RECORDING && action != Action::STOP_MOVEMENT_RECORDING &&
             !update_request()) return;
+        if (grenade()) {
+            if (action == Action::SAVE_PLAN)
+                pending_grenade_save = PendingGrenadeSave{Json::parse(request.plan_text),identity(plan),seen_catalog};
+            else if (action == Action::LOAD_PLAN || action == Action::DELETE_PLAN) pending_grenade_save.reset();
+        }
         request.movement_save_as = save_as;
         actions.debug_action = action;
         actions.debug_request = request;
@@ -243,9 +280,25 @@ struct MovementPanel::Impl {
                 gsi_team = weapon::team_name(snapshot->movement_map.local_team);
         }
         const auto revision = grenade() ? snapshot->grenade_catalog_revision : snapshot->movement_catalog_revision;
+        if (grenade() && pending_grenade_save && revision != pending_grenade_save->catalog &&
+            !snapshot->grenade_selected_path.empty() && snapshot->grenade_baseline == pending_grenade_save->plan) {
+            // 保存只回传目录和基线，不能等待新的loaded_draft才能接住新文件身份。
+            request.load_path = snapshot->grenade_selected_path;
+            grenade_baseline = pending_grenade_save->identity;
+            new_grenade_draft = false; pending_grenade_save.reset();
+        }
         if (revision != seen_catalog) {
             seen_catalog = revision;
-            request.load_path = grenade() ? snapshot->grenade_selected_path : snapshot->movement_selected_path;
+            if (!grenade()) request.load_path = snapshot->movement_selected_path;
+            else if (!new_grenade_draft) {
+                request.load_path = snapshot->grenade_selected_path;
+                if (request.load_path.empty()) grenade_baseline.reset();
+                else {
+                    Plan baseline; std::string reason;
+                    if (movement::timeline::parse_plan(snapshot->grenade_baseline,baseline,reason))
+                        grenade_baseline = identity(baseline);
+                }
+            }
         }
         const auto loaded_revision = grenade() ? snapshot->grenade_loaded_revision : snapshot->movement_loaded_revision;
         const auto& loaded_draft = grenade() ? snapshot->grenade_loaded_draft : snapshot->movement_loaded_draft;
@@ -258,7 +311,14 @@ struct MovementPanel::Impl {
             seen_loaded_slot |= loaded_revision != 0;
             Plan loaded;
             if (movement::timeline::parse_plan(legacy ? snapshot->draft_plan : loaded_draft, loaded, error)) {
-                plan = std::move(loaded); initial_draft = false; custom_map = false; update_request();
+                plan = std::move(loaded); initial_draft = false; custom_map = false;
+                if (grenade()) {
+                    request.load_path = snapshot->grenade_selected_path;
+                    // 载入槽可能先于目录回执到达，不能把暂时的空路径重新当作显式新增。
+                    new_grenade_draft = false; pending_grenade_save.reset();
+                    if (request.load_path.empty()) grenade_baseline.reset(); else grenade_baseline = identity(plan);
+                }
+                update_request();
             }
         }
         // 初始空草稿只补空值；载入和手动选择之后不随GSI换图、换边改写方案。
@@ -329,6 +389,11 @@ struct MovementPanel::Impl {
         if (button("刷新方案", "只列出本页主动保存的方案；测试记录和录制草稿不会加入列表。", !busy))
             send(Action::LIST_MOVEMENT_PLANS, actions);
         if (grenade()) {
+            ImGui::SameLine();
+            if (ImGui::GetContentRegionAvail().x < ImGui::CalcTextSize("新增道具").x + ImGui::GetStyle().FramePadding.x * 2)
+                ImGui::NewLine();
+            if (button("新增道具","清空当前保存目标和草稿，默认使用有效GSI地图与阵营、站姿左键1000ms；不继承旧图片或试投记录，不自动保存或执行。",!busy))
+                new_grenade(actions);
             ImGui::SameLine();
             if (ImGui::GetContentRegionAvail().x < ImGui::CalcTextSize("删除方案").x + ImGui::GetStyle().FramePadding.x * 2)
                 ImGui::NewLine();
@@ -579,7 +644,10 @@ void MovementPanel::render(const AppConfig& config, const Snapshot* snapshot, Ov
         if (ui.grenade()) {
             ImGui::TextWrapped("主机OBS插件右键呼出道具菜单，点选后显示站位和瞄点参考；拿出对应道具，大致转向目标后上键对齐、下键投掷、左键取消，End全局急停。按键须启用并保存，F11手动测试仍保留。");
             tip("道具辅助只调整视角，不替代固定站位；OBS菜单点选不会自动对齐或投掷。上/下/左默认使用方向区，可在上方捕获实际数字区按键；右键由OBS插件呼出或隐藏菜单。对齐沿用当前参考资源，已通过的动作时序保持原样。");
-            if (snapshot) {
+            if (ui.new_grenade_draft || !ui.updates_current_grenade()) {
+                ImGui::TextDisabled("当前为未保存的新道具草稿；保存后可用PgUp/PgDn采集参考图。");
+                tip("当前是独立空白草稿，不沿用之前方案的站位图、瞄点图或投掷确认。");
+            } else if (snapshot) {
                 ImGui::TextWrapped("对齐状态：%s", snapshot->grenade_guidance_message.empty()
                     ? "等待选择方案与参考资源" : snapshot->grenade_guidance_message.c_str());
                 tip("状态来自当前道具对齐会话。画面匹配完成只表示对齐判断通过，实际投掷结果仍需游戏内确认。");
@@ -611,9 +679,22 @@ void MovementPanel::render(const AppConfig& config, const Snapshot* snapshot, Ov
         if (!ui.grenade()) ui.library(snapshot, actions, busy || recording);
         if (button("校验方案", "仅校验时间轴及参数，不输出设备。", !busy && !recording)) ui.send(Action::VALIDATE, actions);
         ImGui::SameLine();
-        if (button("保存方案", "保存当前修改；已选方案直接更新，新方案自动保存到方案库，无需填写路径。", !busy && !recording)) ui.send(Action::SAVE_PLAN, actions);
-        ImGui::SameLine();
-        if (button("另存新方案", "将当前草稿保存为新文件，保留原方案。", !busy && !recording)) ui.send(Action::SAVE_PLAN, actions, true);
+        if (ui.grenade()) {
+            const bool updating = ui.updates_current_grenade();
+            if (button(updating ? "更新当前道具" : "保存新道具",
+                    updating ? "名称、地图、点位和阵营仍是原身份，只更新当前文件的动作、姿态或说明。" :
+                        "当前没有保存目标，或名称、地图、点位、阵营已改变；保存为新文件，保留原方案及参考图。",
+                    !busy && !recording)) ui.send(Action::SAVE_PLAN,actions,!updating);
+            if (updating) {
+                ImGui::SameLine();
+                if (button("复制为新道具","把当前道具复制为另一个新文件，原方案及参考图保持；新文件需独立采集和试投。",!busy && !recording))
+                    ui.send(Action::SAVE_PLAN,actions,true);
+            }
+        } else {
+            if (button("保存方案", "保存当前修改；已选方案直接更新，新方案自动保存到方案库，无需填写路径。", !busy && !recording)) ui.send(Action::SAVE_PLAN, actions);
+            ImGui::SameLine();
+            if (button("另存新方案", "将当前草稿保存为新文件，保留原方案。", !busy && !recording)) ui.send(Action::SAVE_PLAN, actions, true);
+        }
         ImGui::Text("共享灵敏度 %.3f；m_yaw %.6f", config.movement.sensitivity, config.movement.yaw_degrees_per_count);
         tip("换算参数在辅助 / 身法修改；脚本目标角度不等于游戏已实际完成的转角。");
         const bool enabled = snapshot && snapshot->movement_test_enabled && snapshot->movement_test_mode == ui.request.mode;

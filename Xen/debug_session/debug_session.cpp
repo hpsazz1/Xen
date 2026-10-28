@@ -1286,14 +1286,20 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
             if (timeline_mode(request.mode) && action == Action::SAVE_PLAN) {
                 const auto plan = request_plan(request);
                 std::string path;
-                try { path = detail::save_movement_plan(plan,request.load_path,request.movement_save_as,timeline_library_root(request)); }
+                try { path = detail::save_movement_plan(plan,request.load_path,request.movement_save_as,
+                    timeline_library_root(request),request.mode==Mode::GRENADE_TEST); }
                 catch (const std::exception& error) {
                     impl_->update([&](Snapshot& s) { s.state = State::COMPLETED; s.message = error.what(); });
                     return;
                 }
+                std::error_code comparison_error;
+                const bool updated=!request.load_path.empty() && std::filesystem::equivalent(
+                    std::filesystem::u8path(path),std::filesystem::u8path(request.load_path),comparison_error);
                 refresh_movement_library(path);
                 impl_->update([&](Snapshot& s) { baseline_plan(s,request.mode) = plan;
-                    s.state = State::COMPLETED; s.message = std::string(timeline_name(request.mode)) + "方案已保存，可从下拉框重新选择"; });
+                    s.state = State::COMPLETED; s.message = std::string(timeline_name(request.mode)) +
+                        (request.mode==Mode::GRENADE_TEST ? (updated?"方案已更新":"方案已新建") : "方案已保存") +
+                        "，可从下拉框重新选择"; });
                 if (request.mode == Mode::GRENADE_TEST && snapshot()->movement_test_enabled &&
                     snapshot()->movement_test_mode == request.mode) {
                     impl_->guidance("selected","方案已保存，请核对参考图是否匹配当前版本",path,grenade_epoch);

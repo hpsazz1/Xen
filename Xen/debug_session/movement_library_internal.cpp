@@ -42,6 +42,10 @@ movement::timeline::Plan read_plan(const fs::path& path) {
     if (!movement::timeline::parse_plan(document, plan, error)) throw std::runtime_error(error);
     return plan;
 }
+bool same_grenade_identity(const movement::timeline::Plan& a, const movement::timeline::Plan& b) {
+    return a.name==b.name && a.map==b.map && a.location==b.location &&
+        movement::timeline::plan_team(a)==movement::timeline::plan_team(b);
+}
 void append_plan(std::vector<SavedMovementPlan>& result, const fs::path& path, const std::string& suffix) {
     try {
         if (fs::is_symlink(path) || !fs::is_regular_file(path)) return;
@@ -92,7 +96,7 @@ std::vector<SavedMovementPlan> list_movement_plans(const std::string& library_ro
     return result;
 }
 std::string save_movement_plan(const Json& document, const std::string& selected_path, bool save_as,
-    const std::string& library_root) {
+    const std::string& library_root, bool grenade_identity_guard) {
     movement::timeline::Plan plan;
     std::string error;
     if (!movement::timeline::parse_plan(document, plan, error)) throw std::runtime_error(error);
@@ -106,8 +110,9 @@ std::string save_movement_plan(const Json& document, const std::string& selected
         // 只覆盖用户已载入的有效库文件，不把历史 Run 或任意路径变成保存目标。
         if (selected.extension() == ".json" && !fs::is_symlink(selected, code) &&
             fs::is_regular_file(selected, code) && fs::equivalent(selected.parent_path(), root, code)) {
-            read_plan(selected);
-            destination = selected;
+            const auto saved=read_plan(selected);
+            // 道具改名、换图/阵营/点位即是新身份；动作、姿态和备注仍可按原ID微调。
+            if (!grenade_identity_guard || same_grenade_identity(plan,saved)) destination=selected;
         }
     }
     wchar_t temporary_name[MAX_PATH]{};
