@@ -84,9 +84,10 @@ async function selectPlan(planId){
 }
 function imageUrl(kind,id,revision){return '/reference/'+kind+'.png?plan_id='+encodeURIComponent(id)+'&revision='+encodeURIComponent(revision);}
 function svgElement(tag,attributes){const item=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const[name,value]of Object.entries(attributes))item.setAttribute(name,String(value));return item;}
+function imageReady(value,kind){return (value?.[kind+'_ready']??value?.ready)===true;}
 function renderAim(container,plan,value){
-  const revision=value?.ready?value.revision:'missing';if(container.dataset.revision===revision)return;container.dataset.revision=revision;
-  if(!value?.ready){container.innerHTML='<span class="placeholder">瞄点待采集</span>';return;}
+  const revision=imageReady(value,'aim')?value.revision:'missing';if(container.dataset.revision===revision)return;container.dataset.revision=revision;
+  if(!imageReady(value,'aim')){container.innerHTML='<span class="placeholder">瞄点待采集</span>';return;}
   const g=value.geometry,width=Math.min(g.source_width,g.roi_width*g.scale_x*2),height=Math.min(g.source_height,g.roi_height*g.scale_y*2);
   const x=Math.max(0,Math.min(g.source_width-width,g.roi_x+g.roi_width*g.scale_x/2-width/2)),y=Math.max(0,Math.min(g.source_height-height,g.roi_y+g.roi_height*g.scale_y/2-height/2));
   const svg=svgElement('svg',{viewBox:`${x} ${y} ${width} ${height}`,role:'img','aria-label':target(plan)+'瞄点'});
@@ -94,19 +95,19 @@ function renderAim(container,plan,value){
   image.addEventListener('error',()=>{container.dataset.revision='';container.innerHTML='<span class="placeholder">图片读取失败，稍后重试</span>';});
   svg.append(image,svgElement('rect',{x:g.roi_x,y:g.roi_y,width:g.roi_width*g.scale_x,height:g.roi_height*g.scale_y,fill:'none',stroke:'#ffdf36','stroke-width':width*.005}),svgElement('circle',{cx:g.roi_x+value.target_x*g.scale_x,cy:g.roi_y+value.target_y*g.scale_y,r:width*.009,fill:'#ffdf36',stroke:'#23342b','stroke-width':width*.002}));container.replaceChildren(svg);
 }
-function standingSource(){const plans=groupPlans();const chosen=plans.find(plan=>plan.id===state.selected);if(chosen&&state.refs.get(chosen.id)?.ready)return chosen;const own=plans.find(plan=>state.refs.get(plan.id)?.ready);if(own)return own;if(plans.length&&plans.every(sharedSpawn))return visiblePlans().find(plan=>sharedSpawn(plan)&&state.refs.get(plan.id)?.ready)||null;return null;}
+function standingSource(){const plans=groupPlans();const chosen=plans.find(plan=>plan.id===state.selected);if(chosen&&imageReady(state.refs.get(chosen.id),'standing'))return chosen;const own=plans.find(plan=>imageReady(state.refs.get(plan.id),'standing'));if(own)return own;if(plans.length&&plans.every(sharedSpawn))return visiblePlans().find(plan=>sharedSpawn(plan)&&imageReady(state.refs.get(plan.id),'standing')&&state.refs.get(plan.id).standing_marker)||null;return null;}
 function renderImages(){
   const plans=groupPlans();if(!plans.length)return;
   for(const container of $('cards').querySelectorAll('[data-image]')){const plan=plans.find(item=>item.id===container.dataset.image);if(plan)renderAim(container,plan,state.refs.get(plan.id));}
-  const source=standingSource(),shared=plans.every(sharedSpawn),container=$('standing');$('standing-label').textContent=shared?'出生点共用一张图':'先站到这里';
-  if(!source){if(container.dataset.revision!=='missing'){container.innerHTML='<div class="placeholder">站位图待采集</div>';container.dataset.revision='missing';}$('standing-note').textContent='F10 采集并发送后会自动显示。';return;}
+  const source=standingSource(),shared=plans.every(sharedSpawn)&&Boolean(state.refs.get(source?.id)?.standing_marker),container=$('standing');$('standing-label').textContent=shared?'出生点共用一张图':'先站到这里';
+  if(!source){if(container.dataset.revision!=='missing'){container.innerHTML='<div class="placeholder">站位图待采集</div>';container.dataset.revision='missing';}$('standing-note').textContent='F9 采集站位图后会自动显示。';return;}
   const value=state.refs.get(source.id),marker=state.mode==='station'&&station(source).key===state.group?value.standing_marker:null;
   const revision=value.revision+':'+(marker?state.group:'shared');if(container.dataset.revision!==revision){container.dataset.revision=revision;const image=document.createElement('img');image.alt='站位图';image.src=imageUrl('standing',source.id,value.revision);image.onerror=()=>{container.dataset.revision='';container.innerHTML='<span class="placeholder">图片读取失败，稍后重试</span>';};const svg=svgElement('svg',{viewBox:`0 0 ${value.standing_width} ${value.standing_height}`});if(marker)svg.append(svgElement('circle',{cx:marker.x*value.standing_width,cy:marker.y*value.standing_height,r:value.standing_width*.026,fill:'none',stroke:'#ffdf36','stroke-width':value.standing_width*.006}));container.replaceChildren(image,svg);}
   $('standing-note').textContent=shared?'1–5 号位共用出生点图，按图中编号站位。':value.standing_note||'按图站好位置。';
 }
 async function refreshReferences(){
   if(state.referenceLoading||!ready()||!state.group||document.hidden)return;state.referenceLoading=true;const generation=state.generation,group=state.group,mode=state.mode;
-  const fetchOne=async plan=>{try{const response=await fetch('/reference.json?plan_id='+encodeURIComponent(plan.id),{cache:'no-store',signal:AbortSignal.timeout(4000)});const value=await response.json();if(generation!==state.generation)return;const previous=state.refs.get(plan.id);state.refs.set(plan.id,response.ok&&value.ready===true?value:{ready:false});if(previous?.revision&&value.ready&&previous.revision!==value.revision)$('reference-note').textContent='新采集已同步。F10 后这里会自动更新。';}catch{if(generation===state.generation)state.refs.set(plan.id,{ready:false});}};
+  const fetchOne=async plan=>{try{const response=await fetch('/reference.json?plan_id='+encodeURIComponent(plan.id),{cache:'no-store',signal:AbortSignal.timeout(4000)});const value=await response.json();if(generation!==state.generation)return;const previous=state.refs.get(plan.id);state.refs.set(plan.id,response.ok&&(imageReady(value,'aim')||imageReady(value,'standing'))?value:{ready:false});if(previous?.revision&&value.revision&&previous.revision!==value.revision)$('reference-note').textContent='新截图已同步。F9 更新站位，F10 更新瞄点。';}catch{if(generation===state.generation)state.refs.set(plan.id,{ready:false});}};
   try{const wanted=groupPlans();for(const extra of [findPlan(state.selected),standingSource()])if(extra&&!wanted.some(plan=>plan.id===extra.id))wanted.push(extra);
     for(const plan of wanted){await fetchOne(plan);if(generation!==state.generation||group!==state.group||mode!==state.mode)return;renderImages();}
     const plans=groupPlans();if(plans.length&&plans.every(sharedSpawn)&&!standingSource()){for(const plan of visiblePlans().filter(sharedSpawn)){if(plans.some(item=>item.id===plan.id))continue;await fetchOne(plan);if(generation!==state.generation||group!==state.group||mode!==state.mode)return;if(standingSource()){renderImages();break;}}}}

@@ -15,7 +15,9 @@ from tools.grenade_capture.screen_capture import png_rgb
 
 class ReferenceTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="xen-reference-test-")
+        fixtures = Path(__file__).resolve().parents[1] / "temp/XEN-GRENADE-CATALOG-F9-20261028-001/backend-tests"
+        fixtures.mkdir(parents=True, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(prefix="reference-", dir=fixtures)
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
         self.root = self.base / "references"
@@ -54,6 +56,56 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual((directory / "standing.png").read_bytes(), self.image.read_bytes())
         with self.assertRaises(ValueError):
             load_reference(self.root, identity, "other.json")
+
+    def partial(self, role):
+        identity = self.complete()
+        directory = self.root / identity
+        value = json.loads((directory / "reference.json").read_text(encoding="utf-8"))
+        removed = "standing" if role == "aim" else "aim"
+        (directory / (removed + ".png")).unlink()
+        value.pop(removed + "_image")
+        value["image_sha256"].pop(removed + "_image")
+        value["capture_complete"] = False
+        if role == "standing":
+            value.pop("geometry")
+            value.pop("confirmed_at_utc")
+            value["manual_throw_verified"] = False
+        value["reference_revision"] = manifest_revision(value)
+        (directory / "reference.json").write_text(json.dumps(value), encoding="utf-8")
+        return identity, value
+
+    def test_aim_only_is_valid_without_a_standing_image(self):
+        identity, original = self.partial("aim")
+        value, directory = load_reference(self.root, identity, self.plan.name)
+        self.assertEqual(value, original)
+        self.assertFalse((directory / "standing.png").exists())
+        self.assertEqual((directory / "aim.png").read_bytes(), self.image.read_bytes())
+
+    def test_standing_only_is_transferable_but_not_a_matching_reference(self):
+        identity, original = self.partial("standing")
+        value, directory = load_reference(self.root, identity, self.plan.name, allow_partial=True)
+        self.assertEqual(value, original)
+        self.assertFalse((directory / "aim.png").exists())
+        with self.assertRaisesRegex(ValueError, "瞄点尚未采集"):
+            load_reference(self.root, identity)
+
+    def test_partial_manifest_cannot_claim_missing_image_or_false_confirmation(self):
+        identity, original = self.partial("standing")
+        manifest = self.root / identity / "reference.json"
+        for update in ({"capture_complete": True}, {"capture_complete": 0},
+                       {"manual_throw_verified": True}, {"geometry": {}}, {"aim_image": "aim.png"}):
+            value = dict(original, **update)
+            value["reference_revision"] = manifest_revision(value)
+            manifest.write_text(json.dumps(value), encoding="utf-8")
+            with self.subTest(update=update), self.assertRaises(ValueError):
+                load_reference(self.root, identity, allow_partial=True)
+
+    def test_partial_image_still_checks_its_png_hash(self):
+        identity, _ = self.partial("standing")
+        image = self.root / identity / "standing.png"
+        image.write_bytes(png_rgb(640, 360, [bytes([90, 80, 70]) * 640] * 360))
+        with self.assertRaisesRegex(ValueError, "图片已改变"):
+            load_reference(self.root, identity, allow_partial=True)
 
     def test_changed_valid_image_is_rejected_by_manifest_identity(self):
         identity = self.complete()

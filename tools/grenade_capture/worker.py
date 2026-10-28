@@ -1,4 +1,4 @@
-"""OBS 插件启动的单次 F10 采集作业；无常驻监听、语音或游戏输入。"""
+"""OBS 插件启动的单次 F9/F10 采集作业；无常驻监听、语音或游戏输入。"""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ except ImportError:
 
 def foreground_identity():
     if sys.platform != "win32":
-        raise RuntimeError("F10 采集只支持Windows主机")
+        raise RuntimeError("道具采集只支持Windows主机")
     user, kernel = ctypes.WinDLL("user32", use_last_error=True), ctypes.WinDLL("kernel32", use_last_error=True)
     user.GetForegroundWindow.restype = wintypes.HWND
     user.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
@@ -34,7 +34,7 @@ def foreground_identity():
         size = wintypes.DWORD(32768)
         path = ctypes.create_unicode_buffer(size.value)
         if not kernel.QueryFullProcessImageNameW(handle, 0, path, ctypes.byref(size)) or Path(path.value).name.lower() != "cs2.exe":
-            raise ValueError("请恢复正确瞄角并切回CS2，再按F10")
+            raise ValueError("请切回CS2，再按对应采集键")
     finally:
         kernel.CloseHandle(handle)
     return {"window": int(window), "process": process.value}
@@ -52,9 +52,9 @@ def run_worker(args):
     try:
         expected = {"window": args.window, "process": args.process}
         report("checking", "正在读取当前方案")
-        metadata = capture_once(ContextReader(args.host, args.web_port), args.root,
+        metadata = capture_once(ContextReader(args.host, args.web_port, role=args.role), args.root,
                                 shared_standing=args.shared_standing, foreground=foreground_identity,
-                                expected_foreground=expected, report=report)
+                                expected_foreground=expected, report=report, role=args.role)
         transfer_capture(args.root, metadata["plan_id"][:-5], args.destination,
                          deadline=time.monotonic() + 20, report=report)
         return 0
@@ -76,6 +76,7 @@ def main(argv=None):
     parser.add_argument("--job-status", type=Path, required=True)
     parser.add_argument("--window", type=int, required=True)
     parser.add_argument("--process", type=int, required=True)
+    parser.add_argument("--role", choices=("aim", "standing"), default="aim")
     args = parser.parse_args(argv)
     try:
         return run_worker(args)

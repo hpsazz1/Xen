@@ -1,4 +1,4 @@
-"""F10 确认后的采图、资源打包与发送；不产生游戏输入。"""
+"""F9站位与F10瞄点独立采图、资源打包与发送；不产生游戏输入。"""
 
 from __future__ import annotations
 
@@ -14,12 +14,10 @@ import uuid
 import zipfile
 
 try:
-    from .reference_assets import load_reference, manifest_revision, png_size, resource_directory
-    from .reference_tool import add_image, begin
+    from .reference_assets import geometry_for, load_reference, manifest_revision, png_size, resource_directory, resource_files
     from .screen_capture import capture_primary
 except ImportError:
-    from reference_assets import load_reference, manifest_revision, png_size, resource_directory
-    from reference_tool import add_image, begin
+    from reference_assets import geometry_for, load_reference, manifest_revision, png_size, resource_directory, resource_files
     from screen_capture import capture_primary
 
 
@@ -31,7 +29,6 @@ MARKERS = {"T1": (.223, .498), "T2": (.664, .493), "T3": (.598, .344),
 MAP_NAMES = {"de_mirage": "Mirage", "de_dust2": "Dust II", "de_inferno": "Inferno",
              "de_ancient": "Ancient", "de_anubis": "Anubis", "de_nuke": "Nuke",
              "de_vertigo": "Vertigo", "de_train": "Train", "de_cache": "Cache", "de_overpass": "Overpass"}
-RESOURCE_FILES = ("standing.png", "aim.png", "reference.json")
 
 
 def write_json(path, value):
@@ -92,12 +89,14 @@ def validate_context(value, deadline=None, clock=time.monotonic):
         raise ValueError("采集上下文字段无效")
     resource_directory(".", ident[:-5])
     if deadline is not None and clock() >= deadline:
-        raise ValueError("游戏状态已过期，请待同步后重新按F10")
+        raise ValueError("游戏状态已过期，请待同步后重新采集")
     return value
 
 
 class ContextReader:
-    def __init__(self, host, port=5015, clock=time.monotonic):
+    def __init__(self, host, port=5015, clock=time.monotonic, role="aim"):
+        if role not in ("aim", "standing"):
+            raise ValueError("采集类型必须为站位或瞄点")
         address = ipaddress.ip_address(host)
         private = ("127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
         if address.version != 4 or not any(address in ipaddress.ip_network(network) for network in private):
@@ -105,6 +104,8 @@ class ContextReader:
         if not 1 <= port <= 65535:
             raise ValueError("网页端口无效")
         self.url, self.clock = f"http://{address}:{port}/capture-context.json", clock
+        if role == "standing":
+            self.url += "?role=standing"
         # 不经系统代理发送局域网制作上下文，不跟随重定向到另一台主机。
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, *args, **kwargs):
@@ -135,6 +136,15 @@ def _identity(value):
 
 
 def standing_for(context, root, shared_standing=SHARED_STANDING):
+    existing = resource_directory(Path(root) / "references", context["plan_id"][:-5])
+    if (existing / "reference.json").is_file():
+        value, directory = load_reference(Path(root) / "references", context["plan_id"][:-5], context["plan_id"], allow_partial=True)
+        if "standing_image" in value:
+            return directory / value["standing_image"], value.get("standing_marker")
+    custom = Path(root) / "standing" / (context["plan_id"][:-5] + ".png")
+    if custom.is_file():
+        png_size(custom)
+        return custom, None
     name = short_name(context["plan"]["name"], context["map"])
     point = re.match(r"^(T[1-5])(?:\s|$)", name)
     if context["map"] == "de_mirage" and point:
@@ -175,7 +185,7 @@ def _publish_directory(staged, target, backup):
 
 
 class LocalSavePending(RuntimeError):
-    """图片与包已在本地暂存，下一次F10先恢复文件发布，不重新解释确认事实。"""
+    """图片与包已在本地暂存，下一次采集先恢复文件发布，不重新解释确认事实。"""
 
 
 def _finish_local(root, identity, journal):
@@ -190,12 +200,12 @@ def _finish_local(root, identity, journal):
     staged_reference = stage / "references" / identity
     target = resource_directory(root / "references", identity)
     if staged_reference.exists():
-        value, _ = load_reference(stage / "references", identity, metadata["plan_id"])
+        value, _ = load_reference(stage / "references", identity, metadata["plan_id"], allow_partial=True)
         if value["reference_revision"] != metadata["reference_revision"]:
             raise ValueError("本地暂存参考已变化")
         _publish_directory(staged_reference, target, root / "reference-backups" / identity / metadata["capture_id"])
     else:
-        value, _ = load_reference(root / "references", identity, metadata["plan_id"])
+        value, _ = load_reference(root / "references", identity, metadata["plan_id"], allow_partial=True)
         if value["reference_revision"] != metadata["reference_revision"]:
             raise ValueError("本地发布记录与参考资源不符")
     package = _safe_relative(root, metadata["package"])
@@ -225,12 +235,13 @@ def _finish_local(root, identity, journal):
 
 
 def capture_once(fetch_context, root=DEFAULT_ROOT, capture=capture_primary, shared_standing=SHARED_STANDING,
-                 foreground=None, expected_foreground=None, report=lambda *args: None):
-    """只由一次实际F10触发调用；可注入合成采图做离线回归。"""
+                 foreground=None, expected_foreground=None, report=lambda *args: None, role="aim"):
+    """F9/F10各自只更新一张图片；可注入合成采图做离线回归。"""
+    if role not in ("standing", "aim"):
+        raise ValueError("采集类型必须为站位或瞄点")
     root = Path(root).resolve()
     before = validate_context(fetch_context())
     validate_context(before, before.get("_deadline"))
-    standing, marker = standing_for(before, root, shared_standing)
     if foreground and foreground() != expected_foreground:
         raise ValueError("游戏已失焦，未采集")
     identity, capture_id = before["plan_id"][:-5], uuid.uuid4().hex
@@ -247,31 +258,59 @@ def capture_once(fetch_context, root=DEFAULT_ROOT, capture=capture_primary, shar
     plan_path = stage / before["plan_id"]
     write_json(plan_path, before["plan"])
     refs = stage / "references"
-    begin(refs, plan_path, True, "出生点 " + marker["label"] if marker else "按站位参考图定位", marker)
-    add_image(refs, identity, "standing", image=standing)
-    report("capturing", "正在采集当前瞄点画面")
-    # 不因获取上下文/站位图耗时复活旧状态。
+    directory = resource_directory(refs, identity)
+    directory.mkdir(parents=True)
+    current = resource_directory(root / "references", identity)
+    if (current / "reference.json").is_file():
+        manifest, previous = load_reference(root / "references", identity, before["plan_id"], allow_partial=True)
+        # F9更新整体方案身份时，旧瞄点仍属于它采集时的方案，不能被站位采集重新确认。
+        if "aim_image" in manifest:
+            manifest.setdefault("aim_plan", manifest["plan"])
+        for field in ("standing_image", "aim_image"):
+            if field in manifest and field != role + "_image":
+                (directory / manifest[field]).write_bytes((previous / manifest[field]).read_bytes())
+    else:
+        manifest = {"schema_version": 1, "plan_id": before["plan_id"], "reference_id": identity,
+                    "manual_throw_verified": False, "standing_note": "按站位参考图定位",
+                    "target_x": 160, "target_y": 160, "image_sha256": {}}
+    manifest["plan"] = before["plan"]
+    report("capturing", "正在采集当前" + ("站位" if role == "standing" else "瞄点") + "画面")
+    # 不因获取上下文/读取已有图片耗时复活旧状态。
     validate_context(before, before.get("_deadline"))
     if foreground and foreground() != expected_foreground:
         raise ValueError("游戏已失焦，未采集")
-    add_image(refs, identity, "aim", capture=True, delay=0, capture_function=capture)
+    target = directory / (role + ".png")
+    capture(target)
+    width, height = png_size(target)
+    manifest[role + "_image"] = target.name
+    manifest["image_sha256"][role + "_image"] = _sha(target)
+    captured_at = datetime.now(timezone.utc).isoformat()
+    if role == "aim":
+        manifest["aim_plan"] = before["plan"]
+        manifest["geometry"] = geometry_for(width, height)
+        manifest["manual_throw_verified"] = True
+        manifest["confirmed_at_utc"] = captured_at
+        manifest["confirmation_source"] = "host_f10"
+    else:
+        manifest.pop("standing_marker", None)
+        manifest["standing_note"] = "按站位参考图定位"
+        manifest["standing_source"] = "host_f9"
+        manifest["standing_captured_at_utc"] = captured_at
     if foreground and foreground() != expected_foreground:
         raise ValueError("采集时切换了窗口，图片未发布")
     after = validate_context(fetch_context())
     validate_context(after, after.get("_deadline"))
     if _identity(before) != _identity(after):
         raise ValueError("采集期间方案或游戏状态改变，图片未发布")
-    directory = refs / identity
-    manifest = _json(directory / "reference.json")
     manifest["display_name"] = short_name(before["plan"]["name"], before["map"])
-    manifest["confirmation_source"] = "host_f10"
+    manifest["capture_complete"] = "standing_image" in manifest and "aim_image" in manifest
     manifest["reference_revision"] = manifest_revision(manifest)
     write_json(directory / "reference.json", manifest)
-    load_reference(refs, identity, before["plan_id"])
+    load_reference(refs, identity, before["plan_id"], allow_partial=True)
     metadata = {"capture_id": capture_id, "plan_id": before["plan_id"], "plan_sha256": before["plan_sha256"],
                 "display_name": manifest["display_name"], "map": before["map"], "plan": before["plan"],
                 "reference_revision": manifest["reference_revision"], "status": "pending",
-                "captured_at_utc": datetime.now(timezone.utc).isoformat()}
+                "capture_role": role, "captured_at_utc": captured_at}
     packages = root / "packages" / before["map"]
     packages.mkdir(parents=True, exist_ok=True)
     package = packages / _archive_name(manifest["display_name"])
@@ -291,7 +330,7 @@ def capture_once(fetch_context, root=DEFAULT_ROOT, capture=capture_primary, shar
     archive = stage / "capture.zip"
     metadata["package"] = package.relative_to(root).as_posix()
     members = {"plans/" + before["plan_id"]: plan_path}
-    members.update({f"references/{identity}/{name}": directory / name for name in RESOURCE_FILES})
+    members.update({f"references/{identity}/{name}": directory / name for name in resource_files(manifest)})
     with zipfile.ZipFile(archive, "x", compression=zipfile.ZIP_STORED) as output:
         for name, path in members.items():
             output.write(path, name)
@@ -334,7 +373,7 @@ def _recover_transfer(destination, identity, journal):
         backup.rename(target)
     if target.exists():
         # 中断后出现无法校验的目录时保留现场，不把新发送盖上去。
-        load_reference(destination / "references", identity)
+        load_reference(destination / "references", identity, allow_partial=True)
     journal.rename(journal.with_name("recovered-" + uuid.uuid4().hex + ".json"))
 
 
@@ -349,7 +388,7 @@ def transfer_capture(root, identity, destination, deadline=None, report=lambda *
             or not re.fullmatch(r"[0-9a-f]{64}", metadata.get("plan_sha256", ""))
             or not metadata.get("package", "").startswith("packages/" + metadata["map"] + "/")):
         raise ValueError("本地采集记录身份无效")
-    manifest, local = load_reference(root / "references", identity, metadata["plan_id"])
+    manifest, local = load_reference(root / "references", identity, metadata["plan_id"], allow_partial=True)
     if manifest["reference_revision"] != metadata["reference_revision"] or manifest["plan"] != metadata["plan"]:
         raise ValueError("本地参考资源已改变，未发送")
     package = _safe_relative(root, metadata["package"])
@@ -387,10 +426,10 @@ def transfer_capture(root, identity, destination, deadline=None, report=lambda *
         if _sha(source) != _sha(target):
             raise ValueError("辅机变化文件回读摘要不一致")
     report("sending", "正在发送并回读本次图片与资源包")
-    for name in RESOURCE_FILES:
+    for name in resource_files(manifest):
         copy_verified(local / name, staged_reference / name)
     copy_verified(package, stage / "capture.zip")
-    staged_manifest, _ = load_reference(stage, identity, metadata["plan_id"])
+    staged_manifest, _ = load_reference(stage, identity, metadata["plan_id"], allow_partial=True)
     if (staged_manifest["reference_revision"] != metadata["reference_revision"]
             or staged_manifest["plan"] != metadata["plan"] or _sha(stage / "capture.zip") != metadata["package_sha256"]):
         raise ValueError("发送期间本地资源改变，辅机参考未发布")
@@ -406,12 +445,12 @@ def transfer_capture(root, identity, destination, deadline=None, report=lambda *
     report("publishing", "正在发布辅机参考目录，旧资源保留备份")
     _publish_directory(staged_reference, resource_directory(destination / "references", identity), backup)
     verify_plan()
-    remote, _ = load_reference(destination / "references", identity, metadata["plan_id"])
+    remote, _ = load_reference(destination / "references", identity, metadata["plan_id"], allow_partial=True)
     if remote["reference_revision"] != metadata["reference_revision"] or _sha(target_package) != metadata["package_sha256"]:
         raise ValueError("辅机发布回读未通过；本地资源与远端恢复记录保留")
     journal.rename(transactions / ("completed-" + transaction + ".json"))
     metadata["status"] = "sent"
     metadata["sent_at_utc"] = datetime.now(timezone.utc).isoformat()
     write_json(root / "captures" / (identity + ".json"), metadata)
-    report("sent", "已发送并回读通过：" + metadata["display_name"])
+    report("sent", ("站位图" if metadata.get("capture_role") == "standing" else "瞄点图") + "已发送并回读通过：" + metadata["display_name"])
     return metadata

@@ -122,20 +122,21 @@ std::string sha256(std::string_view bytes) {
     for (const auto byte : digest) { result += "0123456789abcdef"[byte >> 4]; result += "0123456789abcdef"[byte & 15]; }
     return result;
 }
-bool f10_conflicts(const AppConfig& config) {
-    const auto contains = [](const auto& keys) { return std::find(keys.begin(),keys.end(),0x79) != keys.end(); };
+bool capture_hotkey_conflicts(const AppConfig& config, int virtual_key) {
+    const auto contains = [virtual_key](const auto& keys) { return std::find(keys.begin(),keys.end(),virtual_key) != keys.end(); };
     const auto& key = config.keyboard;
     if (contains(key.aim_hold_virtual_keys) || contains(key.emergency_virtual_keys) ||
-        contains(key.runtime_toggle_virtual_keys) || contains(key.anomaly_mark_virtual_keys) ||
+        contains(key.runtime_toggle_virtual_keys) ||
+        contains(key.anomaly_mark_virtual_keys) ||
         (key.debug_test_enabled && contains(key.debug_test_virtual_keys))) return true;
     if (key.grenade_assist_enabled && (contains(key.grenade_menu_virtual_keys) || contains(key.grenade_align_virtual_keys) ||
         contains(key.grenade_throw_virtual_keys) || contains(key.grenade_cancel_virtual_keys))) return true;
-    return (config.trigger.enabled && config.trigger.fire_enabled && config.trigger.hold_virtual_key == 0x79) ||
-        (config.recoil.enabled && config.recoil.hold_virtual_key == 0x79) ||
-        (config.auto_stop.enabled && (config.auto_stop.activation_virtual_key == 0x79 || contains(config.auto_stop.release_virtual_keys))) ||
+    return (config.trigger.enabled && config.trigger.fire_enabled && config.trigger.hold_virtual_key == virtual_key) ||
+        (config.recoil.enabled && config.recoil.hold_virtual_key == virtual_key) ||
+        (config.auto_stop.enabled && (config.auto_stop.activation_virtual_key == virtual_key || contains(config.auto_stop.release_virtual_keys))) ||
         (config.movement.enabled && ((config.movement.spin_enabled && config.movement.spin_trigger == movement::Trigger::KEY &&
-            config.movement.spin_virtual_key == 0x79) || (config.movement.large_enabled &&
-            config.movement.large_trigger == movement::Trigger::KEY && config.movement.large_virtual_key == 0x79)));
+            config.movement.spin_virtual_key == virtual_key) || (config.movement.large_enabled &&
+            config.movement.large_trigger == movement::Trigger::KEY && config.movement.large_virtual_key == virtual_key)));
 }
 // 复用正式 Plan 解析；库文件格式/重复字段/注释规则与正式库保持一致。
 // 网页额外限制总扫描量，并在分块读取及 JSON 事件间协作停止。
@@ -278,6 +279,7 @@ struct Server::Impl {
     std::shared_ptr<const debug_session::Snapshot> capture_selection;
     Clock::time_point capture_received{};
     bool capture_available = false;
+    bool capture_f9_conflict = false, capture_f10_conflict = false;
     std::string capture_reason;
     std::uint64_t capture_revision = 0, capture_generation = 0;
     std::optional<std::tuple<std::uint64_t,std::uint64_t,bool,std::string>> capture_identity;
@@ -374,6 +376,7 @@ struct Server::Impl {
         if (directory.parent_path() != root) throw std::runtime_error("参考资源位置无效");
         std::string identity = id;
         for (const auto& file : {path,directory/"reference.json",directory/"standing.png",directory/"aim.png"}) {
+            if (!std::filesystem::exists(file)) { identity += ":missing"; continue; }
             identity += ":" + std::to_string(std::filesystem::last_write_time(file).time_since_epoch().count()) +
                 ":" + std::to_string(std::filesystem::file_size(file));
         }
@@ -383,21 +386,27 @@ struct Server::Impl {
         const auto manifest_bytes = read_resource(directory / "reference.json",1024*1024,deadline);
         const auto manifest = Json::parse(manifest_bytes);
         const auto plan = Json::parse(read_resource(path,1024*1024,deadline),nullptr,true,true);
-        const auto reference = grenade_alignment::load_reference(path,plan);
+        const auto reference = grenade_alignment::load_reference(path,plan,true);
         if (!expected_revision.empty() && reference.revision != expected_revision)
             throw std::runtime_error("参考图版本已更新，请重新读取标记");
         if (read_resource(directory / "reference.json",1024*1024,deadline) != manifest_bytes)
             throw std::runtime_error("参考资源已更新，请重试");
         if (kind == "manifest") {
-            Json value{{"ready",true},{"plan_id",id},{"revision",reference.revision},
+            Json value{{"ready",!reference.aim_image.empty()},
+                {"aim_ready",!reference.aim_image.empty()},{"standing_ready",!reference.standing_image.empty()},
+                {"plan_id",id},{"revision",reference.revision},
                 {"standing_width",reference.standing_image.cols},{"standing_height",reference.standing_image.rows},
-                {"geometry",manifest.at("geometry")},{"target_x",reference.target.x},{"target_y",reference.target.y},
                 {"standing_note",manifest.value("standing_note",std::string{})}};
+            if (!reference.aim_image.empty()) {
+                value["geometry"] = manifest.at("geometry");
+                value["target_x"] = reference.target.x; value["target_y"] = reference.target.y;
+            }
             if (manifest.contains("standing_marker")) value["standing_marker"] = manifest["standing_marker"];
             if (reference_cache.size() >= 32 && !reference_cache.contains(id)) reference_cache.clear();
             auto metadata=value.dump(); reference_cache[id]={identity,metadata};
             return {"application/json; charset=utf-8",std::move(metadata)};
         }
+        if (!manifest.contains(kind + "_image")) throw std::runtime_error("该图片尚未采集");
         const auto image_path = std::filesystem::canonical(directory / (kind + ".png"));
         if (image_path.parent_path() != directory) throw std::runtime_error("参考图片位置无效");
         auto bytes = read_resource(image_path,64*1024*1024,deadline);
@@ -462,7 +471,7 @@ struct Server::Impl {
             {"epoch",std::to_string(current.context_epoch)},{"generation",prefix + "-" + std::to_string(generation)},
             {"remaining_ms",valid ? std::min<std::int64_t>(remaining,10000) : 0}}.dump();
     }
-    std::string capture_context_json(Clock::time_point request_deadline) {
+    std::string capture_context_json(Clock::time_point request_deadline, bool standing = false) {
         update_context();
         std::shared_ptr<const debug_session::Snapshot> selected;
         Clock::time_point received;
@@ -473,6 +482,10 @@ struct Server::Impl {
             std::lock_guard lock(mutex);
             selected = capture_selection; received = capture_received; revision = capture_revision;
             available = capture_available; reason = capture_reason;
+            if (standing ? capture_f9_conflict : capture_f10_conflict) {
+                available = false;
+                reason = std::string(standing ? "F9" : "F10") + "已被辅机控制快捷键占用，请先调整该绑定";
+            }
         }
         Json result{{"ready",false},{"reason",""},{"map",""},{"team",""},{"generation",""},
             {"remaining_ms",0},{"plan_id",""},{"plan",Json::object()},{"plan_sha256",""}};
@@ -494,7 +507,7 @@ struct Server::Impl {
             // physical记录上次任务种类，成功试投后仍可能为true；只拒绝在途输出与清理未知。
             if (selected->busy || selected->cleanup_unknown || selected->movement_recording ||
                 selected->state == debug_session::State::RUNNING || selected->state == debug_session::State::STOPPING)
-                throw std::runtime_error("请先结束当前运行或录制，再按F10采集");
+                throw std::runtime_error("请先结束当前运行或录制，再采集图片");
             if (!selected->movement_test_enabled || selected->movement_test_mode != debug_session::Mode::GRENADE_TEST)
                 throw std::runtime_error("请先在辅机启用当前道具方案测试");
             if (selected->grenade_selected_path.empty() || !selected->grenade_current.is_object() ||
@@ -692,6 +705,7 @@ struct Server::Impl {
                 }
             }
             else if (target == "/capture-context.json") respond(client,200,"application/json; charset=utf-8",capture_context_json(deadline),deadline);
+            else if (target == "/capture-context.json?role=standing") respond(client,200,"application/json; charset=utf-8",capture_context_json(deadline,true),deadline);
             else if (target == "/catalog.json") {
                 if (refresh_catalog(deadline)) respond(client,200,"application/json; charset=utf-8",catalog,deadline);
                 else respond(client,503,"text/plain; charset=utf-8","道具清单读取失败",deadline);
@@ -755,6 +769,7 @@ bool Server::start(const Config& config, std::shared_ptr<weapon::GsiReceiver> gs
             std::lock_guard lock(impl_->mutex);
             impl_->state = {true,ntohs(address.sin_port),{},local_urls(config,ntohs(address.sin_port))};
             impl_->capture_selection.reset(); impl_->capture_received = {}; impl_->capture_available = false;
+            impl_->capture_f9_conflict = false; impl_->capture_f10_conflict = false;
             impl_->capture_reason.clear(); impl_->capture_revision = 0;
             impl_->selection_request.reset(); impl_->selection_sequence = 0; impl_->selection_delivered = false;
             impl_->selection_state = "idle"; impl_->selection_reason.clear(); impl_->selection_context.clear();
@@ -772,12 +787,14 @@ bool Server::start(const Config& config, std::shared_ptr<weapon::GsiReceiver> gs
 void Server::publish_capture(std::shared_ptr<const debug_session::Snapshot> selection,
                             const AppConfig& controls, bool available, const std::string& reason) noexcept {
     try {
-        const auto conflict = f10_conflicts(controls);
-        const auto message = conflict ? "F10已被辅机控制快捷键占用，请先调整该绑定" : reason;
-        available = available && !conflict;
+        const auto f9_conflict = capture_hotkey_conflicts(controls,0x78);
+        const auto f10_conflict = capture_hotkey_conflicts(controls,0x79);
         const auto now = Clock::now();
         std::lock_guard lock(impl_->mutex);
-        impl_->publish_capture_locked(std::move(selection),available,message,now);
+        if (impl_->capture_f9_conflict != f9_conflict || impl_->capture_f10_conflict != f10_conflict)
+            impl_->capture_received = {};
+        impl_->capture_f9_conflict = f9_conflict; impl_->capture_f10_conflict = f10_conflict;
+        impl_->publish_capture_locked(std::move(selection),available,reason,now);
     } catch (...) {
         std::lock_guard lock(impl_->mutex);
         impl_->capture_selection.reset(); impl_->capture_available = false;

@@ -131,8 +131,10 @@ View Model::update(const Json& selection, const Json& reference, const Json& cat
         return result;
     }
     const auto revision = text(reference, "revision");
-    const bool ready = reference.is_object() && reference.value("ready", false) &&
+    const bool bound = reference.is_object() &&
         text(reference, "plan_id") == actual && !revision.empty();
+    const bool aim_ready = bound && reference.value("aim_ready", reference.value("ready", false));
+    const bool standing_ready = bound && reference.value("standing_ready", reference.value("ready", false));
     const auto state = text(*guide, "state");
     if (state != "selected" && state != "aligning" && state != "failed") {
         display_request_.clear(); return result;
@@ -147,17 +149,19 @@ View Model::update(const Json& selection, const Json& reference, const Json& cat
     }
     result.visible = true;
     displayed_ = true;
-    result.payload = ready ? reference : Json::object();
+    result.payload = bound ? reference : Json::object();
     result.payload["title"] = title;
     result.payload["state"] = state;
     result.payload["message"] = text(*guide, "message");
-    result.payload["ready"] = ready;
-    if (ready) {
+    result.payload["ready"] = aim_ready;
+    result.payload["aim_ready"] = aim_ready;
+    result.payload["standing_ready"] = standing_ready;
+    if (aim_ready || standing_ready) {
         const auto suffix = "?plan_id=" + percent_encode(actual) + "&revision=" + percent_encode(revision);
-        result.payload["standing_url"] = base_url + "/reference/standing.png" + suffix;
-        result.payload["aim_url"] = base_url + "/reference/aim.png" + suffix;
+        if (standing_ready) result.payload["standing_url"] = base_url + "/reference/standing.png" + suffix;
+        if (aim_ready) result.payload["aim_url"] = base_url + "/reference/aim.png" + suffix;
     } else {
-        result.payload["reason"] = "参考图待采集；试投成功并复位后按F10。";
+        result.payload["reason"] = "F9采站位图；试投成功并复位后F10采瞄点图，两者互相独立。";
     }
     return result;
 }

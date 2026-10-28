@@ -99,7 +99,7 @@ void validate_standing_marker(const Json& marker) {
 }
 
 Reference load_reference(const std::filesystem::path& plan_path,
-                         const Json& expected_plan) {
+                         const Json& expected_plan, bool allow_partial) {
     try {
         if (plan_path.extension() != ".json" || plan_path.stem().empty() ||
             plan_path.stem()=="." || plan_path.stem()=="..")
@@ -119,56 +119,67 @@ Reference load_reference(const std::filesystem::path& plan_path,
             (manifest.contains("reference_id") && manifest.at("reference_id").get<std::string>()!=
                 std::string(stem.begin(),stem.end())))
             throw std::runtime_error("参考资源标识与选中方案文件不一致");
+        const bool has_aim = manifest.contains("aim_image"), has_standing = manifest.contains("standing_image");
+        if (!has_aim && !allow_partial)
+            throw std::runtime_error("瞄点图待采集，请恢复正确瞄角后按F10");
+        if ((!has_aim && !has_standing) || manifest.value("capture_complete", true) != (has_aim && has_standing))
+            throw std::runtime_error("参考资源的图片声明不完整");
         if (manifest.at("schema_version").get<int>() != 1 ||
             !manifest.at("manual_throw_verified").is_boolean() ||
-            !manifest.at("manual_throw_verified").get<bool>())
+            (has_aim && !manifest.at("manual_throw_verified").get<bool>()))
             throw std::runtime_error("参考资源尚未绑定人工投掷成功记录");
         if (manifest.contains("standing_marker")) validate_standing_marker(manifest.at("standing_marker"));
         reference.plan = canonical_plan(manifest.at("plan"));
         if (reference.plan != expected)
             throw std::runtime_error("参考资源与当前道具方案版本不一致");
-        const auto& geometry = manifest.at("geometry");
+        // F9更新站位时保留旧瞄点的方案快照；只有F10能重新绑定瞄点。
+        if (has_aim && !allow_partial &&
+            canonical_plan(manifest.value("aim_plan", manifest.at("plan"))) != expected)
+            throw std::runtime_error("瞄点图与当前道具方案版本不一致，请恢复正确瞄角后按F10更新");
         auto& g = reference.geometry;
-        g.source_width = geometry.at("source_width").get<int>();
-        g.source_height = geometry.at("source_height").get<int>();
-        g.roi_width = geometry.at("roi_width").get<int>();
-        g.roi_height = geometry.at("roi_height").get<int>();
-        g.roi_x = geometry.at("roi_x").get<double>();
-        g.roi_y = geometry.at("roi_y").get<double>();
-        g.scale_x = geometry.at("scale_x").get<double>();
-        g.scale_y = geometry.at("scale_y").get<double>();
-        if (g.source_width <= 0 || g.source_height <= 0 ||
-            g.source_width > 8192 || g.source_height > 8192 ||
-            g.roi_width != 320 || g.roi_height != 320 ||
-            !std::isfinite(g.roi_x) || !std::isfinite(g.roi_y) ||
-            !std::isfinite(g.scale_x) || !std::isfinite(g.scale_y) ||
-            g.roi_x < 0 || g.roi_y < 0 || g.scale_x <= 0 || g.scale_y <= 0 ||
-            g.roi_x + g.roi_width * g.scale_x > g.source_width ||
-            g.roi_y + g.roi_height * g.scale_y > g.source_height)
-            throw std::runtime_error("参考图必须声明有效的全屏到320×320 ROI映射");
-        reference.target.x = manifest.value("target_x", 160.0);
-        reference.target.y = manifest.value("target_y", 160.0);
-        if (!std::isfinite(reference.target.x) || !std::isfinite(reference.target.y) ||
-            reference.target.x < 0 || reference.target.y < 0 ||
-            reference.target.x >= g.roi_width || reference.target.y >= g.roi_height)
-            throw std::runtime_error("参考瞄点必须位于320×320 ROI内");
-        const auto standing = read_bytes(image_path(reference.directory, manifest,
-            "standing_image", "standing.png"), 64U * 1024U * 1024U);
-        const auto aim = read_bytes(image_path(reference.directory, manifest,
-            "aim_image", "aim.png"), 64U * 1024U * 1024U);
-        const auto standing_hash=sha256(standing), aim_hash=sha256(aim);
-        if (manifest.at("image_sha256").at("standing_image").get<std::string>()!=standing_hash ||
-            manifest.at("image_sha256").at("aim_image").get<std::string>()!=aim_hash)
-            throw std::runtime_error("参考图片摘要与人工确认时不一致，请重新登记参考资源");
-        const auto standing_size = png_dimensions(standing), aim_size = png_dimensions(aim);
-        if (aim_size != cv::Size(g.source_width,g.source_height))
+        if (has_aim) {
+            const auto& geometry = manifest.at("geometry");
+            g.source_width = geometry.at("source_width").get<int>();
+            g.source_height = geometry.at("source_height").get<int>();
+            g.roi_width = geometry.at("roi_width").get<int>();
+            g.roi_height = geometry.at("roi_height").get<int>();
+            g.roi_x = geometry.at("roi_x").get<double>();
+            g.roi_y = geometry.at("roi_y").get<double>();
+            g.scale_x = geometry.at("scale_x").get<double>();
+            g.scale_y = geometry.at("scale_y").get<double>();
+            if (g.source_width <= 0 || g.source_height <= 0 ||
+                g.source_width > 8192 || g.source_height > 8192 ||
+                g.roi_width != 320 || g.roi_height != 320 ||
+                !std::isfinite(g.roi_x) || !std::isfinite(g.roi_y) ||
+                !std::isfinite(g.scale_x) || !std::isfinite(g.scale_y) ||
+                g.roi_x < 0 || g.roi_y < 0 || g.scale_x <= 0 || g.scale_y <= 0 ||
+                g.roi_x + g.roi_width * g.scale_x > g.source_width ||
+                g.roi_y + g.roi_height * g.scale_y > g.source_height)
+                throw std::runtime_error("参考图必须声明有效的全屏到320×320 ROI映射");
+            reference.target.x = manifest.value("target_x", 160.0);
+            reference.target.y = manifest.value("target_y", 160.0);
+            if (!std::isfinite(reference.target.x) || !std::isfinite(reference.target.y) ||
+                reference.target.x < 0 || reference.target.y < 0 ||
+                reference.target.x >= g.roi_width || reference.target.y >= g.roi_height)
+                throw std::runtime_error("参考瞄点必须位于320×320 ROI内");
+        }
+        // F9/F10独立保存；只解码manifest声明的图片，不借残留旧文件补造另一角色。
+        const auto load_image = [&](const char* field, const char* filename, cv::Mat& output) {
+            if (!manifest.contains(field)) return std::string{};
+            const auto bytes = read_bytes(image_path(reference.directory, manifest, field, filename), 64U * 1024U * 1024U);
+            const auto hash = sha256(bytes);
+            if (manifest.at("image_sha256").at(field).get<std::string>() != hash)
+                throw std::runtime_error("参考图片摘要与采集记录不一致，请重新采集对应图片");
+            const auto size = png_dimensions(bytes);
+            output = cv::imdecode(bytes, cv::IMREAD_COLOR);
+            if (output.empty() || output.size() != size)
+                throw std::runtime_error("参考PNG解码尺寸与图片头不一致");
+            return hash;
+        };
+        const auto standing_hash = load_image("standing_image", "standing.png", reference.standing_image);
+        const auto aim_hash = load_image("aim_image", "aim.png", reference.aim_image);
+        if (has_aim && reference.aim_image.size() != cv::Size(g.source_width,g.source_height))
             throw std::runtime_error("瞄点图不是声明分辨率的原始全屏图");
-        reference.standing_image = cv::imdecode(standing, cv::IMREAD_COLOR);
-        reference.aim_image = cv::imdecode(aim, cv::IMREAD_COLOR);
-        // 站位说明允许共用另一张原图；仅瞄点图参与匹配并绑定当前采集几何。
-        if (reference.standing_image.empty() || reference.standing_image.size() != standing_size ||
-            reference.aim_image.empty() || reference.aim_image.size() != aim_size)
-            throw std::runtime_error("参考PNG解码尺寸与图片头不一致");
         const auto digest = sha256(manifest_bytes) + standing_hash + aim_hash;
         reference.revision = sha256(std::vector<unsigned char>(digest.begin(), digest.end()));
         return reference;

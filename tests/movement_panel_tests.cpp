@@ -250,6 +250,7 @@ void grenade_interactions() {
 
     movement::timeline::Plan grenade;
     grenade.name = "Mirage T1 VIP R1"; grenade.map = "de_mirage";
+    grenade.location = "Window"; grenade.voice_command = "保留旧字段";
     grenade.notes = "setpos 1296 -352 -167.968750;setang -41.580170 -173.471710 0";
     movement::timeline::Action button;
     button.kind = movement::timeline::ActionKind::BUTTON; button.duration_ms = 1000;
@@ -313,6 +314,51 @@ void grenade_interactions() {
         actions.debug_request.load_path == snapshot.grenade_selected_path &&
         Json::parse(actions.debug_request.plan_text).at("actions") == movement::timeline::plan_json(pending_grenade).at("actions"),
         "移除语音控件后，道具保存仍使用独立库且保持原动作时序");
+    const auto identity_before_preset = Json::parse(actions.debug_request.plan_text);
+    const char* preset_names[]{"左键投掷","左键跳投","W 跳投","蹲跳投","蹲 W 跳投","左右双键 W 跳投"};
+    const int action_counts[]{1,2,3,3,4,4};
+    for (int index = 0; index < 6; ++index) {
+        click("投掷动作"); frame();
+        auto* preset_popup = ImGui::FindWindowByName("##Combo_00");
+        expect(preset_popup && preset_popup->Active, "投掷预设必须打开真实下拉列表");
+        if (!preset_popup || !preset_popup->Active) continue;
+        const ImVec2 position{preset_popup->Pos.x + ImGui::GetStyle().WindowPadding.x + 30,
+            preset_popup->Pos.y + ImGui::GetStyle().WindowPadding.y +
+                ImGui::GetTextLineHeight() * .5f + index * ImGui::GetTextLineHeightWithSpacing()};
+        auto& io = ImGui::GetIO(); io.AddMousePosEvent(position.x,position.y); frame();
+        io.AddMouseButtonEvent(0,true); frame(); io.AddMouseButtonEvent(0,false); actions = frame();
+        expect(actions.movement_draft_changed && actions.debug_action == Action::NONE &&
+            actions.debug_request.mode == Mode::GRENADE_TEST && actions.debug_request.load_path == snapshot.grenade_selected_path,
+            "选择投掷预设只更新当前草稿，不保存、不执行、不换保存目标");
+        if (actions.debug_request.plan_text.empty()) continue;
+        const auto value = Json::parse(actions.debug_request.plan_text);
+        for (const auto* field : {"name","map","location","notes","voice_command"})
+            expect(value.at(field) == identity_before_preset.at(field), "套用动作不得覆盖点位身份、坐标或兼容字段");
+        movement::timeline::Plan applied; std::string error;
+        expect(movement::timeline::parse_plan(value,applied,error) &&
+            applied.actions.size() == static_cast<std::size_t>(action_counts[index]), preset_names[index]);
+        expect(applied.mask.enabled && applied.mask.wasd == 15 && applied.mask.start_ms == 0 && applied.mask.duration_ms == 0,
+            "预设复用原配方完整的方向键屏蔽参数");
+        if (applied.actions.size() != static_cast<std::size_t>(action_counts[index])) continue;
+        const auto& first = applied.actions.front();
+        expect(first.kind == movement::timeline::ActionKind::BUTTON && first.start_ms == 0 && first.duration_ms == 1000,
+            "既有预设拉栓时长和起点保持");
+        if (index == 5) {
+            expect(first.button == movement::timeline::Button::RIGHT &&
+                applied.actions[1].button == movement::timeline::Button::LEFT && applied.actions[1].duration_ms == 1001,
+                "双键预设保留先松右键、后松左键的原1ms差异");
+        } else expect(first.button == movement::timeline::Button::LEFT, "普通投掷预设使用左键");
+        for (const auto& item : applied.actions) if (item.kind == movement::timeline::ActionKind::KEY) {
+            expect(!item.physical, "预设按键保持既有软件轨道");
+            if (item.key == movement::timeline::Key::SPACE)
+                expect(item.start_ms == 1000 && item.duration_ms == 40, "跳投保留原空格时序");
+            else if (item.key == movement::timeline::Key::W)
+                expect(item.start_ms == 1000 && item.duration_ms == 100, "W跳投保留原方向键时序");
+            else if (item.key == movement::timeline::Key::CTRL)
+                expect(item.start_ms == 0 && item.duration_ms == (index == 4 ? 1100 : 1040), "蹲姿保持至原动作结束");
+            else expect(false, "预设不得增加未声明按键");
+        }
+    }
     snapshot.movement_test_mode = Mode::MOVEMENT_TEST; frame();
     actions = click("启用道具测试");
     expect(actions.debug_action == Action::ENABLE_MOVEMENT_TEST && actions.debug_request.mode == Mode::GRENADE_TEST,

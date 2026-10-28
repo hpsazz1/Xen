@@ -319,6 +319,37 @@ void reference_resources(const std::filesystem::path& root) {
     const auto shared_loaded=grenade_alignment::load_reference(plans/"sample.json",expected);
     expect(shared_loaded.standing_image.size()==cv::Size(640,360)&&shared_loaded.aim_image.size()==cv::Size(320,320),
         "共用站位图可独立分辨率，瞄点图仍绑定采集几何");
+    auto single = manifest;
+    single.erase("standing_image"); single.erase("standing_marker"); single["image_sha256"].erase("standing_image");
+    single["capture_complete"] = false;
+    save(directory/"reference.json",single.dump());
+    const auto aim_only = grenade_alignment::load_reference(plans/"sample.json",expected);
+    expect(aim_only.standing_image.empty() && aim_only.aim_image.cols == 320,
+        "F10独立首采不要求站位图，残留未声明PNG不能被拼入");
+    single = manifest;
+    single.erase("aim_image"); single.erase("geometry"); single["image_sha256"].erase("aim_image");
+    single["capture_complete"] = false; single["manual_throw_verified"] = false;
+    save(directory/"reference.json",single.dump());
+    const auto standing_only = grenade_alignment::load_reference(plans/"sample.json",expected,true);
+    expect(standing_only.standing_image.cols == 640 && standing_only.aim_image.empty(),
+        "F9独立首采可用于参考展示，不伪造瞄点和试投确认");
+    rejects("站位图不能被当作瞄点执行自动找点");
+    single["image_sha256"]["standing_image"] = std::string(64,'0');
+    save(directory/"reference.json",single.dump());
+    bool partial_rejected = false;
+    try { grenade_alignment::load_reference(plans/"sample.json",expected,true); }
+    catch (const std::exception&) { partial_rejected = true; }
+    expect(partial_rejected,"独立站位展示同样核对原图摘要");
+    single = manifest; single["aim_plan"] = expected;
+    single["aim_plan"]["name"] = "旧瞄点所属方案";
+    save(directory/"reference.json",single.dump());
+    const auto prior_aim = grenade_alignment::load_reference(plans/"sample.json",expected,true);
+    expect(!prior_aim.aim_image.empty() && !prior_aim.standing_image.empty(),
+        "F9保留旧方案瞄点图仍可展示两张原图");
+    rejects("F9不能把保留的旧瞄点重新绑定为当前方案");
+    single["aim_plan"] = expected; save(directory/"reference.json",single.dump());
+    expect(!grenade_alignment::load_reference(plans/"sample.json",expected).aim_image.empty(),
+        "F10更新瞄点与所属方案后恢复用于找点");
     auto changed=manifest;changed["standing_marker"]["x"]=-0.01;save(directory/"reference.json",changed.dump());
     rejects("站位标记越界必须拒绝");
     changed=manifest;changed["standing_marker"]["x"]=true;save(directory/"reference.json",changed.dump());

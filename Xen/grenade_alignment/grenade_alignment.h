@@ -23,7 +23,7 @@ struct Geometry {
 
 struct Reference {
     std::filesystem::path directory;
-    // manifest及两张原图的SHA-256，调用方可据此撤销旧的已对齐状态。
+    // manifest及已有原图的SHA-256，调用方可据此撤销旧的已对齐状态。
     std::string revision;
     nlohmann::json plan;
     Geometry geometry;
@@ -34,8 +34,9 @@ struct Reference {
 
 // 只读固定的 ../references/<方案文件stem>/reference.json；资源或方案绑定
 // 不合法时抛出中文异常，由Session冷路径统一显示，不补造图片或人工通过事实。
+// 找点只需当前方案的瞄点图；allow_partial供展示单图或保留旧方案关联的原图。
 Reference load_reference(const std::filesystem::path& plan_path,
-                         const nlohmann::json& expected_plan);
+                         const nlohmann::json& expected_plan, bool allow_partial = false);
 
 struct Result {
     bool aligned = false;

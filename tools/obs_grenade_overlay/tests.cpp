@@ -44,6 +44,15 @@ int main() {
     reference["revision"] = "r3";
     view = model.update(selection, reference, catalog, "http://host:5015");
     check(view.visible && view.payload["aim_url"].get<std::string>().ends_with("revision=r3"), "F10更新当前可见卡片");
+    auto single = reference;
+    single["ready"] = false; single["aim_ready"] = false; single["standing_ready"] = true;
+    view = model.update(selection,single,catalog,"http://host:5015");
+    check(view.visible && view.payload.contains("standing_url") && !view.payload.contains("aim_url"),
+        "F9独立站位图可显示，瞄点保持待采集");
+    single["ready"] = true; single["aim_ready"] = true; single["standing_ready"] = false;
+    view = model.update(selection,single,catalog,"http://host:5015");
+    check(view.visible && !view.payload.contains("standing_url") && view.payload.contains("aim_url"),
+        "F10独立瞄点图可显示，不要求先采站位");
     model.reset();
     check(!model.update(selection, reference, catalog, "http://host:5015").visible, "重连不重播现存selected");
     selection["request_id"] = "5";

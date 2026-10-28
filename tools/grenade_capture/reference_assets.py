@@ -106,16 +106,21 @@ def validate_standing_marker(marker):
         raise ValueError("站位标记名称无效")
 
 
-def load_reference(root, identity, plan_id=None):
+def resource_files(value):
+    """只打包清单中实际已有的图片，不为另一种采集补占位图。"""
+    return tuple(value[field] for field in ("standing_image", "aim_image") if field in value) + ("reference.json",)
+
+
+def load_reference(root, identity, plan_id=None, allow_partial=False):
     directory = resource_directory(root, identity)
     manifest_path = directory / "reference.json"
     if not manifest_path.is_file() or manifest_path.stat().st_size > 1024 * 1024:
         raise ValueError("参考资源尚未完成")
     value = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
     if (not isinstance(value, dict) or type(value.get("schema_version")) is not int
-            or value.get("schema_version") != 1 or value.get("manual_throw_verified") is not True
+            or value.get("schema_version") != 1
             or not isinstance(value.get("plan"), dict) or not value["plan"].get("actions")):
-        raise ValueError("参考资源缺少人工投掷确认或方案")
+        raise ValueError("参考资源缺少有效方案")
     if (not isinstance(value["plan"].get("name", ""), str)
             or not isinstance(value.get("standing_note", ""), str)
             or not isinstance(value.get("image_sha256"), dict)):
@@ -124,7 +129,24 @@ def load_reference(root, identity, plan_id=None):
         raise ValueError("参考资源 ID 不一致")
     if plan_id is not None and value.get("plan_id") != plan_id:
         raise ValueError("参考资源绑定了其他方案")
-    validate_geometry(value.get("geometry"))
+    has_aim, has_standing = "aim_image" in value, "standing_image" in value
+    if not has_aim and not has_standing:
+        raise ValueError("参考资源尚未采集图片")
+    if type(value.get("capture_complete", True)) is not bool or value.get("capture_complete", True) != (has_aim and has_standing):
+        raise ValueError("参考资源采集状态与已有图片不符")
+    if has_aim:
+        if value.get("manual_throw_verified") is not True:
+            raise ValueError("瞄点资源缺少人工投掷确认")
+        aim_plan = value.get("aim_plan", value["plan"])
+        if not isinstance(aim_plan, dict) or not aim_plan.get("actions"):
+            raise ValueError("瞄点资源缺少采集时的方案")
+        if not allow_partial and aim_plan != value["plan"]:
+            raise ValueError("参考资源与当前方案不一致，请重新采集瞄点图")
+        validate_geometry(value.get("geometry"))
+    elif not allow_partial:
+        raise ValueError("瞄点尚未采集，请按F10采集瞄点图")
+    elif value.get("manual_throw_verified") is not False or "geometry" in value:
+        raise ValueError("站位图不能冒充已确认的瞄点资源")
     if "standing_marker" in value:
         validate_standing_marker(value["standing_marker"])
     for key, limit in (("target_x", 320), ("target_y", 320)):
@@ -132,6 +154,10 @@ def load_reference(root, identity, plan_id=None):
         if type(coordinate) not in (int, float) or not math.isfinite(coordinate) or not 0 <= coordinate < limit:
             raise ValueError("参考瞄点超出 ROI")
     for field, expected in (("standing_image", "standing.png"), ("aim_image", "aim.png")):
+        if field not in value:
+            if expected in {path.name for path in directory.iterdir()} or field in value["image_sha256"]:
+                raise ValueError("未登记的参考图片不能混入资源")
+            continue
         if value.get(field) != expected or (directory / expected).resolve().parent != directory:
             raise ValueError("参考图路径无效")
         size = png_size(directory / expected)

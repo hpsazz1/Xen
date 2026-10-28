@@ -13,6 +13,7 @@
 #include "window_surface.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -254,6 +255,7 @@ public:
         hotkey_ids_[0] = GlobalAddAtomW(L"Xen.OBS.Grenade.Menu.Right");
         hotkey_ids_[1] = GlobalAddAtomW(L"Xen.OBS.Grenade.Menu.Num6");
         hotkey_ids_[2] = GlobalAddAtomW(L"Xen.OBS.Grenade.Capture.F10");
+        hotkey_ids_[3] = GlobalAddAtomW(L"Xen.OBS.Grenade.Capture.F9");
         SetTimer(window, 1, 100, nullptr);
         worker_ = std::thread([this] { poll(); });
         blog(LOG_INFO, "[xen-obs-overlay] 已加载：OBS私有浏览器源与桌面显示，不加入NDI场景");
@@ -269,7 +271,7 @@ public:
         if (worker_.joinable()) worker_.join();
         if (const auto window = handle_.load()) KillTimer(window, 1);
         close_menu(false);
-        for (size_t index=0;index<3;++index) if (hotkey_ids_[index]) {
+        for (size_t index=0;index<hotkey_ids_.size();++index) if (hotkey_ids_[index]) {
             UnregisterHotKey(handle_.load(), hotkey_ids_[index]); GlobalDeleteAtom(hotkey_ids_[index]);
         }
         if (capture_process_) {
@@ -327,8 +329,8 @@ private:
             foreground_is_game_ = game_window(foreground);
         }
         const bool wanted = enabled && (foreground_is_game_ || foreground == menu_window_);
-        const UINT keys[]{VK_RIGHT, VK_NUMPAD6, VK_F10};
-        for (size_t index=0;index<3;++index) {
+        const UINT keys[]{VK_RIGHT, VK_NUMPAD6, VK_F10, VK_F9};
+        for (size_t index=0;index<hotkey_ids_.size();++index) {
             if (wanted == hotkeys_registered_[index] || !hotkey_ids_[index]) continue;
             if (wanted) {
                 hotkeys_registered_[index] = RegisterHotKey(handle_.load(), hotkey_ids_[index], MOD_NOREPEAT, keys[index]) != FALSE;
@@ -442,12 +444,13 @@ private:
 
     void notice(std::string message) {
         blog(LOG_INFO, "[xen-obs-overlay] %s", message.c_str());
-        notice_ = {{"title", "F10 道具采集"}, {"message",std::move(message)}, {"notification",true}};
+        notice_ = {{"title", "道具截图"}, {"message",std::move(message)}, {"notification",true}};
         notice_until_ = Clock::now() + std::chrono::seconds(6);
     }
 
-    void request_capture() noexcept {
+    void request_capture(const char* role) noexcept {
         if (capture_process_ || pending_capture_) return;
+        capture_role_ = role;
         if (menu_visible_) close_menu();
         pending_capture_ = GetForegroundWindow();
         set_visible(false); notice_until_ = {};
@@ -485,13 +488,14 @@ private:
             add(L"--root", root.wstring()); add(L"--destination", wide(config.capture_destination));
             add(L"--window", std::to_wstring(reinterpret_cast<std::uintptr_t>(foreground)));
             add(L"--process", std::to_wstring(process)); add(L"--job-status", capture_status_.wstring());
+            add(L"--role", wide(capture_role_));
             STARTUPINFOW startup{}; startup.cb = sizeof(startup); PROCESS_INFORMATION launched{};
             if (!CreateProcessW(executable.c_str(), arguments.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
                                 nullptr, script.parent_path().c_str(), &startup, &launched))
                 throw std::runtime_error("无法启动采集内部作业，请核对Python路径");
             CloseHandle(launched.hThread); capture_process_ = launched.hProcess;
             capture_job_.start(GetTickCount64());
-            blog(LOG_INFO, "[xen-obs-overlay] F10采集作业已开始");
+            blog(LOG_INFO, "[xen-obs-overlay] %s采集作业已开始", capture_role_ == "standing" ? "F9站位图" : "F10瞄点图");
         } catch (const std::exception& error) { notice(error.what()); }
     }
 
@@ -530,7 +534,8 @@ private:
         }
         if (self && window == self->menu_window_) return self->menu_message(window, message, wp, lp);
         if (self && message == WM_HOTKEY) {
-            if (wp == self->hotkey_ids_[2]) self->request_capture();
+            if (wp == self->hotkey_ids_[2]) self->request_capture("aim");
+            else if (wp == self->hotkey_ids_[3]) self->request_capture("standing");
             else self->toggle_menu();
             return 0;
         }
@@ -697,9 +702,10 @@ private:
     obs_source_t* menu_browser_ = nullptr;
     obs_display_t* menu_display_ = nullptr;
     bool menu_visible_ = false, foreground_is_game_ = false;
-    bool hotkeys_registered_[3]{};
-    bool hotkey_error_logged_[3]{};
-    ATOM hotkey_ids_[3]{};
+    std::array<bool,4> hotkeys_registered_{};
+    std::array<bool,4> hotkey_error_logged_{};
+    std::array<ATOM,4> hotkey_ids_{};
+    std::string capture_role_ = "aim";
     uint64_t menu_configuration_ = 0;
     uint64_t menu_open_count_ = 0;
     uint32_t card_height_ = kHeight;
@@ -726,16 +732,16 @@ void settings_defaults(obs_data_t* settings) {
 }
 obs_properties_t* settings_properties(void*) {
     auto* properties = obs_properties_create();
-    auto* enabled = obs_properties_add_bool(properties, "enabled", "启用道具菜单、参考图和F10采集");
-    obs_property_set_long_description(enabled, "游戏中小键盘右键开关居中菜单；点选后返回游戏并显示参考图，对齐或投掷后隐藏。F10采集当前正确瞄角并同步辅机。");
+    auto* enabled = obs_properties_add_bool(properties, "enabled", "启用道具菜单、参考图和F9/F10采集");
+    obs_property_set_long_description(enabled, "游戏中小键盘右键开关居中菜单；点选后返回游戏并显示参考图，对齐或投掷后隐藏。F9只采站位图，F10只采瞄点图，各自保存并同步辅机，无先后顺序要求。");
     auto* address = obs_properties_add_text(properties, "auxiliary_url", "辅机道具网址", OBS_TEXT_DEFAULT);
     obs_property_set_long_description(address, "填写辅机道具接口地址，例如http://192.168.3.20:5015。插件从这里读取GSI、清单和图片，并提交点选方案。");
     auto* python = obs_properties_add_path(properties, "capture_python", "采集Python", OBS_PATH_FILE, "Python (*.exe)", nullptr);
-    obs_property_set_long_description(python, "使用主机已有Python 3，安装时自动填写；只在F10采集作业期间启动，无语音模型依赖。");
+    obs_property_set_long_description(python, "使用主机已有Python 3，安装时自动填写；只在F9/F10采集作业期间启动，无语音模型依赖。");
     auto* root = obs_properties_add_path(properties, "capture_root", "采集本地目录", OBS_PATH_DIRECTORY, nullptr, nullptr);
     obs_property_set_long_description(root, "保留原图、自动命名资源及待发送记录；沿用主机cache/grenade。");
     auto* destination = obs_properties_add_text(properties, "capture_destination", "辅机资源目录", OBS_TEXT_DEFAULT);
-    obs_property_set_long_description(destination, "辅机cache/grenade的已有共享路径；F10自动打包同步，不需要单独启动采集程序。");
+    obs_property_set_long_description(destination, "辅机cache/grenade的已有共享路径；F9/F10自动打包同步，不需要单独启动采集程序。");
     return properties;
 }
 void settings_menu(void*) { if (manager) manager->open_settings(); }

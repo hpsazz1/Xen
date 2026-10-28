@@ -1,4 +1,4 @@
-"""F10制作离线闭环：合成PNG、本地接收目录及回环HTTP，不采屏/按键/连接辅机。"""
+"""F9/F10独立制作离线闭环：合成PNG、本地接收目录及回环HTTP，不采屏/按键/连接辅机。"""
 
 from copy import deepcopy
 import hashlib
@@ -18,13 +18,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.grenade_capture import capture_workflow, worker
 from tools.grenade_capture.capture_workflow import (
     ContextReader, LocalSavePending, capture_once, short_name, standing_for, transfer_capture, validate_context)
-from tools.grenade_capture.reference_assets import load_reference
+from tools.grenade_capture.reference_assets import load_reference, manifest_revision
+from tools.grenade_capture.reference_tool import add_image, begin
 from tools.grenade_capture.screen_capture import png_rgb
 
 
 class CaptureTests(unittest.TestCase):
     def setUp(self):
-        fixtures = Path(__file__).resolve().parents[1] / "temp/XEN-GRENADE-OBS-MENU-20261026-001/capture-fixtures"
+        fixtures = Path(__file__).resolve().parents[1] / "temp/XEN-GRENADE-CATALOG-F9-20261028-001/backend-tests"
         fixtures.mkdir(parents=True, exist_ok=True)
         self.temporary = tempfile.TemporaryDirectory(prefix="run-", dir=fixtures)
         self.addCleanup(self.temporary.cleanup)
@@ -51,6 +52,10 @@ class CaptureTests(unittest.TestCase):
     def complete(self, reader=None):
         return capture_once(reader or (lambda: deepcopy(self.context)), self.root, self.fake_capture, self.standing)
 
+    def capture_standing(self):
+        return capture_once(lambda: deepcopy(self.context), self.root,
+                            capture=lambda path: shutil.copyfile(self.standing, path), role="standing")
+
     def test_short_names_preserve_alternative_and_existing_position(self):
         self.assertEqual(short_name("Mirage T1 VIP R2", "de_mirage"), "T1 VIP烟")
         self.assertEqual(short_name("Mirage T1 VIP 备用瞄角 R1", "de_mirage"), "T1 VIP烟 备用瞄角")
@@ -66,16 +71,184 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(manifest["display_name"], "T1 VIP烟")
         self.assertEqual(manifest["confirmation_source"], "host_f10")
         self.assertTrue(manifest["manual_throw_verified"])
-        self.assertEqual(manifest["standing_marker"]["label"], "T1")
-        self.assertEqual((directory / "standing.png").read_bytes(), self.standing.read_bytes())
+        self.assertFalse(manifest["capture_complete"])
+        self.assertNotIn("standing_image", manifest)
+        self.assertNotIn("standing_marker", manifest)
+        self.assertFalse((directory / "standing.png").exists())
         self.assertEqual((directory / "aim.png").read_bytes(), self.aim.read_bytes())
         self.assertEqual((manifest["geometry"]["source_width"], manifest["geometry"]["source_height"]), (640, 360))
         archive = self.root / captured["package"]
         self.assertEqual(archive.name, "T1 VIP烟.zip")
         with zipfile.ZipFile(archive) as package:
-            self.assertEqual(len(package.namelist()), 5)
+            self.assertEqual(len(package.namelist()), 4)
             self.assertIsNone(package.testzip())
             self.assertEqual(json.loads(package.read("plans/" + self.plan_path.name)), self.plan)
+
+    def test_f9_first_saves_and_transfers_only_standing_without_claiming_aim(self):
+        captured = self.capture_standing()
+        manifest, directory = load_reference(self.root / "references", self.plan_path.stem, allow_partial=True)
+        self.assertFalse(manifest["capture_complete"])
+        self.assertFalse(manifest["manual_throw_verified"])
+        self.assertNotIn("aim_image", manifest)
+        self.assertNotIn("geometry", manifest)
+        self.assertNotIn("confirmed_at_utc", manifest)
+        self.assertEqual(captured["capture_role"], "standing")
+        self.assertEqual((directory / "standing.png").read_bytes(), self.standing.read_bytes())
+        self.assertFalse((directory / "aim.png").exists())
+        with self.assertRaisesRegex(ValueError, "瞄点尚未采集"):
+            load_reference(self.root / "references", self.plan_path.stem)
+        transfer_capture(self.root, self.plan_path.stem, self.remote)
+        remote, target = load_reference(self.remote / "references", self.plan_path.stem, allow_partial=True)
+        self.assertEqual(remote, manifest)
+        self.assertEqual((target / "standing.png").read_bytes(), self.standing.read_bytes())
+        with zipfile.ZipFile(self.root / captured["package"]) as package:
+            self.assertFalse(any(name.endswith("aim.png") for name in package.namelist()))
+            self.assertEqual(len(package.namelist()), 4)
+
+    def test_f9_then_f10_preserves_custom_standing_without_spawn_marker(self):
+        self.capture_standing()
+        transfer_capture(self.root, self.plan_path.stem, self.remote)
+        self.complete()
+        manifest, directory = load_reference(self.root / "references", self.plan_path.stem)
+        self.assertTrue(manifest["capture_complete"])
+        self.assertTrue(manifest["manual_throw_verified"])
+        self.assertEqual((directory / "standing.png").read_bytes(), self.standing.read_bytes())
+        self.assertEqual((directory / "aim.png").read_bytes(), self.aim.read_bytes())
+        self.assertNotIn("standing_marker", manifest)
+        custom, marker = standing_for(self.context, self.root, self.aim)
+        self.assertEqual(custom, directory / "standing.png")
+        self.assertIsNone(marker)
+        transfer_capture(self.root, self.plan_path.stem, self.remote)
+        remote, _ = load_reference(self.remote / "references", self.plan_path.stem)
+        self.assertEqual(remote, manifest)
+
+    def test_f10_then_f9_preserves_aim_geometry_and_manual_confirmation(self):
+        self.complete()
+        transfer_capture(self.root, self.plan_path.stem, self.remote)
+        original, directory = load_reference(self.root / "references", self.plan_path.stem)
+        aim = (directory / "aim.png").read_bytes()
+        self.capture_standing()
+        manifest, directory = load_reference(self.root / "references", self.plan_path.stem)
+        self.assertTrue(manifest["capture_complete"])
+        self.assertEqual((directory / "aim.png").read_bytes(), aim)
+        for field in ("geometry", "target_x", "target_y", "manual_throw_verified", "confirmed_at_utc", "confirmation_source"):
+            self.assertEqual(manifest[field], original[field])
+        self.assertNotEqual(manifest["reference_revision"], original["reference_revision"])
+        transfer_capture(self.root, self.plan_path.stem, self.remote)
+        remote, target = load_reference(self.remote / "references", self.plan_path.stem)
+        self.assertEqual(remote, manifest)
+        self.assertEqual((target / "aim.png").read_bytes(), aim)
+
+    def test_repeated_f9_and_f10_only_replace_the_selected_role(self):
+        self.capture_standing()
+        self.complete()
+        first, directory = load_reference(self.root / "references", self.plan_path.stem)
+        old_aim = (directory / "aim.png").read_bytes()
+        self.standing.write_bytes(png_rgb(640, 480, [bytes([22, 33, 44]) * 640] * 480))
+        self.capture_standing()
+        second, directory = load_reference(self.root / "references", self.plan_path.stem)
+        self.assertEqual((directory / "aim.png").read_bytes(), old_aim)
+        self.assertEqual(second["confirmed_at_utc"], first["confirmed_at_utc"])
+        standing = (directory / "standing.png").read_bytes()
+        self.aim.write_bytes(png_rgb(640, 360, [bytes([66, 77, 88]) * 640] * 360))
+        self.complete()
+        third, directory = load_reference(self.root / "references", self.plan_path.stem)
+        self.assertEqual((directory / "standing.png").read_bytes(), standing)
+        self.assertEqual((directory / "aim.png").read_bytes(), self.aim.read_bytes())
+        self.assertEqual(third["standing_captured_at_utc"], second["standing_captured_at_utc"])
+        self.assertNotEqual(third["reference_revision"], second["reference_revision"])
+
+    def changed_plan_then_standing(self, legacy=False):
+        self.complete()
+        previous, directory = load_reference(self.root / "references", self.plan_path.stem)
+        old_plan = deepcopy(previous["plan"])
+        old_aim = (directory / "aim.png").read_bytes()
+        if legacy:
+            previous.pop("aim_plan")
+            previous["reference_revision"] = manifest_revision(previous)
+            capture_workflow.write_json(directory / "reference.json", previous)
+        self.plan["notes"] = "setpos 1 2 3;setang -42 -170 0"
+        self.plan["actions"][0]["duration_ms"] = 300
+        self.plan_path.write_text(json.dumps(self.plan, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.context["plan_sha256"] = hashlib.sha256(self.plan_path.read_bytes()).hexdigest()
+        self.capture_standing()
+        changed, directory = load_reference(self.root / "references", self.plan_path.stem, allow_partial=True)
+        self.assertEqual(changed["plan"], self.plan)
+        self.assertEqual(changed["aim_plan"], old_plan)
+        self.assertEqual((directory / "aim.png").read_bytes(), old_aim)
+        for field in ("geometry", "target_x", "target_y", "manual_throw_verified", "confirmed_at_utc", "confirmation_source"):
+            self.assertEqual(changed[field], previous[field])
+        with self.assertRaisesRegex(ValueError, "参考资源与当前方案不一致"):
+            load_reference(self.root / "references", self.plan_path.stem)
+        transfer_capture(self.root, self.plan_path.stem, self.remote)
+        remote, remote_directory = load_reference(self.remote / "references", self.plan_path.stem, allow_partial=True)
+        self.assertEqual(remote, changed)
+        self.assertEqual((remote_directory / "aim.png").read_bytes(), old_aim)
+        with self.assertRaisesRegex(ValueError, "参考资源与当前方案不一致"):
+            load_reference(self.remote / "references", self.plan_path.stem)
+        self.aim.write_bytes(png_rgb(640, 360, [bytes([41, 81, 161]) * 640] * 360))
+        self.complete()
+        renewed, directory = load_reference(self.root / "references", self.plan_path.stem)
+        self.assertEqual(renewed["aim_plan"], self.plan)
+        self.assertEqual((directory / "aim.png").read_bytes(), self.aim.read_bytes())
+        self.assertEqual((directory / "standing.png").read_bytes(), self.standing.read_bytes())
+        transfer_capture(self.root, self.plan_path.stem, self.remote)
+        remote, _ = load_reference(self.remote / "references", self.plan_path.stem)
+        self.assertEqual(remote, renewed)
+
+    def test_f9_keeps_aim_bound_to_its_captured_plan_until_f10(self):
+        self.changed_plan_then_standing()
+
+    def test_f9_preserves_legacy_aim_plan_before_updating_current_plan(self):
+        self.changed_plan_then_standing(legacy=True)
+
+    def test_f10_keeps_legacy_standing_note_marker_and_original_image(self):
+        refs = self.root / "references"
+        marker = {"x": .223, "y": .498, "label": "T1"}
+        identity = begin(refs, self.plan_path, True, "出生点 T1", marker)
+        add_image(refs, identity, "standing", image=self.standing)
+        add_image(refs, identity, "aim", image=self.aim)
+        self.complete()
+        manifest, directory = load_reference(refs, identity)
+        self.assertEqual(manifest["standing_note"], "出生点 T1")
+        self.assertEqual(manifest["standing_marker"], marker)
+        self.assertEqual((directory / "standing.png").read_bytes(), self.standing.read_bytes())
+        self.capture_standing()
+        manifest, _ = load_reference(refs, identity)
+        self.assertNotIn("standing_marker", manifest)
+        self.assertEqual(manifest["standing_source"], "host_f9")
+
+    def test_f9_partial_local_failure_recovers_before_f10_without_losing_standing(self):
+        write = capture_workflow.write_json
+        def fail_metadata(path, value):
+            if Path(path).parent.name == "captures":
+                raise OSError("synthetic metadata failure")
+            return write(path, value)
+        with patch.object(capture_workflow, "write_json", side_effect=fail_metadata):
+            with self.assertRaises(LocalSavePending):
+                self.capture_standing()
+        self.complete()
+        manifest, directory = load_reference(self.root / "references", self.plan_path.stem)
+        self.assertTrue(manifest["capture_complete"])
+        self.assertEqual((directory / "standing.png").read_bytes(), self.standing.read_bytes())
+        transfer_capture(self.root, self.plan_path.stem, self.remote)
+        self.assertFalse((self.root / "capture-transactions" / self.plan_path.stem / "pending.json").exists())
+
+    def test_f9_partial_transfer_recovers_interrupted_directory_switch(self):
+        self.capture_standing()
+        transfer_capture(self.root, self.plan_path.stem, self.remote)
+        target = self.remote / "references" / self.plan_path.stem
+        backup = self.remote / "reference-backups" / self.plan_path.stem / "interrupted"
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        target.rename(backup)
+        journal = self.remote / "capture-transfers" / self.plan_path.stem / "pending.json"
+        journal.write_text(json.dumps({"identity": self.plan_path.stem, "backup": backup.relative_to(self.remote).as_posix()}), encoding="utf-8")
+        transfer_capture(self.root, self.plan_path.stem, self.remote)
+        manifest, directory = load_reference(self.remote / "references", self.plan_path.stem, allow_partial=True)
+        self.assertFalse(manifest["manual_throw_verified"])
+        self.assertEqual((directory / "standing.png").read_bytes(), self.standing.read_bytes())
+        self.assertFalse((directory / "aim.png").exists())
+        self.assertFalse(journal.exists())
 
     def test_not_ready_expired_or_wrong_foreground_never_captures(self):
         for change in ({"ready": False, "reason": "请启用道具测试"}, {"remaining_ms": 0},
@@ -227,8 +400,10 @@ class CaptureTests(unittest.TestCase):
 
     def test_context_reader_uses_real_loopback_http(self):
         payload = json.dumps(self.context).encode()
+        paths = []
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
+                paths.append(self.path)
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
@@ -242,6 +417,9 @@ class CaptureTests(unittest.TestCase):
             result = ContextReader("127.0.0.1", server.server_port)()
             self.assertGreater(result["_deadline"], time.monotonic())
             self.assertEqual(result["plan_sha256"], self.context["plan_sha256"])
+            standing = ContextReader("127.0.0.1", server.server_port, role="standing")()
+            self.assertEqual(standing["plan_sha256"], self.context["plan_sha256"])
+            self.assertEqual(paths, ["/capture-context.json", "/capture-context.json?role=standing"])
         finally:
             server.shutdown()
             worker.join(2)
@@ -258,13 +436,15 @@ class CaptureTests(unittest.TestCase):
                 "--destination", str(self.remote), "--shared-standing", str(self.standing),
                 "--window", "12", "--process", "34", "--job-status", str(self.status_path)]
 
-    def run_worker(self):
+    def run_worker(self, role=None):
         def capture(*args, **kwargs):
             return capture_once(*args, capture=self.fake_capture, **kwargs)
-        with patch.object(worker, "ContextReader", return_value=lambda: deepcopy(self.context)), \
+        with patch.object(worker, "ContextReader", return_value=lambda: deepcopy(self.context)) as context_reader, \
              patch.object(worker, "capture_once", side_effect=capture), \
              patch.object(worker, "foreground_identity", return_value={"window": 12, "process": 34}):
-            result = worker.main(self.worker_arguments())
+            args = self.worker_arguments() + (["--role", role] if role else [])
+            result = worker.main(args)
+            context_reader.assert_called_once_with("127.0.0.1", 5015, role=role or "aim")
         return result, json.loads(self.status_path.read_text(encoding="utf-8"))
 
     def test_obs_worker_captures_and_transfers_once_then_reports_terminal_success(self):
@@ -277,6 +457,17 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(self.plan_path.read_bytes(), plan_bytes)
         _, directory = load_reference(self.remote / "references", self.plan_path.stem)
         self.assertEqual((directory / "aim.png").read_bytes(), self.aim.read_bytes())
+
+    def test_obs_worker_f9_routes_standing_and_transfers_without_aim(self):
+        result, status = self.run_worker("standing")
+        self.assertEqual(result, 0)
+        self.assertEqual(self.capture_count, 1)
+        self.assertEqual((status["state"], status["terminal"]), ("sent", True))
+        self.assertIn("站位图", status["message"])
+        manifest, directory = load_reference(self.remote / "references", self.plan_path.stem, allow_partial=True)
+        self.assertFalse(manifest["manual_throw_verified"])
+        self.assertFalse((directory / "aim.png").exists())
+        self.assertEqual((directory / "standing.png").read_bytes(), self.aim.read_bytes())
 
     def test_obs_worker_failed_context_reports_failure_without_capture(self):
         self.context["ready"] = False

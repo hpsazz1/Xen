@@ -4,6 +4,7 @@
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <regex>
@@ -16,6 +17,35 @@ using movement::timeline::ActionKind;
 using movement::timeline::Key;
 using movement::timeline::Button;
 using TimelineAction = movement::timeline::Action;
+
+struct GrenadePreset {
+    const char* name;
+    bool jump, forward, crouch, both_buttons;
+};
+constexpr std::array<GrenadePreset,6> kGrenadePresets{{
+    {"左键投掷",false,false,false,false},
+    {"左键跳投",true,false,false,false},
+    {"W 跳投",true,true,false,false},
+    {"蹲跳投",true,false,true,false},
+    {"蹲 W 跳投",true,true,true,false},
+    {"左右双键 W 跳投",true,true,false,true}
+}};
+
+void apply_grenade_preset(Plan& plan, const GrenadePreset& preset) {
+    // 六套时序逐项复用现役道具库；只替换动作，不从图片推测投法或覆盖点位身份。
+    plan.actions.clear();
+    const auto button = [&](Button value, int duration) {
+        TimelineAction action;
+        action.kind = ActionKind::BUTTON; action.button = value; action.duration_ms = duration;
+        plan.actions.push_back(action);
+    };
+    if (preset.both_buttons) button(Button::RIGHT,1000);
+    button(Button::LEFT,preset.both_buttons ? 1001 : 1000);
+    if (preset.jump) plan.actions.push_back({ActionKind::KEY,Key::SPACE,1000,40,0});
+    if (preset.forward) plan.actions.push_back({ActionKind::KEY,Key::W,1000,100,0});
+    if (preset.crouch) plan.actions.push_back({ActionKind::KEY,Key::CTRL,0,preset.forward ? 1100 : 1040,0});
+    plan.mask = {true,15,0,0};
+}
 
 void tip(const char* text) {
     if (!ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) return;
@@ -241,6 +271,17 @@ struct MovementPanel::Impl {
             tip("从起始说明提取的 setpos/setang；只提供复制，不自动执行控制台命令。道具辅助另通过参考图对齐视角，仍需先手动站到固定点位。");
             if (button("复制定位指令", "只复制当前配方的精确坐标和瞄角；关闭控制台、确认站位后再按测试键执行当前动作。"))
                 ImGui::SetClipboardText(command.c_str());
+        }
+        if (grenade()) {
+            ImGui::SetNextItemWidth(std::max(100.f, ImGui::GetContentRegionAvail().x * .7f));
+            if (ImGui::BeginCombo("投掷动作", "选择动作预设…")) {
+                for (const auto& preset : kGrenadePresets) {
+                    if (ImGui::Selectable(preset.name)) { apply_grenade_preset(plan,preset); change = true; }
+                    tip("套用现有方案的整组动作和方向键屏蔽；保留名称、地图、坐标及保存目标，只修改草稿，不自动保存或投掷。");
+                }
+                ImGui::EndCombo();
+            }
+            tip("按投法选择即可填好按键和时序，下面仍可微调；站位和瞄点图片不能确定投法，套用后用F11试投。");
         }
         if (button("添加动作", "添加独立动作；时间从脚本启动起算，与其他行可以重叠。")) {
             plan.actions.push_back({}); change = true;

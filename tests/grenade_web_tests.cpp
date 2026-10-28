@@ -210,6 +210,24 @@ void selection_tests(const std::filesystem::path& root) {
         "图片与标记使用同一资源版本，旧版本地址不返回新图");
     expect(get(port,"/reference.json?plan_id=%2e%2e%2ft.json").status==404 &&
         get(port,"/reference/config.ini?plan_id=t.json").status==404,"参考图片路由不能读任意路径");
+    auto single=reference; single.erase("aim_image"); single.erase("geometry");
+    single["image_sha256"].erase("aim_image"); single["capture_complete"]=false; single["manual_throw_verified"]=false;
+    {std::ofstream file(resources/"reference.json");file<<single.dump();}
+    const auto standing_only=get(port,"/reference.json?plan_id=t.json");
+    expect(standing_only.status==200 && standing_only.json().value("standing_ready",false) &&
+        !standing_only.json().value("aim_ready",true) && !standing_only.json().contains("geometry") &&
+        get(port,"/reference/standing.png?plan_id=t.json").status==200 &&
+        get(port,"/reference/aim.png?plan_id=t.json").status==404,
+        "F9单独首采立即显示站位，不把残留瞄点作为本次资源");
+    single=reference; single.erase("standing_image"); single.erase("standing_marker");
+    single["image_sha256"].erase("standing_image"); single["capture_complete"]=false;
+    {std::ofstream file(resources/"reference.json");file<<single.dump();}
+    const auto aim_only=get(port,"/reference.json?plan_id=t.json");
+    expect(aim_only.status==200 && aim_only.json().value("aim_ready",false) &&
+        !aim_only.json().value("standing_ready",true) && get(port,"/reference/aim.png?plan_id=t.json").status==200 &&
+        get(port,"/reference/standing.png?plan_id=t.json").status==404,
+        "F10单独首采立即显示瞄点，不要求先按F9");
+    {std::ofstream file(resources/"reference.json");file<<reference.dump();}
     {std::ofstream file(resources/"aim.png",std::ios::app|std::ios::binary);file<<'x';}
     expect(get(port,"/reference/aim.png?plan_id=t.json").status==404,"原图变化不得继续显示未核对旧资源");
     expect(select_plan(port,"t.json",generation).status==202,"前次完成后接受新选择");
@@ -246,6 +264,7 @@ void capture_context_tests(const std::filesystem::path& root) {
     expect(server.start(config,gsi),"F10只读上下文服务启动");
     const auto port = server.snapshot().port;
     AppConfig controls;
+    controls.keyboard.anomaly_mark_virtual_keys.clear(); // 用户已清空旧F9异常标记绑定。
     debug_session::Snapshot selected;
     selected.movement_test_enabled = true; selected.movement_test_mode = debug_session::Mode::GRENADE_TEST;
     selected.grenade_selected_path = utf8(path); selected.grenade_current = Json::parse(raw);
@@ -287,6 +306,12 @@ void capture_context_tests(const std::filesystem::path& root) {
     publish(false); rejected();
     controls.keyboard.debug_test_enabled = true; controls.keyboard.debug_test_virtual_keys = {0x79}; publish();
     expect(rejected().value("reason",std::string{}).find("F10")!=std::string::npos,"设备侧自定义F10与采集热键冲突时拒绝");
+    const auto read_standing=[&] { return get(port,"/capture-context.json?role=standing").json(); };
+    expect(read_standing().value("ready",false),"F10占用不影响独立F9采集");
+    controls.keyboard.debug_test_virtual_keys = {0x78}; publish();
+    expect(read().value("ready",false) && !read_standing().value("ready",true) &&
+        read_standing().value("reason",std::string{}).find("F9")!=std::string::npos,
+        "F9占用只影响站位采集，不影响F10");
     controls.keyboard.debug_test_enabled = false; publish();
     expect(read().value("ready",false),"未启用的F10草稿绑定不占用采集键");
     controls.trigger.enabled = true; controls.trigger.fire_enabled = true; controls.trigger.hold_virtual_key = 0x79; publish(); rejected();
