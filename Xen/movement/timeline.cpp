@@ -13,8 +13,11 @@ constexpr int kMaxTime = 60000;
 constexpr std::array<const char*, 6> kKeys{"W", "A", "S", "D", "SPACE", "CTRL"};
 bool ack(const KeyboardReceipt& r) { return r.disposition == KeyboardDisposition::ACKNOWLEDGED; }
 bool ack(const ButtonReceipt& r) { return r.disposition == ButtonDisposition::ACKNOWLEDGED; }
-void fields(const nlohmann::json& j, std::initializer_list<const char*> allowed) {
-    if (!j.is_object() || j.size() != allowed.size()) throw std::runtime_error("方案字段缺失或包含未知字段");
+void fields(const nlohmann::json& j, std::initializer_list<const char*> allowed,
+            std::initializer_list<const char*> optional = {}) {
+    auto expected = allowed.size();
+    for (auto name : optional) if (j.contains(name)) ++expected;
+    if (!j.is_object() || j.size() != expected) throw std::runtime_error("方案字段缺失或包含未知字段");
     for (auto name : allowed) if (!j.contains(name)) throw std::runtime_error("方案缺少必要字段");
 }
 int integer(const nlohmann::json& j) {
@@ -121,15 +124,15 @@ bool parse_plan(const nlohmann::json& j, Plan& out, std::string& error) noexcept
     try {
         const int version = integer(j.at("schema_version"));
         if (version != 1 && version != 2 && version != 3) throw std::runtime_error("不支持的方案版本");
-        if (version == 3 && j.contains("team"))
-            fields(j, {"schema_version", "name", "map", "location", "notes", "voice_command", "actions", "mask", "team"});
-        else if (version == 3)
-            fields(j, {"schema_version", "name", "map", "location", "notes", "voice_command", "actions", "mask"});
+        if (version == 3)
+            fields(j, {"schema_version", "name", "map", "location", "notes", "voice_command", "actions", "mask"},
+                {"team", "crouch"});
         else fields(j, {"schema_version", "name", "map", "location", "notes", "actions", "mask"});
         Plan p;
         p.name = j.at("name").get<std::string>(); p.map = j.at("map").get<std::string>();
         if (version == 3) p.voice_command = j.at("voice_command").get<std::string>();
         if (version == 3 && j.contains("team")) p.team = j.at("team").get<std::string>();
+        if (version == 3 && j.contains("crouch")) p.crouch = j.at("crouch").get<bool>();
         p.location = j.at("location").get<std::string>(); p.notes = j.at("notes").get<std::string>();
         const auto& list = j.at("actions");
         if (!list.is_array() || list.size() > 16384) throw std::runtime_error("动作必须是最多16384项的数组");
@@ -193,6 +196,7 @@ nlohmann::json plan_json(const Plan& p) {
         {"actions", actions}, {"mask", {{"enabled", p.mask.enabled}, {"wasd", p.mask.wasd},
             {"start_ms", p.mask.start_ms}, {"duration_ms", p.mask.duration_ms}}}};
     if (!p.team.empty()) result["team"] = p.team;
+    if (p.crouch) result["crouch"] = true;
     return result;
 }
 
@@ -208,6 +212,7 @@ Result run_plan(IMouseController& device, const Plan& p, const movement::Config&
             !std::isfinite(scale.sensitivity) || scale.sensitivity <= 0 || scale.yaw_degrees_per_count <= 0)
             throw std::runtime_error("灵敏度和每count角度必须为有限正数");
         if (!device.supports_wasd_keyboard()) throw std::runtime_error("设备不支持身法键盘输出");
+        if (p.crouch && !device.supports_left_ctrl_key()) throw std::runtime_error("设备不支持Left Ctrl");
         std::vector<int> sent(p.actions.size(), 0);
         std::vector<int> sent_y(p.actions.size(), 0);
         std::vector<bool> seen(p.actions.size(), false);
@@ -260,11 +265,12 @@ Result run_plan(IMouseController& device, const Plan& p, const movement::Config&
                     command([&] { return device.set_wasd_mask(static_cast<std::uint8_t>(bit), true); });
                 masked |= want_mask;
             }
-            int want_keys = 0; bool want_space = false, want_ctrl = false;
+            int want_keys = 0; bool want_space = false, want_ctrl = p.crouch;
             for (std::size_t i = 0; i < p.actions.size(); ++i) {
                 const auto& a = p.actions[i];
                 if (a.kind != ActionKind::KEY) continue;
-                const bool already_held = a.key == Key::SPACE ? space : a.key == Key::CTRL ? ctrl :
+                // 找点姿态覆盖整段；短CTRL动作不能制造提前站起或“已错过”的假故障。
+                const bool already_held = a.key == Key::SPACE ? space : a.key == Key::CTRL ? (ctrl || p.crouch) :
                     (keys & (1 << static_cast<unsigned>(a.key))) != 0;
                 // 完整落在其他同键持有段内的短动作已由并集满足，不制造误报。
                 if (elapsed >= a.start_ms + a.duration_ms && already_held) seen[i] = true;

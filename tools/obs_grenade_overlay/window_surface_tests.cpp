@@ -1,12 +1,49 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "window_surface.h"
+#include "hotkeys.h"
 #include <iostream>
+#include <set>
+#include <string_view>
 
 int main() {
     int failures = 0;
     const auto check = [&](bool value, const char* reason) {
         if (!value) { std::cerr << reason << '\n'; ++failures; }
     };
+    check(xen_obs::kHotkeys.size()==6,"热键表应包含两个菜单入口及普通/Ctrl两种采集组合");
+    check(xen_obs::kHotkeys[0].virtual_key==VK_RIGHT&&xen_obs::kHotkeys[1].virtual_key==VK_NUMPAD6&&
+        !xen_obs::kHotkeys[0].capture_role&&!xen_obs::kHotkeys[1].capture_role,"原Right/Num6菜单入口保持");
+    std::set<std::wstring_view> names;
+    std::set<std::pair<UINT,UINT>> keys;
+    std::set<ATOM> atoms;
+    for (const auto& binding : xen_obs::kHotkeys) {
+        check(binding.virtual_key!=VK_F9&&binding.virtual_key!=VK_F10,"旧F9/F10采集热键不得继续注册");
+        check(names.insert(binding.atom_name).second,"每个热键应使用独立atom名称");
+        check(keys.insert({binding.virtual_key,binding.modifiers}).second,"热键表不能重复键位和修饰键组合");
+        check((binding.modifiers&MOD_NOREPEAT)!=0,"普通和蹲姿采集均应保持按住不重复");
+        const auto atom=GlobalAddAtomW(binding.atom_name);
+        check(atom!=0&&atoms.insert(atom).second,"生产表中的atom应能建立且互不重复");
+    }
+    for (const auto atom : atoms) GlobalDeleteAtom(atom);
+    for (const auto key : {UINT(VK_NEXT),UINT(VK_PRIOR)}) {
+        const xen_obs::HotkeyBinding* ordinary=nullptr;
+        const xen_obs::HotkeyBinding* crouched=nullptr;
+        for (const auto& binding : xen_obs::kHotkeys) {
+            if(binding.virtual_key!=key) continue;
+            if(binding.modifiers==MOD_NOREPEAT) ordinary=&binding;
+            if(binding.modifiers==(MOD_CONTROL|MOD_NOREPEAT)) crouched=&binding;
+        }
+        check(ordinary&&ordinary->capture_role,"PgUp/PgDn应进入单次采集入口");
+        check(crouched&&crouched->capture_role,"手动保持Ctrl蹲姿时也应有PgUp/PgDn采集入口");
+        if (ordinary&&crouched&&ordinary->capture_role&&crouched->capture_role)
+            check(std::string_view(ordinary->capture_role)==crouched->capture_role&&
+                std::string_view(ordinary->capture_role)==(key==VK_NEXT?"aim":"standing"),
+                "Ctrl采集必须与普通键路由到相同图片角色");
+        if (ordinary&&crouched)
+            check(std::wstring_view(ordinary->atom_name).ends_with(key==VK_NEXT?L".PageDown":L".PageUp")&&
+                std::wstring_view(crouched->atom_name).ends_with(key==VK_NEXT?L".CtrlPageDown":L".CtrlPageUp"),
+                "PgUp/PgDn及Ctrl组合应使用各自新atom名称");
+    }
     for (const DWORD extra : {DWORD(0), DWORD(WS_EX_NOACTIVATE | WS_EX_TRANSPARENT)}) {
         const auto window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED | extra,
             L"STATIC", L"Xen截图排除离线检查", WS_POPUP, -10000, -10000, 800, 430,

@@ -114,6 +114,11 @@ def resource_files(value):
 def _plan_identity(plan):
     # 与生产方案解析一致：补存同阵营元数据不使既有瞄点失效，其他字段仍逐项比较。
     result = dict(plan)
+    crouch = result.pop("crouch", False)
+    if type(crouch) is not bool:
+        raise ValueError("参考资源瞄点姿态必须为布尔值")
+    if crouch:
+        result["crouch"] = True
     team = result.get("team", "")
     if team not in ("", "T", "CT") or not isinstance(result.get("name", ""), str):
         raise ValueError("参考资源方案阵营或名称无效")
@@ -165,7 +170,7 @@ def load_reference(root, identity, plan_id=None, allow_partial=False):
             raise ValueError("参考资源与当前方案不一致，请重新采集瞄点图")
         validate_geometry(value.get("geometry"))
     elif not allow_partial:
-        raise ValueError("瞄点尚未采集，请按F10采集瞄点图")
+        raise ValueError("瞄点尚未采集，请按PgDn采集瞄点图")
     elif value.get("manual_throw_verified") is not False or "geometry" in value:
         raise ValueError("站位图不能冒充已确认的瞄点资源")
     if "standing_marker" in value:

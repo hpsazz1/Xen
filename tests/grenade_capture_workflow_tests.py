@@ -1,4 +1,4 @@
-"""F9/F10独立制作离线闭环：合成PNG、本地接收目录及回环HTTP，不采屏/按键/连接辅机。"""
+"""PgUp/PgDn独立制作离线闭环：合成PNG、本地接收目录及回环HTTP，不采屏/按键/连接辅机。"""
 
 from copy import deepcopy
 import hashlib
@@ -12,6 +12,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+import urllib.error
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -62,6 +63,17 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(short_name("Mirage T2 B小烟 R1", "de_mirage"), "T2 B小烟")
         self.assertEqual(short_name("Ancient T来源5号 中路烟 [S102]", "de_ancient"), "T5 中路烟")
         self.assertEqual(short_name("未知站位 A烟"), "未知站位 A烟")
+
+    def test_crouch_context_requires_explicit_boolean(self):
+        for pose in (True, False):
+            value = deepcopy(self.context)
+            value["plan"]["crouch"] = pose
+            self.assertIs(validate_context(value), value)
+        for pose in (None, 0, 1, "蹲姿", []):
+            value = deepcopy(self.context)
+            value["plan"]["crouch"] = pose
+            with self.subTest(pose=pose), self.assertRaisesRegex(ValueError, "采集上下文字段无效"):
+                validate_context(value)
 
     def test_explicit_team_context_matches_and_rejects_invalid_or_mismatched_team(self):
         value = deepcopy(self.context)
@@ -136,7 +148,7 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(self.capture_count, 1)
         self.assertEqual(manifest["plan"], self.plan)
         self.assertEqual(manifest["display_name"], "T1 VIP烟")
-        self.assertEqual(manifest["confirmation_source"], "host_f10")
+        self.assertEqual(manifest["confirmation_source"], "host_pgdn")
         self.assertTrue(manifest["manual_throw_verified"])
         self.assertTrue(manifest["capture_complete"])
         self.assertEqual(manifest["standing_image"], "standing.png")
@@ -611,6 +623,50 @@ class CaptureTests(unittest.TestCase):
         for host in ("8.8.8.8", "0.0.0.0", "::1", "example.com"):
             with self.assertRaises(ValueError):
                 ContextReader(host)
+
+    def test_context_reader_network_errors_explain_auxiliary_service_without_retry(self):
+        reader = ContextReader("192.168.3.20")
+        for error, message in (
+            (urllib.error.URLError(TimeoutError("timed out")), "读取辅机方案超时"),
+            (TimeoutError("timed out"), "读取辅机方案超时"),
+            (urllib.error.URLError(ConnectionRefusedError("refused")), "无法连接辅机道具服务"),
+            (urllib.error.HTTPError(reader.url, 503, "unavailable", {}, None), "辅机道具服务返回HTTP 503"),
+        ):
+            with self.subTest(error=type(error).__name__), patch.object(reader.opener, "open", side_effect=error) as opened:
+                with self.assertRaisesRegex(ValueError, message) as caught:
+                    reader()
+                self.assertIn("192.168.3.20:5015", str(caught.exception))
+                self.assertIn("辅机Xen", str(caught.exception))
+                self.assertEqual(opened.call_count, 1)
+                self.assertEqual(opened.call_args.kwargs["timeout"], 2)
+
+    def test_context_reader_real_http_header_timeout_remains_bounded_without_retry(self):
+        requests, release = [], threading.Event()
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                requests.append(self.path)
+                release.wait(3)
+                try:
+                    self.send_response(200)
+                    self.end_headers()
+                except OSError:
+                    pass
+            def log_message(self, *args):
+                pass
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        started = time.monotonic()
+        try:
+            with self.assertRaisesRegex(ValueError, "读取辅机方案超时"):
+                ContextReader("127.0.0.1", server.server_port)()
+            self.assertLess(time.monotonic() - started, 3)
+            self.assertEqual(requests, ["/capture-context.json"])
+        finally:
+            release.set()
+            server.shutdown()
+            worker.join(2)
+            server.server_close()
 
 
     # 单作业忙态、超时与退出状态的消费已由 OBS 插件模型负责；此处验证实际 worker 协议。

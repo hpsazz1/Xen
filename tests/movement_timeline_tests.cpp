@@ -19,7 +19,10 @@ public:
     int dx = 0, dy = 0, wheels = 0, wheel_calls = 0, cleanups = 0, masks = 0, software = 0;
     int physical = 1;
     bool space = false, ctrl = false, fail_key = false, fail_cleanup = false, fail_move = false;
-    bool delay_key = false;
+    bool delay_key = false, ctrl_supported = true;
+    bool ctrl_on_w = false, ctrl_on_jump = false, ctrl_at_cleanup = false;
+    int ctrl_ups = 0;
+    bool stood_before_button_release = false;
     bool button_supported = true, left = false, right = false;
     bool fail_button_down = false, fail_button_up = false, shared_button_fault = false;
     int left_ups = 0, right_ups = 0;
@@ -29,10 +32,11 @@ public:
     std::string last_error() const override { return {}; }
     bool poll_input(InputSnapshot&) noexcept override { return false; }
     bool supports_wasd_keyboard() const noexcept override { return true; }
-    bool supports_left_ctrl_key() const noexcept override { return true; }
+    bool supports_left_ctrl_key() const noexcept override { return ctrl_supported; }
     bool supports_left_button() const noexcept override { return button_supported; }
     bool left_button_faulted() const noexcept override { return shared_button_fault; }
     ButtonReceipt set_left_button(bool down) noexcept override {
+        if (!down && left && !ctrl) stood_before_button_release = true;
         events.push_back(down ? "left_down" : "left_up");
         if (!down) ++left_ups;
         left = down;
@@ -53,14 +57,18 @@ public:
         wheels += value; ++wheel_calls; MouseMoveReceipt r; r.succeeded = !fail_move; return r;
     }
     KeyboardReceipt set_wasd_keyboard(std::uint8_t value) noexcept override {
+        if (value) ctrl_on_w = ctrl;
         software = value; keys.push_back(value); events.push_back("keys");
         if (delay_key) std::this_thread::sleep_for(std::chrono::milliseconds(60));
         return {fail_key ? KeyboardDisposition::APPLICATION_UNKNOWN : KeyboardDisposition::ACKNOWLEDGED};
     }
     KeyboardReceipt set_space_key(bool value) noexcept override {
+        if (value) ctrl_on_jump = ctrl;
         space = value; events.push_back(value ? "space_down" : "space_up"); return {KeyboardDisposition::ACKNOWLEDGED};
     }
     KeyboardReceipt set_left_ctrl_key(bool value) noexcept override {
+        if (!value) ++ctrl_ups;
+        events.push_back(value ? "ctrl_down" : "ctrl_up");
         ctrl = value; return {KeyboardDisposition::ACKNOWLEDGED};
     }
     KeyboardReceipt set_wasd_mask(std::uint8_t key, bool value) noexcept override {
@@ -68,6 +76,7 @@ public:
         events.push_back(value ? "mask" : "unmask"); return {KeyboardDisposition::ACKNOWLEDGED};
     }
     KeyboardReceipt cleanup_wasd_keyboard() noexcept override {
+        ctrl_at_cleanup = ctrl;
         ++cleanups; events.push_back("cleanup");
         if (fail_cleanup) return {KeyboardDisposition::APPLICATION_UNKNOWN};
         software = 0; space = ctrl = false; masks = 0; return {KeyboardDisposition::ACKNOWLEDGED};
@@ -149,6 +158,77 @@ void plan_team_json_contract() {
     legacy_name("T垃圾桶左 拱门烟", ""); legacy_name("Mirage T 自定义烟", "");
     legacy_name("MirageCT1 烟", ""); legacy_name("T未知 T1 烟", "");
     legacy_name("T1 CT2 烟", "CT");
+}
+void crouch_json_contract() {
+    Plan p; p.name = "蹲姿拱门烟"; p.actions = {button(Button::LEFT,0,100)};
+    const auto original = plan_json(p);
+    require(!original.contains("crouch"), "旧方案不得被增加站姿字段");
+    auto crouched = original; crouched["crouch"] = true;
+    Plan restored; std::string error;
+    require(parse_plan(crouched,restored,error) && restored.crouch && plan_json(restored)==crouched,
+        "蹲姿参考标记必须能够生产解析和无损保存");
+    crouched["team"] = "CT";
+    require(parse_plan(crouched,restored,error) && restored.crouch && restored.team=="CT" &&
+        plan_json(restored)==crouched, "可选阵营和蹲姿字段必须可同时保存");
+    const auto preserved = plan_json(restored);
+    for (const nlohmann::json invalid : {nlohmann::json(1),nlohmann::json("true"),nlohmann::json(nullptr)}) {
+        auto bad = crouched; bad["crouch"] = invalid;
+        require(!parse_plan(bad,restored,error) && plan_json(restored)==preserved,
+            "非布尔蹲姿字段不得被接受或破坏已有草稿");
+    }
+    auto unknown = crouched; unknown["unexpected"] = true;
+    require(!parse_plan(unknown,restored,error), "新增可选蹲姿不得放宽其他未知字段");
+    crouched["crouch"] = false;
+    auto standing = crouched; standing.erase("crouch");
+    require(parse_plan(crouched,restored,error) && !restored.crouch && plan_json(restored)==standing,
+        "显式false须省略输出并清空此前蹲姿");
+    restored.crouch = true;
+    require(parse_plan(original,restored,error) && !restored.crouch && plan_json(restored)==original,
+        "旧方案缺省蹲姿必须恢复站姿及原结构");
+    for (const int version : {1,2}) {
+        auto old = original; old["schema_version"] = version; old.erase("voice_command"); old["crouch"] = true;
+        require(!parse_plan(old,restored,error), "旧版schema不接受新增蹲姿字段");
+    }
+}
+void crouch_execution_contract() {
+    Plan p; p.name = "蹲姿W跳投"; p.crouch = true; p.mask.enabled = false;
+    p.actions = {key(Key::CTRL,0,1), key(Key::W,40,100), key(Key::SPACE,80,40), button(Button::LEFT,0,100)};
+    Fake f; f.ctrl = true; // 生产找点已持蹲；短CTRL区间不能使投掷期间站起。
+    auto callbacks = permission(); bool delayed = false;
+    callbacks.permitted = [&] {
+        if (!delayed) { delayed = true; std::this_thread::sleep_for(std::chrono::milliseconds(8)); }
+        return true;
+    };
+    callbacks.progress = [&](const Progress&) { require(f.ctrl,"蹲姿方案执行期间不得提前释放Ctrl"); };
+    const auto result = run_plan(f,p,scale(),callbacks);
+    require(result.outcome==Outcome::COMPLETED && result.cleanup_known,
+        "已持蹲的W跳投不得将短CTRL段误判错过，或在W跳投期间提前站起");
+    require(f.ctrl_on_w && f.ctrl_on_jump && !f.stood_before_button_release && f.ctrl_ups==0 && f.ctrl_at_cleanup,
+        "W、跳跃、松鼠标均须保持蹲姿，Ctrl只由最终统一清理释放");
+    const auto jump = std::find(f.events.begin(),f.events.end(),"space_down");
+    const auto release = std::find(f.events.begin(),f.events.end(),"left_up");
+    require(jump!=f.events.end() && release!=f.events.end() && jump<release &&
+        !f.ctrl && !f.space && f.software==0 && f.cleanups==1,
+        "保持原跳跃先于松鼠标顺序，并在最终归还全部软件键");
+    Fake canceled; canceled.ctrl = true;
+    auto cancel = permission(); cancel.canceled = [&] { return canceled.software!=0; };
+    const auto stopped = run_plan(canceled,p,scale(),cancel);
+    require(stopped.outcome==Outcome::CANCELED && stopped.cleanup_known && !canceled.ctrl && canceled.cleanups==1,
+        "蹲姿W跳投取消须确认释放而不遗留Ctrl");
+    Fake dirty; dirty.ctrl = true; dirty.fail_cleanup = true;
+    const auto failed = run_plan(dirty,p,scale(),permission());
+    require(failed.outcome==Outcome::FAILED && !failed.cleanup_known && dirty.cleanups==1,
+        "蹲姿统一清理失败不得宣称释放已知");
+    auto no_ctrl_action = p; no_ctrl_action.actions = {button(Button::LEFT,0,30)};
+    Fake unsupported; unsupported.ctrl_supported = false;
+    const auto refused = run_plan(unsupported,no_ctrl_action,scale(),permission());
+    require(refused.outcome==Outcome::FAILED && unsupported.events.empty() && unsupported.cleanups==0,
+        "蹲姿标记需要在任何输出前校验Ctrl能力，即使时间线无CTRL动作");
+    p.crouch = false; p.actions[0].duration_ms = 30;
+    Fake legacy;
+    const auto old = run_plan(legacy,p,scale(),permission());
+    require(old.outcome==Outcome::COMPLETED && legacy.ctrl_ups==1 && legacy.stood_before_button_release,
+        "未启用蹲姿参考的旧方案保留原CTRL区间行为");
 }
 void recorded_tracks() {
     Plan p; p.mask.enabled = false;
@@ -382,6 +462,7 @@ int main(int argc, char** argv) {
             validate_directory(std::filesystem::u8path(argv[2]));
             return 0;
         }
+        crouch_execution_contract(); crouch_json_contract();
         json_contract(); plan_team_json_contract(); parallel_union_and_restore(); failures_and_cancel(); missed_interval_and_mask_window(); recorded_tracks();
         button_contract_and_jump_order(); button_failure_cleanup_and_missed_interval();
         first_output_admission();

@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 
 namespace {
@@ -22,10 +23,64 @@ nlohmann::json read(const std::string& path) {
     std::ifstream stream(fs::u8path(path));
     return nlohmann::json::parse(stream);
 }
+std::string bytes(const fs::path& path) {
+    std::ifstream file(path,std::ios::binary);
+    return {std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>()};
+}
 void write(const fs::path& path, const std::string& text) {
     fs::create_directories(path.parent_path());
     std::ofstream file(path, std::ios::binary); file << text;
     require(static_cast<bool>(file), "测试文件创建失败");
+}
+void archive_contract(const fs::path& root) {
+    const auto domain = root / "grenade", plans = domain / "plans";
+    movement::timeline::Plan plan; plan.name = "T垃圾桶左 拱门烟"; plan.map = "de_mirage";
+    plan.team = "T"; plan.actions.push_back({});
+    const auto document = movement::timeline::plan_json(plan);
+    const auto selected = plans / "sample.json", other = plans / "other.json";
+    const auto reference = domain / "references" / "sample" / "aim.png";
+    const auto capture = domain / "captures" / "sample.json";
+    const auto standing = domain / "standing" / "sample.png";
+    const auto shared = domain / "standing" / "shared" / "de_mirage-T.png";
+    const auto historical = domain / "packages" / "de_mirage" / "historical.zip";
+    write(selected, document.dump()); write(other, document.dump());
+    write(reference,"original aim"); write(capture,"original capture"); write(standing,"original standing");
+    write(shared,"shared standing"); write(historical,"historical package");
+    const auto backup = fs::u8path(archive_movement_plan(utf8(selected),utf8(plans)));
+    require(backup.parent_path() == domain / "backups" / "deleted-plans" &&
+        !fs::exists(selected) && !fs::exists(reference.parent_path()) && !fs::exists(capture) && !fs::exists(standing),
+        "删除必须移出本方案及独占活动资源到同域归档");
+    require(bytes(backup / "plans" / "sample.json") == document.dump() &&
+        bytes(backup / "references" / "sample" / "aim.png") == "original aim" &&
+        bytes(backup / "captures" / "sample.json") == "original capture" &&
+        bytes(backup / "standing" / "sample.png") == "original standing",
+        "归档必须保留原方案及图片记录字节");
+    require(fs::exists(other) && fs::exists(shared) && fs::exists(historical) &&
+        list_movement_plans(utf8(plans)).size() == 1,
+        "删除不得改动其他方案、共享站位或历史包，归档不得继续列入现役库");
+    const auto reject = [&](const fs::path& path) {
+        bool failed = false;
+        try { archive_movement_plan(utf8(path),utf8(plans)); } catch (const std::exception&) { failed = true; }
+        require(failed && fs::exists(other) && read(utf8(other)) == document,"非法删除目标必须拒绝且不伤及现役方案");
+    };
+    write(domain / "external.json",document.dump()); write(plans / "nested" / "inside.json",document.dump());
+    fs::create_directory(plans / "directory.json");
+    reject(selected); reject(domain / "external.json"); reject(plans / "nested" / "inside.json");
+    reject(plans / "directory.json"); reject(plans / "missing.json");
+
+    // 最后一步方案移动失败时，之前已移出的图片和采集记录必须恢复。
+    write(reference,"original aim"); write(capture,"original capture"); write(standing,"original standing");
+    write(selected,document.dump());
+    const HANDLE locked = CreateFileW(selected.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,
+        OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    require(locked != INVALID_HANDLE_VALUE,"删除回滚夹具占用失败");
+    bool rolled_back = false;
+    try { archive_movement_plan(utf8(selected),utf8(plans)); }
+    catch (const std::exception& error) { rolled_back = std::string(error.what()).find("已恢复") != std::string::npos; }
+    CloseHandle(locked);
+    require(rolled_back && bytes(selected) == document.dump() && bytes(reference) == "original aim" &&
+        bytes(capture) == "original capture" && bytes(standing) == "original standing",
+        "归档方案被占用时必须恢复先前移出的独占资源");
 }
 void run(const fs::path& root) {
     const auto library = utf8(root / fs::u8path("身法方案"));
@@ -104,6 +159,7 @@ void run(const fs::path& root) {
     auto legacy_plan = document; legacy_plan["schema_version"] = 2; legacy_plan.erase("voice_command");
     const auto migrated = save_movement_plan(legacy_plan, "", false, library);
     require(read(migrated) == document, "旧格式保存未保留动作及空口令");
+    archive_contract(root);
 }
 }
 int main(int argc, char** argv) {

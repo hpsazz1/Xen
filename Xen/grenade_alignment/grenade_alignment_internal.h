@@ -12,6 +12,7 @@ struct Dependencies {
     std::function<Clock::time_point()> now;
     std::function<void(std::chrono::milliseconds)> sleep;
     std::function<source_context::SourceContextSnapshot()> source;
+    bool settle_before_alignment = false;
 };
 
 // 生产runner与测试共用；替换实际采集、时钟及焦点来源，算法和设备许可不旁路。

@@ -8,6 +8,7 @@
 #include "movement/timeline.h"
 #include "movement/recording.h"
 #include "debug_session/movement_library_internal.h"
+#include "debug_session/grenade_posture_internal.h"
 #include "source_context/source_context.h"
 #include "grenade_alignment/grenade_alignment.h"
 #include <cstdlib>
@@ -193,12 +194,25 @@ struct Session::Impl {
     std::atomic_uint64_t grenade_epoch{0};
     std::atomic_bool grenade_operation{false};
     std::atomic_bool grenade_assisted_operation{false};
+    std::shared_ptr<std::atomic_bool> grenade_posture_fault = std::make_shared<std::atomic_bool>(false);
     struct AlignedGrenade {
         std::uint64_t epoch = 0, repeat_revision = 0;
         std::string reference_revision;
         Context context;
+        std::shared_ptr<RuntimeGrenadeControl> control;
+        std::shared_ptr<detail::GrenadePosture> posture;
     };
     std::atomic<std::shared_ptr<const AlignedGrenade>> aligned_grenade;
+    void check_posture_cleanup() {
+        if (!grenade_posture_fault->exchange(false)) return;
+        canceled = true;
+        update([](Snapshot& s) {
+            s.cleanup_unknown = true; s.state = State::CLEANUP_UNKNOWN;
+            s.repeat_ready = false; s.movement_test_enabled = false;
+            s.message = "蹲姿释放未确认，其他输出保持暂停，请检查设备";
+            s.grenade_guidance_state = "failed"; s.grenade_guidance_message = s.message;
+        });
+    }
     void guidance(const std::string& state, const std::string& message,
                   const std::string& path = {}, std::optional<std::uint64_t> expected_epoch = {}) {
         update([&](Snapshot& s) {
@@ -217,6 +231,7 @@ struct Session::Impl {
         ++grenade_epoch; aligned_grenade.store(nullptr);
         if (grenade_operation.load()) canceled = true;
         guidance("hidden", reason);
+        check_posture_cleanup();
     }
     void invalidate_repeat(const std::string& reason) {
         ++repeat_revision;
@@ -619,6 +634,7 @@ bool Session::busy() const noexcept {
 }
 void Session::poll() noexcept {
     try {
+        impl_->check_posture_cleanup();
         if (impl_->shutting_down) finish_voice(Context{},false);
         if (impl_->worker.valid() && impl_->worker.wait_for(0ms) == std::future_status::ready) impl_->worker.get();
         {
@@ -810,16 +826,18 @@ void Session::cancel_grenade(const std::string& reason) noexcept {
         impl_->invalidate_grenade(reason);
         // 局部取消只结束道具任务，保留当前已启用方案；全局cancel另行撤销许可。
         impl_->update([&](Snapshot& next) {
-            next.message = reason;
+            if (!next.cleanup_unknown) next.message = reason;
             if (next.busy && owns_worker) next.state = State::STOPPING;
         });
     } catch (...) {}
 }
 void Session::maintain_grenade(const Context& context, bool input_healthy) noexcept {
     try {
+        impl_->check_posture_cleanup();
         const auto s = snapshot();
         // F11人工试投先隐藏引导，不依赖图像辅助开关、GSI或参考图。
-        if (s->grenade_guidance_state == "hidden" && !impl_->grenade_assisted_operation.load()) return;
+        if (s->grenade_guidance_state == "hidden" && !impl_->grenade_assisted_operation.load() &&
+            !impl_->aligned_grenade.load()) return;
         if (!s->movement_test_enabled || s->movement_test_mode != Mode::GRENADE_TEST ||
             !context.config.keyboard.grenade_assist_enabled || !input_healthy || !runtime_available(context,Mode::GRENADE_TEST) ||
             !context.input_recording_idle || !context.cleanup_known || !context.config.mouse.allow_send_input ||
@@ -828,12 +846,29 @@ void Session::maintain_grenade(const Context& context, bool input_healthy) noexc
             cancel_grenade("道具辅助上下文已失效，请重新选择与对齐");
             return;
         }
-        if (const auto ready = impl_->aligned_grenade.load(); ready &&
-            (ready->context.map.context_epoch != context.map.context_epoch ||
+        const auto ready = impl_->aligned_grenade.load();
+        if (ready && (ready->epoch != impl_->grenade_epoch.load() ||
+             ready->context.map.context_epoch != context.map.context_epoch ||
              ready->repeat_revision != impl_->repeat_revision.load() ||
              ready->context.config.aim.counts_per_pixel_x != context.config.aim.counts_per_pixel_x ||
-             ready->context.config.aim.counts_per_pixel_y != context.config.aim.counts_per_pixel_y))
+             ready->context.config.aim.counts_per_pixel_y != context.config.aim.counts_per_pixel_y)) {
             cancel_grenade("对齐参数或地图已改变，请重新对齐");
+            return;
+        }
+        if (ready && ready->posture && !ready->posture->valid()) {
+            cancel_grenade("源端焦点或蹲姿控制已失效，已释放蹲姿，请重新找点"); return;
+        }
+        // 只在等待下键时响应人工移动；执行中的W/SPACE由同一时间线管理，不能误判冲突。
+        if (ready && ready->posture && !impl_->grenade_operation.load()) {
+            InputSnapshot input;
+            if (!context.device->poll_input(input) || !input.state_valid) {
+                cancel_grenade("等待投掷时设备输入失效，已释放蹲姿"); return;
+            }
+            for (int key : {0x57,0x41,0x53,0x44,0x20,0x01,0x02})
+                if (input.virtual_keys[static_cast<std::size_t>(key)]) {
+                    cancel_grenade("人工移动或按钮输入取消等待，已释放蹲姿"); return;
+                }
+        }
     } catch (...) { cancel_grenade("道具辅助上下文不可用"); }
 }
 bool Session::align_grenade(const Context& context) noexcept {
@@ -851,23 +886,38 @@ bool Session::align_grenade(const Context& context) noexcept {
         if (!context.config.mouse.allow_send_input || !source->context.config.mouse.allow_send_input ||
             source->context.device != context.device) throw std::runtime_error("道具输出许可或设备已变化，请重新启用");
         impl_->aligned_grenade.store(nullptr);
+        impl_->check_posture_cleanup();
+        if (snapshot()->cleanup_unknown) throw std::runtime_error("蹲姿释放未确认，不能开始新的对齐");
         const auto epoch = ++impl_->grenade_epoch;
         const auto revision = impl_->repeat_revision.load();
         const auto path = s->grenade_selected_path;
         impl_->guidance("aligning","正在对齐；左键取消",path);
         return impl_->launch(State::RUNNING,true,[this,context,source,epoch,revision,path] {
             std::shared_ptr<RuntimeGrenadeControl> control;
-            const auto permitted = [this,epoch,revision,&control] {
+            std::shared_ptr<detail::GrenadePosture> posture;
+            const auto permitted = [this,epoch,revision,&control,&posture] {
                 return !impl_->canceled.load() && impl_->grenade_epoch.load() == epoch &&
-                    impl_->repeat_revision.load() == revision && (!control || control->valid());
+                    impl_->repeat_revision.load() == revision && (!control || control->valid()) &&
+                    (!posture || posture->valid());
             };
             try {
                 const auto reference = grenade_alignment::load_reference(std::filesystem::u8path(path),source->plan);
                 control=borrow_grenade_control(context,impl_->canceled);
                 if (!permitted()) return;
+                const bool crouch = source->plan.value("crouch",false);
+                if (crouch) {
+                    if (!control) throw std::runtime_error("蹲姿自动找点需要先启动Runtime，以保持同一输入控制链");
+                    const auto fault = impl_->grenade_posture_fault;
+                    posture = std::make_shared<detail::GrenadePosture>(context.device,
+                        [control]{return control->source_snapshot();},[control]{return control->valid();},
+                        [control,fault](bool known){if(!known) fault->store(true);control->finish(known);});
+                    if (!posture->start()) throw std::runtime_error("未能建立可信蹲姿，请确认游戏聚焦和设备状态");
+                }
                 const auto directory = new_directory(source->request.output_root);
                 impl_->update([&](Snapshot& next){next.report_directory=directory.string();});
-                const auto result = grenade_alignment::run(reference,context.config,context.device,impl_->canceled,false,permitted,shared_stream(control));
+                auto stream = shared_stream(control);
+                stream.settle_before_alignment = crouch;
+                const auto result = grenade_alignment::run(reference,context.config,context.device,impl_->canceled,false,permitted,std::move(stream));
                 if (result.emergency_stop) cancel("急停键已取消对齐并撤销测试许可");
                 auto evidence = result.evidence;
                 evidence["code_identity"] = code_identity(); evidence["plan"] = source->plan;
@@ -877,8 +927,16 @@ bool Session::align_grenade(const Context& context) noexcept {
                 write_document(directory/"grenade-alignment.json",evidence);
                 if (impl_->grenade_epoch.load() != epoch) return;
                 const bool aligned = result.aligned && permitted();
-                if (aligned) impl_->aligned_grenade.store(std::make_shared<const Impl::AlignedGrenade>(
-                    Impl::AlignedGrenade{epoch,revision,reference.revision,context}));
+                if (aligned) {
+                    auto published = std::make_shared<const Impl::AlignedGrenade>(
+                        Impl::AlignedGrenade{epoch,revision,reference.revision,context,posture?control:nullptr,posture});
+                    impl_->aligned_grenade.store(published);
+                    // 取消可穿过最后一次许可检查；发布后再核对，只撤销本次持蹲所有权。
+                    if (!permitted()) {
+                        impl_->aligned_grenade.compare_exchange_strong(published,{});
+                        return;
+                    }
+                }
                 impl_->guidance(aligned?"aligned":result.canceled?"hidden":"failed",
                     aligned?"对齐完成，按下键投掷":result.error,{},epoch);
                 impl_->update([&](Snapshot& next) {
@@ -895,6 +953,8 @@ bool Session::align_grenade(const Context& context) noexcept {
         },true,true);
     } catch (const std::exception& error) {
         try {
+            impl_->invalidate_grenade(error.what());
+            if (snapshot()->cleanup_unknown) return false;
             impl_->guidance("failed",error.what(),snapshot()->grenade_selected_path);
             impl_->update([&](Snapshot& s){s.message=error.what();});
         } catch (...) {}
@@ -923,16 +983,22 @@ bool Session::throw_grenade(const Context& context) noexcept {
         auto work = *source; work.context = context;
         return impl_->launch(State::RUNNING,true,[this,ready,path,work=std::move(work)]() mutable {
             std::shared_ptr<RuntimeGrenadeControl> control;
+            struct FinishPosture {
+                std::shared_ptr<detail::GrenadePosture> posture;
+                ~FinishPosture(){if(posture) posture->finish();}
+            } finish_posture{ready->posture};
             const auto permitted = [this,ready,&control] {
                 return !impl_->canceled.load() && impl_->grenade_epoch.load()==ready->epoch &&
-                    impl_->repeat_revision.load()==ready->repeat_revision && (!control || control->valid());
+                    impl_->repeat_revision.load()==ready->repeat_revision && (!control || control->valid()) &&
+                    (!ready->posture || ready->posture->valid());
             };
             Json check_evidence;
             auto checked_at = std::chrono::steady_clock::time_point{};
             bool entered_execution = false;
             bool execution_returned = false;
             try {
-                control=borrow_grenade_control(work.context,impl_->canceled);
+                control=ready->posture ? ready->control : borrow_grenade_control(work.context,impl_->canceled);
+                if (!permitted()) throw DebugRunFailure("蹲姿或道具上下文已失效，请重新找点",true);
                 if (control) work.context.output_permitted=[control]{return control->valid();};
                 work.directory = new_directory(work.request.output_root);
                 const auto parent_id = work.id;
@@ -959,6 +1025,8 @@ bool Session::throw_grenade(const Context& context) noexcept {
                         std::chrono::steady_clock::now()-checked_at < 200ms;
                 });
                 execution_returned = true;
+                if (control && snapshot()->cleanup_unknown) control->finish(false);
+                if (ready->posture) ready->posture->finish();
                 // 最后一帧判定与动作开始之间不做文件IO；报告在动作清理之后落盘。
                 write_document(work.directory/"grenade-prethrow-check.json",check_evidence);
                 const auto result = snapshot();
@@ -983,6 +1051,8 @@ bool Session::throw_grenade(const Context& context) noexcept {
         },true,true);
     } catch (const std::exception& error) {
         try {
+            impl_->invalidate_grenade(error.what());
+            if (snapshot()->cleanup_unknown) return false;
             impl_->guidance("failed",error.what(),snapshot()->grenade_selected_path);
             impl_->update([&](Snapshot& s){s.message=error.what();});
         } catch (...) {}
@@ -1137,7 +1207,15 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
         if (snapshot()->cleanup_unknown && uses_device(request.mode)) return false;
         const bool movement_document = timeline_mode(request.mode) &&
             (action == Action::LIST_MOVEMENT_PLANS || action == Action::LOAD_PLAN ||
-             action == Action::SAVE_PLAN || action == Action::VALIDATE);
+             action == Action::SAVE_PLAN || action == Action::DELETE_PLAN || action == Action::VALIDATE);
+        if (action == Action::DELETE_PLAN) {
+            if (request.mode != Mode::GRENADE_TEST || request.load_path.empty() ||
+                request.load_path != snapshot()->grenade_selected_path)
+                return reject("请先载入要删除的已保存道具方案");
+            if (snapshot()->movement_test_mode == Mode::GRENADE_TEST)
+                impl_->invalidate_repeat("当前道具正在归档，旧测试和蹲姿已取消");
+            else impl_->invalidate_grenade("当前道具正在归档");
+        }
         if (!movement_document) {
             impl_->prepared.reset();
             invalidate_repeat("新任务正在准备；旧测试模板已失效");
@@ -1170,6 +1248,39 @@ bool Session::dispatch(Action action, const Request& request, const Context& con
             if (timeline_mode(request.mode) && action == Action::LIST_MOVEMENT_PLANS) {
                 refresh_movement_library(request.load_path);
                 impl_->update([&](Snapshot& s) { s.state = State::COMPLETED; s.message = std::string("已刷新") + timeline_name(request.mode) + "方案列表"; });
+                return;
+            }
+            if (action == Action::DELETE_PLAN) {
+                std::string backup;
+                try { backup = detail::archive_movement_plan(request.load_path,timeline_library_root(request)); }
+                catch (const std::exception& error) {
+                    impl_->update([&](Snapshot& s) {
+                        // 文档归档失败不撤销另一页的测试许可；沿用保存失败的非物理反馈语义。
+                        s.state = s.cleanup_unknown ? State::CLEANUP_UNKNOWN : State::COMPLETED;
+                        s.message = error.what();
+                    });
+                    return;
+                }
+                refresh_movement_library({});
+                movement::timeline::Plan reset;
+                reset.name = "新道具方案";
+                if (context.map.valid) {
+                    reset.map = context.map.map_name;
+                    if (context.map.local_team != weapon::Team::UNKNOWN)
+                        reset.team = weapon::team_name(context.map.local_team);
+                }
+                movement::timeline::Action button; button.kind = movement::timeline::ActionKind::BUTTON;
+                button.duration_ms = 1000; reset.actions.push_back(button);
+                const auto draft = movement::timeline::plan_json(reset);
+                impl_->update([&](Snapshot& s) {
+                    s.grenade_current = draft; s.grenade_baseline = nullptr;
+                    publish_loaded_plan(s,Mode::GRENADE_TEST,draft);
+                    s.grenade_guidance_state = "hidden";
+                    s.grenade_guidance_plan_id.clear(); s.grenade_guidance_reference_id.clear();
+                    s.state = s.cleanup_unknown ? State::CLEANUP_UNKNOWN : State::COMPLETED;
+                    s.message = "道具已删除并可恢复保留于：" + backup;
+                    if (s.cleanup_unknown) s.message += "；蹲姿释放未确认，其他输出保持暂停";
+                });
                 return;
             }
             if (timeline_mode(request.mode) && action == Action::SAVE_PLAN) {

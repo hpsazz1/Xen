@@ -304,6 +304,48 @@ void test_documents(const std::filesystem::path& root) {
     require(session.snapshot()->state == State::CANCELED && session.snapshot()->prepared_id.empty(),
         "取消未撤销准备身份");
 }
+void test_grenade_delete(const std::filesystem::path& root) {
+    Session session;
+    auto device = std::make_shared<FakeDevice>();
+    const auto context = context_for(device);
+    auto request = request_for(root / "grenade-delete");
+    submit(session,Action::SAVE_PLAN,request,context,State::COMPLETED);
+    const auto movement_path = session.snapshot()->movement_selected_path;
+    const auto movement_current = session.snapshot()->movement_current;
+    request.mode = Mode::GRENADE_TEST;
+    request.movement_library_root = utf8(root / "grenade-delete" / "grenade" / "plans");
+    submit(session,Action::SAVE_PLAN,request,context,State::COMPLETED);
+    request.load_path = session.snapshot()->grenade_selected_path;
+    const auto path = std::filesystem::u8path(request.load_path);
+    request.plan_text = "{"; // 删除独立于当前无效、未保存的草稿。
+    auto movement_request = request_for(root / "grenade-delete");
+    movement_request.load_path = movement_path;
+    require(session.dispatch(Action::ENABLE_MOVEMENT_TEST,movement_request,context),"跨域删除fixture未启用身法");
+    {
+        struct CloseFile { HANDLE value; ~CloseFile(){if(value!=INVALID_HANDLE_VALUE) CloseHandle(value);} };
+        CloseFile held{CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,
+            OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr)};
+        require(held.value!=INVALID_HANDLE_VALUE,"删除回滚fixture无法锁住方案");
+        require(session.dispatch(Action::DELETE_PLAN,request,context),"锁定方案删除请求未进入存储回归");
+        wait_idle(session);
+        require(session.snapshot()->movement_test_enabled && session.snapshot()->movement_test_mode==Mode::MOVEMENT_TEST &&
+            session.snapshot()->repeat_ready && std::filesystem::exists(path) &&
+            session.snapshot()->grenade_selected_path==request.load_path,
+            "道具归档回滚误撤销另一页身法F11或清空原方案");
+    }
+    submit(session,Action::DELETE_PLAN,request,context,State::COMPLETED);
+    const auto after = session.snapshot();
+    require(!std::filesystem::exists(path) && after->grenade_selected_path.empty() &&
+        after->grenade_saved_plans.empty() && after->grenade_baseline.is_null() &&
+        after->grenade_loaded_draft.value("name",std::string{})=="新道具方案" &&
+        after->grenade_guidance_state=="hidden", "删除未清空当前道具及活动选择");
+    require(after->movement_selected_path==movement_path && after->movement_current==movement_current &&
+        std::filesystem::exists(std::filesystem::u8path(movement_path)) && device->touches==0,
+        "道具删除误改身法或触发设备输出");
+    require(!session.dispatch(Action::DELETE_PLAN,request,context),"已归档路径仍可重复删除");
+    request.mode = Mode::MOVEMENT_TEST; request.load_path = movement_path;
+    require(!session.dispatch(Action::DELETE_PLAN,request,context),"道具删除入口错误作用于身法库");
+}
 void test_invalid_plans(const std::filesystem::path& root) {
     Session session;
     auto request = request_for(root / "invalid");
@@ -861,6 +903,7 @@ int main(int argc, char** argv) {
         require(argc == 2, "需要显式提供构建目录内的fixture目录");
         const auto root = std::filesystem::absolute(std::filesystem::u8path(argv[1]));
         test_documents(root);
+        test_grenade_delete(root);
         test_invalid_plans(root);
         test_frozen_and_missing_source(root);
         test_cancel_prepare(root);

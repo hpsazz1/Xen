@@ -26,7 +26,7 @@ def write_json(path, value):
 
 def begin(root, plan_path, verified, standing_note="", standing_marker=None):
     if not verified:
-        raise ValueError("必须先人工完成一次成功投掷，再按F10采集")
+        raise ValueError("必须先人工完成一次成功投掷，再按PgDn采集")
     source = Path(plan_path).resolve()
     if source.suffix.lower() != ".json" or source.stat().st_size > 1024 * 1024:
         raise ValueError("方案文件无效")

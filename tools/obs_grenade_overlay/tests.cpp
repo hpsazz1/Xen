@@ -36,23 +36,23 @@ int main() {
     selection["guidance"]["state"] = "aligned";
     model.update(selection, reference, catalog, "http://host:5015");
     selection["guidance"]["state"] = "selected"; reference["revision"] = "r2";
-    check(!model.update(selection, reference, catalog, "http://host:5015").visible, "F10新资源不能复活已隐藏提示");
+    check(!model.update(selection, reference, catalog, "http://host:5015").visible, "PgDn新资源不能复活已隐藏提示");
     selection["guidance"]["state"] = "aligning";
     check(!model.update(selection, reference, catalog, "http://host:5015").visible, "重新找点不能替代新的人工选择");
     selection["request_id"] = "4"; selection["guidance"]["state"] = "selected";
     check(model.update(selection, reference, catalog, "http://host:5015").visible, "新人工选择重新显示");
     reference["revision"] = "r3";
     view = model.update(selection, reference, catalog, "http://host:5015");
-    check(view.visible && view.payload["aim_url"].get<std::string>().ends_with("revision=r3"), "F10更新当前可见卡片");
+    check(view.visible && view.payload["aim_url"].get<std::string>().ends_with("revision=r3"), "PgDn更新当前可见卡片");
     auto single = reference;
     single["ready"] = false; single["aim_ready"] = false; single["standing_ready"] = true;
     view = model.update(selection,single,catalog,"http://host:5015");
     check(view.visible && view.payload.contains("standing_url") && !view.payload.contains("aim_url"),
-        "F9独立站位图可显示，瞄点保持待采集");
+        "PgUp独立站位图可显示，瞄点保持待采集");
     single["ready"] = true; single["aim_ready"] = true; single["standing_ready"] = false;
     view = model.update(selection,single,catalog,"http://host:5015");
     check(view.visible && !view.payload.contains("standing_url") && view.payload.contains("aim_url"),
-        "F10独立瞄点图可显示，不要求先采站位");
+        "PgDn独立瞄点图可显示，不要求先采站位");
     model.reset();
     check(!model.update(selection, reference, catalog, "http://host:5015").visible, "重连不重播现存selected");
     selection["request_id"] = "5";
@@ -88,12 +88,12 @@ int main() {
     xen_obs::CaptureJobState capture;
     const Json sent{{"terminal", true}, {"state", "sent"}, {"message", "采集完成，已同步到辅机"}};
     check(capture.start(1000) && capture.running(), "空闲时允许一次采集");
-    check(!capture.start(2000), "采集中再次按F10不排队、不重置超时");
+    check(!capture.start(2000), "采集中再次按PgDn不排队、不重置超时");
     check(!capture.poll(30999, std::nullopt, sent) && capture.running(), "子进程未结束时不凭文件提前宣称完成");
     auto message = capture.poll(31000, std::nullopt, Json::object());
     check(message && message->find("超时") != std::string::npos && !capture.running(), "30秒超时结束等待");
     check(!capture.poll(32000, 0, sent), "超时后的晚到退出不重复发布成功");
-    check(capture.start(33000), "上次结束后下一次F10可重新采集");
+    check(capture.start(33000), "上次结束后下一次PgDn可重新采集");
     message = capture.poll(34000, 0, sent);
     check(message && *message == sent["message"].get<std::string>() && !capture.running(), "退出0且sent终态才发布成功");
     capture.start(35000);

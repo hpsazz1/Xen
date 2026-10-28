@@ -1,4 +1,4 @@
-"""F9站位与F10瞄点独立采图、资源打包与发送；不产生游戏输入。"""
+"""PgUp站位与PgDn瞄点独立采图、资源打包与发送；不产生游戏输入。"""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import re
 import time
+import urllib.error
 import urllib.request
 import uuid
 import zipfile
@@ -85,6 +86,7 @@ def validate_context(value, deadline=None, clock=time.monotonic):
             or plan.get("map") != value["map"]
             or value.get("team") not in ("T", "CT")
             or ("team" in plan and plan["team"] != "" and plan["team"] != value["team"])
+            or ("crouch" in plan and type(plan["crouch"]) is not bool)
             or not isinstance(value.get("generation"), str) or not value["generation"]
             or type(value.get("remaining_ms")) is not int or not 0 < value["remaining_ms"] <= 10000
             or not re.fullmatch(r"[0-9a-f]{64}", value.get("plan_sha256", ""))):
@@ -105,7 +107,8 @@ class ContextReader:
             raise ValueError("采集仅连接辅机局域网IPv4地址")
         if not 1 <= port <= 65535:
             raise ValueError("网页端口无效")
-        self.url, self.clock = f"http://{address}:{port}/capture-context.json", clock
+        self.endpoint = f"{address}:{port}"
+        self.url, self.clock = f"http://{self.endpoint}/capture-context.json", clock
         if role == "standing":
             self.url += "?role=standing"
         # 不经系统代理发送局域网制作上下文，不跟随重定向到另一台主机。
@@ -118,14 +121,21 @@ class ContextReader:
         started = self.clock()
         request = urllib.request.Request(self.url, headers={"Cache-Control": "no-store"})
         data = bytearray()
-        with self.opener.open(request, timeout=2) as response:
-            while len(data) <= 1024 * 1024:
-                if self.clock() - started >= 2:
-                    raise ValueError("采集状态读取超时")
-                block = response.read1(min(65536, 1024 * 1024 + 1 - len(data)))
-                if not block:
-                    break
-                data.extend(block)
+        try:
+            with self.opener.open(request, timeout=2) as response:
+                while len(data) <= 1024 * 1024:
+                    if self.clock() - started >= 2:
+                        raise ValueError("采集状态读取超时")
+                    block = response.read1(min(65536, 1024 * 1024 + 1 - len(data)))
+                    if not block:
+                        break
+                    data.extend(block)
+        except urllib.error.HTTPError as error:
+            raise ValueError(f"辅机道具服务返回HTTP {error.code}（{self.endpoint}），请确认辅机Xen正在运行并已更新") from None
+        except (TimeoutError, urllib.error.URLError, ConnectionError) as error:
+            reason = getattr(error, "reason", error)
+            message = "读取辅机方案超时" if isinstance(reason, TimeoutError) else "无法连接辅机道具服务"
+            raise ValueError(f"{message}（{self.endpoint}），请确认辅机Xen已打开；持续失败请重开辅机Xen并核对OBS中的辅机地址和端口") from None
         if len(data) > 1024 * 1024 or self.clock() - started >= 2:
             raise ValueError("采集状态读取超时或过大")
         value = validate_context(json.loads(data))
@@ -289,7 +299,7 @@ def _prepare_capture(root, before, role, reference_root=None):
     current = resource_directory(reference_root / "references", identity)
     if (current / "reference.json").is_file():
         manifest, previous = load_reference(reference_root / "references", identity, before["plan_id"], allow_partial=True)
-        # F9更新整体方案身份时，旧瞄点仍属于它采集时的方案，不能被站位采集重新确认。
+        # PgUp更新整体方案身份时，旧瞄点仍属于它采集时的方案，不能被站位采集重新确认。
         if "aim_image" in manifest:
             manifest.setdefault("aim_plan", manifest["plan"])
         for field in ("standing_image", "aim_image"):
@@ -305,7 +315,7 @@ def _prepare_capture(root, before, role, reference_root=None):
 
 def capture_once(fetch_context, root=DEFAULT_ROOT, capture=capture_primary, shared_standing=SHARED_STANDING,
                  foreground=None, expected_foreground=None, report=lambda *args: None, role="aim"):
-    """F9/F10各自只采一张图片；F10可复用已确认的同组站位图。"""
+    """PgUp/PgDn各自只采一张图片；PgDn可复用已确认的同组站位图。"""
     if role not in ("standing", "aim"):
         raise ValueError("采集类型必须为站位或瞄点")
     root = Path(root).resolve()
@@ -330,14 +340,14 @@ def capture_once(fetch_context, root=DEFAULT_ROOT, capture=capture_primary, shar
         manifest["geometry"] = geometry_for(width, height)
         manifest["manual_throw_verified"] = True
         manifest["confirmed_at_utc"] = captured_at
-        manifest["confirmation_source"] = "host_f10"
+        manifest["confirmation_source"] = "host_pgdn"
         group = spawn_group(before["plan"])
         shared = _shared_standing_path(root, group) if group else None
         if (shared and shared.is_file()) or "standing_image" not in manifest:
             try:
                 standing, marker = standing_for(before, root, shared_standing)
             except ValueError:
-                # 普通点位没有站位图时，F10仍独立完成，不生成占位图片。
+                # 普通点位没有站位图时，PgDn仍独立完成，不生成占位图片。
                 if shared and shared.is_file():
                     raise
             else:

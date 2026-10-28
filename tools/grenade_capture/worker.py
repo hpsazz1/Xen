@@ -1,4 +1,4 @@
-"""OBS 插件启动的单次 F9/F10 采集作业；无常驻监听、语音或游戏输入。"""
+"""OBS 插件启动的单次 PgUp/PgDn 采集作业；无常驻监听、语音或游戏输入。"""
 
 from __future__ import annotations
 

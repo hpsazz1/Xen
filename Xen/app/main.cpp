@@ -263,7 +263,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         return startup_boundary.finish(0);
     }
 
-    // OBS道具菜单与F10制作共用辅机接口，直接共享GSI及当前选择。
+    // OBS道具菜单与PgUp/PgDn制作共用辅机接口，直接共享GSI及当前选择。
     grenade_web::Server grenade_bridge;
     std::optional<grenade_web::SelectionRequest> bridge_selection;
     std::string observed_reference_path;
@@ -823,12 +823,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                 debug_workspace.cancel_grenade("参考图已更新，请按上键重新找点");
             if (!error) observed_reference_time=modified;
         }
-        // F10只读当前已保存选择；每轮心跳撤销旧许可，不在网页线程访问可变App状态。
+        // PgUp/PgDn只读当前已保存选择；每轮心跳撤销旧许可，不在网页线程访问可变App状态。
         interface_context.config.keyboard = active_keyboard_config;
         grenade_bridge.publish_capture(debug_workspace.snapshot(),interface_context.config,
             (interface_context.runtime_idle || interface_context.runtime) && interface_context.input_recording_idle && interface_context.cleanup_known &&
             !debug_workspace.busy() && !interface_blocked && !actions.hotkey_capture_consumed,
-            "请先结束当前道具动作或配置操作，再按F10采集");
+            "请先结束当前道具动作或配置操作，再按PgUp/PgDn采集");
         // 本轮键盘与界面停止/急停优先，不能先自动重启再清除刚收到的急停。
         const auto restart_target = report_lifecycle.take_restart(debug_workspace.busy() || overlay.background_busy() ||
                 model_workspace.poll().job_running,

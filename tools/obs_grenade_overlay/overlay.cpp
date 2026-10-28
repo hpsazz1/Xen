@@ -11,6 +11,7 @@
 #include <util/platform.h>
 #include "model.h"
 #include "window_surface.h"
+#include "hotkeys.h"
 
 #include <algorithm>
 #include <array>
@@ -252,10 +253,8 @@ public:
         obs_display_add_draw_callback(menu_display_, draw_menu, this);
         obs_display_set_enabled(menu_display_, false);
         verify_capture_exclusion(menu_window_);
-        hotkey_ids_[0] = GlobalAddAtomW(L"Xen.OBS.Grenade.Menu.Right");
-        hotkey_ids_[1] = GlobalAddAtomW(L"Xen.OBS.Grenade.Menu.Num6");
-        hotkey_ids_[2] = GlobalAddAtomW(L"Xen.OBS.Grenade.Capture.F10");
-        hotkey_ids_[3] = GlobalAddAtomW(L"Xen.OBS.Grenade.Capture.F9");
+        for (size_t index=0;index<hotkey_ids_.size();++index)
+            hotkey_ids_[index] = GlobalAddAtomW(xen_obs::kHotkeys[index].atom_name);
         SetTimer(window, 1, 100, nullptr);
         worker_ = std::thread([this] { poll(); });
         blog(LOG_INFO, "[xen-obs-overlay] 已加载：OBS私有浏览器源与桌面显示，不加入NDI场景");
@@ -329,13 +328,13 @@ private:
             foreground_is_game_ = game_window(foreground);
         }
         const bool wanted = enabled && (foreground_is_game_ || foreground == menu_window_);
-        const UINT keys[]{VK_RIGHT, VK_NUMPAD6, VK_F10, VK_F9};
         for (size_t index=0;index<hotkey_ids_.size();++index) {
             if (wanted == hotkeys_registered_[index] || !hotkey_ids_[index]) continue;
             if (wanted) {
-                hotkeys_registered_[index] = RegisterHotKey(handle_.load(), hotkey_ids_[index], MOD_NOREPEAT, keys[index]) != FALSE;
+                const auto& binding = xen_obs::kHotkeys[index];
+                hotkeys_registered_[index] = RegisterHotKey(handle_.load(), hotkey_ids_[index], binding.modifiers, binding.virtual_key) != FALSE;
                 if (!hotkeys_registered_[index] && !hotkey_error_logged_[index]) {
-                    blog(LOG_WARNING, "[xen-obs-overlay] 热键注册失败 vk=%u error=%lu", keys[index], GetLastError());
+                    blog(LOG_WARNING, "[xen-obs-overlay] 热键注册失败 vk=%u modifiers=0x%x error=%lu", binding.virtual_key, binding.modifiers, GetLastError());
                     hotkey_error_logged_[index] = true;
                 }
             } else { UnregisterHotKey(handle_.load(), hotkey_ids_[index]); hotkeys_registered_[index] = false; }
@@ -495,7 +494,7 @@ private:
                 throw std::runtime_error("无法启动采集内部作业，请核对Python路径");
             CloseHandle(launched.hThread); capture_process_ = launched.hProcess;
             capture_job_.start(GetTickCount64());
-            blog(LOG_INFO, "[xen-obs-overlay] %s采集作业已开始", capture_role_ == "standing" ? "F9站位图" : "F10瞄点图");
+            blog(LOG_INFO, "[xen-obs-overlay] %s采集作业已开始", capture_role_ == "standing" ? "PgUp站位图" : "PgDn瞄点图");
         } catch (const std::exception& error) { notice(error.what()); }
     }
 
@@ -534,9 +533,12 @@ private:
         }
         if (self && window == self->menu_window_) return self->menu_message(window, message, wp, lp);
         if (self && message == WM_HOTKEY) {
-            if (wp == self->hotkey_ids_[2]) self->request_capture("aim");
-            else if (wp == self->hotkey_ids_[3]) self->request_capture("standing");
-            else self->toggle_menu();
+            for (size_t index=0;index<self->hotkey_ids_.size();++index) {
+                if (wp != self->hotkey_ids_[index]) continue;
+                const auto role = xen_obs::kHotkeys[index].capture_role;
+                if (role) self->request_capture(role); else self->toggle_menu();
+                break;
+            }
             return 0;
         }
         if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
@@ -702,9 +704,9 @@ private:
     obs_source_t* menu_browser_ = nullptr;
     obs_display_t* menu_display_ = nullptr;
     bool menu_visible_ = false, foreground_is_game_ = false;
-    std::array<bool,4> hotkeys_registered_{};
-    std::array<bool,4> hotkey_error_logged_{};
-    std::array<ATOM,4> hotkey_ids_{};
+    std::array<bool,xen_obs::kHotkeys.size()> hotkeys_registered_{};
+    std::array<bool,xen_obs::kHotkeys.size()> hotkey_error_logged_{};
+    std::array<ATOM,xen_obs::kHotkeys.size()> hotkey_ids_{};
     std::string capture_role_ = "aim";
     uint64_t menu_configuration_ = 0;
     uint64_t menu_open_count_ = 0;
@@ -732,16 +734,16 @@ void settings_defaults(obs_data_t* settings) {
 }
 obs_properties_t* settings_properties(void*) {
     auto* properties = obs_properties_create();
-    auto* enabled = obs_properties_add_bool(properties, "enabled", "启用道具菜单、参考图和F9/F10采集");
-    obs_property_set_long_description(enabled, "游戏中小键盘右键开关居中菜单；点选后返回游戏并显示参考图，对齐或投掷后隐藏。F9只采站位图，F10只采瞄点图，各自保存并同步辅机，无先后顺序要求。");
+    auto* enabled = obs_properties_add_bool(properties, "enabled", "启用道具菜单、参考图和PgUp/PgDn采集");
+    obs_property_set_long_description(enabled, "游戏中小键盘右键开关居中菜单；点选后返回游戏并显示参考图，对齐或投掷后隐藏。PgUp只采站位图，PgDn只采瞄点图，按住Ctrl蹲姿时也可使用，各自保存并同步辅机，无先后顺序要求。");
     auto* address = obs_properties_add_text(properties, "auxiliary_url", "辅机道具网址", OBS_TEXT_DEFAULT);
     obs_property_set_long_description(address, "填写辅机道具接口地址，例如http://192.168.3.20:5015。插件从这里读取GSI、清单和图片，并提交点选方案。");
     auto* python = obs_properties_add_path(properties, "capture_python", "采集Python", OBS_PATH_FILE, "Python (*.exe)", nullptr);
-    obs_property_set_long_description(python, "使用主机已有Python 3，安装时自动填写；只在F9/F10采集作业期间启动，无语音模型依赖。");
+    obs_property_set_long_description(python, "使用主机已有Python 3，安装时自动填写；只在PgUp/PgDn采集作业期间启动，无语音模型依赖。");
     auto* root = obs_properties_add_path(properties, "capture_root", "采集本地目录", OBS_PATH_DIRECTORY, nullptr, nullptr);
     obs_property_set_long_description(root, "保留原图、自动命名资源及待发送记录；沿用主机cache/grenade。");
     auto* destination = obs_properties_add_text(properties, "capture_destination", "辅机资源目录", OBS_TEXT_DEFAULT);
-    obs_property_set_long_description(destination, "辅机cache/grenade的已有共享路径；F9/F10自动打包同步，不需要单独启动采集程序。");
+    obs_property_set_long_description(destination, "辅机cache/grenade的已有共享路径；PgUp/PgDn自动打包同步，不需要单独启动采集程序。");
     return properties;
 }
 void settings_menu(void*) { if (manager) manager->open_settings(); }

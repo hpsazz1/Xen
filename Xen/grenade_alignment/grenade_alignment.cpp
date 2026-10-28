@@ -334,6 +334,10 @@ Result detail::run_with_dependencies(const Reference& reference, const AppConfig
         double best_error=std::numeric_limits<double>::infinity();
         auto last_progress=dependencies.now();
         int stable_frames=0;
+        bool settling=dependencies.settle_before_alignment&&!verify_only;
+        int settling_frames=0;
+        auto settling_since=Clock::time_point{};
+        cv::Point2d settling_min{},settling_max{};
         while (dependencies.now()<deadline) {
             check_permission();
             CapturedFrame frame;
@@ -378,6 +382,7 @@ Result detail::run_with_dependencies(const Reference& reference, const AppConfig
                     {"observed_steady_ns",std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count()},
                     {"source_time_steady_ns",std::chrono::duration_cast<std::chrono::nanoseconds>(timing.source_time_at.time_since_epoch()).count()}};
                 stable_frames=0;stable_since={};
+                settling_frames=0;settling_since={};
                 // 首次暖机仍由整次期限约束；接受有效帧后不重新暖机。
                 if (!frames && !clock_recovering && !config.capture.ndi_clock_sync_url.empty() &&
                     (timing.source_clock_status==SourceClockStatus::WARMING ||
@@ -406,8 +411,32 @@ Result detail::run_with_dependencies(const Reference& reference, const AppConfig
             }
             last_source_time=observed_at;last_source_timestamp=timing.source_timestamp;last_fresh=now;++frames;
             clock_recovering=false;
-            const auto measured=match(reference_gray,frame.bgr,center,reference.target-center);
-            if (!measured.valid) throw std::runtime_error(measured.error);
+            Match measured;
+            try { measured=match(reference_gray,frame.bgr,center,reference.target-center); }
+            catch (const cv::Exception&) {
+                if (!settling) throw;
+                settling_frames=0;settling_since={};dependencies.sleep(2ms);continue;
+            }
+            if (!measured.valid) {
+                if (!settling) throw std::runtime_error(measured.error);
+                settling_frames=0;settling_since={};dependencies.sleep(2ms);continue;
+            }
+            if (settling) {
+                const cv::Point2d minimum(std::min(settling_min.x,measured.shift.x),
+                    std::min(settling_min.y,measured.shift.y));
+                const cv::Point2d maximum(std::max(settling_max.x,measured.shift.x),
+                    std::max(settling_max.y,measured.shift.y));
+                // 姿态起步只观察共同纹理，沿用原精度与稳定时段；窗口内缓慢漂移也不能提前移动。
+                if (!settling_frames || maximum.x-minimum.x>320*kAlignedRatio || maximum.y-minimum.y>320*kAlignedRatio) {
+                    settling_min=settling_max=measured.shift;settling_frames=1;settling_since=observed_at;
+                } else {
+                    settling_min=minimum;settling_max=maximum;++settling_frames;
+                }
+                if (settling_frames<3 || observed_at-settling_since<kStableDuration) {
+                    dependencies.sleep(2ms);continue;
+                }
+                settling=false;
+            }
             const auto error=reference.target+measured.shift-center;
             const double normalized=std::max(std::abs(error.x)/320.0,std::abs(error.y)/320.0);
             auto& samples=result.evidence["samples"];
@@ -488,7 +517,7 @@ Result run(const Reference& reference, const AppConfig& config,
                 [&](const CaptureConfig&){return std::make_unique<SharedCapture>(stream.grab);},
                 []{return Clock::now();},
                 [](std::chrono::milliseconds duration){std::this_thread::sleep_for(duration);},
-                stream.source};
+                stream.source,stream.settle_before_alignment};
             return detail::run_with_dependencies(reference,config,std::move(device),canceled,
                 verify_only,std::move(permitted),dependencies);
         }
@@ -504,7 +533,7 @@ Result run(const Reference& reference, const AppConfig& config,
             [](const CaptureConfig& value){return create_capture(value);},
             []{return Clock::now();},
             [](std::chrono::milliseconds duration){std::this_thread::sleep_for(duration);},
-            [&]{return source.snapshot();}};
+            [&]{return source.snapshot();},stream.settle_before_alignment};
         auto result=detail::run_with_dependencies(reference,config,std::move(device),canceled,
             verify_only,std::move(permitted),dependencies);
         LOG_INFO("grenade_alignment","道具对齐结束 aligned={} canceled={} verify_only={}",

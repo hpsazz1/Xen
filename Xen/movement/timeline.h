@@ -31,6 +31,7 @@ struct Plan {
     std::vector<Action> actions;
     Mask mask;
     std::string team; // 空值保留旧方案按名称推断阵营的行为。
+    bool crouch = false; // 蹲姿参考需要整段保持，独立于原CTRL动作区间。
 };
 bool validate_plan(const Plan&, std::string& error) noexcept;
 bool parse_plan(const nlohmann::json&, Plan&, std::string& error) noexcept;

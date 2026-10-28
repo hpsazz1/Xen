@@ -54,6 +54,7 @@ struct Result {
 struct SharedStream {
     std::function<CaptureStatus(CapturedFrame&)> grab;
     std::function<source_context::SourceContextSnapshot()> source;
+    bool settle_before_alignment = false; // 蹲姿起步只观察，画面稳定后再细调。
 };
 
 // 同步有界任务，由Session独占调度；复用已有Mouse，不创建或关闭设备。

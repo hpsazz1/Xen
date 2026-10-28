@@ -123,7 +123,7 @@ Reference load_reference(const std::filesystem::path& plan_path,
             throw std::runtime_error("参考资源标识与选中方案文件不一致");
         const bool has_aim = manifest.contains("aim_image"), has_standing = manifest.contains("standing_image");
         if (!has_aim && !allow_partial)
-            throw std::runtime_error("瞄点图待采集，请恢复正确瞄角后按F10");
+            throw std::runtime_error("瞄点图待采集，请恢复正确瞄角后按PgDn");
         if ((!has_aim && !has_standing) || manifest.value("capture_complete", true) != (has_aim && has_standing))
             throw std::runtime_error("参考资源的图片声明不完整");
         if (manifest.at("schema_version").get<int>() != 1 ||
@@ -134,10 +134,10 @@ Reference load_reference(const std::filesystem::path& plan_path,
         reference.plan = canonical_plan(manifest.at("plan"));
         if (reference.plan != expected)
             throw std::runtime_error("参考资源与当前道具方案版本不一致");
-        // F9更新站位时保留旧瞄点的方案快照；只有F10能重新绑定瞄点。
+        // PgUp更新站位时保留旧瞄点的方案快照；只有PgDn能重新绑定瞄点。
         if (has_aim && !allow_partial &&
             canonical_plan(manifest.value("aim_plan", manifest.at("plan"))) != expected)
-            throw std::runtime_error("瞄点图与当前道具方案版本不一致，请恢复正确瞄角后按F10更新");
+            throw std::runtime_error("瞄点图与当前道具方案版本不一致，请恢复正确瞄角后按PgDn更新");
         auto& g = reference.geometry;
         if (has_aim) {
             const auto& geometry = manifest.at("geometry");
@@ -165,7 +165,7 @@ Reference load_reference(const std::filesystem::path& plan_path,
                 reference.target.x >= g.roi_width || reference.target.y >= g.roi_height)
                 throw std::runtime_error("参考瞄点必须位于320×320 ROI内");
         }
-        // F9/F10独立保存；只解码manifest声明的图片，不借残留旧文件补造另一角色。
+        // PgUp/PgDn独立保存；只解码manifest声明的图片，不借残留旧文件补造另一角色。
         const auto load_image = [&](const char* field, const char* filename, cv::Mat& output) {
             if (!manifest.contains(field)) return std::string{};
             const auto bytes = read_bytes(image_path(reference.directory, manifest, field, filename), 64U * 1024U * 1024U);

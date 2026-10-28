@@ -139,7 +139,7 @@ View Model::update(const Json& selection, const Json& reference, const Json& cat
     if (state != "selected" && state != "aligning" && state != "failed") {
         display_request_.clear(); return result;
     }
-    // 对齐、取消后已清除display_request，后续selected、F10换图和重新找点均不能复活它。
+    // 对齐、取消后已清除display_request，后续selected、PgDn换图和重新找点均不能复活它。
 
     std::string title = actual.substr(0, actual.size() - 5);
     if (catalog.is_array()) for (const auto& entry : catalog) {
@@ -161,7 +161,7 @@ View Model::update(const Json& selection, const Json& reference, const Json& cat
         if (standing_ready) result.payload["standing_url"] = base_url + "/reference/standing.png" + suffix;
         if (aim_ready) result.payload["aim_url"] = base_url + "/reference/aim.png" + suffix;
     } else {
-        result.payload["reason"] = "F9采站位图；试投成功并复位后F10采瞄点图，两者互相独立。";
+        result.payload["reason"] = "PgUp采站位图；试投成功并复位后PgDn采瞄点图，两者互相独立。";
     }
     return result;
 }

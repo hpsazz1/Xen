@@ -116,7 +116,7 @@
   function loadImage(kind,draw) {
     const frame=$(kind),image=$(kind+'-image'),svg=$(kind+'-markers'),placeholder=$(kind+'-placeholder');
     const failed=()=>{frame.dataset.status='failed';placeholder.textContent=kind==='standing'?'站位图加载失败':'瞄点图加载失败';svg.replaceChildren();};
-    if((value[kind+'_ready']??value.ready)!==true){placeholder.textContent=kind==='standing'?'F9 采集站位图':'F10 采集瞄点图';return;}
+    if((value[kind+'_ready']??value.ready)!==true){placeholder.textContent=kind==='standing'?'PgUp 采集站位图':'PgDn 采集瞄点图';return;}
     let url;
     try {url=new URL(string(value[kind+'_url']));if(!['http:','https:'].includes(url.protocol))throw Error('image URL');}
     catch {failed();return;}

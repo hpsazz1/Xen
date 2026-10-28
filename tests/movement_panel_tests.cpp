@@ -645,6 +645,99 @@ void grenade_map_team_interactions() {
     expect(value(actions).value("map",std::string{}) == "de_user_gsi","当前GSI未知地图同时出现在地图下拉中");
 }
 
+void grenade_crouch_delete_interactions() {
+    using namespace debug_session;
+    auto panel = std::make_unique<MovementPanel>(Mode::GRENADE_TEST);
+    AppConfig config; Snapshot snapshot;
+    snapshot.movement_map.valid = true; snapshot.movement_map.map_name = "de_mirage";
+    snapshot.movement_map.local_team = weapon::Team::T;
+    const char* title = "道具蹲姿和删除交互回归";
+    auto frame = [&](const char* focus = nullptr, bool popup_focus = false, std::string* rendered = nullptr) {
+        ImGui::NewFrame();
+        if (auto* prior = ImGui::FindWindowByName(popup_focus ? "##Combo_00" : title); focus && prior)
+            ImGui::SetFocusID(prior->GetID(focus),prior);
+        ImGui::SetNextWindowPos({0,0}); ImGui::SetNextWindowSize({1100,2000});
+        ImGui::Begin(title,nullptr,ImGuiWindowFlags_NoSavedSettings);
+        if (rendered) ImGui::LogToBuffer();
+        OverlayActions actions; panel->render(config,&snapshot,actions);
+        if (rendered) { *rendered = ImGui::GetCurrentContext()->LogBuffer.c_str(); ImGui::LogFinish(); }
+        ImGui::End(); ImGui::Render(); return actions;
+    };
+    auto click = [&](const char* label) {
+        auto& io = ImGui::GetIO(); io.AddMousePosEvent(-100,-100); frame(label);
+        auto* window = ImGui::FindWindowByName(title);
+        expect(window && ImGui::GetCurrentContext()->NavId == window->GetID(label),"蹲姿删除交互须定位真实控件");
+        if (!window) return OverlayActions{};
+        const auto rect = ImGui::WindowRectRelToAbs(window,window->NavRectRel[ImGuiNavLayer_Main]);
+        io.AddMousePosEvent(rect.GetCenter().x,rect.GetCenter().y); frame();
+        io.AddMouseButtonEvent(0,true); frame(); io.AddMouseButtonEvent(0,false); return frame();
+    };
+    auto select = [&](const char* label, const char* option) {
+        click(label); frame(); auto* popup = ImGui::FindWindowByName("##Combo_00");
+        expect(popup && popup->Active,"瞄点姿态必须提供真实下拉列表");
+        if (!popup || !popup->Active) return OverlayActions{};
+        frame(option,true);
+        const auto rect = ImGui::WindowRectRelToAbs(popup,popup->NavRectRel[ImGuiNavLayer_Main]);
+        auto& io = ImGui::GetIO(); io.AddMousePosEvent(rect.GetCenter().x,rect.GetCenter().y); frame();
+        io.AddMouseButtonEvent(0,true); frame(); io.AddMouseButtonEvent(0,false); return frame();
+    };
+    const auto value = [](const OverlayActions& actions) {
+        return actions.debug_request.plan_text.empty() ? Json::object() : Json::parse(actions.debug_request.plan_text);
+    };
+    frame();
+    auto actions = click("删除方案");
+    expect(actions.debug_action == Action::NONE,"未保存草稿没有删除目标，删除按钮须禁用");
+    actions = select("瞄点姿态","蹲姿");
+    expect(actions.movement_draft_changed && actions.debug_action == Action::NONE && value(actions).value("crouch",false),
+        "蹲姿下拉只编辑当前草稿，不提前蹲下、保存或投掷");
+    const auto before_preset = value(actions);
+    actions = select("投掷动作","左键跳投");
+    expect(actions.movement_draft_changed && value(actions).value("crouch",false),"套用动作预设不得覆盖瞄点姿态");
+    actions = click("保存方案");
+    expect(actions.debug_action == Action::SAVE_PLAN && value(actions).value("crouch",false) &&
+        value(actions).value("name",std::string{}) == before_preset.value("name",std::string{}),
+        "保存蹲姿独立字段且保持当前名称");
+    actions = select("瞄点姿态","站姿");
+    expect(actions.movement_draft_changed && !value(actions).value("crouch",false),"站姿下拉可恢复不保持蹲键");
+
+    auto saved = value(click("保存方案")); saved["crouch"] = true;
+    snapshot.grenade_loaded_draft = saved; snapshot.grenade_loaded_revision = 1;
+    snapshot.grenade_selected_path = "cache/grenade/plans/loaded.json";
+    snapshot.grenade_catalog_revision = 1;
+    snapshot.grenade_saved_plans = {{snapshot.grenade_selected_path,"已载入方案","de_mirage",""},
+        {"cache/grenade/plans/pending.json","等待载入方案","de_mirage",""}};
+    actions = frame();
+    expect(!actions.movement_draft_changed,"载入蹲姿方案不伪装手工编辑");
+    actions = click("保存方案");
+    expect(value(actions).value("crouch",false),"载入已存蹲姿须保留姿态字段");
+    snapshot.busy = true; frame(); actions = click("删除方案");
+    expect(actions.debug_action == Action::NONE,"运行期间禁止归档当前道具");
+    snapshot.busy = false; snapshot.movement_recording = true; frame(); actions = click("删除方案");
+    expect(actions.debug_action == Action::NONE,"录制期间禁止归档当前道具");
+    snapshot.movement_recording = false; frame();
+
+    // 删除只需已载入的保存目标，不能隐式保存或被下一次草稿校验拦住。
+    click("道具名称"); auto& io = ImGui::GetIO();
+    io.AddKeyEvent(ImGuiMod_Ctrl,true); io.AddKeyEvent(ImGuiKey_A,true); frame();
+    io.AddKeyEvent(ImGuiKey_A,false); io.AddKeyEvent(ImGuiMod_Ctrl,false);
+    io.AddKeyEvent(ImGuiKey_Backspace,true); actions = frame();
+    expect(actions.movement_draft_changed && actions.debug_request.plan_text.empty(),"删除夹具须先产生真实无效草稿");
+    io.AddKeyEvent(ImGuiKey_Backspace,false); frame();
+    actions = click("删除方案");
+    expect(actions.debug_action == Action::DELETE_PLAN && actions.debug_request.load_path == snapshot.grenade_selected_path &&
+        actions.debug_request.mode == Mode::GRENADE_TEST && !actions.movement_draft_changed &&
+        actions.debug_request.plan_text.empty() && !actions.debug_request.movement_save_as,
+        "删除必须交付当前载入路径，忽略无效未保存草稿且不执行保存");
+    snapshot.grenade_selected_path.clear(); ++snapshot.grenade_catalog_revision; frame();
+    actions = click("删除方案");
+    expect(actions.debug_action == Action::NONE,"归档完成清空保存目标后不得重复删除旧路径");
+
+    panel = std::make_unique<MovementPanel>(Mode::MOVEMENT_TEST); snapshot = Snapshot{};
+    std::string rendered; frame(nullptr,false,&rendered);
+    expect(rendered.find("删除方案") == std::string::npos && rendered.find("瞄点姿态") == std::string::npos,
+        "道具删除与瞄点姿态不进入身法编辑器");
+}
+
 }
 
 int main() {
@@ -656,6 +749,7 @@ int main() {
     grenade_interactions();
     grenade_editor_cleanup_interactions();
     grenade_map_team_interactions();
+    grenade_crouch_delete_interactions();
     for (const auto mode : {debug_session::Mode::MOVEMENT_TEST, debug_session::Mode::GRENADE_TEST})
     for (const ImVec2 size : {ImVec2{620, 480}, ImVec2{820, 600}}) {
         io.DisplaySize = size; MovementPanel panel(mode);

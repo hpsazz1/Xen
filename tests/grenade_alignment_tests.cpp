@@ -61,6 +61,10 @@ struct Scene {
     std::function<void(FrameTiming&)> transform_timing;
     bool last_clock_trusted=true;
     int untrusted_clock_moves=0;
+    bool settle_before_alignment=false,transitioning=false;
+    int transition_moves=0;
+    std::uint64_t first_move_sequence=0;
+    std::function<void(std::uint64_t)> prepare_frame;
 };
 class Device final : public IMouseController {
 public:
@@ -68,6 +72,8 @@ public:
     bool open() noexcept override { return true; }
     MouseMoveReceipt move(const MouseMoveCommand& value) noexcept override {
         ++scene_.moves;scene_.commands.push_back(value);
+        if (!scene_.first_move_sequence) scene_.first_move_sequence=scene_.sequence;
+        if (scene_.transitioning) ++scene_.transition_moves;
         if (scene_.network&&!scene_.last_clock_trusted) ++scene_.untrusted_clock_moves;
         if (!scene_.no_response && !scene_.command_failed) {
             scene_.x-=value.dx_counts/scene_.response_counts_per_pixel_x;
@@ -104,6 +110,7 @@ public:
         if (scene_.no_frame || scene_.now<scene_.first_frame_at ||
             (scene_.stop_after_frames && scene_.sequence>=static_cast<std::uint64_t>(scene_.stop_after_frames)))
             return CaptureStatus::NO_FRAME;
+        if (scene_.prepare_frame) scene_.prepare_frame(scene_.sequence+1);
         frame={};frame.width=frame.height=frame.source_width=frame.source_height=320;
         frame.encoded_width=frame.encoded_height=320;
         frame.bgr=scene_.unrelated?texture(7788):translated(
@@ -165,7 +172,7 @@ grenade_alignment::Result run(Scene& scene,bool verify=false,std::function<bool(
     grenade_alignment::detail::Dependencies dependencies{
         [&](const CaptureConfig&){return std::make_unique<Capture>(scene);},[&]{return scene.now;},
         [&](std::chrono::milliseconds duration){scene.now+=duration;},
-        [&]{return source_context::SourceContextSnapshot{true,scene.focus,1,scene.sequence,0,1};}};
+        [&]{return source_context::SourceContextSnapshot{true,scene.focus,1,scene.sequence,0,1};},scene.settle_before_alignment};
     if (!permission) permission=[] {return true;};
     return grenade_alignment::detail::run_with_dependencies(reference(scene),config(scene),
         std::make_shared<Device>(scene),scene.canceled,verify,std::move(permission),dependencies);
@@ -422,6 +429,65 @@ Json clock_recovery() {
     }
     return evidence;
 }
+void posture_startup_stability() {
+    const auto setup=[](Scene& scene,bool initial_mismatch) {
+        scene.settle_before_alignment=true;
+        scene.response_counts_per_pixel_x=scene.response_counts_per_pixel_y=2.5;
+        scene.configured_counts_per_pixel_x=scene.configured_counts_per_pixel_y=2.5;
+        scene.prepare_frame=[&,initial_mismatch](std::uint64_t sequence) {
+            scene.unrelated=initial_mismatch&&sequence<=2;
+            scene.transitioning=sequence<12;
+            if (sequence<=8) {scene.x=8.4;scene.y=24-static_cast<double>(sequence)*2;}
+            else if (sequence==9) {scene.x=8.4;scene.y=6.4;}
+        };
+    };
+    for (const bool initial_mismatch:{true,false}) {
+        Scene settling;setup(settling,initial_mismatch);
+        const auto result=run(settling);
+        expect(result.aligned&&settling.moves>0&&settling.transition_moves==0&&settling.first_move_sequence>=12&&
+            std::max(std::abs(settling.x),std::abs(settling.y))<=0.35,
+            "蹲姿初始不匹配或持续移动先零输出，稳定后沿原精度完成："+result.error);
+    }
+    Scene never_stable;never_stable.settle_before_alignment=true;
+    never_stable.prepare_frame=[&](std::uint64_t sequence) {
+        never_stable.x=8.4;never_stable.y=sequence%2?12:18;never_stable.transitioning=true;
+    };
+    const auto timeout=run(never_stable);
+    expect(!timeout.aligned&&never_stable.moves==0&&timeout.evidence.value("elapsed_ms",0.0)>=5000&&
+        timeout.evidence.value("elapsed_ms",9999.0)<5100,
+        "蹲姿画面永不稳定时保持零输出并沿原5秒预算结束");
+    for (const bool lose_focus:{false,true}) {
+        Scene interrupted;setup(interrupted,false);
+        const auto prepare=interrupted.prepare_frame;
+        interrupted.prepare_frame=[&,prepare](std::uint64_t sequence) {
+            prepare(sequence);
+            if (sequence==5) {if(lose_focus) interrupted.focus=false;else interrupted.canceled=true;}
+        };
+        const auto result=run(interrupted);
+        expect(!result.aligned&&interrupted.moves==0&&interrupted.sequence<=5&&
+            (lose_focus||result.canceled),"蹲姿稳定等待期间失焦或取消仍立即零输出结束");
+    }
+    Scene clock_reset;clock_reset.settle_before_alignment=true;clock_reset.network=true;
+    clock_reset.x=8.4;clock_reset.y=6.4;
+    clock_reset.response_counts_per_pixel_x=clock_reset.response_counts_per_pixel_y=2.5;
+    clock_reset.configured_counts_per_pixel_x=clock_reset.configured_counts_per_pixel_y=2.5;
+    clock_reset.transform_timing=[&](FrameTiming& timing) {
+        if(clock_reset.sequence==3) {timing.source_time_timing_valid=false;timing.source_clock_status=SourceClockStatus::INVALID;}
+    };
+    const auto recovered=run(clock_reset);
+    expect(recovered.aligned&&clock_reset.first_move_sequence>=7&&clock_reset.untrusted_clock_moves==0,
+        "蹲姿稳定窗口遇到坏时钟帧须重算三帧和80ms，不提前输出");
+    Scene interrupted_stream;interrupted_stream.settle_before_alignment=true;interrupted_stream.stop_after_frames=1;
+    const auto disconnected=run(interrupted_stream);
+    expect(!disconnected.aligned&&interrupted_stream.moves==0&&disconnected.evidence.value("elapsed_ms",9999.0)<600,
+        "蹲姿稳定等待不能延长原350ms断流预算");
+    Scene standing;setup(standing,true);standing.settle_before_alignment=false;
+    expect(!run(standing).aligned&&standing.sequence==1&&standing.moves==0,
+        "站姿起步不放宽首帧匹配失败行为");
+    Scene verify;setup(verify,true);
+    expect(!run(verify,true).aligned&&verify.sequence==1&&verify.moves==0,
+        "投前只读复核忽略蹲姿起步稳定选项且保留首帧失败行为");
+}
 void timing_geometry_and_cancellation() {
     Scene cold;cold.network=true;cold.clock_warming=true;cold.first_frame_at=cold.now+2500ms;
     const auto cold_result=run(cold);
@@ -646,7 +712,7 @@ int main(int argc,char** argv) {
             save(argv[4],image_coverage(image(cv::Rect(1120,560,320,320)).clone()).dump(2));
             return failures?1:0;
         }
-        aligned_and_control();precision_control();coupled_subpixel_precision();image_failures();sparse_texture_coverage();timing_geometry_and_cancellation();
+        aligned_and_control();precision_control();coupled_subpixel_precision();image_failures();sparse_texture_coverage();timing_geometry_and_cancellation();posture_startup_stability();
         const auto clock_evidence=clock_recovery();
         const auto root=argc==2?std::filesystem::path(argv[1]):
             argc==3&&std::string(argv[1])=="--output-root"?std::filesystem::path(argv[2]):

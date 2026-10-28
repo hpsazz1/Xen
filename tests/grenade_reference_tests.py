@@ -75,6 +75,28 @@ class ReferenceTests(unittest.TestCase):
                     self.assertEqual(loaded, value)
                     self.assertEqual((directory / "aim.png").read_bytes(), self.image.read_bytes())
 
+    def test_crouch_pose_is_bound_while_false_remains_legacy_compatible(self):
+        identity = self.complete()
+        path = self.root / identity / "reference.json"
+        original = json.loads(path.read_text(encoding="utf-8"))
+        value = {**original, "plan": {**original["plan"], "crouch": False}, "aim_plan": original["plan"]}
+        def save():
+            value["reference_revision"] = manifest_revision(value)
+            path.write_text(json.dumps(value), encoding="utf-8")
+        save()
+        self.assertEqual(load_reference(self.root, identity)[0], value)
+        value["plan"]["crouch"] = True
+        save()
+        with self.assertRaisesRegex(ValueError, "参考资源与当前方案不一致"):
+            load_reference(self.root, identity)
+        value["aim_plan"] = {**value["plan"]}
+        save()
+        self.assertEqual(load_reference(self.root, identity)[0], value)
+        value["plan"]["crouch"] = value["aim_plan"]["crouch"] = 1
+        save()
+        with self.assertRaises(ValueError):
+            load_reference(self.root, identity)
+
     def test_real_team_or_plan_change_still_invalidates_existing_aim(self):
         identity = self.complete()
         manifest = self.root / identity / "reference.json"

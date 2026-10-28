@@ -268,7 +268,7 @@ struct Server::Impl {
     std::shared_ptr<const debug_session::Snapshot> capture_selection;
     Clock::time_point capture_received{};
     bool capture_available = false;
-    bool capture_f9_conflict = false, capture_f10_conflict = false;
+    bool capture_standing_conflict = false, capture_aim_conflict = false;
     std::string capture_reason;
     std::uint64_t capture_revision = 0, capture_generation = 0;
     std::optional<std::tuple<std::uint64_t,std::uint64_t,bool,std::string>> capture_identity;
@@ -337,7 +337,9 @@ struct Server::Impl {
         const auto& selected = capture_selection;
         if (selected && current.valid && Clock::now() < capture_received + kCaptureHeartbeat &&
             selected->movement_test_enabled && selected->movement_test_mode == debug_session::Mode::GRENADE_TEST &&
-            selected->grenade_current.value("map",std::string{}) == current.map_name) {
+            selected->grenade_current.is_object() && selected->grenade_current.contains("map") &&
+            selected->grenade_current.at("map").is_string() &&
+            selected->grenade_current.at("map").get_ref<const std::string&>() == current.map_name) {
             const auto id = std::filesystem::u8path(selected->grenade_selected_path).filename().u8string();
             result["actual_plan_id"] = std::string(id.begin(),id.end());
             result["guidance"] = {{"state",selected->grenade_guidance_state},
@@ -471,9 +473,9 @@ struct Server::Impl {
             std::lock_guard lock(mutex);
             selected = capture_selection; received = capture_received; revision = capture_revision;
             available = capture_available; reason = capture_reason;
-            if (standing ? capture_f9_conflict : capture_f10_conflict) {
+            if (standing ? capture_standing_conflict : capture_aim_conflict) {
                 available = false;
-                reason = std::string(standing ? "F9" : "F10") + "已被辅机控制快捷键占用，请先调整该绑定";
+                reason = std::string(standing ? "PgUp" : "PgDn") + "已被辅机控制快捷键占用，请先调整该绑定";
             }
         }
         Json result{{"ready",false},{"reason",""},{"map",""},{"team",""},{"generation",""},
@@ -690,7 +692,7 @@ struct Server::Impl {
                     respond(client,200,type,bytes,deadline);
                 } catch (const std::exception&) {
                     respond(client,404,"application/json; charset=utf-8",Json{{"ready",false},
-                        {"reason","这套方案的参考图尚未就绪，请在正确站位和瞄角按F10采集"}}.dump(),deadline);
+                        {"reason","这套方案的参考图尚未就绪，请在正确站位和瞄角按PgDn采集"}}.dump(),deadline);
                 }
             }
             else if (target == "/capture-context.json") respond(client,200,"application/json; charset=utf-8",capture_context_json(deadline),deadline);
@@ -758,7 +760,7 @@ bool Server::start(const Config& config, std::shared_ptr<weapon::GsiReceiver> gs
             std::lock_guard lock(impl_->mutex);
             impl_->state = {true,ntohs(address.sin_port),{},local_urls(config,ntohs(address.sin_port))};
             impl_->capture_selection.reset(); impl_->capture_received = {}; impl_->capture_available = false;
-            impl_->capture_f9_conflict = false; impl_->capture_f10_conflict = false;
+            impl_->capture_standing_conflict = false; impl_->capture_aim_conflict = false;
             impl_->capture_reason.clear(); impl_->capture_revision = 0;
             impl_->selection_request.reset(); impl_->selection_sequence = 0; impl_->selection_delivered = false;
             impl_->selection_state = "idle"; impl_->selection_reason.clear(); impl_->selection_context.clear();
@@ -776,13 +778,13 @@ bool Server::start(const Config& config, std::shared_ptr<weapon::GsiReceiver> gs
 void Server::publish_capture(std::shared_ptr<const debug_session::Snapshot> selection,
                             const AppConfig& controls, bool available, const std::string& reason) noexcept {
     try {
-        const auto f9_conflict = capture_hotkey_conflicts(controls,0x78);
-        const auto f10_conflict = capture_hotkey_conflicts(controls,0x79);
+        const auto standing_conflict = capture_hotkey_conflicts(controls,0x21);
+        const auto aim_conflict = capture_hotkey_conflicts(controls,0x22);
         const auto now = Clock::now();
         std::lock_guard lock(impl_->mutex);
-        if (impl_->capture_f9_conflict != f9_conflict || impl_->capture_f10_conflict != f10_conflict)
+        if (impl_->capture_standing_conflict != standing_conflict || impl_->capture_aim_conflict != aim_conflict)
             impl_->capture_received = {};
-        impl_->capture_f9_conflict = f9_conflict; impl_->capture_f10_conflict = f10_conflict;
+        impl_->capture_standing_conflict = standing_conflict; impl_->capture_aim_conflict = aim_conflict;
         impl_->publish_capture_locked(std::move(selection),available,reason,now);
     } catch (...) {
         std::lock_guard lock(impl_->mutex);

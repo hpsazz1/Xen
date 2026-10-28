@@ -212,6 +212,7 @@ struct MovementPanel::Impl {
         return !side.empty() ? side : plan.map == gsi_map ? gsi_team : std::string{};
     }
     void send(Action action, OverlayActions& actions, bool save_as = false) {
+        if (action == Action::DELETE_PLAN && (!grenade() || request.load_path.empty())) return;
         if (grenade() && action == Action::SAVE_PLAN) {
             const auto side = selected_team();
             const auto valid_map = !plan.map.empty() && plan.map.size() <= 83 &&
@@ -225,7 +226,7 @@ struct MovementPanel::Impl {
             }
             plan.team = side;
         }
-        if (action != Action::CANCEL && action != Action::LOAD_PLAN && action != Action::LIST_MOVEMENT_PLANS &&
+        if (action != Action::CANCEL && action != Action::LOAD_PLAN && action != Action::LIST_MOVEMENT_PLANS && action != Action::DELETE_PLAN &&
             action != Action::START_MOVEMENT_RECORDING && action != Action::STOP_MOVEMENT_RECORDING &&
             !update_request()) return;
         request.movement_save_as = save_as;
@@ -327,6 +328,13 @@ struct MovementPanel::Impl {
         ImGui::SameLine();
         if (button("刷新方案", "只列出本页主动保存的方案；测试记录和录制草稿不会加入列表。", !busy))
             send(Action::LIST_MOVEMENT_PLANS, actions);
+        if (grenade()) {
+            ImGui::SameLine();
+            if (ImGui::GetContentRegionAvail().x < ImGui::CalcTextSize("删除方案").x + ImGui::GetStyle().FramePadding.x * 2)
+                ImGui::NewLine();
+            if (button("删除方案","将当前已载入的方案及其独占参考资源移入backups，保留可恢复备份；不保存未保存编辑、不执行设备。运行和录制期间不可删除。",!busy && !request.load_path.empty()))
+                send(Action::DELETE_PLAN,actions);
+        }
     }
     void copy_preset(const movement::Config& config, bool spin, bool right, OverlayActions& actions) {
         Plan copy;
@@ -386,6 +394,13 @@ struct MovementPanel::Impl {
             if (button("使用当前地图与阵营","把有效GSI地图及本地T/CT填入当前草稿；保存后生效，不执行游戏操作。",!gsi_map.empty() && !gsi_team.empty())) {
                 plan.map = gsi_map; plan.team = gsi_team; custom_map = false; change = true;
             }
+            ImGui::SetNextItemWidth(std::max(80.f,ImGui::GetContentRegionAvail().x * .7f));
+            if (ImGui::BeginCombo("瞄点姿态",plan.crouch ? "蹲姿" : "站姿")) {
+                if (ImGui::Selectable("站姿",!plan.crouch)) { plan.crouch = false; change = true; }
+                if (ImGui::Selectable("蹲姿",plan.crouch)) { plan.crouch = true; change = true; }
+                ImGui::EndCombo();
+            }
+            tip("PgDn保存实际画面；选蹲姿时需先手动蹲下并稳定后再按Ctrl+PgDn。上键自动蹲下找瞄点并保持，下键投完或取消时释放蹲姿；投掷动作与原时序保持。选择姿态只修改草稿，保存后生效，不立即输出。");
         } else {
             change |= text_field("地图（可选）", plan.map, "保存地图标识，手动身法方案不受地图限制。");
             if (button("使用当前地图", "将有效 GSI 地图填入当前草稿，保存后写入本页方案库。", snapshot && snapshot->movement_map.valid)) {
@@ -412,7 +427,7 @@ struct MovementPanel::Impl {
             if (ImGui::BeginCombo("投掷动作", "选择动作预设…")) {
                 for (const auto& preset : kGrenadePresets) {
                     if (ImGui::Selectable(preset.name)) { apply_grenade_preset(plan,preset); change = true; }
-                    tip("套用现有方案的整组动作和方向键屏蔽；保留名称、地图、坐标及保存目标，只修改草稿，不自动保存或投掷。");
+                    tip("套用现有方案的整组动作和方向键屏蔽；保留名称、地图、瞄点姿态、坐标及保存目标，只修改草稿，不自动保存或投掷。");
                 }
                 ImGui::EndCombo();
             }

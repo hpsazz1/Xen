@@ -250,6 +250,36 @@ void selection_tests(const std::filesystem::path& root) {
     std::filesystem::remove(resources);std::filesystem::remove(base/"references");
     std::filesystem::remove(path);std::filesystem::remove(plans/"ct.json");std::filesystem::remove(plans);std::filesystem::remove(base);
 }
+void selection_snapshot_type_tests(const std::filesystem::path& root) {
+    auto gsi = std::make_shared<weapon::GsiReceiver>();
+    weapon::GsiConfig gsi_config; gsi_config.enabled = true; gsi_config.port = unused_port(); gsi_config.ttl_ms = 3000;
+    expect(gsi->start(gsi_config),"不完整选择快照使用独立回环GSI");
+    const std::array<Json,6> malformed{Json{},Json::object(),Json::array(),Json{{"map",7}},Json{{"map",nullptr}},Json(4)};
+    for (const auto& value : malformed) {
+        grenade_web::Server server;
+        grenade_web::Config config; config.bind_address = "127.0.0.1"; config.port = 0; config.plans_root = utf8(root);
+        expect(server.start(config,gsi),"每种未就绪快照使用生产网页服务");
+        const auto port = server.snapshot().port;
+        expect(post_context(gsi_config.port,utc_seconds(),"de_mirage","T"),"不完整选择快照仍有有效GSI");
+        debug_session::Snapshot selected;
+        selected.movement_test_enabled = true; selected.movement_test_mode = debug_session::Mode::GRENADE_TEST;
+        selected.grenade_selected_path = utf8(root/"t.json");
+        selected.grenade_current = selected.grenade_baseline = value;
+        server.publish_capture(std::make_shared<const debug_session::Snapshot>(selected),AppConfig{},true);
+        const auto response = get(port,"/selection.json");
+        const auto selection = response.json();
+        expect(response.status==200 && selection.is_object() && selection.value("actual_plan_id",std::string("old")).empty() &&
+            selection["guidance"]["state"]=="hidden", "空或错误类型的道具快照不得终止网页线程或暴露旧选择");
+        if (response.status==200) {
+            expect(get(port,"/context.json").status==200,"错误选择快照后共享GSI接口继续响应");
+            const auto capture = get(port,"/capture-context.json");
+            expect(capture.status==200 && !capture.json().value("ready",true) && server.snapshot().running,
+                "错误选择快照后F10返回未就绪而不是urlopen超时");
+        }
+        server.stop();
+    }
+    gsi->stop();
+}
 void capture_context_tests(const std::filesystem::path& root) {
     const auto directory = root / "capture-context";
     std::filesystem::create_directory(directory);
@@ -324,17 +354,22 @@ void capture_context_tests(const std::filesystem::path& root) {
     selected.movement_test_mode = debug_session::Mode::MOVEMENT_TEST; publish(); rejected();
     selected.movement_test_mode = debug_session::Mode::GRENADE_TEST;
     publish(false); rejected();
-    controls.keyboard.debug_test_enabled = true; controls.keyboard.debug_test_virtual_keys = {0x79}; publish();
-    expect(rejected().value("reason",std::string{}).find("F10")!=std::string::npos,"设备侧自定义F10与采集热键冲突时拒绝");
+    controls.keyboard.debug_test_enabled = true; controls.keyboard.debug_test_virtual_keys = {0x22}; publish();
+    expect(rejected().value("reason",std::string{}).find("PgDn")!=std::string::npos,"设备侧自定义PgDn与瞄点采集冲突时拒绝");
     const auto read_standing=[&] { return get(port,"/capture-context.json?role=standing").json(); };
-    expect(read_standing().value("ready",false),"F10占用不影响独立F9采集");
-    controls.keyboard.debug_test_virtual_keys = {0x78}; publish();
+    expect(read_standing().value("ready",false),"PgDn占用不影响独立PgUp采集");
+    controls.keyboard.debug_test_virtual_keys = {0x21}; publish();
     expect(read().value("ready",false) && !read_standing().value("ready",true) &&
-        read_standing().value("reason",std::string{}).find("F9")!=std::string::npos,
-        "F9占用只影响站位采集，不影响F10");
+        read_standing().value("reason",std::string{}).find("PgUp")!=std::string::npos,
+        "PgUp占用只影响站位采集，不影响PgDn");
+    for (int old_key : {0x78,0x79}) {
+        controls.keyboard.debug_test_virtual_keys = {old_key}; publish();
+        expect(read().value("ready",false) && read_standing().value("ready",false),
+            "旧F9/F10控制绑定不得再阻断PgUp/PgDn采集");
+    }
     controls.keyboard.debug_test_enabled = false; publish();
     expect(read().value("ready",false),"未启用的F10草稿绑定不占用采集键");
-    controls.trigger.enabled = true; controls.trigger.fire_enabled = true; controls.trigger.hold_virtual_key = 0x79; publish(); rejected();
+    controls.trigger.enabled = true; controls.trigger.fire_enabled = true; controls.trigger.hold_virtual_key = 0x22; publish(); rejected();
     controls.trigger.enabled = false; publish();
     const auto before_bytes_change = read();
     { std::ofstream file(path,std::ios::binary | std::ios::app); file << '\n'; }
@@ -529,6 +564,7 @@ int main(int argc, char** argv) {
     expect(post_context(gsi_config.port,timestamp+4,"de_mirage","T") && gsi->map_snapshot().valid,"网页停止不关闭共享GSI");
     catalog_limits(root,gsi);
     capture_context_tests(root);
+    selection_snapshot_type_tests(root);
     selection_tests(root);
     gsi->stop();
     auto invalid = config; invalid.bind_address = "203.0.113.8";
