@@ -9,6 +9,7 @@
 #include <limits>
 #include <regex>
 #include <string>
+#include <string_view>
 
 namespace {
 using namespace debug_session;
@@ -90,6 +91,62 @@ std::string console_command(const std::string& notes) {
     }());
     std::smatch match;
     return std::regex_search(notes, match, expression) ? match.str() : std::string{};
+}
+int natural_compare(std::string_view a, std::string_view b) {
+    const auto digit = [](char c) { return c >= '0' && c <= '9'; };
+    const auto fold = [](unsigned char c) { return c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c; };
+    std::size_t i = 0, j = 0;
+    while (i < a.size() && j < b.size()) {
+        if (digit(a[i]) && digit(b[j])) {
+            auto end_a = i, end_b = j;
+            while (end_a < a.size() && digit(a[end_a])) ++end_a;
+            while (end_b < b.size() && digit(b[end_b])) ++end_b;
+            while (i < end_a && a[i] == '0') ++i;
+            while (j < end_b && b[j] == '0') ++j;
+            if (end_a - i != end_b - j) return end_a - i < end_b - j ? -1 : 1;
+            const auto order = a.substr(i,end_a-i).compare(b.substr(j,end_b-j));
+            if (order) return order;
+            i = end_a; j = end_b;
+        } else {
+            const auto left = fold(static_cast<unsigned char>(a[i++]));
+            const auto right = fold(static_cast<unsigned char>(b[j++]));
+            if (left != right) return left < right ? -1 : 1;
+        }
+    }
+    return i == a.size() ? (j == b.size() ? 0 : -1) : 1;
+}
+int grenade_map_rank(std::string_view map) {
+    // 与按地图采集清单保持一致；未列出的自定义地图稳定排在后面。
+    constexpr std::array<std::string_view,10> maps{"de_mirage","de_dust2","de_inferno","de_ancient",
+        "de_anubis","de_nuke","de_overpass","de_train","de_vertigo","de_cache"};
+    return static_cast<int>(std::find(maps.begin(),maps.end(),map) - maps.begin());
+}
+const std::string& grenade_name(const MovementSavedPlan& item) {
+    return item.raw_name.empty() ? item.name : item.raw_name;
+}
+std::string_view grenade_order_name(const MovementSavedPlan& item) {
+    std::string_view name = grenade_name(item), map = item.map;
+    if (map.starts_with("de_")) map.remove_prefix(3);
+    if (!map.empty() && name.size() > map.size() && name[map.size()] == ' ' &&
+        natural_compare(name.substr(0,map.size()),map) == 0) name.remove_prefix(map.size()+1);
+    return name;
+}
+int station_group(std::string_view name) {
+    const auto digit = [](char c) { return c >= '0' && c <= '9'; };
+    if (name.size() > 1 && (name[0] == 'T' || name[0] == 't') && digit(name[1])) return 0;
+    if (name.size() > 2 && (name[0] == 'C' || name[0] == 'c') &&
+        (name[1] == 'T' || name[1] == 't') && digit(name[2])) return 1;
+    return 2;
+}
+bool grenade_less(const MovementSavedPlan* a, const MovementSavedPlan* b) {
+    const auto map_a = grenade_map_rank(a->map), map_b = grenade_map_rank(b->map);
+    if (map_a != map_b) return map_a < map_b;
+    if (a->map != b->map) return a->map < b->map;
+    const auto name_a = grenade_order_name(*a), name_b = grenade_order_name(*b);
+    const auto group_a = station_group(name_a), group_b = station_group(name_b);
+    if (group_a != group_b) return group_a < group_b;
+    if (const auto order = natural_compare(name_a,name_b)) return order < 0;
+    return a->path < b->path;
 }
 void timeline(const Plan& plan) {
     const int duration = movement::timeline::duration_ms(plan);
@@ -186,40 +243,43 @@ struct MovementPanel::Impl {
             for (const auto& item : saved) entries.push_back(&item);
         }
         if (grenade()) {
-            // 专用五点方案优先；其他道具仍可按地图查找，不改变保存文件顺序。
-            std::stable_sort(entries.begin(), entries.end(), [](const auto* a, const auto* b) {
-                const auto priority = [](const auto* item) {
-                    return item->name.starts_with("Mirage T") && item->name.find(" VIP R") != std::string::npos;
-                };
-                return priority(a) > priority(b);
-            });
+            std::sort(entries.begin(), entries.end(), grenade_less);
             ImGui::BeginDisabled(busy);
             if (ImGui::BeginCombo("筛选地图", map_filter.empty() ? "全部地图" : map_filter.c_str())) {
                 if (ImGui::Selectable("全部地图", map_filter.empty())) map_filter.clear();
                 std::vector<std::string> maps;
                 for (const auto* item : entries)
                     if (!item->map.empty()) maps.push_back(item->map);
-                std::sort(maps.begin(), maps.end());
+                std::sort(maps.begin(), maps.end(), [](const auto& a, const auto& b) {
+                    const auto rank_a = grenade_map_rank(a), rank_b = grenade_map_rank(b);
+                    return rank_a != rank_b ? rank_a < rank_b : a < b;
+                });
                 maps.erase(std::unique(maps.begin(), maps.end()), maps.end());
                 for (const auto& map : maps)
                     if (ImGui::Selectable(map.c_str(), map_filter == map)) map_filter = map;
                 ImGui::EndCombo();
             }
             ImGui::EndDisabled();
-            tip("只筛选道具列表，不载入、不启用测试，也不改变当前F11方案。Mirage五点专用方案优先显示。");
+            tip("按地图筛选道具；列表依次按地图、T/CT站位编号和道具名称排列，T2在T10前，同名备用瞄角相邻。筛选不载入或执行方案。");
         }
-        const char* selected = "未保存的新方案";
+        const auto label = [&](const MovementSavedPlan& item) {
+            if (!grenade()) return item.name;
+            auto name = grenade_name(item);
+            if (map_filter.empty() && !item.map.empty()) name += " / " + item.map;
+            return name;
+        };
+        std::string selected = "未保存的新方案";
         for (const auto* item : entries)
-            if (item->path == request.load_path) { selected = item->name.c_str(); break; }
+            if (item->path == request.load_path) { selected = label(*item); break; }
         ImGui::BeginDisabled(busy);
         ImGui::SetNextItemWidth(std::max(100.f, ImGui::GetContentRegionAvail().x * .7f));
-        if (ImGui::BeginCombo(grenade() ? "道具方案" : "已保存方案", selected)) {
+        if (ImGui::BeginCombo(grenade() ? "道具方案" : "已保存方案", selected.c_str())) {
             int visible = 0;
             for (const auto* item : entries) {
                 if (grenade() && !map_filter.empty() && item->map != map_filter) continue;
                 ++visible;
                 ImGui::PushID(item->path.c_str());
-                if (ImGui::Selectable(item->name.c_str(), item->path == request.load_path)) {
+                if (ImGui::Selectable(label(*item).c_str(), item->path == request.load_path)) {
                     send(Action::LOAD_PLAN, actions);
                     // 成功载入后才更新保存目标，避免旧草稿覆盖新选择。
                     actions.debug_request.load_path = item->path;
@@ -262,13 +322,18 @@ struct MovementPanel::Impl {
         if (button("使用当前地图", "将有效 GSI 地图填入当前草稿，保存后写入本页方案库。", snapshot && snapshot->movement_map.valid)) {
             plan.map = snapshot->movement_map.map_name; change = true;
         }
-        change |= text_field("点位（可选）", plan.location, "保存点位名称；每次测试前由用户对齐位置和朝向。");
-        change |= text_field("起始说明", plan.notes, "记录起始朝向、站位和人工准备步骤；不参与设备执行。");
+        if (!grenade())
+            change |= text_field("点位（可选）", plan.location, "保存点位名称；每次测试前由用户对齐位置和朝向。");
+        change |= text_field(grenade() ? "定位与瞄角指令" : "起始说明", plan.notes,
+            grenade() ? "在此编辑或粘贴setpos/setang，原有附注也保留；复制按钮只复制定位命令，不自动执行。" :
+                "记录起始朝向、站位和人工准备步骤；不参与设备执行。");
         auto command = console_command(plan.notes);
         if (!command.empty()) {
-            ImGui::SetNextItemWidth(std::max(100.f, ImGui::GetContentRegionAvail().x * .7f));
-            ImGui::InputText("定位与瞄角指令", &command, ImGuiInputTextFlags_ReadOnly);
-            tip("从起始说明提取的 setpos/setang；只提供复制，不自动执行控制台命令。道具辅助另通过参考图对齐视角，仍需先手动站到固定点位。");
+            if (!grenade()) {
+                ImGui::SetNextItemWidth(std::max(100.f, ImGui::GetContentRegionAvail().x * .7f));
+                ImGui::InputText("定位与瞄角指令", &command, ImGuiInputTextFlags_ReadOnly);
+                tip("从起始说明提取的 setpos/setang；只提供复制，不自动执行控制台命令。道具辅助另通过参考图对齐视角，仍需先手动站到固定点位。");
+            }
             if (button("复制定位指令", "只复制当前配方的精确坐标和瞄角；关闭控制台、确认站位后再按测试键执行当前动作。"))
                 ImGui::SetClipboardText(command.c_str());
         }

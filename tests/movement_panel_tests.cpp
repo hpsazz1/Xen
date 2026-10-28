@@ -5,6 +5,7 @@
 #include <imgui_internal.h>
 #include <cmath>
 #include <iostream>
+#include <string>
 
 namespace {
 int failures = 0;
@@ -293,7 +294,7 @@ void grenade_interactions() {
         auto& io = ImGui::GetIO(); io.AddMousePosEvent(pos.x, pos.y); frame();
         io.AddMouseButtonEvent(0, true); frame(); io.AddMouseButtonEvent(0, false); actions = frame();
         expect(actions.debug_action == Action::LOAD_PLAN && actions.debug_request.load_path == snapshot.grenade_selected_path,
-            "道具列表须优先显示Mirage五点且不混入身法库");
+            "道具列表须按地图编号规则排列且不混入身法库");
     }
     // 道具载入已完成但页面尚未渲染，随后身法载入覆盖全局草稿；返回仍须匹配道具保存目标。
     auto pending_grenade = grenade; pending_grenade.name = "Mirage T2 VIP R1";
@@ -368,6 +369,144 @@ void grenade_interactions() {
     expect(actions.debug_action == Action::CANCEL, "道具测试必须可以撤销许可和清理");
 }
 
+void grenade_editor_cleanup_interactions() {
+    using namespace debug_session;
+    MovementPanel panel(Mode::GRENADE_TEST);
+    AppConfig config;
+    Snapshot snapshot;
+    const char* title = "道具编辑精简交互回归";
+    auto frame = [&](const char* focus = nullptr, std::string* rendered = nullptr) {
+        ImGui::NewFrame();
+        if (auto* prior = ImGui::FindWindowByName(title); focus && prior)
+            ImGui::SetFocusID(prior->GetID(focus), prior);
+        ImGui::SetNextWindowPos({0, 0}); ImGui::SetNextWindowSize({1100, 2000});
+        ImGui::Begin(title, nullptr, ImGuiWindowFlags_NoSavedSettings);
+        if (rendered) ImGui::LogToBuffer();
+        OverlayActions actions; panel.render(config, &snapshot, actions);
+        if (rendered) { *rendered = ImGui::GetCurrentContext()->LogBuffer.c_str(); ImGui::LogFinish(); }
+        ImGui::End(); ImGui::Render(); return actions;
+    };
+    auto click = [&](const char* label) {
+        auto& io = ImGui::GetIO(); io.AddMousePosEvent(-100, -100); frame(label);
+        auto* window = ImGui::FindWindowByName(title);
+        expect(window && ImGui::GetCurrentContext()->NavId == window->GetID(label), "精简道具页须定位真实控件");
+        const auto rect = ImGui::WindowRectRelToAbs(window, window->NavRectRel[ImGuiNavLayer_Main]);
+        io.AddMousePosEvent(rect.GetCenter().x, rect.GetCenter().y); frame();
+        io.AddMouseButtonEvent(0, true); frame(); io.AddMouseButtonEvent(0, false); return frame();
+    };
+    auto edit = [&](const char* label, const char* value) {
+        click(label); auto& io = ImGui::GetIO();
+        io.AddKeyEvent(ImGuiMod_Ctrl, true); io.AddKeyEvent(ImGuiKey_A, true); frame();
+        io.AddKeyEvent(ImGuiKey_A, false); io.AddKeyEvent(ImGuiMod_Ctrl, false);
+        io.AddInputCharactersUTF8(value); return frame();
+    };
+    auto popup_click = [&](int row) {
+        frame(); auto* popup = ImGui::FindWindowByName("##Combo_00");
+        expect(popup && popup->Active, "排序交互须打开真实下拉");
+        if (!popup || !popup->Active) return OverlayActions{};
+        const ImVec2 pos{popup->Pos.x + ImGui::GetStyle().WindowPadding.x + 30,
+            popup->Pos.y + ImGui::GetStyle().WindowPadding.y + ImGui::GetTextLineHeight() * .5f +
+                row * ImGui::GetTextLineHeightWithSpacing()};
+        auto& io = ImGui::GetIO(); io.AddMousePosEvent(pos.x, pos.y); frame();
+        io.AddMouseButtonEvent(0, true); frame(); io.AddMouseButtonEvent(0, false); return frame();
+    };
+
+    movement::timeline::Plan plan;
+    plan.name = "T1 VIP烟"; plan.map = "de_mirage"; plan.location = "旧站位信息必须保留";
+    plan.notes = "setpos 1296 -352 -167.968750;setang -41.580170 -173.471710 0；原有附注；quit";
+    movement::timeline::Action throw_action;
+    throw_action.kind = movement::timeline::ActionKind::BUTTON; throw_action.duration_ms = 1000;
+    plan.actions.push_back(throw_action);
+    snapshot.grenade_loaded_draft = movement::timeline::plan_json(plan); snapshot.grenade_loaded_revision = 1;
+    snapshot.grenade_selected_path = "cache/grenade/plans/edit-only.json"; snapshot.grenade_catalog_revision = 1;
+    frame();
+    std::string rendered;
+    frame(nullptr, &rendered);
+    const auto occurrences = [&](const std::string& needle) {
+        std::size_t count = 0, at = 0;
+        while ((at = rendered.find(needle, at)) != std::string::npos) { ++count; at += needle.size(); }
+        return count;
+    };
+    expect(occurrences("道具名称") == 1 && occurrences("定位与瞄角指令") == 1 &&
+        occurrences("点位（可选）") == 0 && occurrences("起始说明") == 0 && occurrences("方案名称") == 0,
+        "道具页只渲染一个名称和一个定位指令框，不重复显示旧点位或起始说明");
+    auto actions = click("保存方案");
+    expect(Json::parse(actions.debug_request.plan_text) == snapshot.grenade_loaded_draft,
+        "仅打开和保存精简界面不得迁移或改写旧location、notes及动作");
+    actions = edit("道具名称", "T1 VIP烟 自定义");
+    expect(actions.movement_draft_changed && actions.debug_action == Action::NONE,
+        "单一名称输入框可以直接编辑且不自动保存");
+    const char* changed_notes = "setpos 1300 -351 -167.968750;setang -42.5 -174.25 0；原有附注；quit";
+    actions = edit("定位与瞄角指令", changed_notes);
+    expect(actions.movement_draft_changed && actions.debug_action == Action::NONE &&
+        Json::parse(actions.debug_request.plan_text).at("notes") == changed_notes,
+        "定位指令框必须直接编辑notes，附注完整保留，不是只读提取框");
+    std::string copied; auto& io = ImGui::GetIO();
+    const auto old_set_clipboard = io.SetClipboardTextFn; void* old_clipboard_data = io.ClipboardUserData;
+    io.ClipboardUserData = &copied;
+    io.SetClipboardTextFn = [](void* data, const char* value) { *static_cast<std::string*>(data) = value; };
+    actions = click("复制定位指令");
+    expect(copied == "setpos 1300 -351 -167.968750;setang -42.5 -174.25 0" &&
+        !actions.movement_draft_changed && actions.debug_action == Action::NONE,
+        "编辑后的复制只取setpos/setang，不含附注或后续命令且不执行动作");
+    io.SetClipboardTextFn = old_set_clipboard; io.ClipboardUserData = old_clipboard_data;
+    actions = click("保存方案");
+    auto expected = snapshot.grenade_loaded_draft; expected["name"] = "T1 VIP烟 自定义"; expected["notes"] = changed_notes;
+    expect(actions.debug_action == Action::SAVE_PLAN && actions.debug_request.load_path == snapshot.grenade_selected_path &&
+        Json::parse(actions.debug_request.plan_text) == expected,
+        "保存仅更新编辑过的名称与指令，隐藏的旧location、动作和保存目标不变");
+
+    const auto saved = [](const char* id, const char* name, const char* map) {
+        return MovementSavedPlan{"cache/grenade/plans/" + std::string(id) + ".json",
+            "文件附名 " + std::string(id), map, "", name};
+    };
+    // 故意打乱快照；短名相同的两项由路径确定顺序，选择时不能串到另一项。
+    snapshot.grenade_saved_plans = {
+        saved("ct1", "CT1 VIP烟", "de_mirage"), saved("t10", "T10 B小烟", "de_mirage"),
+        saved("anubis", "T1 B烟", "de_anubis"), saved("vip-b", "T1 VIP烟", "de_mirage"),
+        saved("vip-backup", "T1 VIP烟 备用瞄角", "de_mirage"), saved("t2", "T2 B小烟", "de_mirage"),
+        saved("cache", "T1 B烟", "de_cache"), saved("dust", "T1 B烟", "de_dust2"),
+        saved("other", "A点烟", "de_mirage"), saved("t1-b", "T1 B小烟", "de_mirage"),
+        saved("vip-a", "T1 VIP烟", "de_mirage"), saved("ancient", "T1 B烟", "de_ancient"),
+        saved("train", "T1 B烟", "de_train"), saved("inferno", "T1 B烟", "de_inferno"),
+        saved("nuke", "T1 B烟", "de_nuke"), saved("overpass", "T1 B烟", "de_overpass"),
+        saved("vertigo", "T1 B烟", "de_vertigo"), saved("custom", "T1 B烟", "de_custom")};
+    ++snapshot.grenade_catalog_revision; frame();
+    click("道具方案"); frame(nullptr, &rendered);
+    expect(rendered.find("文件附名") == std::string::npos, "下拉使用raw_name短名，不重复显示文件附名");
+    std::size_t previous = 0;
+    const char* ordered_labels[]{"T1 B小烟 / de_mirage", "T1 VIP烟 / de_mirage", "T1 VIP烟 / de_mirage",
+        "T1 VIP烟 备用瞄角 / de_mirage", "T2 B小烟 / de_mirage", "T10 B小烟 / de_mirage",
+        "CT1 VIP烟 / de_mirage", "A点烟 / de_mirage", "T1 B烟 / de_dust2", "T1 B烟 / de_inferno",
+        "T1 B烟 / de_ancient", "T1 B烟 / de_anubis", "T1 B烟 / de_nuke", "T1 B烟 / de_overpass",
+        "T1 B烟 / de_train", "T1 B烟 / de_vertigo", "T1 B烟 / de_cache", "T1 B烟 / de_custom"};
+    for (const auto* label : ordered_labels) {
+        const auto at = rendered.find(label, previous);
+        expect(at != std::string::npos, "全部地图列表须按固定地图顺序、T数字、CT和其他站位排列，备用瞄角相邻");
+        if (at != std::string::npos) previous = at + std::string(label).size();
+    }
+    actions = popup_click(1);
+    expect(actions.debug_action == Action::LOAD_PLAN && actions.debug_request.load_path == "cache/grenade/plans/vip-a.json",
+        "同名道具按路径稳定排序且第一项载入正确文件");
+    click("道具方案"); actions = popup_click(2);
+    expect(actions.debug_action == Action::LOAD_PLAN && actions.debug_request.load_path == "cache/grenade/plans/vip-b.json",
+        "同名道具第二项使用独立控件身份，不串到第一个路径");
+    click("筛选地图"); actions = popup_click(1);
+    expect(actions.debug_action == Action::NONE && !actions.movement_draft_changed,
+        "筛选地图只修改显示范围，不载入或修改方案");
+    click("道具方案"); frame(nullptr, &rendered);
+    expect(rendered.find("T1 B小烟") != std::string::npos && rendered.find("T10 B小烟") != std::string::npos &&
+        rendered.find(" / de_") == std::string::npos && rendered.find("文件附名") == std::string::npos &&
+        rendered.find("de_dust2") == std::string::npos,
+        "单地图下拉仅显示该地图短名，省略地图和文件附名");
+    actions = popup_click(3);
+    expect(actions.debug_action == Action::LOAD_PLAN && actions.debug_request.load_path == "cache/grenade/plans/vip-backup.json",
+        "筛选后备用瞄角仍保持相邻顺序并载入对应文件");
+    actions = click("保存方案");
+    expect(actions.debug_request.load_path == snapshot.grenade_selected_path && Json::parse(actions.debug_request.plan_text) == expected,
+        "列表点击未获载入回执前，不改变草稿或原保存目标");
+}
+
 }
 
 int main() {
@@ -377,6 +516,7 @@ int main() {
     unsigned char* pixels; int width, height; io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
     interactions();
     grenade_interactions();
+    grenade_editor_cleanup_interactions();
     for (const auto mode : {debug_session::Mode::MOVEMENT_TEST, debug_session::Mode::GRENADE_TEST})
     for (const ImVec2 size : {ImVec2{620, 480}, ImVec2{820, 600}}) {
         io.DisplaySize = size; MovementPanel panel(mode);
