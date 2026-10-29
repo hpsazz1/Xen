@@ -1,4 +1,5 @@
 #include "auto_stop/hud_stop.h"
+#include "auto_stop/stop_driver_internal.h"
 #include <cmath>
 #include <iostream>
 
@@ -23,8 +24,68 @@ struct Fixture {
         core.request(1, time); ack(time); return ack(time);
     }
 };
+void trigger_idle_model_contracts() {
+    {
+        Fixture f;
+        expect(!f.core.idle_for_trigger(base), "未同步不能免制动");
+        f.observe(0, base);
+        expect(f.core.idle_for_trigger(base), "最初真实全松及模型真零立即免制动，不添加固定等待");
+        expect(!f.core.idle_for_trigger(0) && !f.core.idle_for_trigger(base - 1), "非法或回退时刻不能免制动");
+        expect(f.core.idle_for_trigger(base), "只读无效查询不能污染健康模型");
+    }
+    {
+        Fixture f; f.start(1);
+        const auto released = base + 251 * ms;
+        f.observe(0, released);
+        const auto before = f.core.telemetry().velocity;
+        const auto command = f.core.decision().command_id;
+        expect(!f.core.idle_for_trigger(released + 104 * ms), "长按W全松104ms仍有自然滑行量，不得以零键免制动");
+        expect(!f.core.idle_for_trigger(released + 399 * ms), "自然减速尚未到两轴零时持续拒绝");
+        expect(f.core.idle_for_trigger(released + 400 * ms), "既有归一化自然减速归零后无需补反向即可免制动");
+        expect(f.core.telemetry().velocity == before && f.core.decision().command_id == command,
+            "查询不得修改积分时间、速度或生成新反向命令");
+        f.observe(0, released + 10 * ms);
+        expect(f.core.decision().phase == AutoStopPhase::IDLE &&
+            !f.core.idle_for_trigger(released + 104 * ms), "未来查询不得跨过队列中稍早真实输入并污染积分顺序");
+    }
+    {
+        Fixture f; f.start(8);
+        const auto released = base + 11 * ms;
+        f.observe(0, released);
+        expect(!f.core.idle_for_trigger(released + 21 * ms) &&
+            f.core.idle_for_trigger(released + 23 * ms), "短按按真实dt和当前模型量更早归零，不能固定等400ms");
+    }
+    {
+        Fixture f; f.start(1);f.observe(9, base + 191 * ms);
+        const auto released = base + 201 * ms;f.observe(0, released);
+        expect(!f.core.idle_for_trigger(released + 23 * ms) &&
+            f.core.idle_for_trigger(released + 400 * ms), "对角输入必须两轴自然归零，短轴停止不替代长轴");
+    }
+    {
+        Fixture f; f.start();auto d=f.brake(base + 51 * ms);
+        expect(!f.core.idle_for_trigger(base + 1000 * ms), "活动或仍接管输出时不能借未来模型零量免制动");
+        f.core.tick(d.axis_deadline_ns[1]);d=f.ack(d.axis_deadline_ns[1]);
+        f.core.tick(d.completion_ready_ns);
+        const auto zero=f.history.observe(0,1,++f.sequence,d.completion_ready_ns);
+        expect(f.core.resume_after_masked_hold(zero,d.completion_ready_ns) &&
+            f.core.idle_for_trigger(d.completion_ready_ns), "已完成制动并清理的真零不额外叠加固定等待");
+    }
+    {
+        Fixture f;f.start();auto invalid=f.input;invalid.sequence+=2;
+        f.core.observe(invalid,base + 10 * ms);
+        expect(!f.core.idle_for_trigger(base + 1000 * ms), "输入缺口失信后自然时间流逝不能恢复资格");
+        AutoStopConfig config;config.shot_after_release_ms=-1;HudStopController bad(config);
+        WasdInputHistory history;bad.observe(history.observe(0,1,1,base),base);
+        expect(!bad.idle_for_trigger(base), "非法时序配置不能由初始零模型获取资格");
+    }
+    {
+        AutoStopConfig config;config.experimental_hud_model=false;detail::StopDriver h40(config);
+        expect(h40.idle_for_trigger(base), "H40兼容路径保持原有免制动策略");
+    }
+}
 }
 int main() {
+    trigger_idle_model_contracts();
     for (const int hold : {10, 50, 250}) {
         Fixture f; f.start();
         auto d = f.brake(base + (1 + hold) * ms);

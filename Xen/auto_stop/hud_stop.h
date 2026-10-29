@@ -26,6 +26,8 @@ public:
         std::uint8_t applied_mask, std::int64_t ack_ns) noexcept;
     AutoStopDecision decision() const noexcept { return decision_; }
     HudStopTelemetry telemetry() const noexcept { return telemetry_; }
+    // 只读的模型免制动资格；不产生输入，也不声明游戏内真实停稳。
+    bool idle_for_trigger(std::int64_t now_ns) const noexcept;
 private:
     bool active() const noexcept;
     bool advance(std::int64_t now_ns) noexcept;

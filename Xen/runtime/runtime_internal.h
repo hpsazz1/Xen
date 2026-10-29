@@ -119,6 +119,16 @@ inline AutoStopTargetPermits auto_stop_target_permits(
     if (result.tracking_until == std::chrono::steady_clock::time_point{}) return result;
     result.admission_until = auto_stop_target_deadline(frame.detections, config, timing, now,
         frame.control_center_x, frame.control_center_y, &result.reason);
+    // 持Aim键已经表达交火意图。当前真实确认目标可在追入准星前启动制动，
+    // 避免先追入框、再串行等待整段急停；独立扳机仍按自己的当前几何和停稳资格开火。
+    // 未锁定沿用原准星入框准入，滑行/域外/低置信轨迹不能提前接管方向键。
+    if (result.admission_until == std::chrono::steady_clock::time_point{} &&
+        frame.lock_active && selected.range_allows_control &&
+        selected.target.state == TrackState::CONFIRMED && !selected.target.predicted &&
+        std::isfinite(selected.target.confidence) && selected.target.confidence >= config.high_confidence) {
+        result.admission_until = result.tracking_until;
+        result.reason = AutoStopBlockReason::NONE;
+    }
     return result;
 }
 

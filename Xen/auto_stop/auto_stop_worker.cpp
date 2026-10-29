@@ -1345,7 +1345,8 @@ public:
                 report_block();
                 std::unique_lock<std::mutex> lock(mutex);
                 const bool idle = input_ok && events_ok && intent.input_continuous && intent.held_mask == 0 &&
-                    held_wasd(input) == 0 && !active_id && !pending_id && !debt && !fault && !state.cleanup_unknown;
+                    held_wasd(input) == 0 && !active_id && !pending_id && !debt && !fault && !state.cleanup_unknown &&
+                    controller.idle_for_trigger(now_ns());
                 if (trigger_idle != idle) ++trigger_idle_generation;
                 trigger_idle = idle;
                 if (trigger_idle) trigger_idle_cursor = cursor;

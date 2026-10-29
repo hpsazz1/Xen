@@ -407,6 +407,25 @@ std::string auto_stop_metadata_json(const AutoStopConfig& config,
     return output.str();
 }
 
+std::string aim_external_motion_events_json(const RuntimeAimMotionEvidence& evidence) {
+    std::ostringstream output;
+    output << '[';
+    const auto count = std::min<std::size_t>(evidence.event_count, evidence.events.size());
+    for (std::size_t index = 0; index < count; ++index) {
+        if (index) output << ',';
+        const auto& event = evidence.events[index];
+        output << "{\"id\":\"" << event.id
+               << "\",\"issued_at_ns\":\""
+               << std::chrono::duration_cast<std::chrono::nanoseconds>(event.issued_at.time_since_epoch()).count()
+               << "\",\"completed_at_ns\":\""
+               << std::chrono::duration_cast<std::chrono::nanoseconds>(event.completed_at.time_since_epoch()).count()
+               << "\",\"dx_counts\":" << event.dx_counts
+               << ",\"dy_counts\":" << event.dy_counts << '}';
+    }
+    output << ']';
+    return output.str();
+}
+
 std::string trigger_metadata_json(const TriggerConfig& config,
                                   const RuntimeSnapshot& runtime) {
     std::ostringstream output;
@@ -428,6 +447,8 @@ std::string trigger_metadata_json(const TriggerConfig& config,
         output << ']';
     };
     field("hold_virtual_key", config.hold_virtual_key);
+    field("fire_enabled", config.fire_enabled);
+    field("random_timing_enabled", config.random_timing_enabled);
     field("require_stop", config.require_stop);
     field("allow_estimated_stop", config.allow_estimated_stop);
     field("fire_delay_ms", config.fire_delay_ms);
@@ -1593,7 +1614,12 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                "aim_target_motion_maintenance_x_counts,"
                "aim_error_derivative_x_source_pixels_per_second,"
                "aim_filter_reset_x,aim_opening_weight_x,"
-               "background_motion_ms\n";
+               "background_motion_ms,aim_input_motion_recorded,aim_recoil_y_owned,"
+               "aim_external_motion_enabled,aim_external_motion_complete,"
+               "aim_external_motion_revision,aim_external_motion_covered_from_ns,"
+               "aim_external_motion_covered_until_ns,aim_external_motion_source_event_count,"
+               "aim_external_motion_source_first_event_id,aim_external_motion_event_count,"
+               "aim_external_motion_events_truncated,aim_external_motion_events\n";
         csv << std::setprecision(9);
         for (const auto& sample : samples_) {
             csv << sample.sequence << ',' << sample.profile.capture_ms << ','
@@ -1904,7 +1930,19 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                 << sample.aim_control.error_derivative_x_source_pixels_per_second << ','
                 << (sample.aim_control.filter_reset_x ? "true" : "false") << ','
                 << sample.aim_control.opening_weight_x << ','
-                << sample.profile.background_motion_ms << '\n';
+                << sample.profile.background_motion_ms << ','
+                << bool_name(sample.aim_motion.recorded) << ','
+                << bool_name(sample.aim_motion.recoil_y_owned) << ','
+                << bool_name(sample.aim_motion.external_enabled) << ','
+                << bool_name(sample.aim_motion.external_complete) << ','
+                << sample.aim_motion.external_revision << ','
+                << sample.aim_motion.covered_from_ns << ','
+                << sample.aim_motion.covered_until_ns << ','
+                << sample.aim_motion.source_event_count << ','
+                << sample.aim_motion.source_first_event_id << ','
+                << sample.aim_motion.event_count << ','
+                << bool_name(sample.aim_motion.events_truncated) << ','
+                << csv_escape(aim_external_motion_events_json(sample.aim_motion)) << '\n';
         }
 
         std::ostringstream json;
@@ -2559,7 +2597,19 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
                  << (sample.aim_control.filter_reset_x ? "true" : "false")
                  << ", \"aim_opening_weight_x\": "
                  << sample.aim_control.opening_weight_x
-                 << ", \"background_motion_ms\": " << sample.profile.background_motion_ms << "}"
+                 << ", \"background_motion_ms\": " << sample.profile.background_motion_ms
+                 << ", \"aim_input_motion_recorded\": " << bool_name(sample.aim_motion.recorded)
+                 << ", \"aim_recoil_y_owned\": " << bool_name(sample.aim_motion.recoil_y_owned)
+                 << ", \"aim_external_motion_enabled\": " << bool_name(sample.aim_motion.external_enabled)
+                 << ", \"aim_external_motion_complete\": " << bool_name(sample.aim_motion.external_complete)
+                 << ", \"aim_external_motion_revision\": \"" << sample.aim_motion.external_revision << "\""
+                 << ", \"aim_external_motion_covered_from_ns\": \"" << sample.aim_motion.covered_from_ns << "\""
+                 << ", \"aim_external_motion_covered_until_ns\": \"" << sample.aim_motion.covered_until_ns << "\""
+                 << ", \"aim_external_motion_source_event_count\": \"" << sample.aim_motion.source_event_count << "\""
+                 << ", \"aim_external_motion_source_first_event_id\": \"" << sample.aim_motion.source_first_event_id << "\""
+                 << ", \"aim_external_motion_event_count\": " << sample.aim_motion.event_count
+                 << ", \"aim_external_motion_events_truncated\": " << bool_name(sample.aim_motion.events_truncated)
+                 << ", \"aim_external_motion_events\": " << aim_external_motion_events_json(sample.aim_motion) << "}"
                  << (index + 1 == samples_.size() ? '\n' : ',');
         }
         json << "  ]\n}\n";

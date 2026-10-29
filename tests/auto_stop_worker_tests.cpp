@@ -746,6 +746,46 @@ void trigger_idle_contracts() {
     require(!worker.idle_for_trigger(input), "停止owner不再发布空闲事实");
 }
 
+void hud_trigger_idle_after_weapon_cleanup() {
+    using namespace std::chrono_literals;
+    auto fake = std::make_shared<Fake>();
+    std::atomic<std::uint64_t> id{0};
+    AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+        [&] { return ++id; }, [] { return true; }, [] {
+            return AutoStopWeaponContext{true, true, 1, "ak47", 67, true};
+        });
+    AutoStopConfig config{true, 5};
+    config.experimental_hud_model = true;
+    config.release_virtual_keys = {51};
+    require(worker.start(config), "HUD近期松键空闲资格回归启动");
+    fake->physical(0);
+    InputSnapshot input;
+    wait_for([&] { fake->poll_input(input); return worker.idle_for_trigger(input); });
+    require(worker.snapshot().requests == 0 && fake->reports().empty(), "真实初始零无需额外制动或固定等待");
+    fake->physical(1);
+    wait_for([&] { return fake->drained(); });
+    std::this_thread::sleep_for(220ms);
+    // 可信切枪清理会清除旧松键武装，却继续承接真实W输入；不能随后补发旧W反向。
+    { std::lock_guard lock(fake->mutex); fake->extra_keys[51] = true; }
+    wait_for([&] { return worker.snapshot().rescue_succeeded == 1; });
+    require(!worker.snapshot().recovery_pending && fake->released(), "可信切枪清理须保留健康连续输入");
+    { std::lock_guard lock(fake->mutex); fake->extra_keys[51] = false; }
+    const auto reports_before_release = fake->reports();
+    const auto released_at = Clock::now();
+    fake->physical(0);
+    wait_for([&] { return fake->drained(); });
+    std::this_thread::sleep_until(released_at + 104ms);
+    fake->poll_input(input);
+    require(!worker.idle_for_trigger(input), "真实方向全松104ms仍有模型余量，不能伪造无需急停资格");
+    require(worker.snapshot().requests == 0 && fake->reports() == reports_before_release && fake->released(),
+        "旧松键边沿不得补反向，也不得为等待自然减速新增请求或输出");
+    wait_for([&] { fake->poll_input(input); return worker.idle_for_trigger(input); });
+    require(worker.snapshot().requests == 0 && worker.estimated_completion_id() == 0 &&
+        fake->reports() == reports_before_release && fake->released(),
+        "模型自然归零后恢复原地资格，不伪造制动完成编号且不增加键盘输出");
+    worker.stop();
+}
+
 void weapon_session_recovery_contracts(bool hud_reference = false) {
     for (int scenario = 0; scenario < 9; ++scenario) {
         auto fake = std::make_shared<Fake>();
@@ -1625,13 +1665,14 @@ void fault_rescue_retry_contract(bool delayed_poll) {
     worker.stop();
 }
 
-void diagnostic_hud_transaction_contract() {
+void diagnostic_hud_transaction_contract(bool revoke_permission = false) {
     using namespace std::chrono_literals;
     std::vector<int> disabled_reports, disabled_masks;
     for (const bool enabled : {false, true}) {
         auto fake = std::make_shared<Fake>();
         std::atomic<std::uint64_t> id{0};
-        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+        std::atomic<bool> allowed{true};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [&] { return allowed.load(); },
             [&] { return ++id; }, [] { return true; });
         AutoStopConfig config{true, 5}; config.experimental_hud_model = true;
         worker.set_diagnostics_enabled(enabled);
@@ -1647,6 +1688,10 @@ void diagnostic_hud_transaction_contract() {
             state.completion_ready_ns - state.counter_release_ack_ns == 18'000'000,
             "HUD诊断不能改变模型资格边界或最终UP ACK后18ms合同");
         // 正常停止也必须经过活动请求取消、后端清理和owner归还；记录开启时覆盖同一路径。
+        if (revoke_permission) {
+            allowed = false;
+            wait_for([&] { return worker.snapshot().canceled == 1 && fake->released(); });
+        }
         worker.stop();
         std::vector<int> reports, masks;
         { std::lock_guard lock(fake->mutex); reports = fake->software; masks = fake->masks; }
@@ -1661,7 +1706,7 @@ void diagnostic_hud_transaction_contract() {
         require(reports == disabled_reports && masks == disabled_masks && log.dropped_count == 0,
             "HUD诊断开关两轮输出序列须完全相同且有限正常事务无诊断丢失");
         bool started = false, estimated = false, canceled = false, returned = false, stopped = false;
-        int mask_commands = 0, keyboard_commands = 0, cleanups = 0;
+        int mask_commands = 0, keyboard_commands = 0, cleanups = 0, cancellations = 0;
         std::uint64_t previous_sequence = 0;
         for (const auto& event : log.events) {
             require(event.sequence == ++previous_sequence, "HUD单事务诊断事件不得缺号或重排");
@@ -1669,8 +1714,12 @@ void diagnostic_hud_transaction_contract() {
                 event.target.observation_epoch == evidence.observation_epoch && event.target.observation_sequence == evidence.observation_sequence;
             estimated |= event.kind == AutoStopExecutionKind::ESTIMATED && event.request_id == 1 &&
                 event.completion_ready_ns == state.completion_ready_ns;
-            canceled |= event.kind == AutoStopExecutionKind::CANCELED && event.request_id == 1 &&
-                std::string_view(event.reason) == "worker_stopped";
+            if (event.kind == AutoStopExecutionKind::CANCELED && event.request_id == 1) {
+                ++cancellations;
+                const std::string_view reason(event.reason);
+                // stop既可在轮询等待处结束，也可先被本轮许可检查观察到；两者都须完整归还同一请求。
+                canceled |= reason == "permission_revoked" || (!revoke_permission && reason == "worker_stopped");
+            }
             returned |= event.kind == AutoStopExecutionKind::MOVEMENT_RETURNED && event.request_id == 1 && !event.cleanup_unknown;
             stopped |= event.kind == AutoStopExecutionKind::WORKER_STOPPED;
             if (event.kind != AutoStopExecutionKind::BACKEND_RESULT || event.request_id != 1) continue;
@@ -1690,13 +1739,22 @@ void diagnostic_hud_transaction_contract() {
                     "HUD监听物理方向不能混成初始零、反向或释放软件报告");
             }
         }
-        require(started && estimated && canceled && returned && stopped && mask_commands == 4 && keyboard_commands == 3 && cleanups == 1,
+        const bool transaction_complete = started && estimated && canceled && returned && stopped &&
+            mask_commands == 4 && keyboard_commands == 3 && cleanups == 1 && cancellations == 1;
+        if (!transaction_complete) {
+            std::cerr << "HUD诊断阶段：撤销许可=" << revoke_permission << " started=" << started << " estimated=" << estimated <<
+                " canceled=" << canceled << " returned=" << returned << " stopped=" << stopped <<
+                " mask=" << mask_commands << " keyboard=" << keyboard_commands << " cleanup=" << cleanups <<
+                " cancellations=" << cancellations << '\n';
+        }
+        require(transaction_complete,
             "HUD开启记录必须完整经过请求、动态制动、估计资格、取消和清理，不能由关闭日志掩盖锁重入");
     }
 }
 
 void diagnostic_execution_contracts() {
     diagnostic_hud_transaction_contract();
+    diagnostic_hud_transaction_contract(true);
     AutoStopConfig config{true, 5};
     std::vector<int> disabled_reports;
     for (const bool enabled : {false, true}) {
@@ -1883,6 +1941,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--hud-reference") {
+            hud_trigger_idle_after_weapon_cleanup();
             automatic_recovery_contracts(true);
             hud_reference_output_contracts();
             cycle_cleanup_direction_contracts(true);
@@ -1914,6 +1973,7 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--target-loss") return 0;
         weapon_session_recovery_contracts();
         trigger_idle_contracts();
+        if (argc == 1) hud_trigger_idle_after_weapon_cleanup();
         if (argc == 2 && std::string_view(argv[1]) == "--manual-fire") {
             manual_fire_retains_stop_contracts();
             std::cout << "人工开火保持急停专项通过\n";

@@ -186,12 +186,56 @@ struct RuntimeFrameTimingEvidence {
     bool control_steady_valid = false;
 };
 
+inline constexpr std::size_t kRuntimeExternalMotionEventCapacity = 8;
+
+// 固化交给Aim的同一份输入账。只保留固定尾部，离线按id去重/查缺；
+// truncated只描述导出截断，不能改写源账complete或把缺测当零位移。
+struct RuntimeAimMotionEvidence {
+    bool recorded = false;
+    bool recoil_y_owned = false;
+    bool external_enabled = false;
+    bool external_complete = false;
+    std::uint64_t external_revision = 0;
+    std::int64_t covered_from_ns = 0;
+    std::int64_t covered_until_ns = 0;
+    std::uint64_t source_event_count = 0;
+    std::uint64_t source_first_event_id = 0;
+    std::uint32_t event_count = 0;
+    bool events_truncated = false;
+    std::array<ExternalMotionEvent, kRuntimeExternalMotionEventCapacity> events{};
+
+    void capture(const AimFrame& frame) noexcept {
+        *this = {};
+        recorded = true;
+        recoil_y_owned = frame.recoil_y_owned;
+        const auto& source = frame.external_motion;
+        external_enabled = source.enabled;
+        external_complete = source.complete;
+        external_revision = source.revision;
+        covered_from_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            source.covered_from.time_since_epoch()).count();
+        covered_until_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            source.covered_until.time_since_epoch()).count();
+        source_event_count = source.events.size();
+        source_first_event_id = source.events.empty() ? 0 : source.events.front().id;
+        const auto count = source.events.size() < events.size()
+            ? source.events.size() : events.size();
+        event_count = static_cast<std::uint32_t>(count);
+        events_truncated = source.events.size() > count;
+        const auto begin = source.events.size() - count;
+        for (std::size_t index = 0; index < count; ++index) {
+            events[index] = source.events[begin + index];
+        }
+    }
+};
+
 // Runtime 每处理一帧发布一个固定大小的诊断样本。该样本只包含数值和枚举，
 // 不持有图像、模型或设备资源，便于在主线程锁外写入报告。
 struct RuntimePipelineSample {
     std::uint64_t sequence = 0;
     std::uint64_t aim_observation_epoch = 0;
     AimBackgroundMotionX background_motion_x;
+    RuntimeAimMotionEvidence aim_motion;
     RuntimeFrameGeometry geometry;
     RuntimeFrameTimingEvidence frame_timing;
     PipelineProfile profile;

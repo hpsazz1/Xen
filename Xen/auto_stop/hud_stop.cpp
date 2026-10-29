@@ -20,6 +20,16 @@ bool HudStopController::active() const noexcept {
     return decision_.phase == AutoStopPhase::WAITING_ACK || decision_.phase == AutoStopPhase::BRAKING ||
         decision_.phase == AutoStopPhase::SETTLING;
 }
+bool HudStopController::idle_for_trigger(std::int64_t now) const noexcept {
+    if (!timing_valid_ || !synchronized_ || active() || output_started_ || applied_mask_ != 0 ||
+        decision_.phase != AutoStopPhase::IDLE || input_.held_mask != 0 || !input_.history_valid ||
+        !valid_intent(input_, now) || time_ns_ <= 0 || now < time_ns_) return false;
+    // 轮询不能把正式积分游标推进到尚未消费的真实边沿之后。
+    // 只在副本上复用既有零输入自然衰减，不发反向、不添加固定等待。
+    auto projected = *this;
+    return projected.advance(now) && projected.telemetry_.velocity[0] == 0.0 &&
+        projected.telemetry_.velocity[1] == 0.0;
+}
 void HudStopController::invalidate() noexcept {
     synchronized_ = false;
     decision_.phase = AutoStopPhase::INVALID;

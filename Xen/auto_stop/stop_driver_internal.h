@@ -42,6 +42,10 @@ public:
         if (const auto* value=std::get_if<HudStopController>(&driver_)) return value->telemetry();
         return HudStopController{}.telemetry();
     }
+    bool idle_for_trigger(std::int64_t now) const noexcept {
+        if (const auto* value=std::get_if<HudStopController>(&driver_)) return value->idle_for_trigger(now);
+        return true;
+    }
 private:
     std::variant<AutoStopController,HudStopController> driver_;
 };

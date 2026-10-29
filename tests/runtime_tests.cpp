@@ -259,6 +259,60 @@ void test_auto_stop_permits_follow_actual_aim_selection() {
         "准星离开当前有效目标只撤销首次准入，仍保留跟踪期限");
 }
 
+void test_locked_target_starts_braking_before_crosshair_entry() {
+    using Clock = std::chrono::steady_clock;
+    using namespace std::chrono_literals;
+    AimConfig config;
+    config.person_class_ids = {0, 2};
+    config.head_class_ids = {1, 3};
+    Aim aim(config);
+    AimFrame frame;
+    frame.roi_width = frame.roi_height = 320;
+    frame.control_center_x = frame.control_center_y = 160;
+    frame.observation_epoch = 1;
+    frame.lock_active = true;
+    frame.detections = {{190, 120, 230, 220, .95f, 0}};
+    AimResult selected;
+    for (int index = 0; index < 3; ++index) {
+        frame.sequence = index + 1;
+        frame.captured_at = Clock::time_point{1s} + index * 4ms;
+        frame.control_at = frame.captured_at + 1ms;
+        selected = aim.process(frame);
+        if (selected.has_command)
+            expect(aim.record_backend_completed_command(frame.sequence, frame.control_at, 0, 0),
+                "提前制动回归只反馈零输出，不访问设备");
+    }
+    FrameTiming timing;
+    timing.source_time_timing_valid = true;
+    timing.source_clock_uncertainty_ms = 1;
+    timing.source_time_at = frame.captured_at;
+    const auto permits = [&](const AimResult& value) {
+        return runtime::detail::auto_stop_target_permits(frame, value, config, timing, frame.control_at);
+    };
+    expect(selected.has_target && !selected.target.predicted && selected.range_allows_control &&
+               selected.target.state == TrackState::CONFIRMED,
+        "提前制动须先由真实Aim确认当前有效范围内的目标");
+    expect(permits(selected).admission_until > frame.control_at,
+        "已持Aim锁定真实目标时应在准星入框前开始制动，不能等追入框后才起计");
+    frame.lock_active = false;
+    expect(permits(selected).admission_until == Clock::time_point{},
+        "未持Aim键仍保留原准星入框准入，单纯看见人物不提前制动");
+    frame.lock_active = true;
+    for (int invalid = 0; invalid < 5; ++invalid) {
+        auto rejected = selected;
+        if (invalid == 0) rejected.target.predicted = true;
+        if (invalid == 1) rejected.range_allows_control = false;
+        if (invalid == 2) rejected.target.state = TrackState::TENTATIVE;
+        if (invalid == 3) rejected.target.confidence = config.high_confidence * .5f;
+        if (invalid == 4) rejected.target.confidence = std::numeric_limits<float>::quiet_NaN();
+        expect(permits(rejected).admission_until == Clock::time_point{},
+            "滑行、域外、未确认或低置信目标不能取得提前制动资格");
+    }
+    timing.source_time_at = frame.control_at - 50ms;
+    expect(permits(selected).admission_until == Clock::time_point{},
+        "提前制动仍须服从原帧50ms有效期");
+}
+
 void test_close_target_auto_stop_admission_keeps_crosshair_gate() {
     using Clock = std::chrono::steady_clock;
     using namespace std::chrono_literals;
@@ -914,6 +968,7 @@ void test_runtime_preview_held_slots_and_reset() {
 
 int main() {
     test_auto_stop_permits_follow_actual_aim_selection();
+    test_locked_target_starts_braking_before_crosshair_entry();
     test_close_target_auto_stop_admission_keeps_crosshair_gate();
     {
         auto catalog = weapon::default_timing_catalog();

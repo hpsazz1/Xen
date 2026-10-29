@@ -687,6 +687,7 @@ struct Runtime::Impl {
             sample.sequence = frame.timing.sequence;
             sample.aim_observation_epoch = aim_frame.observation_epoch;
             sample.background_motion_x = aim_frame.background_motion_x;
+            if (profile.control_timing_valid) sample.aim_motion.capture(aim_frame);
             sample.frame_timing = runtime::detail::make_frame_timing_evidence(
                 frame.timing, aim_frame, profile.control_timing_valid);
             sample.geometry.encoded_width = frame.encoded_width;

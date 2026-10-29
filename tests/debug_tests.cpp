@@ -16,6 +16,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -1421,6 +1422,48 @@ void test_report_preserves_same_frame_source_timing_fields() {
     samples[0].aim_control.filter_reset_x = true;
     samples[0].aim_control.opening_weight_x = 0.375f;
     samples[0].profile.background_motion_ms = 0.125;
+    AimFrame motion_frame;
+    motion_frame.recoil_y_owned = true;
+    auto& external = motion_frame.external_motion;
+    external.enabled = external.complete = true;
+    external.covered_from = std::chrono::steady_clock::time_point(
+        std::chrono::nanoseconds(18014398509471983LL));
+    external.covered_until = std::chrono::steady_clock::time_point(
+        std::chrono::nanoseconds(18014398509503991LL));
+    for (std::uint64_t index = 0; index < 10; ++index) {
+        external.events.push_back({9007199254740993ULL + index,
+            std::chrono::steady_clock::time_point(std::chrono::nanoseconds(18014398509481983LL + index)),
+            static_cast<int>(index), -static_cast<int>(index),
+            std::chrono::steady_clock::time_point(std::chrono::nanoseconds(18014398509471983LL + index))});
+    }
+    external.revision = external.events.back().id;
+    samples[0].aim_motion.capture(motion_frame);
+    static_assert(std::is_trivially_copyable_v<RuntimeAimMotionEvidence>);
+    expect(samples[0].aim_motion.event_count == 8 &&
+               samples[0].aim_motion.events_truncated &&
+               samples[0].aim_motion.source_event_count == 10 &&
+               samples[0].aim_motion.events.front().id == 9007199254740995ULL &&
+               samples[0].aim_motion.events.back().id == external.revision &&
+               samples[0].aim_motion.events.front().dx_counts == 2 &&
+               samples[0].aim_motion.events.front().dy_counts == -2,
+           "同帧外部账只截取固定8条尾部并保留截断与源总数，不复制整个队列");
+    // 后续改变原动态账，已经进入固定大小样本的尾部不能跟随修改。
+    motion_frame.recoil_y_owned = false;
+    external.events.clear();
+    external.revision = 0;
+    samples[1].aim_motion.capture(motion_frame);
+    external.complete = false;
+    RuntimeAimMotionEvidence incomplete_motion;
+    incomplete_motion.capture(motion_frame);
+    expect(incomplete_motion.recorded && incomplete_motion.external_enabled &&
+               !incomplete_motion.external_complete && incomplete_motion.event_count == 0 &&
+               samples[1].aim_motion.external_complete && samples[1].aim_motion.event_count == 0 &&
+               !samples[2].aim_motion.recorded,
+           "外部账缺失、已测真零与未经过Aim必须不同，源complete不能因无事件补真");
+    incomplete_motion = samples[0].aim_motion;
+    incomplete_motion.capture(motion_frame);
+    expect(!incomplete_motion.events_truncated && incomplete_motion.events.front().id == 0,
+           "重复采样为空时清除上次尾部，不能泄漏旧事件");
 
     // 第二帧保留相邻大整数；源序号和映射无效时不能借本地序号或上一帧补齐。
     auto& second = samples[1].frame_timing;
@@ -1604,7 +1647,18 @@ void test_report_preserves_same_frame_source_timing_fields() {
         {"aim_error_derivative_x_source_pixels_per_second", {"-91.125", "47.875", "0"}, false},
         {"aim_filter_reset_x", {"true", "false", "false"}, false},
         {"aim_opening_weight_x", {"0.375", "0.625", "0"}, false},
-        {"background_motion_ms", {"0.125", "0.25", "0"}, false}};
+        {"background_motion_ms", {"0.125", "0.25", "0"}, false},
+        {"aim_input_motion_recorded", {"true", "true", "false"}, false},
+        {"aim_recoil_y_owned", {"true", "false", "false"}, false},
+        {"aim_external_motion_enabled", {"true", "true", "false"}, false},
+        {"aim_external_motion_complete", {"true", "true", "false"}, false},
+        {"aim_external_motion_revision", {"9007199254741002", "0", "0"}, true},
+        {"aim_external_motion_covered_from_ns", {"18014398509471983", "18014398509471983", "0"}, true},
+        {"aim_external_motion_covered_until_ns", {"18014398509503991", "18014398509503991", "0"}, true},
+        {"aim_external_motion_source_event_count", {"10", "0", "0"}, true},
+        {"aim_external_motion_source_first_event_id", {"9007199254740993", "0", "0"}, true},
+        {"aim_external_motion_event_count", {"8", "0", "0"}, false},
+        {"aim_external_motion_events_truncated", {"true", "false", "false"}, false}};
     expect(csv_rows.size() == samples.size() && json_rows.size() == samples.size(),
            "CSV/JSON 必须分别导出三条同帧时间证据样本");
     for (std::size_t index = 0; index < samples.size(); ++index) {
@@ -1625,6 +1679,28 @@ void test_report_preserves_same_frame_source_timing_fields() {
             expect(json_scalar(json_rows[index], field.name) == expected_json,
                    "JSON 必须逐样本保留整数字符串和布尔有效性，不能发生浮点舍入" + context);
         }
+    }
+
+    const auto event_header = std::find(header.begin(), header.end(), "aim_external_motion_events");
+    const auto event_column = static_cast<std::size_t>(event_header - header.begin());
+    std::ostringstream expected_events;
+    expected_events << '[';
+    for (std::uint64_t index = 2; index < 10; ++index) {
+        if (index != 2) expected_events << ',';
+        expected_events << "{\"id\":\"" << 9007199254740993ULL + index
+                        << "\",\"issued_at_ns\":\"" << 18014398509471983LL + index
+                        << "\",\"completed_at_ns\":\"" << 18014398509481983LL + index
+                        << "\",\"dx_counts\":" << index
+                        << ",\"dy_counts\":-" << index << '}';
+    }
+    expected_events << ']';
+    for (std::size_t index = 0; index < samples.size(); ++index) {
+        if (index >= csv_rows.size() || index >= json_rows.size()) break;
+        const auto expected = index == 0 ? expected_events.str() : "[]";
+        expect(event_header != header.end() && event_column < csv_rows[index].size() &&
+                   csv_rows[index][event_column] == expected &&
+                   json_rows[index].find("\"aim_external_motion_events\": " + expected) != std::string::npos,
+               "固定外部事件尾部CSV须正确转义为一个可解析单元，JSON保留同一顺序/大整数/提交与完成时刻");
     }
 
     error.clear();
@@ -1794,6 +1870,8 @@ void test_trigger_startup_and_final_metadata() {
             TriggerConfig trigger;
             trigger.range_percent = 63.0f;
             trigger.enabled = true;
+            trigger.fire_enabled = (mode % 2) == 0;
+            trigger.random_timing_enabled = (mode % 2) != 0;
             trigger.fire_mode = TriggerFireMode::AUTOMATIC;
             trigger.head_width_percent = 37.5f;
             trigger.body_height_percent = 72.0f;
@@ -1805,7 +1883,11 @@ void test_trigger_startup_and_final_metadata() {
         }
         DebugReport report;
         expect(report.start(config, error), "Trigger报告启动");
-        if (config.trigger_config) config.trigger_config->fire_delay_ms = 999;
+        if (config.trigger_config) {
+            config.trigger_config->fire_delay_ms = 999;
+            config.trigger_config->fire_enabled = !config.trigger_config->fire_enabled;
+            config.trigger_config->random_timing_enabled = !config.trigger_config->random_timing_enabled;
+        }
         RuntimeSnapshot snapshot;
         snapshot.trigger_telemetry_available = mode >= 2;
         if (mode >= 3) {
@@ -1856,6 +1938,9 @@ void test_trigger_startup_and_final_metadata() {
                metadata.find("\"fire_mode\":\"AUTOMATIC\"") != std::string::npos &&
                metadata.find("\"head_class_ids\":[1,3]") != std::string::npos,
                "报告绑定真实启动范围、时序、模式、类别，不跟随后续config修改");
+        expect(metadata.find((mode % 2) == 0 ? "\"fire_enabled\":true" : "\"fire_enabled\":false") != std::string::npos &&
+                   metadata.find((mode % 2) == 0 ? "\"random_timing_enabled\":false" : "\"random_timing_enabled\":true") != std::string::npos,
+               "报告绑定实际启动开火开关与随机时序，不能只报告被随机策略覆盖的fire_delay_ms");
         expect(metadata.find("token") == std::string::npos && metadata.find("host") == std::string::npos,
                "源状态元数据不含认证或网络身份字段");
         if (mode == 1) {
