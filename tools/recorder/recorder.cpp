@@ -178,6 +178,8 @@ struct Recorder::Impl {
         release_output();
         if (video_encoder) { obs_encoder_release(video_encoder); video_encoder = nullptr; }
         if (audio_encoder) { obs_encoder_release(audio_encoder); audio_encoder = nullptr; }
+        // 编码断开会排空在途帧；在shutdown清空统计前补取最终重复帧数。
+        if (obs_started) update_statistics();
         if (obs_started) { obs_set_output_source(0, nullptr); obs_set_output_source(1, nullptr); }
         if (scene) { obs_scene_release(scene); scene = nullptr; }
         marker.reset();
@@ -212,6 +214,8 @@ struct Recorder::Impl {
                 state.encoder_skipped_frames = delta(video_output_get_skipped_frames(video), encoder_skipped_baseline);
             }
         }
+        state.packet_timing_valid = state.render_lagged_frames==0 && state.encoder_skipped_frames==0 &&
+            state.output_dropped_frames==0 && state.render_queue_gaps==0 && state.packet_queue_gaps==0;
     }
     void finish(std::size_t index, EncodedMarker result) {
         if (result.matched) ++state.markers_matched; else ++state.markers_dropped;
@@ -219,6 +223,7 @@ struct Recorder::Impl {
         pending_count.store(pending.size(), std::memory_order_release);
     }
     void collect(bool final) {
+        update_statistics();
         const auto rendered = marker.drain();
         state.render_queue_gaps = rendered.dropped;
         for (const auto& frame : rendered.markers) {
@@ -234,12 +239,14 @@ struct Recorder::Impl {
         for (std::size_t i = 0; i < pending.size();) {
             const auto& item = pending[i];
             EncodedMarker result; result.id = item.id;
-            if (state.render_queue_gaps != item.render_gaps || state.packet_queue_gaps != item.packet_gaps) {
+            if (!state.packet_timing_valid) {
+                result.error = "本段存在渲染/编码重复或诊断缺口，无法仅凭CTS确认可见内容";
+            } else if (state.render_queue_gaps != item.render_gaps || state.packet_queue_gaps != item.packet_gaps) {
                 result.error = "标记期间诊断队列存在缺口，无法确认首个编码可见帧";
             } else {
                 for (const auto& packet : packet_history) {
                     const auto frame = std::find_if(render_history.begin(), render_history.end(), [&](const auto& value) {
-                        return value.id == item.id && value.render_frame_time_ns != 0 && value.render_frame_time_ns == packet.cts;
+                        return value.id == item.id && value.encoder_timing_valid && value.encoder_frame_time_ns != 0 && value.encoder_frame_time_ns == packet.cts;
                     });
                     if (frame == render_history.end()) continue;
                     result.render_begin_steady_ns = frame->render_begin_steady_ns;
@@ -247,6 +254,8 @@ struct Recorder::Impl {
                     result.render_begin_system_unix_ns = frame->render_begin_system_unix_ns;
                     result.render_end_system_unix_ns = frame->render_end_system_unix_ns;
                     result.render_frame_time_ns = frame->render_frame_time_ns;
+                    result.encoder_frame_time_ns = frame->encoder_frame_time_ns;
+                    result.timing_mode = state.gpu_texture_input ? "gpu_previous_completed" : "raw_current";
                     result.video_pts = packet.pts; result.timebase_num = packet.timebase_num; result.timebase_den = packet.timebase_den;
                     result.matched = true; break;
                 }
@@ -272,7 +281,9 @@ struct Recorder::Impl {
         } else {
             obs_data_set_string(settings.value, "rate_control", "CBR");
             obs_data_set_int(settings.value, "bitrate", config.bitrate_kbps);
-            obs_data_set_string(settings.value, "preset", "p5"); obs_data_set_int(settings.value, "bf", 0);
+            obs_data_set_string(settings.value, "preset", config.quality_encoder ? "p5" : "p1");
+            obs_data_set_string(settings.value, "multipass",config.quality_encoder ? "qres" : "disabled");
+            obs_data_set_int(settings.value, "bf", 0);
             obs_data_set_bool(settings.value, "lookahead", false);
         }
         obs_data_set_int(settings.value, "keyint_sec", 2);
@@ -293,6 +304,11 @@ struct Recorder::Impl {
         encoder_total_baseline = video_output_get_total_frames(obs_get_video());
         encoder_skipped_baseline = video_output_get_skipped_frames(obs_get_video());
         if (!obs_output_start(output)) return false;
+        state.encoder_quiescent = false;
+        // OBS的公开id保持orig_info，不能据此识别模块内部reroute。独占video encoder时，
+        // video_output_active只表示实际raw订阅；在成功start后读取真实输入路径。
+        state.gpu_texture_input = !video_output_active(obs_encoder_video(video_encoder));
+        marker.set_gpu_texture_timing(state.gpu_texture_input);
         state.encoder_id = obs_encoder_get_id(video_encoder); state.software_fallback = software;
         return true;
     }
@@ -362,7 +378,7 @@ bool Recorder::start(const Config& config, std::string& error) noexcept {
         obs_post_load_modules();
         impl_->scene = obs_scene_create_private("xen-recorder-scene");
         if (!impl_->scene) throw std::runtime_error("独立录制场景创建失败");
-        if (config.synthetic) impl_->picture = create_synthetic_background(width, height);
+        if (config.synthetic) impl_->picture = create_synthetic_background(width, height,config.synthetic_motion);
         else {
             Data settings(obs_get_source_defaults("monitor_capture"));
             obs_data_set_int(settings.value, "method", 1); // 官方DXGI主显示器源，不创建game_capture。
@@ -398,9 +414,9 @@ bool Recorder::start(const Config& config, std::string& error) noexcept {
         impl_->packets.reset(); impl_->encoded_packets.store(0); impl_->pending_count.store(0);
         impl_->packet_history.clear(); impl_->render_history.clear(); impl_->recent_ids.clear();
         impl_->state.width = width; impl_->state.height = height; impl_->state.fps = config.fps;
-        // OBS32.1 texture路径给当前内容配前轮CTS；raw路径下载前轮内容并配同轮CTS。
-        // soft是CPU帧入口的NVENC硬件编码，避免用经验减一帧冒充准确内容关联。
-        const char* nvenc = "obs_nvenc_h264_soft";
+        // texture走GPU共享纹理；其内容CTS由marker采真实前轮主合成完成值配对。
+        // raw仅用于有界对照，不让游戏高负载时全帧GPU→CPU→GPU回传成为默认路径。
+        const char* nvenc = config.raw_frames ? "obs_nvenc_h264_soft" : "obs_nvenc_h264_tex";
         bool started = encoder_available(nvenc) && impl_->begin_output(nvenc, false);
         if (!started) {
             const auto hardware_error = impl_->output_error("NVENC H.264不可用");
@@ -432,10 +448,21 @@ void Recorder::stop() noexcept {
                 impl_->state.last_error = "正常封尾超过10秒，已请求强制停止；成片完整性未确认";
                 impl_->stop_changed.wait_for(stopped, 3s, [&] { return impl_->output_stopped.load(std::memory_order_acquire); });
             }
+            stopped.unlock();
+            // stop信号先于OBS后台断开编码器；必须等真实inactive才能冻结最终重复帧计数。
+            const auto inactive_deadline = Clock::now()+5s;
+            while ((obs_output_active(impl_->output) || obs_encoder_active(impl_->video_encoder)) &&
+                   Clock::now()<inactive_deadline) std::this_thread::sleep_for(2ms);
+            const bool inactive = !obs_output_active(impl_->output) && !obs_encoder_active(impl_->video_encoder);
+            impl_->state.encoder_quiescent = inactive;
+            if (!inactive) {
+                impl_->state.last_error = "输出已请求停止，但编码器未在期限内断开；封尾与时间完整性未确认";
+                obs_output_force_stop(impl_->output);
+            }
             impl_->update_statistics();
             const bool signal_ok = impl_->output_stopped.load(std::memory_order_acquire) && impl_->stop_code.load() == 0;
             const bool nonempty = std::filesystem::is_regular_file(impl_->state.video_path) && std::filesystem::file_size(impl_->state.video_path) > 0;
-            impl_->state.stop_completed = signal_ok && nonempty && impl_->state.encoded_packets != 0 && impl_->state.last_error.empty();
+            impl_->state.stop_completed = signal_ok && inactive && nonempty && impl_->state.encoded_packets != 0 && impl_->state.last_error.empty();
             if (!impl_->state.stop_completed && impl_->state.last_error.empty())
                 impl_->state.last_error = impl_->output_error("录制未成功封尾，未取得成功停止信号或有效成片");
         }

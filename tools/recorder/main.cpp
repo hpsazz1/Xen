@@ -58,6 +58,9 @@ Options arguments() {
             else if (arg == L"--no-audio") options.config.audio = false;
             else if (arg == L"--audio") options.config.audio = true;
             else if (arg == L"--synthetic") options.config.synthetic = true;
+            else if (arg == L"--synthetic-motion") { options.config.synthetic = true; options.config.synthetic_motion = true; }
+            else if (arg == L"--raw-frames") options.config.raw_frames = true;
+            else if (arg == L"--quality-encoder") options.config.quality_encoder = true;
             else if (arg == L"--allow-software-encoder") options.config.allow_software_encoder = true;
             else throw std::runtime_error("未知命令行选项："+narrow(arg));
         }
@@ -132,10 +135,11 @@ public:
                 log_->finish(recorder_.snapshot());
             }
             const auto s = recorder_.snapshot();
-            const bool index_complete = log_ && log_->local_complete() && s.markers_matched>=2 &&
+            const bool index_complete = log_ && log_->local_complete() && s.packet_timing_valid && s.markers_matched>=2 &&
                 !s.markers_dropped && !s.markers_pending && !s.render_queue_gaps && !s.packet_queue_gaps;
             message_ = !s.stop_completed || !s.last_error.empty() ? "录制结束存在错误："+s.last_error :
-                index_complete ? "已保存录像和同步索引" : "录像已保存；同步索引存在缺口，请查看诊断日志";
+                !index_complete ? "录像已保存；存在重复帧或时间索引缺口，请查看诊断日志" :
+                !log_->auxiliary_complete() ? "录像已保存；辅机首尾同步未完成，请查看下方原因" : "已保存录像和同步索引";
         } catch (const std::exception& e) { message_ = e.what(); failed_ = true; }
         stopping_ = false;
     }
@@ -155,7 +159,7 @@ public:
     bool close_ready() const { return close_when_stopped_ && !running(); }
     int result() const {
         const auto s = recorder_.snapshot();
-        return failed_ || (log_ && !log_->local_complete()) || !s.stop_completed || !s.last_error.empty() || s.markers_matched < 2 ||
+        return failed_ || (log_ && !log_->local_complete()) || !s.packet_timing_valid || !s.stop_completed || !s.last_error.empty() || s.markers_matched < 2 ||
             s.markers_dropped || s.markers_pending || s.packet_queue_gaps || s.render_queue_gaps ? 1 : 0;
     }
     const Config& config() const { return options_.config; }
@@ -238,7 +242,7 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM wparam,LPARAM lpara
             SendMessageW(child,WM_SETFONT,reinterpret_cast<WPARAM>(font),TRUE); return child;
         };
         control(L"STATIC",L"Xen 独立录制 · 全画面 · 默认240 FPS · 不采集系统声音",0,18,18,690,24,0);
-        control(L"STATIC",L"开始后返回游戏即可；停止时自动补尾标记。详细记录需在辅机开启。",0,18,48,690,30,0);
+        control(L"STATIC",L"辅机先开详细记录和Runtime；先停止录制并等保存完成，再关闭辅机Runtime。",0,18,48,690,30,0);
         control(L"BUTTON",L"开始录制",BS_PUSHBUTTON,18,88,140,36,1);
         control(L"BUTTON",L"补一个SYNC",BS_PUSHBUTTON,172,88,140,36,2);
         control(L"BUTTON",L"停止并保存",BS_PUSHBUTTON,326,88,140,36,3);

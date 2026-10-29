@@ -15,6 +15,10 @@ struct RenderedMarker {
     std::int64_t render_begin_steady_ns = 0, render_end_steady_ns = 0;
     std::int64_t render_begin_system_unix_ns = 0, render_end_system_unix_ns = 0;
     std::uint64_t render_frame_time_ns = 0;
+    // GPU纹理路径使用真实上一轮主合成CTS；raw路径使用当前内容CTS。零值表示未知。
+    std::uint64_t encoder_frame_time_ns = 0;
+    bool encoder_timing_valid = false;
+    std::string timing_note;
     bool first_render = false;
     // 零CTS与非空error表示没有取得可匹配的渲染候选，不冒充视频PTS。
     std::string error;
@@ -35,6 +39,8 @@ public:
     bool create(std::uint32_t width = 560, std::uint32_t height = 72) noexcept;
     obs_source_t* source() const noexcept { return source_; } // borrowed。
     bool mark(const std::string& id, std::uint32_t duration_ms = 2000) noexcept;
+    // 必须在对应encoder开始前设置；切换会清空主合成时钟代际。
+    void set_gpu_texture_timing(bool enabled) noexcept;
     MarkerDrain drain();
     void reset() noexcept; // 必须在当前obs_shutdown之前调用。
 private:
@@ -42,6 +48,6 @@ private:
 };
 
 // 返回owned source引用；纯合成背景，不打开屏幕、音频、游戏或输入设备。
-obs_source_t* create_synthetic_background(std::uint32_t width, std::uint32_t height) noexcept;
+obs_source_t* create_synthetic_background(std::uint32_t width, std::uint32_t height, bool motion = false) noexcept;
 }
 #endif

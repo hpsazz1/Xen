@@ -17,6 +17,10 @@ struct Config {
     std::uint32_t width = 0, height = 0, fps = 240, bitrate_kbps = 60000;
     // audio控制系统回环；synthetic始终不打开设备。muxer所需静音AAC轨仍保留。
     bool audio = false, synthetic = false;
+    // 诊断对照可显式选择raw；生产默认共享GPU纹理，避免全帧回传CPU。
+    bool raw_frames = false, synthetic_motion = false;
+    // 高帧率录制默认单遍性能配置；旧HQ仅用于同分辨率/帧率的诊断对照。
+    bool quality_encoder = false;
     // 只在调用方明确选择时允许软件编码；Snapshot始终公开实际编码器。
     bool allow_software_encoder = false;
 };
@@ -26,6 +30,8 @@ struct EncodedMarker {
     std::int64_t render_begin_steady_ns = 0, render_end_steady_ns = 0;
     std::int64_t render_begin_system_unix_ns = 0, render_end_system_unix_ns = 0;
     std::uint64_t render_frame_time_ns = 0;
+    std::uint64_t encoder_frame_time_ns = 0;
+    std::string timing_mode;
     std::int64_t video_pts = 0;
     std::int32_t timebase_num = 0, timebase_den = 0;
     bool matched = false;
@@ -35,6 +41,10 @@ struct EncodedMarker {
 
 struct Snapshot {
     bool running = false, stopping = false, stop_completed = true, software_fallback = false;
+    // 只代表无已知渲染/编码重复或诊断缺口，实际蓝条仍需成片验证。
+    bool packet_timing_valid = true;
+    bool encoder_quiescent = true;
+    bool gpu_texture_input = false;
     std::uint32_t width = 0, height = 0, fps = 0;
     std::uint64_t total_frames = 0, encoded_packets = 0, bytes_written = 0;
     std::uint64_t output_dropped_frames = 0, render_total_frames = 0, render_lagged_frames = 0;

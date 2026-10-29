@@ -20,6 +20,41 @@ inline bool valid_marker_id(std::string_view id) noexcept {
 struct MarkerFrame {
     bool draw = false, record = false, first = false, timed_out = false;
 };
+enum class FrameTimingStatus : std::uint8_t {
+    VALID, NO_COMPLETED_FRAME, INVALID_CURRENT, DUPLICATE_CURRENT, ROLLBACK,
+    INVALID_COMPLETION, COMPLETION_GAP
+};
+struct FrameTimingCandidate {
+    std::uint64_t encoder_cts=0;
+    FrameTimingStatus status=FrameTimingStatus::NO_COMPLETED_FRAME;
+};
+// 记录真实主合成回调，绝不按帧率减一帧。不同帧间隔照实映射，缺口明确未知。
+class MainRenderClock {
+public:
+    void reset() noexcept { completed_=0; last_content_=0; completed_valid_=false; }
+    void completed(std::uint64_t cts) noexcept {
+        if (!cts) { completed_=0; completed_valid_=false; return; }
+        const bool ordered=!completed_ || cts>completed_;
+        completed_=cts; completed_valid_=ordered;
+    }
+    FrameTimingCandidate candidate(std::uint64_t content,bool gpu) noexcept {
+        if (!content) { reset(); return {0,FrameTimingStatus::INVALID_CURRENT}; }
+        if (last_content_ && content<last_content_) {
+            reset(); last_content_=content; return {0,FrameTimingStatus::ROLLBACK};
+        }
+        if (last_content_==content) return {0,FrameTimingStatus::DUPLICATE_CURRENT};
+        const bool missed=last_content_ && completed_<last_content_;
+        last_content_=content;
+        if (!gpu) return {content,FrameTimingStatus::VALID};
+        if (!completed_) return {0,FrameTimingStatus::NO_COMPLETED_FRAME};
+        if (!completed_valid_ || completed_>=content) return {0,FrameTimingStatus::INVALID_COMPLETION};
+        if (missed) return {0,FrameTimingStatus::COMPLETION_GAP};
+        return {completed_,FrameTimingStatus::VALID};
+    }
+private:
+    std::uint64_t completed_=0,last_content_=0;
+    bool completed_valid_=false;
+};
 // 时间由调用者注入；可见时长从第一次真实渲染开始，不从热键请求开始推测。
 class MarkerLifecycle {
 public:
@@ -57,7 +92,8 @@ private:
 struct RawRenderedMarker {
     MarkerId id{};
     std::int64_t begin_steady=0, end_steady=0, begin_system=0, end_system=0;
-    std::uint64_t frame_time=0;
+    std::uint64_t frame_time=0, encoder_frame_time=0;
+    FrameTimingStatus timing_status=FrameTimingStatus::NO_COMPLETED_FRAME;
     bool first=false, timed_out=false;
 };
 class RenderQueue {

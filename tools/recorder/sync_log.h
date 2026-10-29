@@ -22,6 +22,7 @@ public:
     void finish(const Snapshot& snapshot);
     std::string status() const;
     bool local_complete() const;
+    bool auxiliary_complete() const;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

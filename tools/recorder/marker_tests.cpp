@@ -10,6 +10,46 @@ int main() {
         if (!success) { std::cerr<<reason<<'\n'; ++failures; }
     };
     {
+        MainRenderClock clock;
+        auto timing=clock.candidate(100,true);
+        check(!timing.encoder_cts && timing.status==FrameTimingStatus::NO_COMPLETED_FRAME,
+            "GPU首帧没有已完成主合成样本，必须未知");
+        clock.completed(100);
+        timing=clock.candidate(137,true);
+        check(timing.encoder_cts==100 && timing.status==FrameTimingStatus::VALID,
+            "GPU当前内容对应真实上一轮完成CTS");
+        clock.completed(137);
+        timing=clock.candidate(901,true);
+        check(timing.encoder_cts==137,"不等间隔使用实际完成CTS，不能减固定一帧");
+        timing=clock.candidate(901,true);
+        check(!timing.encoder_cts && timing.status==FrameTimingStatus::DUPLICATE_CURRENT,
+            "同内容CTS重复source渲染不能猜新编码CTS");
+        timing=clock.candidate(950,true);
+        check(!timing.encoder_cts && timing.status==FrameTimingStatus::COMPLETION_GAP,
+            "上一内容已渲染但主合成完成回调缺失时映射未知");
+        clock.completed(950);
+        timing=clock.candidate(1100,true);
+        check(timing.encoder_cts==950,"缺口后取得新实际完成基准可以恢复");
+        clock.completed(1100); clock.completed(1100);
+        timing=clock.candidate(1200,true);
+        check(!timing.encoder_cts && timing.status==FrameTimingStatus::INVALID_COMPLETION,
+            "重复完成CTS不能静默充当可信上一轮");
+        clock.completed(1200);
+        timing=clock.candidate(1000,true);
+        check(!timing.encoder_cts && timing.status==FrameTimingStatus::ROLLBACK,
+            "内容时钟倒退切断旧代际");
+        clock.completed(1000);
+        timing=clock.candidate(1050,true);
+        check(timing.encoder_cts==1000,"倒退后只承接新的真实完成基准");
+        clock.reset();
+        check(!clock.candidate(2000,true).encoder_cts,"重置/重新录制不能继承旧previous CTS");
+        clock.reset();
+        check(clock.candidate(3000,false).encoder_cts==3000,"raw编码模式保留当前内容CTS");
+        clock.completed(3000);
+        check(!clock.candidate(0,true).encoder_cts,"零内容时戳明确未知且清空代际");
+        check(!clock.candidate(4000,true).encoder_cts,"零时戳后不复用旧完成帧");
+    }
+    {
         MarkerLifecycle state;
         check(!state.request("",100,2000) && !state.request("SYNC newline\n",100,2000) &&
             !state.request(std::string(97,'A'),100,2000) && !state.request("SYNC-1",0,2000),

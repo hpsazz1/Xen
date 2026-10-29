@@ -19,6 +19,10 @@ int main() {
         require(marker_record(marker).at("video_seconds").is_null(),"未匹配标记不能宣称视频时间");
         marker.matched=true;
         require(marker_record(marker).at("video_seconds")==1.5,"PTS有理数单位错误");
+        marker.render_frame_time_ns=101; marker.encoder_frame_time_ns=77; marker.timing_mode="gpu_previous_completed";
+        const auto record=marker_record(marker);
+        require(record.at("render_frame_time_ns")=="101" && record.at("encoder_frame_time_ns")=="77" &&
+            record.at("timing_mode")=="gpu_previous_completed","内容CTS与编码候选CTS不能混为一域");
         std::cout << "同步映射与未匹配语义通过\n"; return 0;
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

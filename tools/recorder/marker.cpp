@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstring>
 #include <mutex>
+#include <memory>
 #include <new>
 #include <string_view>
 
@@ -40,13 +41,16 @@ struct MarkerData {
     std::mutex mutex;
     detail::MarkerLifecycle lifecycle;
     detail::RenderQueue events;
+    detail::MainRenderClock main_clock;
     gs_texture_t* texture=nullptr;
     std::uint32_t width=560,height=72;
     bool rendered=false;
+    bool gpu_texture_timing=false;
 };
 struct BackgroundData {
     gs_texture_t* texture=nullptr;
     std::uint32_t width=0,height=0;
+    bool motion=false;
 };
 
 // 只在mark冷路径分配GDI对象。纹理每个像素都不透明，文字不依赖桌面覆盖窗口。
@@ -106,16 +110,28 @@ bool draw_texture(gs_texture_t* texture,std::uint32_t width,std::uint32_t height
 }
 const char* marker_name(void*) { return "Xen录像同步标记"; }
 const char* background_name(void*) { return "Xen录制合成背景"; }
+void main_rendered(void* opaque) {
+    auto& data=*static_cast<MarkerData*>(opaque);
+    const auto cts=obs_get_video_frame_time();
+    std::lock_guard lock(data.mutex);
+    // 无论本轮标记是否可见都记录；主合成回调结束前不把当前CTS称为上一轮。
+    data.main_clock.completed(cts);
+}
 void* marker_create(obs_data_t* settings,obs_source_t*) {
     const auto width=obs_data_get_int(settings,"width"),height=obs_data_get_int(settings,"height");
     if (width<64 || width>4096 || height<24 || height>1024) return nullptr;
     auto* result=new(std::nothrow) MarkerData;
-    if (result) { result->width=static_cast<std::uint32_t>(width); result->height=static_cast<std::uint32_t>(height); }
+    if (result) {
+        result->width=static_cast<std::uint32_t>(width); result->height=static_cast<std::uint32_t>(height);
+        obs_add_main_rendered_callback(main_rendered,result);
+    }
     return result;
 }
 void marker_destroy(void* opaque) {
     auto* data=static_cast<MarkerData*>(opaque);
     if (!data) return;
+    // remove等待在途回调退出；不能持状态锁或graphics锁再等待回调注册表互斥锁。
+    obs_remove_main_rendered_callback(main_rendered,data);
     // 与渲染同样按graphics→状态锁顺序；绝不持状态锁等待图形线程。
     { GraphicsScope graphics; if (data->texture) gs_texture_destroy(data->texture); }
     delete data;
@@ -127,6 +143,7 @@ void marker_render(void* opaque,gs_effect_t*) {
     const auto began=steady_ns(),system_began=system_ns();
     const auto frame_time=obs_get_video_frame_time();
     std::lock_guard lock(data.mutex);
+    const auto timing=data.main_clock.candidate(frame_time,data.gpu_texture_timing);
     const auto state=data.lifecycle.frame(began,frame_time);
     const bool drawn=state.draw && data.texture && draw_texture(data.texture,data.width,data.height);
     if ((state.record && drawn) || state.timed_out) {
@@ -136,6 +153,8 @@ void marker_render(void* opaque,gs_effect_t*) {
         event.begin_steady=began; event.begin_system=system_began;
         event.end_system=system_ns(); event.end_steady=steady_ns();
         event.frame_time=state.timed_out ? 0 : frame_time;
+        event.encoder_frame_time=state.timed_out ? 0 : timing.encoder_cts;
+        event.timing_status=timing.status;
         data.events.push(event);
     }
 }
@@ -145,9 +164,19 @@ void* background_create(obs_data_t* settings,obs_source_t*) {
     auto* result=new(std::nothrow) BackgroundData;
     if (!result) return nullptr;
     result->width=static_cast<std::uint32_t>(width); result->height=static_cast<std::uint32_t>(height);
-    const std::uint32_t pixel=0xff242a34U;
-    const std::uint8_t* bytes=reinterpret_cast<const std::uint8_t*>(&pixel);
-    { GraphicsScope graphics; result->texture=gs_texture_create(1,1,GS_BGRA,1,&bytes,0); }
+    result->motion=obs_data_get_bool(settings,"motion");
+    const std::uint32_t texture_width=result->motion ? 1024U : 1U;
+    const auto count=static_cast<std::size_t>(texture_width)*texture_width;
+    std::unique_ptr<std::uint32_t[]> pixels(new(std::nothrow) std::uint32_t[count]);
+    if (!pixels) { delete result; return nullptr; }
+    std::uint32_t random=0x73198ad5U;
+    for (std::size_t index=0;index<count;++index) {
+        random^=random<<13; random^=random>>17; random^=random<<5;
+        const auto gray=32U+(random&191U);
+        pixels[index]=result->motion ? 0xff000000U|(gray<<16)|(gray<<8)|gray : 0xff242a34U;
+    }
+    const std::uint8_t* bytes=reinterpret_cast<const std::uint8_t*>(pixels.get());
+    { GraphicsScope graphics; result->texture=gs_texture_create(texture_width,texture_width,GS_BGRA,1,&bytes,0); }
     if (!result->texture) { delete result; return nullptr; }
     return result;
 }
@@ -160,7 +189,16 @@ void background_destroy(void* opaque) {
 std::uint32_t background_width(void* opaque) { return static_cast<BackgroundData*>(opaque)->width; }
 std::uint32_t background_height(void* opaque) { return static_cast<BackgroundData*>(opaque)->height; }
 void background_render(void* opaque,gs_effect_t*) {
-    auto& data=*static_cast<BackgroundData*>(opaque); draw_texture(data.texture,data.width,data.height);
+    auto& data=*static_cast<BackgroundData*>(opaque);
+    if (!data.motion) { draw_texture(data.texture,data.width,data.height); return; }
+    // 噪点纹理只冷生成一次；每帧只做GPU平移，填满画面且不逐帧CPU画图。
+    const auto milliseconds=obs_get_video_frame_time()/1000000ULL;
+    const float x=static_cast<float>(milliseconds%5000ULL)/5000.0f;
+    const float y=static_cast<float>(milliseconds%7000ULL)/7000.0f;
+    gs_matrix_push();
+    gs_matrix_translate3f(-x*data.width,-y*data.height,0.0f);
+    draw_texture(data.texture,data.width*2,data.height*2);
+    gs_matrix_pop();
 }
 bool source_registered(const char* wanted) noexcept {
     const char* id=nullptr;
@@ -220,6 +258,13 @@ bool MarkerSource::mark(const std::string& id,std::uint32_t duration_ms) noexcep
         return true;
     } catch (...) { return false; }
 }
+void MarkerSource::set_gpu_texture_timing(bool enabled) noexcept {
+    if (!source_) return;
+    auto& data=*static_cast<MarkerData*>(obs_obj_get_data(source_));
+    std::lock_guard lock(data.mutex);
+    data.gpu_texture_timing=enabled;
+    data.main_clock.reset();
+}
 MarkerDrain MarkerSource::drain() {
     MarkerDrain result;
     if (!source_) return result;
@@ -244,6 +289,17 @@ MarkerDrain MarkerSource::drain() {
         event.render_begin_steady_ns=raw.begin_steady; event.render_end_steady_ns=raw.end_steady;
         event.render_begin_system_unix_ns=raw.begin_system; event.render_end_system_unix_ns=raw.end_system;
         event.render_frame_time_ns=raw.frame_time;
+        event.encoder_frame_time_ns=raw.encoder_frame_time;
+        event.encoder_timing_valid=raw.encoder_frame_time!=0 && raw.timing_status==detail::FrameTimingStatus::VALID;
+        switch (raw.timing_status) {
+        case detail::FrameTimingStatus::VALID: break;
+        case detail::FrameTimingStatus::NO_COMPLETED_FRAME: event.timing_note="没有上一轮已完成主合成CTS"; break;
+        case detail::FrameTimingStatus::INVALID_CURRENT: event.timing_note="当前内容CTS未知"; break;
+        case detail::FrameTimingStatus::DUPLICATE_CURRENT: event.timing_note="同内容CTS重复渲染，映射未知"; break;
+        case detail::FrameTimingStatus::ROLLBACK: event.timing_note="内容CTS倒退，旧时钟代际失效"; break;
+        case detail::FrameTimingStatus::INVALID_COMPLETION: event.timing_note="主合成完成CTS重复、倒退或未早于当前帧"; break;
+        case detail::FrameTimingStatus::COMPLETION_GAP: event.timing_note="此前内容帧没有对应主合成完成样本"; break;
+        }
         if (raw.timed_out) event.error="标记请求后两秒内没有取得实际渲染帧";
         result.markers.push_back(std::move(event));
     }
@@ -252,13 +308,14 @@ MarkerDrain MarkerSource::drain() {
 void MarkerSource::reset() noexcept {
     if (source_) { obs_source_release(source_); source_=nullptr; }
 }
-obs_source_t* create_synthetic_background(std::uint32_t width,std::uint32_t height) noexcept {
+obs_source_t* create_synthetic_background(std::uint32_t width,std::uint32_t height,bool motion) noexcept {
     try {
         if (width<1 || width>8192 || height<1 || height>8192) return nullptr;
         register_sources();
         auto* settings=obs_data_create();
         if (!settings) return nullptr;
         obs_data_set_int(settings,"width",width); obs_data_set_int(settings,"height",height);
+        obs_data_set_bool(settings,"motion",motion);
         auto* result=obs_source_create_private(kBackgroundSourceId,"Xen合成不透明背景",settings);
         obs_data_release(settings);
         if (result && !obs_obj_get_data(result)) { obs_source_release(result); return nullptr; }

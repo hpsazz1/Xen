@@ -199,6 +199,9 @@ def verify(args: argparse.Namespace) -> dict:
         if closed is not None:
             if closed.get("stop_completed") is not True or closed.get("last_error") or closed.get("local_write_failure"):
                 errors.append("索引封尾存在错误或未完成")
+            for name in ("encoder_quiescent", "packet_timing_valid", "packet_mapping_complete"):
+                if name in closed and closed[name] is not True:
+                    errors.append(f"封尾时间完整性未确认：{name}")
             for name in ("markers_dropped", "markers_pending", "render_queue_gaps", "packet_queue_gaps",
                          "sync_queue_dropped", "render_lagged_frames", "encoder_skipped_frames", "output_dropped_frames"):
                 if closed.get(name, 0):

@@ -27,6 +27,8 @@ Json marker_record(const EncodedMarker& m) {
         {"render_begin_system_unix_ns",std::to_string(m.render_begin_system_unix_ns)},
         {"render_end_system_unix_ns",std::to_string(m.render_end_system_unix_ns)},
         {"render_frame_time_ns",std::to_string(m.render_frame_time_ns)},
+        {"encoder_frame_time_ns",std::to_string(m.encoder_frame_time_ns)},{"timing_mode",m.timing_mode},
+        {"match_scope","packet_candidate; requires_closed_packet_timing_valid_and_decoded_marker_verification"},
         {"video_pts",m.video_pts},{"timebase_num",m.timebase_num},{"timebase_den",m.timebase_den},
         {"error",m.error},{"video_seconds",nullptr}};
     if (m.matched && m.timebase_num > 0 && m.timebase_den > 0)
@@ -201,11 +203,18 @@ void SyncLog::submit(EncodedMarker marker) {
 }
 std::string SyncLog::status() const { std::lock_guard lock(impl_->mutex); return impl_->message; }
 bool SyncLog::local_complete() const { std::lock_guard lock(impl_->mutex); return !impl_->local_failure && impl_->dropped==0; }
+bool SyncLog::auxiliary_complete() const {
+    std::lock_guard lock(impl_->mutex);
+    return impl_->url.empty() || (impl_->finished && impl_->failed==0 && impl_->synced>=2);
+}
 void SyncLog::finish(const Snapshot& s) {
     auto& p = *impl_;
     { std::lock_guard lock(p.mutex); if (p.finished) return; p.closing = true; }
     p.condition.notify_one(); if (p.thread.joinable()) p.thread.join();
+    // 关闭统计约束之前的packet候选，不能将中途一次成功回调外推为整段有效。
     p.write({{"type","closed"},{"stop_completed",s.stop_completed},{"encoder",s.encoder_id},
+        {"encoder_quiescent",s.encoder_quiescent},{"packet_timing_valid",s.packet_timing_valid},
+        {"input_path",s.gpu_texture_input ? "shared_gpu_texture" : "raw_cpu_frame"},
         {"width",s.width},{"height",s.height},{"fps",s.fps},{"total_frames",s.total_frames},
         {"encoded_packets",s.encoded_packets},{"bytes_written",s.bytes_written},
         {"markers_requested",s.markers_requested},{"markers_matched",s.markers_matched},
@@ -217,7 +226,10 @@ void SyncLog::finish(const Snapshot& s) {
         {"active_render_fps",s.active_render_fps},{"average_render_ns",s.average_render_ns},
         {"sync_queue_dropped",p.dropped},{"local_write_failure",p.local_failure},
         {"auxiliary_queued",p.synced},{"auxiliary_failed",p.failed},
-        {"software_fallback",s.software_fallback},{"last_error",s.last_error}});
+        {"packet_mapping_complete",s.stop_completed && s.encoder_quiescent && s.packet_timing_valid &&
+            s.markers_matched>=2 && s.markers_dropped==0 && s.markers_pending==0 && !p.local_failure && p.dropped==0},
+        {"auxiliary_exchange_complete",!p.url.empty() && p.synced>=2 && p.failed==0},
+        {"capture_verified",false},{"software_fallback",s.software_fallback},{"last_error",s.last_error}});
     p.finished = true; p.stream.close();
 }
 }

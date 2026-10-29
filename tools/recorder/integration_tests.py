@@ -168,15 +168,19 @@ def validate_sidecar(recording, auxiliary, refusal):
     closed = rows[-1]
     require(closed.get("stop_completed") is True and closed.get("last_error") == "" and
             closed.get("local_write_failure") is False, "录制或本地索引未成功封尾")
+    require(closed.get("encoder_quiescent") is True and closed.get("packet_timing_valid") is True and
+            closed.get("packet_mapping_complete") is True, "最终编码断开或本地时间完整性未确认")
     require((closed.get("width"), closed.get("height"), closed.get("fps")) == (1280, 720, 120), "未使用指定合成图和120FPS")
     require(closed.get("markers_requested") == closed.get("markers_matched") == 2 and
             closed.get("encoded_packets", 0) > 0 and closed.get("total_frames", 0) > 0, "标记数量或实际编码计数不符")
     for key in ("markers_dropped", "markers_pending", "render_queue_gaps", "packet_queue_gaps", "sync_queue_dropped"):
         require(closed.get(key) == 0, f"存在{key}缺口")
     if refusal:
+        require(closed.get("auxiliary_exchange_complete") is False,"网络拒绝不能宣称首尾辅机交换完整")
         require(closed.get("auxiliary_queued") == 0 and closed.get("auxiliary_failed") == 2 and
                 all(row.get("state") == "failed" and row.get("reason") for row in syncs), "网络拒绝不能抹除本地标记，应保留两条同步失败")
     else:
+        require(closed.get("auxiliary_exchange_complete") is True,"两对网络交换应有明确完成状态")
         require(not auxiliary.failures and len(auxiliary.requests) == 4 and
                 len(auxiliary.paints) == len(auxiliary.receipts) == 2, "回环端未完整收到严格的两对paint/receipt")
         require(closed.get("auxiliary_queued") == 2 and closed.get("auxiliary_failed") == 0, "辅机同步计数不符")
