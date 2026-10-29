@@ -364,6 +364,7 @@ std::string auto_stop_metadata_json(const AutoStopConfig& config,
            << ",\"counter_hold_ms\":" << config.counter_hold_ms
            << ",\"shot_after_release_ms\":" << config.shot_after_release_ms
            << ",\"status\":\"" << AutoStopStatusName(snapshot.status)
+           << "\",\"block_reason\":\"" << AutoStopBlockReasonName(snapshot.block_reason)
            << "\",\"device_protocol_available\":"
            << bool_name(snapshot.device_protocol_available)
            << ",\"stop_evidence_available\":"
@@ -1935,6 +1936,7 @@ bool DebugReport::finalize(const RuntimeSnapshot& final_snapshot,
             json << "  \"auto_stop\": " << auto_stop_metadata_json(
                 *config_.auto_stop_config, final_snapshot.auto_stop) << ",\n";
         }
+        json << "  \"auto_stop_execution\": " << auto_stop_execution_json(final_snapshot) << ",\n";
         if (config_.recoil_config) json << "  \"recoil\": " << recoil_metadata_json(*config_.recoil_config, final_snapshot) << ",\n";
         if (config_.trigger_config) {
             json << "  \"trigger\": " << trigger_metadata_json(*config_.trigger_config, final_snapshot) << ",\n";

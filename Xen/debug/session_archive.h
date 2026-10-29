@@ -11,6 +11,7 @@ struct SessionArchiveConfig {
     // 1..128 批；每批最多 10000 帧及 2048 个 Trigger 事件，整个队列最多 12000 帧。
     std::size_t queue_capacity = 32;
     std::uint64_t trigger_sequence_baseline = 0;
+    std::uint64_t auto_stop_sequence_baseline = 0;
 };
 
 struct SessionArchiveStatus {
@@ -18,6 +19,7 @@ struct SessionArchiveStatus {
     std::uint64_t accepted_samples = 0, written_samples = 0, dropped_samples = 0;
     // marker_count只计已成功发布的标记，不计排队请求或发布失败。
     std::uint64_t written_segments = 0, trigger_events_dropped = 0, marker_count = 0;
+    std::uint64_t auto_stop_events_dropped = 0;
     std::uint64_t dropped_batches = 0;
     std::uint64_t coalesced_batches = 0, queue_capacity_rejections = 0, sample_capacity_rejections = 0;
     std::size_t queued_batches = 0;
@@ -35,6 +37,8 @@ public:
     bool submit(std::span<const RuntimePipelineSample>, const RuntimeSnapshot&) noexcept;
     // 同时保存接收时刻的 steady/system 时钟；窗口为前后各 30 秒。
     bool mark(const std::string& label = "manual") noexcept;
+    // 主机paint/receipt原始证据由既有后台落盘，接收时刻不能冒充视频呈现时刻。
+    bool mark_video_sync(const std::string& metadata_json) noexcept;
     // 上游读取失败等未能交付样本的缺口不能伪装成完整会话。
     void note_gap(const std::string& reason) noexcept;
     void stop() noexcept;

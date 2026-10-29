@@ -20,6 +20,7 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -38,6 +39,7 @@ using Json = nlohmann::json;
 using Clock = std::chrono::steady_clock;
 constexpr std::size_t kMaximumHeader = 8192;
 constexpr std::size_t kMaximumBody = 1024;
+constexpr std::size_t kMaximumSyncBody = 4096;
 constexpr std::size_t kMaximumResponse = 1024 * 1024;
 constexpr std::size_t kMaximumCatalogEntries = 512;
 constexpr std::size_t kMaximumPlanBytes = 16 * 1024 * 1024;
@@ -46,6 +48,8 @@ constexpr auto kCatalogTimeout = std::chrono::milliseconds(750);
 constexpr auto kRequestTimeout = std::chrono::seconds(2);
 constexpr auto kCaptureHeartbeat = std::chrono::seconds(1);
 constexpr std::size_t kMaximumCapturePlan = 1024 * 1024;
+constexpr std::size_t kMaximumSyncQueue = 16, kMaximumSyncMarkers = 64;
+constexpr std::int64_t kMaximumSyncRoundTripNs = 2000000000;
 std::atomic<std::uint64_t> service_sequence{0};
 
 struct ScopedSocket {
@@ -126,6 +130,33 @@ bool capture_hotkey_conflicts(const AppConfig& config, int virtual_key) {
         (config.movement.enabled && ((config.movement.spin_enabled && config.movement.spin_trigger == movement::Trigger::KEY &&
             config.movement.spin_virtual_key == virtual_key) || (config.movement.large_enabled &&
             config.movement.large_trigger == movement::Trigger::KEY && config.movement.large_virtual_key == virtual_key)));
+}
+std::int64_t sync_steady_ns() noexcept {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+}
+bool sync_identifier(const Json& document, const char* key) {
+    const auto value = document.find(key);
+    if (value == document.end() || !value->is_string()) return false;
+    const auto& text = value->get_ref<const std::string&>();
+    return !text.empty() && text.size() <= 96 &&
+        text.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-") == std::string::npos;
+}
+bool sync_stamp(const Json& document, const char* key, std::int64_t& result) {
+    const auto value = document.find(key);
+    if (value == document.end() || !value->is_string()) return false;
+    const auto& text = value->get_ref<const std::string&>();
+    if (text.empty() || text.size() > 19 || text.find_first_not_of("0123456789") != std::string::npos) return false;
+    const auto parsed = std::from_chars(text.data(),text.data() + text.size(),result);
+    return parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size() && result > 0;
+}
+// 所有差先在各自时钟域内计算；巨大跨机纪元不得先转double相减。
+bool sync_mapped_time(std::int64_t source_paint, std::int64_t source_send,
+                      std::int64_t auxiliary_received, std::int64_t half_round_trip,
+                      std::int64_t& mapped) noexcept {
+    const auto before_send = source_send - source_paint;
+    if (auxiliary_received <= before_send || auxiliary_received - before_send <= half_round_trip) return false;
+    mapped = auxiliary_received - before_send - half_round_trip;
+    return true;
 }
 // 复用正式 Plan 解析；库文件格式/重复字段/注释规则与正式库保持一致。
 // 网页额外限制总扫描量，并在分块读取及 JSON 事件间协作停止。
@@ -230,7 +261,8 @@ int request_target(std::string_view request, std::string& method, std::string& t
         if (name == "transfer-encoding" || name == "expect") return 400;
         if (name == "content-length") {
             const auto parsed = std::from_chars(value.data(), value.data() + value.size(), length);
-            if (length_seen || parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() || length > kMaximumBody) return 400;
+            const auto maximum = path == "/sync-marker.json" ? kMaximumSyncBody : kMaximumBody;
+            if (length_seen || parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() || length > maximum) return 400;
             length_seen = true;
         }
         if (name == "content-type") content_type = value;
@@ -239,7 +271,7 @@ int request_target(std::string_view request, std::string& method, std::string& t
         begin = next + 2;
     }
     target = path;
-    if (method == "POST" && target != "/select.json") return 405;
+    if (method == "POST" && target != "/select.json" && target != "/sync-marker.json") return 405;
     if (method == "GET" && length != 0) return 400;
     if (method == "POST" && (!length_seen || length == 0 || content_type != "application/json" ||
         (!origin.empty() && origin != "http://" + host))) return 400;
@@ -278,6 +310,141 @@ struct Server::Impl {
     std::string selection_state = "idle", selection_reason, selection_context;
     Clock::time_point selection_deadline{};
     std::map<std::string,std::pair<std::string,std::string>> reference_cache;
+    Clock::time_point sync_heartbeat{};
+    bool sync_available = false, sync_conflict = false;
+    std::string sync_reason;
+    std::deque<std::string> sync_queue;
+    std::uint64_t sync_discarded_records = 0;
+    struct SyncMarker {
+        Json paint, receipt;
+        std::int64_t received = 0, replied = 0;
+        std::string reply;
+    };
+    // 会话内最多64个唯一编号，重启清空；拒绝超量而不驱逐后复活旧编号。
+    std::map<std::string,SyncMarker> sync_markers;
+
+    void clear_sync_locked() noexcept {
+        const auto discarded = static_cast<std::uint64_t>(sync_queue.size());
+        sync_discarded_records += std::min(discarded,std::numeric_limits<std::uint64_t>::max() - sync_discarded_records);
+        sync_queue.clear(); sync_markers.clear();
+    }
+
+    std::string sync_unavailable_locked(Clock::time_point now) const {
+        if (!state.running || stopping) return "同步服务未运行";
+        if (sync_conflict) return "F7已被Xen控制占用，Ctrl+F7视频打点未启用";
+        if (!sync_available) return sync_reason.empty() ? "详细运行记录未就绪" : sync_reason;
+        if (sync_heartbeat == Clock::time_point{} || now < sync_heartbeat || now >= sync_heartbeat + kCaptureHeartbeat)
+            return "App录制心跳已过期";
+        return {};
+    }
+    std::string sync_status_json() {
+        std::lock_guard lock(mutex);
+        const auto reason = sync_unavailable_locked(Clock::now());
+        return Json{{"available",reason.empty()},{"reason",reason},{"shortcut","Ctrl+F7"},
+            {"pending_records",sync_queue.size()},{"discarded_records",sync_discarded_records}}.dump();
+    }
+    std::pair<int,std::string> video_sync(const std::string& body, std::int64_t received) {
+        const auto failure = [](int status, const std::string& reason) {
+            return std::pair<int,std::string>{status,Json{{"state","failed"},{"reason",reason}}.dump()};
+        };
+        // 固定小消息，拒绝重复键；不能让重复时间字段产生两种解释。
+        std::vector<std::set<std::string>> keys;
+        const auto document = Json::parse(body,[&](int depth, Json::parse_event_t event, Json& value) {
+            if (depth > 4) return false;
+            if (event == Json::parse_event_t::object_start) keys.emplace_back();
+            if (event == Json::parse_event_t::key && !keys.back().insert(value.get<std::string>()).second)
+                throw std::runtime_error("视频同步消息包含重复字段");
+            if (event == Json::parse_event_t::object_end) keys.pop_back();
+            return true;
+        },false);
+        if (!document.is_object() || !document.contains("schema") || !document["schema"].is_number_integer() ||
+            document["schema"] != 1 || !document.contains("stage") || !document["stage"].is_string() ||
+            !document.contains("duration_ms") || !document["duration_ms"].is_number_integer() || document["duration_ms"] != 2000 ||
+            !sync_identifier(document,"marker_id") || !sync_identifier(document,"source_session"))
+            return failure(400,"视频同步消息格式无效");
+        const auto stage = document["stage"].get<std::string>();
+        const bool paint = stage == "paint", receipt = stage == "receipt";
+        if ((!paint && !receipt) || document.size() != (paint ? 10 : 13)) return failure(400,"视频同步阶段或字段无效");
+        std::int64_t paint_begin = 0, paint_end = 0, paint_system = 0, sent = 0, send_system = 0;
+        if (!sync_stamp(document,"source_paint_begin_steady_ns",paint_begin) ||
+            !sync_stamp(document,"source_paint_end_steady_ns",paint_end) ||
+            !sync_stamp(document,"source_paint_system_unix_ns",paint_system) ||
+            !sync_stamp(document,"source_send_steady_ns",sent) ||
+            !sync_stamp(document,"source_send_system_unix_ns",send_system) ||
+            paint_end < paint_begin || sent < paint_end || paint_end - paint_begin > kMaximumSyncRoundTripNs)
+            return failure(400,"视频同步绘制或发送时间无效");
+        const auto marker_id = document["marker_id"].get<std::string>();
+        std::lock_guard lock(mutex);
+        if (const auto reason = sync_unavailable_locked(Clock::now()); !reason.empty()) return failure(409,reason);
+        auto existing = sync_markers.find(marker_id);
+        if (paint) {
+            if (existing != sync_markers.end()) return existing->second.paint == document
+                ? std::pair<int,std::string>{200,existing->second.reply} : failure(409,"同步编号已经对应其他绘制消息");
+            if (sync_markers.size() >= kMaximumSyncMarkers) return failure(409,"本服务会话已达到64个同步编号上限，请结束录制后重开Xen");
+            if (sync_queue.size() >= kMaximumSyncQueue) return failure(409,"视频同步归档队列已满，请稍后重试");
+            SyncMarker marker; marker.paint = document; marker.received = received;
+            // 这是响应准备时间，不称为网卡发出时间或视频呈现时刻。
+            marker.replied = sync_steady_ns();
+            const Json reply{{"state","queued"},{"archive_status","pending_app_delivery"},{"marker_id",marker_id},
+                {"aux_received_steady_ns",std::to_string(marker.received)},
+                {"aux_replied_steady_ns",std::to_string(marker.replied)}};
+            marker.reply = reply.dump();
+            auto metadata = document;
+            metadata["aux_received_steady_ns"] = std::to_string(marker.received);
+            metadata["aux_replied_steady_ns"] = std::to_string(marker.replied);
+            metadata["video_pts_ns"] = nullptr; metadata["capture_verified"] = false;
+            metadata["clock_mapping_available"] = false;
+            // 先完成可能分配的操作，避免异常后留下已记幂等却没有交付的数据。
+            auto serialized = metadata.dump();
+            sync_markers.emplace(marker_id,std::move(marker));
+            try { sync_queue.push_back(std::move(serialized)); }
+            catch (...) { sync_markers.erase(marker_id); throw; }
+            return {200,reply.dump()};
+        }
+        if (existing == sync_markers.end()) return failure(409,"同步绘制编号不存在或服务已经重启");
+        auto& marker = existing->second;
+        std::int64_t source_received = 0, echoed_received = 0, echoed_replied = 0;
+        if (!sync_stamp(document,"source_reply_received_steady_ns",source_received) ||
+            !sync_stamp(document,"aux_received_steady_ns",echoed_received) ||
+            !sync_stamp(document,"aux_replied_steady_ns",echoed_replied)) return failure(400,"视频同步回执时间格式无效");
+        auto expected = marker.paint; expected["stage"] = "receipt";
+        expected["source_reply_received_steady_ns"] = document["source_reply_received_steady_ns"];
+        expected["aux_received_steady_ns"] = std::to_string(marker.received);
+        expected["aux_replied_steady_ns"] = std::to_string(marker.replied);
+        if (document != expected || echoed_received != marker.received || echoed_replied != marker.replied)
+            return failure(409,"视频同步回执与实际绘制或服务时间不匹配");
+        if (!marker.receipt.is_null()) return marker.receipt == document
+            ? std::pair<int,std::string>{200,marker.reply} : failure(409,"同步编号已经对应其他回执");
+        if (source_received < sent) return failure(409,"视频同步主机回执时间倒退");
+        const auto source_elapsed = source_received - sent;
+        const auto auxiliary_elapsed = marker.replied - marker.received;
+        if (source_elapsed < auxiliary_elapsed || source_elapsed - auxiliary_elapsed > kMaximumSyncRoundTripNs)
+            return failure(409,"视频同步往返时间无效或超过2秒");
+        const auto round_trip = source_elapsed - auxiliary_elapsed;
+        const auto half_round_trip = round_trip / 2;
+        std::int64_t mapped_begin = 0, mapped_end = 0;
+        if (!sync_mapped_time(paint_begin,sent,marker.received,half_round_trip,mapped_begin) ||
+            !sync_mapped_time(paint_end,sent,marker.received,half_round_trip,mapped_end))
+            return failure(409,"视频同步映射超出本地有效时间域");
+        if (sync_queue.size() >= kMaximumSyncQueue) return failure(409,"视频同步归档队列已满，请稍后重试回执");
+        auto metadata = document;
+        metadata["receipt_received_aux_steady_ns"] = std::to_string(received);
+        metadata["mapped_paint_begin_aux_steady_ns"] = std::to_string(mapped_begin);
+        metadata["mapped_paint_end_aux_steady_ns"] = std::to_string(mapped_end);
+        // 先取整数差，保留1ns量化上界；误差不包含绘制到捕获及编码采样。
+        metadata["offset_aux_minus_source_ns"] = std::to_string((marker.received - sent) - half_round_trip);
+        metadata["offset_rounding_ns"] = std::to_string(round_trip % 2);
+        metadata["network_round_trip_ns"] = std::to_string(round_trip);
+        metadata["network_uncertainty_ns"] = std::to_string(half_round_trip + round_trip % 2);
+        metadata["uncertainty_scope"] = "network_exchange_only; excludes_paint_to_video_capture_and_video_sampling";
+        metadata["video_pts_ns"] = nullptr; metadata["capture_verified"] = false;
+        metadata["clock_mapping_available"] = true;
+        auto saved_receipt = document;
+        auto serialized = metadata.dump();
+        sync_queue.push_back(std::move(serialized));
+        marker.receipt = std::move(saved_receipt);
+        return {200,marker.reply};
+    }
 
     // 调用方持有mutex；普通心跳和手机选择完成共用同一快照/版本发布规则。
     void publish_capture_locked(std::shared_ptr<const debug_session::Snapshot> selection,
@@ -661,15 +828,18 @@ struct Server::Impl {
             if (status != 200) respond(client,status,"text/plain; charset=utf-8","请求格式或入口不支持",deadline);
             else if (method == "POST") {
                 try {
-                    const auto [code,result] = select_plan(body,deadline);
+                    const auto received = sync_steady_ns();
+                    const auto [code,result] = target == "/sync-marker.json" ? video_sync(body,received) : select_plan(body,deadline);
                     respond(client,code,"application/json; charset=utf-8",result,deadline);
                 } catch (const std::exception&) {
                     respond(client,409,"application/json; charset=utf-8",Json{{"state","failed"},
-                        {"reason","方案文件已改变，请刷新清单后重选"}}.dump(),deadline);
+                        {"reason",target == "/sync-marker.json" ? "视频同步消息无效或未能排队，请检查记录状态后重试" :
+                            "方案文件已改变，请刷新清单后重选"}}.dump(),deadline);
                 }
             }
             else if (target == "/") respond(client,404,"text/plain; charset=utf-8","手机选择入口已移除，请在主机OBS中按小键盘右键选择道具。",deadline);
             else if (target == "/obs-menu") respond(client,200,"text/html; charset=utf-8",kObsMenuPage,deadline);
+            else if (target == "/sync-status.json") respond(client,200,"application/json; charset=utf-8",sync_status_json(),deadline);
             else if (target == "/context.json") respond(client,200,"application/json; charset=utf-8",context_json(),deadline);
             else if (target == "/selection.json") respond(client,200,"application/json; charset=utf-8",selection_json(),deadline);
             else if (target.starts_with("/reference.json?plan_id=") || target.starts_with("/reference/standing.png?plan_id=") ||
@@ -764,6 +934,9 @@ bool Server::start(const Config& config, std::shared_ptr<weapon::GsiReceiver> gs
             impl_->capture_reason.clear(); impl_->capture_revision = 0;
             impl_->selection_request.reset(); impl_->selection_sequence = 0; impl_->selection_delivered = false;
             impl_->selection_state = "idle"; impl_->selection_reason.clear(); impl_->selection_context.clear();
+            impl_->sync_heartbeat = {}; impl_->sync_available = false; impl_->sync_conflict = false;
+            impl_->sync_reason.clear(); impl_->sync_queue.clear(); impl_->sync_markers.clear();
+            impl_->sync_discarded_records = 0;
         }
         impl_->stopping = false;
         impl_->worker = std::thread([this] { impl_->run(); });
@@ -791,6 +964,31 @@ void Server::publish_capture(std::shared_ptr<const debug_session::Snapshot> sele
         impl_->capture_selection.reset(); impl_->capture_available = false;
         impl_->capture_received = {};
     }
+}
+void Server::publish_video_sync(const AppConfig& controls, bool available, const std::string& reason) noexcept {
+    try {
+        const auto conflict = capture_hotkey_conflicts(controls,0x76);
+        const auto now = Clock::now();
+        const auto bounded_reason = reason.substr(0,256);
+        std::lock_guard lock(impl_->mutex);
+        // 停止、切段或旧心跳恢复不能把未交付的旧标记带进新录制段。
+        if (!available || conflict || (impl_->sync_heartbeat != Clock::time_point{} &&
+            (now < impl_->sync_heartbeat || now >= impl_->sync_heartbeat + kCaptureHeartbeat))) impl_->clear_sync_locked();
+        impl_->sync_available = available; impl_->sync_conflict = conflict;
+        impl_->sync_reason = bounded_reason; impl_->sync_heartbeat = now;
+    } catch (...) {
+        std::lock_guard lock(impl_->mutex); impl_->clear_sync_locked();
+        impl_->sync_available = false; impl_->sync_heartbeat = {};
+    }
+}
+std::optional<std::string> Server::poll_video_sync() noexcept {
+    try {
+        std::lock_guard lock(impl_->mutex);
+        if (!impl_->sync_unavailable_locked(Clock::now()).empty()) { impl_->clear_sync_locked(); return {}; }
+        if (impl_->sync_queue.empty()) return {};
+        auto result = std::move(impl_->sync_queue.front()); impl_->sync_queue.pop_front();
+        return result;
+    } catch (...) { return {}; }
 }
 std::optional<SelectionRequest> Server::poll_selection() noexcept {
     try {
@@ -841,6 +1039,12 @@ void Server::stop() noexcept {
     std::lock_guard lock(impl_->mutex); impl_->state.running = false;
     impl_->capture_selection.reset(); impl_->capture_available = false; impl_->capture_received = {};
     impl_->selection_request.reset(); impl_->selection_state = "idle"; impl_->selection_context.clear();
+    impl_->sync_heartbeat = {}; impl_->sync_available = false; impl_->sync_conflict = false;
+    impl_->sync_reason.clear(); impl_->clear_sync_locked();
 }
-Snapshot Server::snapshot() const { std::lock_guard lock(impl_->mutex); return impl_->state; }
+Snapshot Server::snapshot() const {
+    std::lock_guard lock(impl_->mutex);
+    auto result = impl_->state; result.video_sync_discarded_records = impl_->sync_discarded_records;
+    return result;
+}
 }

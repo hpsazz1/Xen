@@ -10,16 +10,27 @@
 
 namespace app::detail {
 
+// 普通停止、退出及切段必须先撤销主机标记，再让后台拥有归档。
+template<class Bridge, class Archive>
+void revoke_video_sync(Bridge& bridge, Archive& archive, const AppConfig& config, bool archive_active) {
+    const auto before = bridge.snapshot().video_sync_discarded_records;
+    bridge.publish_video_sync(config, false, "诊断归档正在结束，请稍后同步");
+    if (archive_active && bridge.snapshot().video_sync_discarded_records > before)
+        archive.note_gap("结束记录时存在尚未交付的视频同步标记");
+}
+
 // App 冷路径持有分段水位；后台封尾结束前，主线程不得再次访问。
 struct ReportBoundary {
     std::uint64_t trigger_after_event = 0;
     std::uint64_t archive_after_event = 0;
+    std::uint64_t auto_stop_after_event = 0, archive_after_auto_stop = 0;
     std::uint64_t recoil_after_command = 0;
 
     template<class Source>
     void begin_segment(Source& source) {
         // 所有开段入口共用当前生产水位，包含模型加载成功/失败后的恢复。
         trigger_after_event = archive_after_event = source.trigger_execution_log().last_sequence;
+        auto_stop_after_event = archive_after_auto_stop = source.auto_stop_execution_log().last_sequence;
         const auto recoil = source.recoil_execution_log();
         recoil_after_command = recoil.records.empty() ? 0 : recoil.records.back().intent.command_id;
     }
@@ -30,6 +41,9 @@ struct ReportBoundary {
         if (!events.empty()) trigger_after_event = events.back().sequence;
         snapshot.trigger_execution_log.first_sequence = events.empty() ? 0 : events.front().sequence;
         snapshot.trigger_execution_log.last_sequence = events.empty() ? 0 : events.back().sequence;
+        auto& stops = snapshot.auto_stop_execution_log.events;
+        std::erase_if(stops, [&](const auto& event) { return event.sequence <= auto_stop_after_event; });
+        if (!stops.empty()) auto_stop_after_event = stops.back().sequence;
         auto& records = snapshot.recoil_execution_log.records;
         std::erase_if(records, [&](const auto& record) { return record.intent.command_id <= recoil_after_command; });
         if (!records.empty()) recoil_after_command = records.back().intent.command_id;

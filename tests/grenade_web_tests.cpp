@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <string_view>
 #include <thread>
 #include <array>
 #include <opencv2/imgcodecs.hpp>
@@ -73,13 +74,31 @@ Response http_exchange(std::uint16_t port, const std::string& request) {
         sent += static_cast<std::size_t>(count);
     }
     std::string raw;
+    std::size_t expected_bytes = 0;
     for (;;) {
         char bytes[8192];
         const auto count = recv(client.value,bytes,sizeof(bytes),0);
         if (count == 0) break;
         if (count < 0 || raw.size() + count > 2 * 1024 * 1024) return {};
         raw.append(bytes,static_cast<std::size_t>(count));
+        if (!expected_bytes) {
+            const auto boundary = raw.find("\r\n\r\n");
+            if (boundary != std::string::npos) {
+                const auto field = raw.find("\r\nContent-Length: ");
+                if (field == std::string::npos || field >= boundary) return {};
+                const auto begin = field + std::string_view("\r\nContent-Length: ").size();
+                const auto end = raw.find("\r\n",begin);
+                std::size_t length = 0;
+                const auto parsed = std::from_chars(raw.data()+begin,raw.data()+end,length);
+                if (parsed.ec != std::errc{} || parsed.ptr != raw.data()+end ||
+                    length > 2 * 1024 * 1024 - boundary - 4) return {};
+                expected_bytes = boundary + 4 + length;
+            }
+        }
+        // 服务端拒绝超长请求后可因未消费正文而reset；完整响应以Content-Length为界，不等待EOF。
+        if (expected_bytes && raw.size() >= expected_bytes) break;
     }
+    if (!expected_bytes || raw.size() != expected_bytes) return {};
     const auto boundary = raw.find("\r\n\r\n");
     if (boundary == std::string::npos || !raw.starts_with("HTTP/1.1 ")) return {};
     Response response;
@@ -96,6 +115,30 @@ Response select_plan(std::uint16_t port, const std::string& plan_id, const std::
     const auto body=Json{{"plan_id",plan_id},{"generation",generation}}.dump();
     return http_exchange(port,"POST /select.json HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: " +
         std::to_string(body.size()) + "\r\n\r\n" + body);
+}
+Response post_video_sync(std::uint16_t port, const Json& document) {
+    const auto body = document.dump();
+    return http_exchange(port,"POST /sync-marker.json HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: " +
+        std::to_string(body.size()) + "\r\n\r\n" + body);
+}
+Json video_sync_paint(const std::string& marker_id) {
+    // 合成主机纪元故意超过2^53；经真实HTTP路由验证整数先做差的映射精度。
+    constexpr std::int64_t sent = 288230376151711747;
+    return {{"schema",1},{"stage","paint"},{"marker_id",marker_id},{"source_session","source-test-1"},
+        {"duration_ms",2000},{"source_paint_begin_steady_ns",std::to_string(sent - 2000000)},
+        {"source_paint_end_steady_ns",std::to_string(sent - 1000000)},
+        {"source_paint_system_unix_ns","1793000000000000000"},{"source_send_steady_ns",std::to_string(sent)},
+        {"source_send_system_unix_ns","1793000000002000000"}};
+}
+Json video_sync_receipt(const Json& paint, const Json& reply, std::int64_t network_round_trip = 3000001) {
+    auto result = paint; result["stage"] = "receipt";
+    const auto send = std::stoll(paint["source_send_steady_ns"].get<std::string>());
+    const auto received = std::stoll(reply["aux_received_steady_ns"].get<std::string>());
+    const auto replied = std::stoll(reply["aux_replied_steady_ns"].get<std::string>());
+    result["source_reply_received_steady_ns"] = std::to_string(send + (replied - received) + network_round_trip);
+    result["aux_received_steady_ns"] = reply["aux_received_steady_ns"];
+    result["aux_replied_steady_ns"] = reply["aux_replied_steady_ns"];
+    return result;
 }
 std::string image_hash(const std::filesystem::path& path) {
     std::ifstream file(path,std::ios::binary);
@@ -396,6 +439,123 @@ void capture_context_tests(const std::filesystem::path& root) {
     server.stop();
     std::filesystem::remove(path); std::filesystem::remove(directory);
 }
+void video_sync_tests(const std::filesystem::path& root) {
+    // 仅创建未启动的共享GSI对象；同步诊断不依赖游戏、Runtime或输入设备。
+    auto gsi = std::make_shared<weapon::GsiReceiver>();
+    grenade_web::Server server; grenade_web::Config config;
+    config.bind_address = "127.0.0.1"; config.port = 0; config.plans_root = utf8(root);
+    expect(server.start(config,gsi),"视频同步使用生产HTTP服务且不启动GSI或设备");
+    auto port = server.snapshot().port;
+    AppConfig controls;
+    const auto publish = [&] { server.publish_video_sync(controls,true); };
+    const auto status = [&] { return get(port,"/sync-status.json").json(); };
+    const auto packet = video_sync_paint("SYNC-main");
+    expect(!status().value("available",true) && status().value("shortcut",std::string{}) == "Ctrl+F7" &&
+        post_video_sync(port,packet).status == 409,"无录制心跳时同步状态和POST均明确拒绝");
+    server.publish_video_sync(controls,false,"详细记录已关闭");
+    expect(status().value("reason",std::string{}) == "详细记录已关闭","App拒绝原因保持原文");
+    controls.keyboard.aim_hold_virtual_keys = {0x76}; publish();
+    expect(!status().value("available",true) && status().value("reason",std::string{}).find("F7") != std::string::npos &&
+        post_video_sync(port,packet).status == 409,"控制键F7冲突时Ctrl+F7不可用于同步");
+    controls.keyboard.aim_hold_virtual_keys.clear(); publish();
+    expect(status().value("available",false),"没有按键冲突且新鲜记录心跳时可打点");
+    std::this_thread::sleep_for(1100ms);
+    expect(!status().value("available",true) && status().value("reason",std::string{}).find("过期") != std::string::npos &&
+        post_video_sync(port,packet).status == 409,"App停止发布后1秒心跳过期，旧可用状态不能继续打点");
+    publish();
+    const auto first = post_video_sync(port,packet);
+    expect(first.status == 200,"绘制阶段接受独立同步消息");
+    if (first.status != 200) { server.stop(); return; }
+    const auto reply = first.json();
+    expect(reply.value("state",std::string{}) == "queued" && reply.value("archive_status",std::string{}) == "pending_app_delivery" &&
+        reply.value("marker_id",std::string{}) == "SYNC-main","HTTP成功仅表示待交付归档，保留同一标记编号");
+    expect(post_video_sync(port,packet).body == first.body,"同一绘制重复提交返回原始辅助机时间，不重复入队");
+    auto changed = packet; changed["source_session"] = "other-source";
+    expect(post_video_sync(port,changed).status == 409,"同步编号不能改绑其他来源会话");
+    const auto paint_record = server.poll_video_sync();
+    const auto paint_metadata = paint_record ? Json::parse(*paint_record,nullptr,false) : Json::object();
+    expect(paint_metadata.value("stage",std::string{}) == "paint" && !paint_metadata.value("clock_mapping_available",true) &&
+        paint_metadata.contains("video_pts_ns") && paint_metadata["video_pts_ns"].is_null() &&
+        !paint_metadata.value("capture_verified",true) && !server.poll_video_sync(),"绘制记录只交付一次，未取得回执/录像时不虚构映射或PTS");
+    auto receipt = video_sync_receipt(packet,reply);
+    changed = receipt; changed["aux_received_steady_ns"] = std::to_string(std::stoll(reply["aux_received_steady_ns"].get<std::string>()) + 1);
+    expect(post_video_sync(port,changed).status == 409,"回执必须回显服务实际采样时间");
+    changed = receipt; changed["source_paint_end_steady_ns"] = packet["source_paint_begin_steady_ns"];
+    expect(post_video_sync(port,changed).status == 409,"回执不能改写已经接受的绘制区间");
+    expect(post_video_sync(port,video_sync_receipt(packet,reply,-1)).status == 409 &&
+        post_video_sync(port,video_sync_receipt(packet,reply,2000000001)).status == 409,"负网络往返及超过2秒交换拒绝，不能形成可信映射");
+    expect(post_video_sync(port,receipt).status == 200 && post_video_sync(port,receipt).status == 200,
+        "合法双阶段回执与同内容重传均接受");
+    const auto receipt_record = server.poll_video_sync();
+    const auto mapped = receipt_record ? Json::parse(*receipt_record,nullptr,false) : Json::object();
+    const auto auxiliary = std::stoll(reply["aux_received_steady_ns"].get<std::string>());
+    const auto source_send = std::stoll(packet["source_send_steady_ns"].get<std::string>());
+    expect(mapped.value("stage",std::string{}) == "receipt" && mapped.value("clock_mapping_available",false) &&
+        mapped.value("mapped_paint_begin_aux_steady_ns",std::string{}) == std::to_string(auxiliary - 3500000) &&
+        mapped.value("mapped_paint_end_aux_steady_ns",std::string{}) == std::to_string(auxiliary - 2500000) &&
+        mapped.value("offset_aux_minus_source_ns",std::string{}) == std::to_string((auxiliary - source_send) - 1500000) &&
+        mapped.value("network_round_trip_ns",std::string{}) == "3000001" &&
+        mapped.value("network_uncertainty_ns",std::string{}) == "1500001" &&
+        mapped.value("offset_rounding_ns",std::string{}) == "1" && !server.poll_video_sync(),
+        "大纪元整数映射保持精度，半纳秒向上计误差，回执只交付一次");
+    changed = receipt; changed["source_reply_received_steady_ns"] = std::to_string(std::stoll(receipt["source_reply_received_steady_ns"].get<std::string>()) + 1);
+    expect(post_video_sync(port,changed).status == 409,"同编号第二份不同回执不能覆盖已交付映射");
+    changed = packet; changed["marker_id"] = "../bad";
+    expect(post_video_sync(port,changed).status == 400,"标记编号只接受有界安全ASCII");
+    changed = packet; changed["source_send_steady_ns"] = 42;
+    expect(post_video_sync(port,changed).status == 400,"纳秒必须为十进制字符串，避免JSON数值精度丢失");
+    changed = packet; changed["duration_ms"] = true;
+    expect(post_video_sync(port,changed).status == 400,"布尔值不能替代固定2000ms显示时长");
+    const auto blocked_packet = video_sync_paint("SYNC-blocked-receipt"); publish();
+    const auto blocked_reply = post_video_sync(port,blocked_packet).json();
+    for (int index = 0; index < 15; ++index) {
+        publish(); expect(post_video_sync(port,video_sync_paint("SYNC-fill-" + std::to_string(index))).status == 200,
+            "16条后台交付容量以内允许多个标记");
+    }
+    const auto overflow_packet = video_sync_paint("SYNC-overflow");
+    expect(post_video_sync(port,overflow_packet).status == 409 &&
+        post_video_sync(port,video_sync_receipt(blocked_packet,blocked_reply)).status == 409,
+        "绘制与回执共用16条有界队列，满载不假报接收成功");
+    int drained = 0; while (server.poll_video_sync()) ++drained;
+    expect(drained == 16,"满载拒绝没有留下半条幂等记录或重复交付");
+    publish();
+    expect(post_video_sync(port,overflow_packet).status == 200 &&
+        post_video_sync(port,video_sync_receipt(blocked_packet,blocked_reply)).status == 200,
+        "队列恢复后先前被拒绝的绘制和回执仍可重试");
+    while (server.poll_video_sync()) {}
+    for (int index = 18; index < 64; ++index) {
+        publish(); expect(post_video_sync(port,video_sync_paint("SYNC-limit-" + std::to_string(index))).status == 200,
+            "会话64个唯一编号预算内可持续交付");
+        server.poll_video_sync();
+    }
+    const auto capped = post_video_sync(port,video_sync_paint("SYNC-limit-overflow"));
+    expect(capped.status == 409 && capped.json().value("reason",std::string{}).find("64") != std::string::npos &&
+        post_video_sync(port,packet).status == 200 && !server.poll_video_sync(),
+        "64条幂等缓存满后拒绝新编号，旧编号重传不复活或重归档");
+    server.publish_video_sync(controls,false,"录制切段"); publish();
+    const auto old_receipt = video_sync_receipt(packet,reply);
+    expect(post_video_sync(port,old_receipt).status == 409 && !server.poll_video_sync(),"录制切段清空旧映射，旧回执不能进入新段");
+    expect(post_video_sync(port,packet).status == 200,"新录制段可以重新开始独立同步会话");
+    server.publish_video_sync(controls,false,"记录关闭"); publish();
+    expect(!server.poll_video_sync() && status().value("discarded_records",0) == 1 &&
+        server.snapshot().video_sync_discarded_records == 1,
+        "记录关闭丢弃未交付标记并显示丢弃数，不冒称落盘也不串入下段");
+    expect(post_video_sync(port,packet).status == 200,"清空后重新接受绘制");
+    std::this_thread::sleep_for(1100ms); publish();
+    expect(!server.poll_video_sync() && status().value("discarded_records",0) == 2,
+        "旧心跳恢复同样清除未交付标记，不能复活过期队列");
+    expect(post_video_sync(port,packet).status == 200,"重启前保留一个未交付标记用于隔离回归");
+    server.stop(); expect(server.start(config,gsi),"同步服务可重启"); port = server.snapshot().port;
+    expect(!status().value("available",true) && !server.poll_video_sync(),"服务重启清空心跳、队列及幂等缓存");
+    publish(); expect(post_video_sync(port,old_receipt).status == 409,"服务重启拒绝旧响应回执");
+    expect(post_video_sync(port,packet).status == 200,"服务重启后的新绘制独立接收");
+    std::string oversized(4097,'x');
+    expect(http_exchange(port,"POST /sync-marker.json HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 4097\r\n\r\n" + oversized).status == 400,
+        "视频同步固定路由请求体超过4096字节拒绝");
+    expect(http_exchange(port,"POST /select.json HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 1025\r\n\r\n" + std::string(1025,'x')).status == 400,
+        "同步路由扩容不放宽原选择接口1024字节上限");
+    server.stop();
+}
 void catalog_limits(const std::filesystem::path& root, const std::shared_ptr<weapon::GsiReceiver>& gsi) {
     const auto directory = root / "catalog-limits";
     std::filesystem::create_directory(directory);
@@ -566,6 +726,7 @@ int main(int argc, char** argv) {
     capture_context_tests(root);
     selection_snapshot_type_tests(root);
     selection_tests(root);
+    video_sync_tests(root);
     gsi->stop();
     auto invalid = config; invalid.bind_address = "203.0.113.8";
     expect(!server.start(invalid,gsi) && !server.snapshot().error.empty(),"公开地址绑定在创建监听前拒绝");

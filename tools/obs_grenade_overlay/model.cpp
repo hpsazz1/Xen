@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "model.h"
+#include <charconv>
+#include <stdexcept>
 
 namespace xen_obs {
 namespace {
@@ -7,6 +9,62 @@ std::string text(const Json& object, const char* key) {
     const auto value = object.find(key);
     return value != object.end() && value->is_string() ? value->get<std::string>() : std::string{};
 }
+bool positive_stamp(const Json& object, const char* key) noexcept {
+    try {
+        const auto it = object.find(key);
+        if (it == object.end() || !it->is_string()) return false;
+        const auto value = it->get<std::string>();
+        std::int64_t parsed = 0;
+        const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+        return !value.empty() && result.ec == std::errc{} && result.ptr == value.data() + value.size() && parsed > 0;
+    } catch (...) { return false; }
+}
+}
+
+Json sync_paint_packet(const std::string& marker_id, const std::string& source_session,
+                       std::int64_t paint_begin, std::int64_t paint_end, std::int64_t paint_system) {
+    if (marker_id.empty() || source_session.empty() || paint_begin <= 0 || paint_end < paint_begin || paint_system <= 0)
+        throw std::invalid_argument("录像同步绘制时间无效");
+    return {{"schema",1},{"stage","paint"},{"marker_id",marker_id},{"source_session",source_session},
+        {"source_paint_begin_steady_ns",std::to_string(paint_begin)},
+        {"source_paint_end_steady_ns",std::to_string(paint_end)},
+        {"source_paint_system_unix_ns",std::to_string(paint_system)},{"duration_ms",2000}};
+}
+
+bool sync_reply_accepted(const Json& reply, const std::string& marker_id) noexcept {
+    try {
+        if (!reply.is_object() || text(reply,"state") != "queued" || text(reply,"marker_id") != marker_id ||
+            !positive_stamp(reply,"aux_received_steady_ns") || !positive_stamp(reply,"aux_replied_steady_ns")) return false;
+        return std::stoll(text(reply,"aux_replied_steady_ns")) >= std::stoll(text(reply,"aux_received_steady_ns"));
+    } catch (...) { return false; }
+}
+
+Json sync_receipt_packet(const Json& paint, const Json& reply, std::int64_t received) {
+    const auto marker_id = text(paint,"marker_id");
+    if (!sync_reply_accepted(reply,marker_id) || !positive_stamp(paint,"source_send_steady_ns") ||
+        received < std::stoll(text(paint,"source_send_steady_ns")))
+        throw std::invalid_argument("录像同步回执时间无效");
+    auto result = paint;
+    result["stage"] = "receipt";
+    result["source_reply_received_steady_ns"] = std::to_string(received);
+    result["aux_received_steady_ns"] = reply.at("aux_received_steady_ns");
+    result["aux_replied_steady_ns"] = reply.at("aux_replied_steady_ns");
+    return result;
+}
+
+bool sync_show_expired(const SyncShowPermit& permit, std::int64_t now) noexcept {
+    return permit.marker_id.empty() || permit.issued_steady_ns <= 0 || now < permit.issued_steady_ns ||
+        now - permit.issued_steady_ns >= 2000000000LL;
+}
+bool sync_show_current(const SyncShowPermit& permit, const std::string& marker_id,
+                       std::uint64_t configuration, std::int64_t now) noexcept {
+    return permit.marker_id == marker_id && permit.configuration == configuration && !sync_show_expired(permit,now);
+}
+bool sync_status_available(const Json& reply) noexcept {
+    try {
+        const auto available=reply.find("available");
+        return reply.is_object() && available!=reply.end() && available->is_boolean() && available->get<bool>();
+    } catch (...) { return false; }
 }
 
 std::string percent_encode(std::string_view value, bool file_path) {

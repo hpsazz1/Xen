@@ -292,14 +292,22 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             auto archive_snapshot = frozen ? *frozen : runtime.snapshot();
             const auto now = std::chrono::steady_clock::now();
             if (final_drain || now - archive_trigger_poll >= std::chrono::milliseconds(100)) {
-                if (!frozen) archive_snapshot.trigger_execution_log = runtime.trigger_execution_log(report_boundary.archive_after_event);
-                else std::erase_if(archive_snapshot.trigger_execution_log.events,
-                    [&](const auto& event) { return event.sequence <= report_boundary.archive_after_event; });
+                if (!frozen) {
+                    archive_snapshot.trigger_execution_log = runtime.trigger_execution_log(report_boundary.archive_after_event);
+                    archive_snapshot.auto_stop_execution_log = runtime.auto_stop_execution_log(report_boundary.archive_after_auto_stop);
+                } else {
+                    std::erase_if(archive_snapshot.trigger_execution_log.events,
+                        [&](const auto& event) { return event.sequence <= report_boundary.archive_after_event; });
+                    std::erase_if(archive_snapshot.auto_stop_execution_log.events,
+                        [&](const auto& event) { return event.sequence <= report_boundary.archive_after_auto_stop; });
+                }
                 archive_trigger_poll = now;
             }
-            if (session_archive.submit(pending_debug_samples, archive_snapshot) &&
-                !archive_snapshot.trigger_execution_log.events.empty()) {
-                report_boundary.archive_after_event = archive_snapshot.trigger_execution_log.events.back().sequence;
+            if (session_archive.submit(pending_debug_samples, archive_snapshot)) {
+                if (!archive_snapshot.trigger_execution_log.events.empty())
+                    report_boundary.archive_after_event = archive_snapshot.trigger_execution_log.events.back().sequence;
+                if (!archive_snapshot.auto_stop_execution_log.events.empty())
+                    report_boundary.archive_after_auto_stop = archive_snapshot.auto_stop_execution_log.events.back().sequence;
             }
         }
         pending_debug_samples.clear();
@@ -307,6 +315,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     const auto report_snapshot = [&]() {
         auto snapshot = runtime.snapshot();
         snapshot.trigger_execution_log = runtime.trigger_execution_log();
+        snapshot.auto_stop_execution_log = runtime.auto_stop_execution_log();
         snapshot.recoil_execution_log = runtime.recoil_execution_log();
         snapshot.output_arbitration = runtime.output_arbitration();
         snapshot.output_arbitration_available = debug_auto_stop_config &&
@@ -325,6 +334,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     };
     const auto start_debug_report = [&](const RuntimeSnapshot& snapshot) {
         if (!config.runtime.diagnostics_enabled || snapshot.state != RuntimeState::RUNNING) return false;
+        grenade_bridge.publish_video_sync(config, false, "正在切换诊断分段，请稍后同步");
         if (report_finalization.pending()) {
             app_message = "旧报告保存失败；请修复磁盘问题后点击停止或启动重试，退出会丢失未保存数据。";
             return false;
@@ -356,6 +366,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         archive_config.directory = "cache/runtime/" + segment_id + "-archive";
         archive_config.report_config = report_config;
         archive_config.trigger_sequence_baseline = report_boundary.archive_after_event;
+        archive_config.auto_stop_sequence_baseline = report_boundary.archive_after_auto_stop;
         std::string archive_error;
         session_archive_active = session_archive.start(archive_config, archive_error);
         archive_trigger_poll = {};
@@ -372,6 +383,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     };
     const auto finish_reports_async = [&]() {
         if (report_lifecycle.busy()) return;
+        app::detail::revoke_video_sync(grenade_bridge, session_archive, config, session_archive_active);
         runtime.set_diagnostics_enabled(false);
         auto frozen = report_snapshot();
         report_lifecycle.finish_async([&, frozen = std::move(frozen)]() mutable {
@@ -381,6 +393,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
     const auto stop_runtime_session = [&](bool retry_report = true) {
         if (report_lifecycle.stopping()) return;
+        if (!report_lifecycle.busy())
+            app::detail::revoke_video_sync(grenade_bridge, session_archive, config, session_archive_active);
         report_resume.cancel();
         pending_detector_config.reset();
         const auto requested = report_lifecycle.stop(runtime, [&] { return finish_debug_report(); }, retry_report);
@@ -829,6 +843,25 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             (interface_context.runtime_idle || interface_context.runtime) && interface_context.input_recording_idle && interface_context.cleanup_known &&
             !debug_workspace.busy() && !interface_blocked && !actions.hotkey_capture_consumed,
             "请先结束当前道具动作或配置操作，再按PgUp/PgDn采集");
+        const bool sync_ready = !report_lifecycle.busy() && config.runtime.diagnostics_enabled && session_archive_active &&
+            snapshot.state == RuntimeState::RUNNING;
+        const auto sync_discarded_before = grenade_bridge.snapshot().video_sync_discarded_records;
+        grenade_bridge.publish_video_sync(interface_context.config, sync_ready,
+            "请在辅机开启详细运行记录并启动Runtime，等待归档就绪");
+        if (!report_lifecycle.busy() && session_archive_active &&
+            grenade_bridge.snapshot().video_sync_discarded_records > sync_discarded_before)
+            session_archive.note_gap("视频同步心跳或控制状态改变，未交付标记已丢弃");
+        if (sync_ready) {
+            // 每轮有界移交；HTTP只承诺queued，后台落盘失败由原归档完整性报告。
+            for (int index = 0; index < 16; ++index) {
+                const auto marker = grenade_bridge.poll_video_sync();
+                if (!marker) break;
+                if (!session_archive.mark_video_sync(*marker)) {
+                    session_archive.note_gap("视频同步标记未能进入归档队列");
+                    LOG_WARN("app", "视频同步标记归档失败，请检查详细记录状态与磁盘");
+                }
+            }
+        }
         // 本轮键盘与界面停止/急停优先，不能先自动重启再清除刚收到的急停。
         const auto restart_target = report_lifecycle.take_restart(debug_workspace.busy() || overlay.background_busy() ||
                 model_workspace.poll().job_running,
@@ -842,6 +875,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
 
     // 渲染失败和系统退出同样经过屏障；不可先关闭后台仍使用的设备或日志。
+    if (!report_lifecycle.busy())
+        app::detail::revoke_video_sync(grenade_bridge, session_archive, config, session_archive_active);
     grenade_bridge.stop();
     debug_workspace.request_shutdown();
     overlay.cancel_background();

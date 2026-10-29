@@ -54,5 +54,24 @@ private:
 std::string percent_encode(std::string_view value, bool file_path = false);
 std::string file_url(const std::filesystem::path& path);
 bool valid_plan_id(std::string_view value);
+
+// 时间戳以十进制字符串传输，避免JSON/网页浮点舍入；此包只证明绘制调用区间。
+Json sync_paint_packet(const std::string& marker_id, const std::string& source_session,
+                       std::int64_t paint_begin, std::int64_t paint_end, std::int64_t paint_system);
+bool sync_reply_accepted(const Json& reply, const std::string& marker_id) noexcept;
+Json sync_receipt_packet(const Json& paint, const Json& reply, std::int64_t received);
+
+// UI显示许可只在请求后的两秒内有效；过期/设置变化/另一编号均不能迟到显示。
+struct SyncShowPermit {
+    std::string marker_id;
+    std::uint64_t configuration = 0;
+    std::int64_t issued_steady_ns = 0;
+};
+bool sync_show_current(const SyncShowPermit& permit, const std::string& marker_id,
+                       std::uint64_t configuration, std::int64_t now) noexcept;
+bool sync_show_expired(const SyncShowPermit& permit, std::int64_t now) noexcept;
+
+// 同步状态故障只关闭同步入口；不抛到原道具publication轮询的异常边界。
+bool sync_status_available(const Json& reply) noexcept;
 }
 #endif

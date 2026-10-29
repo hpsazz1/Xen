@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "model.h"
 #include <iostream>
+#include <stdexcept>
 
 int main() {
     using xen_obs::Json;
@@ -9,6 +10,53 @@ int main() {
     const auto check = [&](bool value, const char* reason) {
         if (!value) { std::cerr << reason << '\n'; ++failures; }
     };
+    {
+        const auto paint=xen_obs::sync_paint_packet("SYNC-obs-1-2-3","obs-1-2",
+            9007199254740993LL,9007199254741093LL,1793260800000000000LL);
+        check(paint["stage"]=="paint" && paint["duration_ms"]==2000 &&
+            paint["source_paint_begin_steady_ns"]=="9007199254740993",
+            "同步绘制保留超过JSON浮点精度的原始纳秒，固定两秒且不是视频PTS");
+        auto sent=paint;
+        sent["source_send_steady_ns"]="9007199254741193";
+        sent["source_send_system_unix_ns"]="1793260800000000200";
+        Json reply{{"state","queued"},{"marker_id","SYNC-obs-1-2-3"},
+            {"aux_received_steady_ns","9007199254741243"},{"aux_replied_steady_ns","9007199254741293"}};
+        check(xen_obs::sync_reply_accepted(reply,"SYNC-obs-1-2-3"),"匹配排队回执可补充四时戳");
+        const auto receipt=xen_obs::sync_receipt_packet(sent,reply,9007199254741393LL);
+        check(receipt["stage"]=="receipt" && receipt["source_reply_received_steady_ns"]=="9007199254741393" &&
+            receipt["source_paint_begin_steady_ns"]==paint["source_paint_begin_steady_ns"] &&
+            receipt["aux_replied_steady_ns"]==reply["aux_replied_steady_ns"],
+            "回执包保留原绘制与发送时戳，新增匹配的辅助机时戳和源机接收时戳");
+        check(!xen_obs::sync_reply_accepted(reply,"另一个标记"),"不接受错配标记的回执");
+        auto corrupt=reply; corrupt["aux_replied_steady_ns"]="9007199254741200";
+        check(!xen_obs::sync_reply_accepted(corrupt,"SYNC-obs-1-2-3"),"不接受辅助机时间倒退");
+        corrupt=reply; corrupt["aux_received_steady_ns"]=9007199254741243LL;
+        check(!xen_obs::sync_reply_accepted(corrupt,"SYNC-obs-1-2-3"),"拒绝数值型纳秒，避免静默舍入");
+        corrupt=reply; corrupt["aux_replied_steady_ns"]="12junk";
+        check(!xen_obs::sync_reply_accepted(corrupt,"SYNC-obs-1-2-3"),"拒绝非完整十进制时戳");
+        corrupt=reply; corrupt["state"]="written";
+        check(!xen_obs::sync_reply_accepted(corrupt,"SYNC-obs-1-2-3"),"不把非契约状态当作排队成功");
+        bool refused=false;
+        try { (void)xen_obs::sync_receipt_packet(sent,reply,9007199254741192LL); }
+        catch (const std::invalid_argument&) { refused=true; }
+        check(refused,"源机接收时间早于发送时拒绝构造回执");
+        const xen_obs::SyncShowPermit permit{"SYNC-obs-1-2-3",7,1000000000LL};
+        check(xen_obs::sync_show_current(permit,"SYNC-obs-1-2-3",7,2999999999LL),
+            "同编号及设置代际的UI显示请求在两秒预算内有效");
+        check(xen_obs::sync_show_expired(permit,3000000000LL) &&
+            !xen_obs::sync_show_current(permit,"SYNC-obs-1-2-3",7,3000000000LL),
+            "到两秒边界失效，迟到UI消息不能重新显示旧标记");
+        check(!xen_obs::sync_show_current(permit,"另一编号",7,1500000000LL) &&
+            !xen_obs::sync_show_current(permit,"SYNC-obs-1-2-3",8,1500000000LL),
+            "新编号或设置变化拒绝旧预检查显示许可");
+        check(xen_obs::sync_show_expired(permit,999999999LL),"单调时钟倒退不延长显示许可");
+        check(xen_obs::sync_status_available(Json{{"available",true}}) &&
+            !xen_obs::sync_status_available(Json{{"available",false}}) &&
+            !xen_obs::sync_status_available(Json{{"available","bad"}}) &&
+            !xen_obs::sync_status_available(Json::array()) &&
+            !xen_obs::sync_status_available(Json()),
+            "同步状态的缺失/类型异常安全返回关闭，不抛出到原道具publication轮询");
+    }
     Json selection{{"state", "selected"}, {"generation", "g1"}, {"request_id", "1"},
         {"plan_id", "t1.json"}, {"actual_plan_id", "t1.json"},
         {"guidance", {{"state", "selected"}, {"plan_id", "t1.json"}, {"message", "已选择"}}}};

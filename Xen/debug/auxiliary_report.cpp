@@ -96,3 +96,45 @@ std::string output_arbitration_json(const RuntimeSnapshot& snapshot) {
     }
     return Json{{"schema",1}, {"scope","runtime_cumulative"}, {"atomic_snapshot",false}, {"sources",sources}}.dump();
 }
+
+std::string auto_stop_execution_json(const RuntimeSnapshot& snapshot) {
+    const auto& log = snapshot.auto_stop_execution_log;
+    const auto ns = [](std::int64_t value) -> Json { return value > 0 ? Json(std::to_string(value)) : Json(nullptr); };
+    const auto receipt_name = [](KeyboardDisposition value) {
+        switch (value) {
+        case KeyboardDisposition::UNSUPPORTED: return "UNSUPPORTED";
+        case KeyboardDisposition::REJECTED: return "REJECTED";
+        case KeyboardDisposition::ACKNOWLEDGED: return "ACKNOWLEDGED";
+        case KeyboardDisposition::APPLICATION_UNKNOWN: return "APPLICATION_UNKNOWN";
+        }
+        return "UNKNOWN";
+    };
+    Json events = Json::array();
+    for (const auto& e : log.events) {
+        events.push_back({{"sequence",identity(e.sequence)}, {"generation",identity(e.generation)},
+            {"kind",AutoStopExecutionKindName(e.kind)}, {"reason",e.reason ? e.reason : "unknown"},
+            {"request_id",identity(e.request_id)}, {"command_id",identity(e.command_id)}, {"backend_call_id",identity(e.backend_call_id)},
+            {"status",AutoStopStatusName(e.status)}, {"block_reason",AutoStopBlockReasonName(e.block_reason)},
+            {"backend_action",AutoStopBackendActionName(e.backend_action)}, {"receipt",receipt_name(e.receipt)},
+            {"datagram_sent",e.datagram_sent}, {"observed_at_steady_ns",ns(e.observed_at_ns)},
+            {"call_started_steady_ns",ns(e.call_started_ns)}, {"backend_completed_steady_ns",ns(e.backend_completed_ns)},
+            {"protocol_ack_received_steady_ns",ns(e.protocol_ack_received_ns)}, {"completion_ready_steady_ns",ns(e.completion_ready_ns)},
+            {"observation_epoch",identity(e.target.observation_epoch)}, {"observation_sequence",identity(e.target.observation_sequence)},
+            {"source_observed_steady_ns",ns(e.target.source_observed_ns)},
+            {"source_session_id",identity(e.source_session_id)}, {"source_sequence",identity(e.source_sequence)},
+            {"source_safety_epoch",identity(e.source_safety_epoch)}, {"input_epoch",identity(e.input_epoch)},
+            {"input_sequence",identity(e.input_sequence)}, {"monitor_sequence",identity(e.monitor_sequence)},
+            {"input_received_steady_ns",ns(e.input_received_ns)},
+            {"monitor_wasd_mask",e.physical_wasd_mask}, {"event_wasd_mask",e.event_wasd_mask},
+            {"software_mask",e.software_mask}, {"command_mask",e.command_mask},
+            {"input_valid",e.input_valid}, {"event_valid",e.event_valid}, {"input_continuous",e.input_continuous},
+            {"history_valid",e.history_valid}, {"input_status",static_cast<int>(e.input_status)},
+            {"left_button_held",e.left_button_held}, {"activation_held",e.activation_held},
+            {"release_held",e.release_held}, {"end_held",e.end_held}, {"cleanup_unknown",e.cleanup_unknown},
+            {"independent",e.independent}, {"manual_release",e.manual_release}, {"physical_effect_observed",nullptr}});
+    }
+    return Json{{"schema",1}, {"clock_domain","local_steady_clock_nanoseconds"},
+        {"enabled",log.enabled}, {"generation",identity(log.generation)}, {"first_sequence",identity(log.first_sequence)},
+        {"last_sequence",identity(log.last_sequence)}, {"ring_overwritten_count",log.dropped_count},
+        {"physical_effect_verified",false}, {"events",std::move(events)}}.dump();
+}

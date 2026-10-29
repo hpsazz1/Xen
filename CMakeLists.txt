@@ -522,7 +522,7 @@ add_library(xen_debug STATIC
 target_include_directories(xen_debug PUBLIC
     ${PROJECT_SOURCE_DIR}/Xen
     ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(xen_debug PUBLIC log aim aim_landmark mouse auto_stop trigger recoil weapon recoil_tuner)
+target_link_libraries(xen_debug PUBLIC log aim aim_landmark mouse auto_stop auto_stop_worker trigger recoil weapon recoil_tuner)
 
 add_library(benchmark STATIC
     Xen/benchmark/benchmark.cpp)
@@ -2226,6 +2226,7 @@ if(BUILD_TESTING)
     add_executable(session_archive_tests tests/session_archive_tests.cpp)
     target_link_libraries(session_archive_tests PRIVATE xen_debug log)
     add_test(NAME session_archive_tests COMMAND session_archive_tests)
+    add_test(NAME session_archive_trace_sync_tests COMMAND session_archive_tests --trace-sync)
     add_test(NAME session_archive_pending_failure_tests COMMAND session_archive_tests --pending-failure-only)
     add_executable(session_archive_publication_tests tests/session_archive_publication_tests.cpp)
     target_link_libraries(session_archive_publication_tests PRIVATE xen_debug log)

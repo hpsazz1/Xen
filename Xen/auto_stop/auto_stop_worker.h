@@ -8,6 +8,7 @@
 #include <mutex>
 #include <chrono>
 #include <condition_variable>
+#include <vector>
 #include "auto_stop/auto_stop.h"
 #include "mouse/mouse.h"
 #include "source_context/source_context.h"
@@ -20,6 +21,50 @@ struct OutputArbiterCounters {
 struct OutputArbiterSnapshot {
     // 下标与OutputArbiterSource一致；并发读取是各计数器的观测值，不宣称同一事务快照。
     std::array<OutputArbiterCounters, 3> sources{};
+};
+
+// 仅关联生产观测；零值表示没有该项证据，不按帧率或本机序号补造。
+struct AutoStopTargetEvidence {
+    std::uint64_t observation_epoch = 0, observation_sequence = 0;
+    std::int64_t source_observed_ns = 0;
+};
+enum class AutoStopExecutionKind {
+    RECORDING_STARTED, RECORDING_STOPPED, WORKER_STARTED, WORKER_STOPPED,
+    INPUT_CHANGED, INPUT_GAP, BLOCK_CHANGED, REQUEST_STARTED, REQUEST_REJECTED,
+    BACKEND_BEGIN, BACKEND_RESULT, ESTIMATED, CANCELED, MOVEMENT_RETURNED,
+    CLEANUP_UNKNOWN, RESCUE, MANUAL_FIRE_RETAINED, RESUME_REQUESTED
+};
+enum class AutoStopBackendAction { NONE, MASK, KEYBOARD, CLEANUP };
+const char* AutoStopExecutionKindName(AutoStopExecutionKind kind) noexcept;
+const char* AutoStopBackendActionName(AutoStopBackendAction action) noexcept;
+inline constexpr std::size_t kAutoStopExecutionCapacity = 2048;
+struct AutoStopExecutionEvent {
+    std::uint64_t sequence = 0, generation = 0, request_id = 0, command_id = 0, backend_call_id = 0;
+    AutoStopExecutionKind kind = AutoStopExecutionKind::INPUT_CHANGED;
+    AutoStopBackendAction backend_action = AutoStopBackendAction::NONE;
+    // reason仅引用字符串字面量；事件不持有动态资源，也不在热路径格式化或写盘。
+    const char* reason = "none";
+    AutoStopStatus status = AutoStopStatus::DISABLED;
+    AutoStopBlockReason block_reason = AutoStopBlockReason::NONE;
+    AutoStopTargetEvidence target;
+    std::uint64_t source_session_id = 0, source_sequence = 0, source_safety_epoch = 0;
+    std::uint64_t input_epoch = 0, input_sequence = 0, monitor_sequence = 0;
+    std::int64_t input_received_ns = 0, observed_at_ns = 0, call_started_ns = 0;
+    std::int64_t backend_completed_ns = 0, protocol_ack_received_ns = 0;
+    std::int64_t completion_ready_ns = 0;
+    // 监听快照、WASD事件和软件输出三者分别保留；不把它们解释为游戏键态或速度。
+    std::uint8_t physical_wasd_mask = 0, event_wasd_mask = 0, software_mask = 0, command_mask = 0;
+    bool input_valid = false, event_valid = false, input_continuous = false, history_valid = false;
+    bool left_button_held = false, activation_held = false, release_held = false, end_held = false;
+    bool cleanup_unknown = false, datagram_sent = false, independent = false, manual_release = false;
+    InputMonitorStatus input_status = InputMonitorStatus::CLOSED;
+    KeyboardDisposition receipt = KeyboardDisposition::UNSUPPORTED;
+};
+struct AutoStopExecutionLog {
+    std::vector<AutoStopExecutionEvent> events;
+    // first/last是保留环的水位，即使after_sequence过滤后为空也不改变；查询不消费。
+    std::uint64_t dropped_count = 0, first_sequence = 0, last_sequence = 0, generation = 0;
+    bool enabled = false;
 };
 // 同一Runtime的Aim发送和辅助发送共用此门；配置等待不占用后端事务。
 class AutoStopOutputArbiter {
@@ -89,6 +134,10 @@ public:
     void set_movement_suspended(bool suspended) noexcept;
     bool movement_suspension_ready() const noexcept;
     AutoStopSnapshot snapshot() const noexcept;
+    // 默认关闭；关闭保留既有事件。序号在本worker生命周期内不回退，start不重置偏好。
+    // 开启和每次运行递增generation；覆盖只计真实环覆盖，不把关闭期间计为丢失。
+    void set_diagnostics_enabled(bool enabled) noexcept;
+    AutoStopExecutionLog execution_log(std::uint64_t after_sequence = 0) const;
     // 只返回独立四键接管仍有效的估计完成id，不是观察停稳证明。
     std::uint64_t estimated_completion_id() const noexcept;
     // 只证明无制动事务且新WASD事件没有未处理移动；不把零键态解释为实测停稳。
@@ -100,11 +149,13 @@ public:
     bool retain_for_manual_fire(std::uint64_t request_id) noexcept;
     // 独立目标存在事实，仅人工接管保持消费；准星离框不等于目标消失。
     // 无目标/失败发布零期限，陈旧帧不能刷新；期限失效撤销原保持，不自动承接新目标。
-    void publish_tracking_target(std::chrono::steady_clock::time_point valid_until) noexcept;
+    void publish_tracking_target(std::chrono::steady_clock::time_point valid_until,
+        AutoStopTargetEvidence evidence = {}) noexcept;
     // 检测线程发布不可变目标事实；无目标/失败发布零期限，旧帧不能自行续期。
     // 目标仅准入；四键接管后制动与保持都锁存至松键或安全撤销，软件制动最多500ms。
     void publish_target(std::chrono::steady_clock::time_point valid_until,
-        AutoStopBlockReason reason = AutoStopBlockReason::NO_TARGET) noexcept;
+        AutoStopBlockReason reason = AutoStopBlockReason::NO_TARGET,
+        AutoStopTargetEvidence evidence = {}) noexcept;
 private:
     class Impl;
     std::unique_ptr<Impl> impl_;

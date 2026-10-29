@@ -366,6 +366,7 @@ struct Runtime::Impl {
                         return runtime::detail::auto_stop_weapon_context(current,
                             config.auto_stop.cycle_enabled, timing_catalog.get(), weapon::Clock::now());
                     });
+                worker->set_diagnostics_enabled(config.runtime.diagnostics_enabled);
                 if (!worker->start(config.auto_stop, config.mouse.kmbox_command_timeout_ms)) {
                     set_error("启动自动急停调度失败");
                     return false;
@@ -985,8 +986,11 @@ struct Runtime::Impl {
                     // 同帧选中目标决定准入和保持；不以原始集合中的任意残留框延续旧接管。
                     const auto permits = runtime::detail::auto_stop_target_permits(
                         aim_frame, aim_result, config.aim, frame->timing, std::chrono::steady_clock::now());
-                    stop->publish_target(permits.admission_until, permits.reason);
-                    stop->publish_tracking_target(permits.tracking_until);
+                    const AutoStopTargetEvidence stop_evidence{aim_frame.observation_epoch, aim_frame.sequence,
+                        frame->timing.source_time_timing_valid ? std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            frame->timing.source_time_at.time_since_epoch()).count() : 0};
+                    stop->publish_target(permits.admission_until, permits.reason, stop_evidence);
+                    stop->publish_tracking_target(permits.tracking_until, stop_evidence);
                 }
 
                 if (aim_result.status == AimStatus::SUCCESS &&
@@ -1395,6 +1399,7 @@ struct Runtime::Impl {
                 std::shared_ptr<AutoStopWorker>{})) {
             worker->stop();
             std::lock_guard<std::mutex> lock(snapshot_mutex);
+            current_snapshot.auto_stop_execution_log = worker->execution_log();
             current_snapshot.auto_stop = worker->snapshot();
         }
         if (output_arbiter) {
@@ -2144,6 +2149,7 @@ void Runtime::set_diagnostics_enabled(bool enabled) noexcept {
         impl_->diagnostics_enabled = enabled;
     }
     if (!enabled) if (auto archive = impl_->recoil_archive.load()) archive->request_stop();
+    if (auto worker = impl_->auto_stop_worker.load()) worker->set_diagnostics_enabled(enabled);
 }
 
 bool Runtime::set_recoil_archive(std::optional<RecoilArchiveConfig> config) noexcept {
@@ -2185,6 +2191,15 @@ TriggerExecutionLog Runtime::trigger_execution_log(std::uint64_t after_sequence)
     std::erase_if(result.events, [after_sequence](const auto& event) { return event.sequence <= after_sequence; });
     result.first_sequence = result.events.empty() ? 0 : result.events.front().sequence;
     result.last_sequence = result.events.empty() ? 0 : result.events.back().sequence;
+    return result;
+}
+
+AutoStopExecutionLog Runtime::auto_stop_execution_log(std::uint64_t after_sequence) const {
+    if (!impl_) return {};
+    if (auto worker = impl_->auto_stop_worker.load()) return worker->execution_log(after_sequence);
+    std::lock_guard lock(impl_->snapshot_mutex);
+    auto result = impl_->current_snapshot.auto_stop_execution_log;
+    std::erase_if(result.events, [after_sequence](const auto& event) { return event.sequence <= after_sequence; });
     return result;
 }
 

@@ -50,16 +50,36 @@ struct Source {
         return log;
     }
     RecoilExecutionLog recoil_execution_log() const { return state.recoil_execution_log; }
+    AutoStopExecutionLog auto_stop_execution_log() const { return state.auto_stop_execution_log; }
     bool set_recoil_archive(std::optional<RecoilArchiveConfig>) { archive->stop(); return true; }
     void append(std::uint64_t trigger, std::uint64_t recoil) {
         TriggerExecutionEvent event; event.sequence = trigger;
         state.trigger_execution_log.events.push_back(event);
         state.trigger_execution_log.last_sequence = trigger;
+        AutoStopExecutionEvent stop; stop.sequence = trigger; stop.observed_at_ns = static_cast<std::int64_t>(trigger);
+        state.auto_stop_execution_log.events.push_back(stop);
+        state.auto_stop_execution_log.last_sequence = trigger;
         RecoilExecutionRecord record; record.intent.command_id = recoil;
         state.recoil_execution_log.records.push_back(record);
         state.trigger_telemetry_available = state.recoil_telemetry_available = true;
     }
 };
+
+void revoke_sync_before_finalization() {
+    struct Bridge {
+        struct State { std::uint64_t video_sync_discarded_records = 0; } state;
+        bool available = true;
+        State snapshot() const { return state; }
+        void publish_video_sync(const AppConfig&, bool enabled, const std::string&) {
+            available = enabled; if (!enabled) state.video_sync_discarded_records += 2;
+        }
+    } bridge;
+    struct Archive { int gaps = 0; void note_gap(const std::string&) { ++gaps; } } archive;
+    app::detail::revoke_video_sync(bridge,archive,AppConfig{},true);
+    expect(!bridge.available && archive.gaps == 1, "停止或退出前撤销queued标记并记录归档缺口");
+    app::detail::revoke_video_sync(bridge,archive,AppConfig{},false);
+    expect(archive.gaps == 1, "未开启归档不制造另一段的缺口");
+}
 
 void final_archive_state(bool fail_write) {
     Fixture fixture;
@@ -149,6 +169,8 @@ void reopen_during_reload(DetectorReloadState result) {
            "重载成功使用新模型，失败仍使用旧模型身份");
     source.append(7, 9);
     auto snapshot = source.snapshot(); snapshot.trigger_execution_log = source.trigger_execution_log(boundary.archive_after_event);
+    std::erase_if(snapshot.auto_stop_execution_log.events,
+        [&](const auto& event) { return event.sequence <= boundary.archive_after_auto_stop; });
     expect(archive.submit({}, snapshot), "提交新段事件"); archive.stop();
     boundary.filter_final(snapshot);
     expect(report.finalize(snapshot, error), "封尾重载后的报告");
@@ -156,6 +178,10 @@ void reopen_during_reload(DetectorReloadState result) {
     expect(json["recoil"]["execution"]["records"].size() == 1 &&
            json["recoil"]["execution"]["records"][0]["command_id"] == 9, "重载成功或失败后均不补关闭期间压枪记录");
     const auto segment = read_json(fixture.root / "session/segment-1.json");
+    expect(segment["auto_stop_execution"]["events"].size() == 1 &&
+           segment["auto_stop_execution"]["events"][0]["sequence"] == "7", "重载后急停事件不能串入关闭窗口旧事务");
+    expect(json["auto_stop_execution"]["events"].size() == 1 &&
+           json["auto_stop_execution"]["events"][0]["sequence"] == "7", "最终急停报告沿用同一分段水位");
     expect(segment["trigger"]["execution"]["events"].size() == 1 &&
            segment["trigger"]["execution"]["events"][0]["sequence"] == "7", "全程归档不补关闭期间扳机事件");
 }
@@ -293,6 +319,7 @@ int main() {
         final_archive_state(false); final_archive_state(true);
         reopen_during_reload(DetectorReloadState::SUCCEEDED); reopen_during_reload(DetectorReloadState::FAILED);
         cancelled_report_resume();
+        revoke_sync_before_finalization();
         failed_session_restart();
         final_report_failure_recovery(ReportRestartTarget::RUNTIME);
         final_report_failure_recovery(ReportRestartTarget::APPLICATION);

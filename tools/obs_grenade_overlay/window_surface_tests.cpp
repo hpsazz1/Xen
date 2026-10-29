@@ -10,7 +10,7 @@ int main() {
     const auto check = [&](bool value, const char* reason) {
         if (!value) { std::cerr << reason << '\n'; ++failures; }
     };
-    check(xen_obs::kHotkeys.size()==6,"热键表应包含两个菜单入口及普通/Ctrl两种采集组合");
+    check(xen_obs::kHotkeys.size()==7,"热键表应包含原六个菜单/采集入口及独立视频同步组合");
     check(xen_obs::kHotkeys[0].virtual_key==VK_RIGHT&&xen_obs::kHotkeys[1].virtual_key==VK_NUMPAD6&&
         !xen_obs::kHotkeys[0].capture_role&&!xen_obs::kHotkeys[1].capture_role,"原Right/Num6菜单入口保持");
     std::set<std::wstring_view> names;
@@ -25,6 +25,35 @@ int main() {
         check(atom!=0&&atoms.insert(atom).second,"生产表中的atom应能建立且互不重复");
     }
     for (const auto atom : atoms) GlobalDeleteAtom(atom);
+    {
+        const auto& sync=xen_obs::kHotkeys.back();
+        check(sync.virtual_key==VK_F7 && sync.modifiers==(MOD_CONTROL|MOD_NOREPEAT) &&
+            sync.capture_role && std::string_view(sync.capture_role)=="sync",
+            "同步只用Ctrl+F7，不复用会启停Runtime的F8基础键");
+        const auto window=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_TOPMOST|WS_EX_LAYERED|
+            WS_EX_NOACTIVATE|WS_EX_TRANSPARENT,L"STATIC",L"Xen同步录制离线检查",WS_POPUP,
+            -10000,-10000,560,64,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+        check(window!=nullptr,"创建独立同步窗口");
+        if (window) {
+            check(xen_obs::prepare_sync_window(window)==ERROR_SUCCESS,"同步窗口生产初始化允许捕获");
+            DWORD affinity=WDA_EXCLUDEFROMCAPTURE;
+            check(GetWindowDisplayAffinity(window,&affinity) && affinity==WDA_NONE,
+                "同步窗口回读WDA_NONE；菜单与参考卡仍独立截图排除");
+            const auto style=GetWindowLongPtrW(window,GWL_EXSTYLE);
+            check((style&WS_EX_NOACTIVATE) && (style&WS_EX_TRANSPARENT),"同步窗不抢焦点且鼠标穿透");
+            const auto screen=GetDC(nullptr), bitmap_dc=CreateCompatibleDC(screen);
+            const auto bitmap=CreateCompatibleBitmap(screen,560,64);
+            const auto old=bitmap ? SelectObject(bitmap_dc,bitmap) : nullptr;
+            const RECT client{0,0,560,64};
+            check(screen && bitmap_dc && bitmap && xen_obs::paint_sync_window(bitmap_dc,client,L"SYNC-obs-test-1"),
+                "生产同步绘制函数在隐藏位图中完成，不启动游戏或显示覆盖窗");
+            if (old) SelectObject(bitmap_dc,old);
+            if (bitmap) DeleteObject(bitmap);
+            if (bitmap_dc) DeleteDC(bitmap_dc);
+            if (screen) ReleaseDC(nullptr,screen);
+            DestroyWindow(window);
+        }
+    }
     for (const auto key : {UINT(VK_NEXT),UINT(VK_PRIOR)}) {
         const xen_obs::HotkeyBinding* ordinary=nullptr;
         const xen_obs::HotkeyBinding* crouched=nullptr;

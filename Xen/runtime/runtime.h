@@ -310,6 +310,7 @@ struct RuntimeSnapshot {
     AimDispatchRejectionSummary aim_dispatch_rejections;
     std::shared_ptr<const input_training::Snapshot> training;
     AutoStopSnapshot auto_stop;
+    AutoStopExecutionLog auto_stop_execution_log;
     TriggerSnapshot trigger;
     bool trigger_telemetry_available = false;
     TriggerExecutionLog trigger_execution_log;
@@ -430,6 +431,7 @@ public:
     void cancel_auto_stop(std::uint64_t request_id) noexcept;
     RecoilExecutionLog recoil_execution_log() const;
     TriggerExecutionLog trigger_execution_log(std::uint64_t after_sequence = 0) const;
+    AutoStopExecutionLog auto_stop_execution_log(std::uint64_t after_sequence = 0) const;
     OutputArbiterSnapshot output_arbitration() const;
     RuntimeSnapshot snapshot() const noexcept;
     // 诊断预览默认关闭；启用时最多 10 FPS，最长边 512，且只保留最新同帧图像与标注。

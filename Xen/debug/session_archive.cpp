@@ -49,6 +49,7 @@ struct SessionArchive::Impl {
         RuntimeSnapshot snapshot;
         bool marker = false;
         std::string label;
+        std::string video_sync;
         std::int64_t steady = 0, system = 0;
     };
     SessionArchiveConfig config;
@@ -63,10 +64,13 @@ struct SessionArchive::Impl {
     bool stopping = false;
     std::int64_t started = 0, ended = 0, started_system = 0, ended_system = 0;
     std::uint64_t trigger_sequence = 0, segment_number = 0;
+    std::uint64_t auto_stop_sequence = 0, auto_stop_watermark = 0;
     std::vector<RuntimePipelineSample> pending;
     RuntimeSnapshot latest;
     bool failed_snapshot_pending = false;
     std::vector<TriggerExecutionEvent> events;
+    std::vector<AutoStopExecutionEvent> stop_events;
+    AutoStopExecutionLog stop_log_metadata;
     std::function<void()> before_flush;
     Clock::time_point segment_started;
 
@@ -93,14 +97,15 @@ struct SessionArchive::Impl {
             {"coalesced_batches",s.coalesced_batches}, {"queue_capacity_rejections",s.queue_capacity_rejections},
             {"sample_capacity_rejections",s.sample_capacity_rejections},
             {"trigger_events_dropped",s.trigger_events_dropped}, {"marker_count",s.marker_count},
+            {"auto_stop_events_dropped",s.auto_stop_events_dropped},
             {"runtime_samples_dropped",latest.debug_samples_dropped},
-            {"last_error",s.last_error}, {"complete",closed && !s.dropped_batches && !s.dropped_samples && !s.trigger_events_dropped && !latest.debug_samples_dropped && s.last_error.empty()},
+            {"last_error",s.last_error}, {"complete",closed && !s.dropped_batches && !s.dropped_samples && !s.trigger_events_dropped && !s.auto_stop_events_dropped && !latest.debug_samples_dropped && s.last_error.empty()},
             {"segments","segment-*.meta.json"}, {"markers","marker-*.json"},
             {"clock_domain","local_steady_clock_nanoseconds"}, {"physical_effect_verified",false}});
     }
     void flush() {
         // 故障可能发生在首帧前或完整分段之后，仍须保留终态证据。
-        if (pending.empty() && events.empty() && !failed_snapshot_pending) return;
+        if (pending.empty() && events.empty() && stop_events.empty() && !failed_snapshot_pending) return;
         std::function<void()> callback;
         { std::lock_guard lock(mutex); callback=before_flush; }
         if (callback) callback();
@@ -119,6 +124,9 @@ struct SessionArchive::Impl {
         latest.trigger_execution_log.first_sequence = events.empty() ? 0 : events.front().sequence;
         latest.trigger_execution_log.last_sequence = events.empty() ? 0 : events.back().sequence;
         latest.trigger_execution_log.dropped_count = status().trigger_events_dropped;
+        latest.auto_stop_execution_log.events = stop_events;
+        latest.auto_stop_execution_log.first_sequence = stop_events.empty() ? 0 : stop_events.front().sequence;
+        latest.auto_stop_execution_log.last_sequence = stop_events.empty() ? 0 : stop_events.back().sequence;
         try {
             DebugReport report; std::string message;
             if (!report.start(report_config, message)) throw std::runtime_error(message);
@@ -133,27 +141,33 @@ struct SessionArchive::Impl {
                 {"last_control_steady_ns",std::to_string(pending.empty()?0:pending.back().frame_timing.control_steady_ns)},
                 {"first_trigger_steady_ns",std::to_string(events.empty()?0:std::chrono::duration_cast<std::chrono::nanoseconds>(events.front().observed_at.time_since_epoch()).count())},
                 {"last_trigger_steady_ns",std::to_string(events.empty()?0:std::chrono::duration_cast<std::chrono::nanoseconds>(events.back().observed_at.time_since_epoch()).count())},
-                {"trigger_event_count",events.size()}, {"published",true}});
+                {"trigger_event_count",events.size()}, {"auto_stop_event_count",stop_events.size()},
+                {"first_auto_stop_steady_ns",std::to_string(stop_events.empty() ? 0 : stop_events.front().observed_at_ns)},
+                {"last_auto_stop_steady_ns",std::to_string(stop_events.empty() ? 0 : stop_events.back().observed_at_ns)},
+                {"published",true}});
             std::lock_guard lock(mutex); ++state.written_segments; state.written_samples += pending.size();
         } catch (const std::exception& ex) {
             std::lock_guard lock(mutex); state.last_error = ex.what();
             state.dropped_samples += pending.size(); state.trigger_events_dropped += events.size();
+            state.auto_stop_events_dropped += stop_events.size();
         }
         failed_snapshot_pending = false;
-        pending.clear(); events.clear(); segment_started = Clock::now();
+        pending.clear(); events.clear(); stop_events.clear(); segment_started = Clock::now();
         manifest(false);
     }
     void marker(const Batch& batch) {
         std::uint64_t number;
         { std::lock_guard lock(mutex); number = state.marker_count + 1; }
         constexpr std::int64_t window = 30000000000LL;
-        publish(std::filesystem::path(config.directory) / ("marker-" + std::to_string(number) + ".json"), {
+        Json value = {
             {"schema",1}, {"label",batch.label}, {"steady_ns",std::to_string(batch.steady)},
             {"system_unix_ns",std::to_string(batch.system)}, {"window_start_steady_ns",std::to_string(batch.steady-window)},
             {"window_end_steady_ns",std::to_string(batch.steady+window)},
             {"pre_truncated",batch.steady-window < started}, {"post_truncated",nullptr},
             {"segment_reference","segment-*.meta.json; select overlapping control/trigger steady timestamps"},
-            {"coverage_manifest","manifest.json"}, {"closed",false}});
+            {"coverage_manifest","manifest.json"}, {"closed",false}};
+        if (!batch.video_sync.empty()) value["video_sync"] = Json::parse(batch.video_sync);
+        publish(std::filesystem::path(config.directory) / ("marker-" + std::to_string(number) + ".json"), value);
         // 仅已发布的标记进入清单计数；失败不能被计作落盘成功。
         { std::lock_guard lock(mutex); state.marker_count = number; }
     }
@@ -196,29 +210,54 @@ struct SessionArchive::Impl {
                     trigger_sequence = event.sequence; events.push_back(event);
                 }
                 batch.snapshot.trigger_execution_log.events.clear();
+                auto_stop_watermark = std::max(auto_stop_watermark, batch.snapshot.auto_stop_execution_log.last_sequence);
+                const auto& sampled_stop_log = batch.snapshot.auto_stop_execution_log;
+                if (sampled_stop_log.generation || sampled_stop_log.last_sequence || sampled_stop_log.enabled) {
+                    stop_log_metadata.enabled = sampled_stop_log.enabled;
+                    stop_log_metadata.generation = sampled_stop_log.generation;
+                    stop_log_metadata.dropped_count = sampled_stop_log.dropped_count;
+                }
+                for (const auto& event : batch.snapshot.auto_stop_execution_log.events) {
+                    if (event.sequence <= auto_stop_sequence) continue;
+                    if (event.sequence > auto_stop_sequence + 1) {
+                        std::lock_guard lock(mutex); state.auto_stop_events_dropped += event.sequence-auto_stop_sequence-1;
+                    }
+                    if (stop_events.size() >= kAutoStopExecutionCapacity) flush();
+                    auto_stop_sequence = event.sequence; stop_events.push_back(event);
+                }
+                batch.snapshot.auto_stop_execution_log.events.clear();
                 // 重复空FAILED轮询不重复写段；真正的终态变化仍须保留。
                 failed_snapshot_pending = batch.snapshot.state == RuntimeState::FAILED &&
                     (failed_snapshot_pending || !same_failure_snapshot(latest, batch.snapshot));
                 latest = std::move(batch.snapshot);
+                // 普通逐帧批次未轮询事件头，不能把有效代际/覆盖计数清为默认值。
+                latest.auto_stop_execution_log = stop_log_metadata;
                 for (const auto& sample : batch.samples) {
                     pending.push_back(sample);
                     if (pending.size() >= config.segment_samples) flush();
                 }
-                if (events.size() >= 2048 || Clock::now()-segment_started >= config.segment_interval) flush();
+                if (events.size() >= 2048 || stop_events.size() >= kAutoStopExecutionCapacity || Clock::now()-segment_started >= config.segment_interval) flush();
             }
-            flush(); close_markers(); manifest(true);
+            flush();
+            // 末尾丢失后可能再无下一事件，仍以生产水位识别尾部缺口。
+            if (auto_stop_watermark > auto_stop_sequence) {
+                std::lock_guard lock(mutex); state.auto_stop_events_dropped += auto_stop_watermark-auto_stop_sequence;
+            }
+            close_markers(); manifest(true);
         } catch (const std::exception& ex) { error(ex.what()); }
           catch (...) { error("归档后台未知异常"); }
         {
             std::lock_guard lock(mutex);
             state.dropped_samples += pending.size();
             state.trigger_events_dropped += events.size();
+            state.auto_stop_events_dropped += stop_events.size();
             for (const auto& batch : queue) {
                 state.dropped_samples += batch.samples.size();
                 state.trigger_events_dropped += batch.snapshot.trigger_execution_log.events.size();
+                state.auto_stop_events_dropped += batch.snapshot.auto_stop_execution_log.events.size();
                 ++state.dropped_batches;
             }
-            pending.clear(); events.clear(); queue.clear(); queued_samples=0; state.active = false;
+            pending.clear(); events.clear(); stop_events.clear(); queue.clear(); queued_samples=0; state.active = false;
             state.dropped_samples = std::max(state.dropped_samples,
                 state.accepted_samples-state.written_samples);
         }
@@ -239,6 +278,7 @@ bool SessionArchive::start(const SessionArchiveConfig& config, std::string& erro
         if (!std::filesystem::create_directory(directory)) throw std::runtime_error("归档目录已存在，拒绝覆盖旧会话");
         impl_ = std::make_unique<Impl>(); impl_->config = config;
         impl_->trigger_sequence = config.trigger_sequence_baseline;
+        impl_->auto_stop_sequence = impl_->auto_stop_watermark = config.auto_stop_sequence_baseline;
         impl_->state.directory = config.directory; impl_->state.active = true; impl_->started = steady_ns();
         impl_->started_system = system_ns();
         impl_->worker = std::thread([p=impl_.get()]{ p->run(); }); error.clear(); return true;
@@ -251,7 +291,8 @@ bool SessionArchive::start(const SessionArchiveConfig& config, std::string& erro
 }
 bool SessionArchive::submit(std::span<const RuntimePipelineSample> samples, const RuntimeSnapshot& snapshot) noexcept {
     try {
-        if (samples.size()>10000 || snapshot.trigger_execution_log.events.size()>2048) {
+        if (samples.size()>10000 || snapshot.trigger_execution_log.events.size()>2048 ||
+            snapshot.auto_stop_execution_log.events.size()>kAutoStopExecutionCapacity) {
             impl_->rejected += samples.size(); ++impl_->rejected_batches; return false;
         }
         Impl::Batch batch; batch.steady=steady_ns(); batch.system=system_ns();
@@ -267,17 +308,31 @@ bool SessionArchive::submit(std::span<const RuntimePipelineSample> samples, cons
             (impl_->queue.back().snapshot.state != RuntimeState::FAILED ||
              same_failure_snapshot(impl_->queue.back().snapshot, snapshot)) &&
             impl_->queue.back().samples.size()+samples.size()<=merge_limit &&
-            impl_->queue.back().snapshot.trigger_execution_log.events.size()+snapshot.trigger_execution_log.events.size()<=2048;
+            impl_->queue.back().snapshot.trigger_execution_log.events.size()+snapshot.trigger_execution_log.events.size()<=2048 &&
+            impl_->queue.back().snapshot.auto_stop_execution_log.events.size()+snapshot.auto_stop_execution_log.events.size()<=kAutoStopExecutionCapacity;
         if (merge) {
             auto& tail=impl_->queue.back();
             // 先完成所有可能分配的操作，再改变尾批；失败不能部分写入后又计作丢弃。
             auto combined_events=tail.snapshot.trigger_execution_log.events;
             combined_events.insert(combined_events.end(),snapshot.trigger_execution_log.events.begin(),snapshot.trigger_execution_log.events.end());
+            auto combined_stops=tail.snapshot.auto_stop_execution_log.events;
+            combined_stops.insert(combined_stops.end(),snapshot.auto_stop_execution_log.events.begin(),snapshot.auto_stop_execution_log.events.end());
+            auto& incoming_stop_log = batch.snapshot.auto_stop_execution_log;
+            if (!incoming_stop_log.generation && !incoming_stop_log.last_sequence && !incoming_stop_log.enabled) {
+                // 合批也可能覆盖尚未到达消费者的事件头，必须在移交前保留。
+                const auto& previous = tail.snapshot.auto_stop_execution_log;
+                incoming_stop_log.enabled = previous.enabled;
+                incoming_stop_log.generation = previous.generation;
+                incoming_stop_log.dropped_count = previous.dropped_count;
+                incoming_stop_log.first_sequence = previous.first_sequence;
+                incoming_stop_log.last_sequence = previous.last_sequence;
+            }
             const auto needed=tail.samples.size()+samples.size();
             if (needed>tail.samples.capacity()) tail.samples.reserve(std::max(needed,
                 std::min(merge_limit,tail.samples.capacity()*2)));
             tail.samples.insert(tail.samples.end(),batch.samples.begin(),batch.samples.end());
             batch.snapshot.trigger_execution_log.events=std::move(combined_events);
+            batch.snapshot.auto_stop_execution_log.events=std::move(combined_stops);
             tail.snapshot=std::move(batch.snapshot); tail.steady=batch.steady; tail.system=batch.system;
             ++impl_->state.coalesced_batches;
         } else {
@@ -297,6 +352,17 @@ bool SessionArchive::mark(const std::string& label) noexcept {
         Impl::Batch batch; batch.marker=true; batch.label=label.substr(0,256); batch.steady=steady_ns(); batch.system=system_ns();
         std::unique_lock lock(impl_->mutex, std::try_to_lock);
         if (!lock || !impl_->state.active || impl_->stopping || impl_->queue.size()>=impl_->config.queue_capacity) return false;
+        impl_->queue.push_back(std::move(batch)); lock.unlock(); impl_->wake.notify_one(); return true;
+    } catch (...) { return false; }
+}
+bool SessionArchive::mark_video_sync(const std::string& metadata_json) noexcept {
+    try {
+        const auto value = Json::parse(metadata_json);
+        if (!value.is_object() || metadata_json.size() > 8192) return false;
+        Impl::Batch batch; batch.marker = true; batch.label = "video_sync"; batch.video_sync = metadata_json;
+        batch.steady = steady_ns(); batch.system = system_ns();
+        std::unique_lock lock(impl_->mutex, std::try_to_lock);
+        if (!lock || !impl_->state.active || impl_->stopping || impl_->queue.size() >= impl_->config.queue_capacity) return false;
         impl_->queue.push_back(std::move(batch)); lock.unlock(); impl_->wake.notify_one(); return true;
     } catch (...) { return false; }
 }

@@ -22,6 +22,7 @@ struct Snapshot {
     std::uint16_t port = 0;
     std::string error;
     std::vector<std::string> urls;
+    std::uint64_t video_sync_discarded_records = 0;
 };
 struct SelectionRequest {
     std::uint64_t id = 0, map_epoch = 0;
@@ -38,6 +39,11 @@ public:
     // App 主线程发布心跳与不可变选择；只检查 controls 的按键，不保留配置或秘密字段。
     void publish_capture(std::shared_ptr<const debug_session::Snapshot> selection,
                          const AppConfig& controls, bool available, const std::string& reason = {}) noexcept;
+    // 只发布诊断录制可用性；视频打点不产生Runtime/设备控制意图。
+    void publish_video_sync(const AppConfig& controls, bool available,
+                            const std::string& reason = {}) noexcept;
+    // 每个paint/receipt只交付一次；JSON保留原始时钟及映射误差，由App后台归档。
+    std::optional<std::string> poll_video_sync() noexcept;
     std::optional<SelectionRequest> poll_selection() noexcept;
     bool selection_current(const SelectionRequest& request) const noexcept;
     // 成功快照与选择回执一并发布；空快照表示载入失败，不能先回执成功再等待下一帧补图。

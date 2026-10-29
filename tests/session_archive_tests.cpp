@@ -428,13 +428,67 @@ void pending_failure_transition_test(const std::filesystem::path& root,
           "D20 preserves sample accounting, duplicate suppression and completed drain");
 }
 
+int trace_sync_tests(const std::filesystem::path& root) {
+    SessionArchiveConfig config; config.directory = (root / "trace-complete").string();
+    config.auto_stop_sequence_baseline = 40; config.report_config.auto_stop_config = AutoStopConfig{};
+    config.segment_samples = 1;
+    SessionArchive archive; std::string error;
+    check(archive.start(config,error), "急停日志归档启动");
+    RuntimeSnapshot snapshot; snapshot.state = RuntimeState::RUNNING;
+    snapshot.auto_stop_execution_log.enabled = true;
+    snapshot.auto_stop_execution_log.generation = 2;
+    snapshot.auto_stop_execution_log.dropped_count = 9;
+    AutoStopExecutionEvent event; event.sequence = 41; event.generation = 2;
+    event.kind = AutoStopExecutionKind::BLOCK_CHANGED; event.block_reason = AutoStopBlockReason::NO_TARGET;
+    event.request_id = 77; event.reason = "fixture_no_target"; event.observed_at_ns = 123456789;
+    event.physical_wasd_mask = 1; event.software_mask = 2;
+    snapshot.auto_stop_execution_log.events.push_back(event);
+    send(archive,{},snapshot); send(archive,{},snapshot); // 同游标重读不能重复保存。
+    RuntimeSnapshot ordinary_batch; ordinary_batch.state = RuntimeState::RUNNING;
+    RuntimePipelineSample ordinary_sample; ordinary_sample.sequence = 1;
+    send(archive,std::span(&ordinary_sample,1),ordinary_batch);
+    const auto sync = Json{{"schema",1},{"stage","receipt"},{"marker_id","fixture-sync-1"},
+        {"mapped_paint_begin_aux_steady_ns","123456789"},{"network_uncertainty_ns","250000"}}.dump();
+    check(archive.mark_video_sync(sync), "同步编号接受后台落盘");
+    check(!archive.mark_video_sync("[]"), "无效同步元数据拒绝");
+    archive.stop();
+    const auto report = read(root / "trace-complete/segment-1.json");
+    const auto& rows = report["auto_stop_execution"]["events"];
+    check(report["auto_stop_execution"]["enabled"] == true && report["auto_stop_execution"]["generation"] == "2" &&
+          report["auto_stop_execution"]["ring_overwritten_count"] == 9, "未轮询的逐帧批次不能覆盖急停日志代际和统计");
+    check(rows.size() == 1 && rows[0]["sequence"] == "41" && rows[0]["request_id"] == "77", "急停请求身份去重且64位时间不损精度");
+    check(rows[0]["reason"] == "fixture_no_target" && rows[0]["block_reason"] == AutoStopBlockReasonName(AutoStopBlockReason::NO_TARGET), "阻断原因逐事件保留");
+    check(rows[0]["monitor_wasd_mask"] == 1 && rows[0]["software_mask"] == 2 && rows[0]["physical_effect_observed"].is_null(), "监听与软件输出分离且不冒充停稳");
+    check(read(root / "trace-complete/segment-1.meta.json")["auto_stop_event_count"] == 1, "急停事件独立覆盖索引");
+    check(read(root / "trace-complete/marker-1.json")["video_sync"]["marker_id"] == "fixture-sync-1", "视频同步编号与原始时钟保存");
+    check(read(root / "trace-complete/manifest.json")["complete"] == true, "纯急停事件和同步标记正常封尾");
+
+    config.directory = (root / "trace-gap").string();
+    check(archive.start(config,error), "急停缺口归档启动");
+    snapshot.auto_stop_execution_log.events[0].sequence = 43;
+    send(archive,{},snapshot); archive.stop();
+    const auto manifest = read(root / "trace-gap/manifest.json");
+    check(manifest["auto_stop_events_dropped"] == 2 && manifest["complete"] == false, "急停环覆盖缺口必须影响完整性");
+    config.directory = (root / "trace-tail-gap").string();
+    check(archive.start(config,error), "急停尾部缺口归档启动");
+    snapshot.auto_stop_execution_log.events[0].sequence = 41;
+    snapshot.auto_stop_execution_log.last_sequence = 44;
+    send(archive,{},snapshot); archive.stop();
+    check(read(root / "trace-tail-gap/manifest.json")["auto_stop_events_dropped"] == 3 &&
+          read(root / "trace-tail-gap/manifest.json")["complete"] == false, "没有下一事件的尾部缺口仍须保留");
+    std::cout << "急停事件与视频同步归档专项通过\n";
+    return 0;
+}
+
 int main(int argc, char** argv) {
     try {
+        if (argc==3 && std::string(argv[1])=="--trace-sync") return trace_sync_tests(argv[2]);
         if (argc==3 && std::string(argv[1])=="--benchmark") return benchmark(argv[2]);
         if (argc==3 && std::string(argv[1])=="--queue-repro") return benchmark(argv[2],true);
         if (argc==3 && std::string(argv[1])=="--queue-pressure") return queue_pressure(argv[2]);
         const auto root=std::filesystem::temp_directory_path()/
             ("xen-session-archive-test-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        if (argc==2 && std::string(argv[1])=="--trace-sync") return trace_sync_tests(root);
         if (argc == 2 && std::string(argv[1]) == "--pending-failure-only") {
             int failures = 0;
             for (const bool separate : {false, true}) {

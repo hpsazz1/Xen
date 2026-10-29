@@ -80,6 +80,7 @@ public:
         input.virtual_keys['A'] = (held & 2) != 0;
         input.virtual_keys['S'] = (held & 4) != 0;
         input.virtual_keys['D'] = (held & 8) != 0;
+        if (input.virtual_keys[1]) ++left_down_polls; else ++left_up_polls;
         if (!input.virtual_keys['1']) ++rescue_key_up_polls;
         const bool inject_release = release_after_poll.exchange(false);
         const auto inject_press = press_after_poll.exchange(0);
@@ -201,6 +202,7 @@ public:
     int physical_during_cleanup = -1;
     int cleanup_report_mode = 0;
     std::uint64_t rescue_key_up_polls = 0;
+    std::uint64_t left_down_polls = 0, left_up_polls = 0;
     std::function<void()> before_poll;
     std::function<void()> after_first_software;
     std::function<void()> before_wasd_read;
@@ -1623,8 +1625,226 @@ void fault_rescue_retry_contract(bool delayed_poll) {
     worker.stop();
 }
 
+void diagnostic_hud_transaction_contract() {
+    using namespace std::chrono_literals;
+    std::vector<int> disabled_reports, disabled_masks;
+    for (const bool enabled : {false, true}) {
+        auto fake = std::make_shared<Fake>();
+        std::atomic<std::uint64_t> id{0};
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; },
+            [&] { return ++id; }, [] { return true; });
+        AutoStopConfig config{true, 5}; config.experimental_hud_model = true;
+        worker.set_diagnostics_enabled(enabled);
+        require(worker.start(config), "HUD诊断事务启动失败");
+        ready(worker, fake); // 复用现有HUD真实全松同步后持W的生产Fake场景。
+        const AutoStopTargetEvidence evidence{6, 77, clock_ns()};
+        const auto deadline = Clock::now() + 2s;
+        worker.publish_tracking_target(deadline, evidence);
+        worker.publish_target(deadline, AutoStopBlockReason::NONE, evidence);
+        wait_for([&] { return worker.estimated_completion_id() != 0; });
+        const auto state = worker.snapshot();
+        require(state.experimental_hud_model && !state.fire_permitted && !state.stop_evidence_available &&
+            state.completion_ready_ns - state.counter_release_ack_ns == 18'000'000,
+            "HUD诊断不能改变模型资格边界或最终UP ACK后18ms合同");
+        // 正常停止也必须经过活动请求取消、后端清理和owner归还；记录开启时覆盖同一路径。
+        worker.stop();
+        std::vector<int> reports, masks;
+        { std::lock_guard lock(fake->mutex); reports = fake->software; masks = fake->masks; }
+        require(reports == std::vector<int>({0, 4, 0}) && masks == std::vector<int>({1, 2, 4, 8}) && fake->released(),
+            "HUD目标事务必须保持四键屏蔽、初始零、反向S、最终零及停止清理");
+        const auto log = worker.execution_log();
+        if (!enabled) {
+            disabled_reports = reports; disabled_masks = masks;
+            require(log.events.empty() && log.last_sequence == 0, "关闭诊断的HUD事务不得记录事件");
+            continue;
+        }
+        require(reports == disabled_reports && masks == disabled_masks && log.dropped_count == 0,
+            "HUD诊断开关两轮输出序列须完全相同且有限正常事务无诊断丢失");
+        bool started = false, estimated = false, canceled = false, returned = false, stopped = false;
+        int mask_commands = 0, keyboard_commands = 0, cleanups = 0;
+        std::uint64_t previous_sequence = 0;
+        for (const auto& event : log.events) {
+            require(event.sequence == ++previous_sequence, "HUD单事务诊断事件不得缺号或重排");
+            started |= event.kind == AutoStopExecutionKind::REQUEST_STARTED && event.independent && event.request_id == 1 &&
+                event.target.observation_epoch == evidence.observation_epoch && event.target.observation_sequence == evidence.observation_sequence;
+            estimated |= event.kind == AutoStopExecutionKind::ESTIMATED && event.request_id == 1 &&
+                event.completion_ready_ns == state.completion_ready_ns;
+            canceled |= event.kind == AutoStopExecutionKind::CANCELED && event.request_id == 1 &&
+                std::string_view(event.reason) == "worker_stopped";
+            returned |= event.kind == AutoStopExecutionKind::MOVEMENT_RETURNED && event.request_id == 1 && !event.cleanup_unknown;
+            stopped |= event.kind == AutoStopExecutionKind::WORKER_STOPPED;
+            if (event.kind != AutoStopExecutionKind::BACKEND_RESULT || event.request_id != 1) continue;
+            const auto begin = std::find_if(log.events.begin(), log.events.end(), [&](const auto& value) {
+                return value.kind == AutoStopExecutionKind::BACKEND_BEGIN && value.backend_call_id == event.backend_call_id;
+            });
+            require(begin != log.events.end() && begin->sequence < event.sequence && begin->command_id == event.command_id &&
+                event.receipt == KeyboardDisposition::ACKNOWLEDGED && event.call_started_ns <= event.protocol_ack_received_ns &&
+                event.protocol_ack_received_ns <= event.backend_completed_ns && event.backend_completed_ns <= event.observed_at_ns,
+                "HUD后端事务须完整保留开始、ACK、返回和命令身份");
+            if (event.backend_action == AutoStopBackendAction::MASK) ++mask_commands;
+            if (event.backend_action == AutoStopBackendAction::CLEANUP) ++cleanups;
+            if (event.backend_action == AutoStopBackendAction::KEYBOARD) {
+                ++keyboard_commands;
+                require(keyboard_commands <= 3 && event.command_mask == reports[keyboard_commands - 1] &&
+                    event.software_mask == (keyboard_commands == 3 ? 4 : 0) && event.physical_wasd_mask == 1,
+                    "HUD监听物理方向不能混成初始零、反向或释放软件报告");
+            }
+        }
+        require(started && estimated && canceled && returned && stopped && mask_commands == 4 && keyboard_commands == 3 && cleanups == 1,
+            "HUD开启记录必须完整经过请求、动态制动、估计资格、取消和清理，不能由关闭日志掩盖锁重入");
+    }
+}
+
+void diagnostic_execution_contracts() {
+    diagnostic_hud_transaction_contract();
+    AutoStopConfig config{true, 5};
+    std::vector<int> disabled_reports;
+    for (const bool enabled : {false, true}) {
+        auto fake = std::make_shared<Fake>();
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; });
+        worker.set_diagnostics_enabled(enabled);
+        require(worker.start(config), "诊断契约启动失败");
+        ready(worker, fake);
+        worker.publish_target(Clock::now() + std::chrono::seconds(2), AutoStopBlockReason::NONE, {4, 56, 123456});
+        require(worker.request(101), "诊断契约请求失败");
+        wait_for([&] { return worker.snapshot().status == AutoStopStatus::ESTIMATED; });
+        { std::lock_guard lock(fake->mutex); fake->extra_keys[1] = true; }
+        wait_for([&] { std::lock_guard lock(fake->mutex); return fake->left_down_polls != 0; });
+        std::uint64_t up_polls = 0;
+        { std::lock_guard lock(fake->mutex); fake->extra_keys[1] = false; up_polls = fake->left_up_polls; }
+        wait_for([&] { std::lock_guard lock(fake->mutex); return fake->left_up_polls > up_polls; });
+        worker.cancel();
+        wait_for([&] { return fake->has_cleanup(); });
+        { std::lock_guard lock(fake->mutex); fake->activation = false; }
+        fake->physical(0);
+        wait_for([&] { return worker.snapshot().block_reason == AutoStopBlockReason::ACTIVATION_NOT_HELD; });
+        worker.stop();
+        const auto reports = fake->reports();
+        // H40既有合同包含初始零报告，随后反向和最终释放，三次ACK都不能省略。
+        require(reports == std::vector<int>({0, 4, 0}) && fake->released(),
+            "诊断开关不能改变真实生产接口的初始零、反向、释放或清理输出");
+        if (!enabled) disabled_reports = reports;
+        else require(reports == disabled_reports, "开启诊断与关闭诊断必须产生完全相同的键盘报告序列");
+        const auto log = worker.execution_log();
+        if (!enabled) {
+            require(log.events.empty() && log.last_sequence == 0 && !log.enabled,
+                "诊断默认关闭时不得持续记录或消耗事件序号");
+            continue;
+        }
+        require(log.enabled && log.dropped_count == 0 && !log.events.empty(), "有限正常事务应完整记录");
+        bool request = false, estimated = false, canceled = false, returned = false;
+        bool physical = false, left_down = false, left_up = false, worker_end = false, idle_input = false, idle_block = false;
+        int masked = 0, keyboard = 0;
+        std::uint64_t sequence = 0;
+        for (const auto& event : log.events) {
+            require(event.sequence == ++sequence && event.generation != 0 && event.observed_at_ns > 0,
+                "急停事件须有连续序号、诊断代际和单调时钟");
+            require(std::string_view(AutoStopExecutionKindName(event.kind)) != "UNKNOWN", "事件类型必须可读");
+            physical |= event.kind == AutoStopExecutionKind::INPUT_CHANGED && event.event_wasd_mask == 1;
+            if (event.kind == AutoStopExecutionKind::INPUT_CHANGED && std::string_view(event.reason) == "monitor_snapshot") {
+                left_down |= event.left_button_held;
+                left_up |= left_down && !event.left_button_held;
+                idle_input |= !event.activation_held && event.input_valid && event.request_id == 0;
+            }
+            idle_block |= event.kind == AutoStopExecutionKind::BLOCK_CHANGED && event.block_reason == AutoStopBlockReason::ACTIVATION_NOT_HELD &&
+                event.request_id == 0;
+            if (event.kind == AutoStopExecutionKind::REQUEST_STARTED) {
+                request = event.request_id == 101 && event.target.observation_epoch == 4 && event.target.observation_sequence == 56 &&
+                    event.target.source_observed_ns == 123456;
+            }
+            estimated |= event.kind == AutoStopExecutionKind::ESTIMATED && event.request_id == 101;
+            canceled |= event.kind == AutoStopExecutionKind::CANCELED && event.request_id == 101;
+            returned |= event.kind == AutoStopExecutionKind::MOVEMENT_RETURNED && event.request_id == 101 && !event.cleanup_unknown;
+            worker_end |= event.kind == AutoStopExecutionKind::WORKER_STOPPED;
+            if (event.kind != AutoStopExecutionKind::BACKEND_RESULT) continue;
+            const auto begin = std::find_if(log.events.begin(), log.events.end(), [&](const auto& value) {
+                return value.kind == AutoStopExecutionKind::BACKEND_BEGIN && value.backend_call_id == event.backend_call_id;
+            });
+            require(begin != log.events.end() && begin->call_started_ns == event.call_started_ns && begin->sequence < event.sequence,
+                "后端开始与返回须按唯一调用身份关联");
+            if (!event.datagram_sent) continue; // 无历史债务的启动清理可能合法地没有后端调用。
+            require(event.receipt == KeyboardDisposition::ACKNOWLEDGED && event.call_started_ns <= event.protocol_ack_received_ns &&
+                event.protocol_ack_received_ns <= event.backend_completed_ns && event.backend_completed_ns <= event.observed_at_ns,
+                "回执须保留提交、ACK、后端完成及返回观察时间");
+            if (event.backend_action == AutoStopBackendAction::MASK) ++masked;
+            if (event.backend_action == AutoStopBackendAction::KEYBOARD) {
+                ++keyboard;
+                require(keyboard <= 3 && event.physical_wasd_mask == 1 && event.command_mask == reports[keyboard - 1] &&
+                    event.software_mask == (keyboard == 3 ? 4 : 0),
+                    "物理监听、调用前软件状态与本次请求mask必须分别记录");
+            }
+        }
+        require(request && estimated && canceled && returned && physical && left_down && left_up && worker_end && idle_input && idle_block &&
+            masked == 1 && keyboard == 3,
+            "急停输入、左键、目标身份、制动、估计完成、撤销和归还事件链缺失");
+        const auto filtered = worker.execution_log(log.last_sequence);
+        require(filtered.events.empty() && filtered.first_sequence == log.first_sequence && filtered.last_sequence == log.last_sequence,
+            "空过滤结果仍须保留全环水位，查询不能消费事件");
+        worker.set_diagnostics_enabled(false);
+        const auto stopped = worker.execution_log();
+        require(stopped.events.back().kind == AutoStopExecutionKind::RECORDING_STOPPED && !stopped.enabled,
+            "关闭须保存显式边界并停止新增");
+        require(worker.start(config), "同worker诊断关闭后重启失败");
+        worker.stop();
+        require(worker.execution_log().last_sequence == stopped.last_sequence, "start不能自行重新开启诊断或重置序号");
+        worker.set_diagnostics_enabled(true);
+        const auto resumed = worker.execution_log(stopped.last_sequence);
+        require(resumed.events.size() == 1 && resumed.events.front().kind == AutoStopExecutionKind::RECORDING_STARTED &&
+            resumed.events.front().sequence == stopped.last_sequence + 1 && resumed.generation > stopped.generation,
+            "重新开启须跨段连续计数且明确新代际");
+    }
+    {
+        auto fake = std::make_shared<Fake>(); fake->software_fail_at = 1;
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; });
+        worker.set_diagnostics_enabled(true); require(worker.start(config), "未知回执诊断启动失败");
+        ready(worker, fake); require(worker.request(202), "未知回执诊断请求失败");
+        wait_for([&] { return worker.snapshot().status == AutoStopStatus::FAULT; }); worker.stop();
+        const auto log = worker.execution_log();
+        require(std::any_of(log.events.begin(), log.events.end(), [](const auto& event) {
+            return event.kind == AutoStopExecutionKind::BACKEND_RESULT && event.backend_action == AutoStopBackendAction::KEYBOARD &&
+                event.receipt == KeyboardDisposition::APPLICATION_UNKNOWN;
+        }) && std::any_of(log.events.begin(), log.events.end(), [](const auto& event) {
+            return event.kind == AutoStopExecutionKind::CANCELED && std::string_view(event.reason) == "keyboard_not_acknowledged";
+        }) && fake->released(), "未知ACK不能伪造成成功，也必须保留清理链");
+    }
+    {
+        auto fake = std::make_shared<Fake>();
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; });
+        worker.set_diagnostics_enabled(true); require(worker.start(config), "输入缺口诊断启动失败");
+        ready(worker, fake); require(worker.request(303), "输入缺口诊断请求失败");
+        wait_for([&] { return fake->has_software(); });
+        { std::lock_guard lock(fake->mutex); fake->gap = true; fake->cleanup_fails = true; }
+        wait_for([&] { return worker.snapshot().cleanup_unknown; });
+        { std::lock_guard lock(fake->mutex); fake->cleanup_fails = false; }
+        worker.stop();
+        const auto log = worker.execution_log();
+        require(std::any_of(log.events.begin(), log.events.end(), [](const auto& event) {
+            return event.kind == AutoStopExecutionKind::INPUT_GAP && std::string_view(event.reason) == "wasd_history_unavailable";
+        }) && std::any_of(log.events.begin(), log.events.end(), [](const auto& event) {
+            return event.kind == AutoStopExecutionKind::CLEANUP_UNKNOWN && event.cleanup_unknown && event.request_id == 303;
+        }) && std::any_of(log.events.begin(), log.events.end(), [](const auto& event) {
+            return event.kind == AutoStopExecutionKind::BACKEND_RESULT && event.backend_action == AutoStopBackendAction::CLEANUP &&
+                event.receipt == KeyboardDisposition::APPLICATION_UNKNOWN;
+        }) && fake->released(), "输入历史缺口与清理未知须显式保留，后续补清理不能抹掉原始故障");
+    }
+    {
+        auto fake = std::make_shared<Fake>();
+        AutoStopWorker worker(fake, std::make_shared<AutoStopOutputArbiter>(), [] { return true; });
+        for (std::size_t i = 0; i < kAutoStopExecutionCapacity + 17; ++i) worker.set_diagnostics_enabled(i % 2 == 0);
+        const auto log = worker.execution_log();
+        require(log.events.size() == kAutoStopExecutionCapacity && log.last_sequence == kAutoStopExecutionCapacity + 17 &&
+            log.dropped_count == 17 && log.first_sequence == 18, "环覆盖必须有界并公开精确丢失与保留水位");
+        require(worker.execution_log(log.last_sequence).events.empty() && worker.execution_log().events.size() == log.events.size(),
+            "多个消费者的游标互不消费或清空证据");
+    }
+}
+
 int main(int argc, char** argv) {
     try {
+        diagnostic_execution_contracts();
+        if (argc == 2 && std::string_view(argv[1]) == "--diagnostics") {
+            std::cout << "急停有限事件环、诊断启停和生产回执专项通过\n"; return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--rescue-retry") {
             fault_rescue_retry_contract(false);
             fault_rescue_retry_contract(true);

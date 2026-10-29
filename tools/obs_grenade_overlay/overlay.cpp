@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// OBS负责图片、文字和标记的GPU绘制；Win32仅管理桌面窗口的位置和输入行为。
+// OBS负责道具图片与菜单；独立录像同步小窗由Win32绘制，不进入中央NDI场景。
 #include <windows.h>
 #include <windowsx.h>
 #include <winhttp.h>
@@ -37,8 +37,18 @@ using Json = xen_obs::Json;
 constexpr uint32_t kWidth = 344, kHeight = 576;
 constexpr uint32_t kMenuWidth = 1120, kMenuHeight = 640;
 constexpr UINT kApplySettings = WM_APP + 21;
+constexpr UINT kShowSyncMarker = WM_APP + 22, kSyncFailure = WM_APP + 23;
 constexpr wchar_t kWindowClass[] = L"XenObsGrenadeReference";
 constexpr char kSettingsSource[] = "xen_grenade_overlay_settings";
+
+std::int64_t steady_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+}
+std::int64_t system_ns() {
+    FILETIME value{}; GetSystemTimePreciseAsFileTime(&value);
+    ULARGE_INTEGER combined{}; combined.LowPart=value.dwLowDateTime; combined.HighPart=value.dwHighDateTime;
+    return static_cast<std::int64_t>((combined.QuadPart-116444736000000000ULL)*100);
+}
 
 std::wstring wide(const std::string& value) {
     if (value.empty()) return {};
@@ -87,15 +97,20 @@ Endpoint endpoint(std::string url) {
 
 struct HttpReply { DWORD status = 0; Json document = Json::object(); };
 
-HttpReply get_json(HINTERNET session, HINTERNET connection, const std::string& path) {
+HttpReply request_json(HINTERNET session, HINTERNET connection, const std::string& path,
+                      const Json* body = nullptr, std::int64_t* received_ns = nullptr) {
     const auto request_path = wide(path);
-    InternetHandle request(WinHttpOpenRequest(connection, L"GET", request_path.c_str(), nullptr,
+    InternetHandle request(WinHttpOpenRequest(connection, body ? L"POST" : L"GET", request_path.c_str(), nullptr,
                                               WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0));
     if (!request.value) throw std::runtime_error("建立HTTP请求失败");
     DWORD redirect = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
     WinHttpSetOption(request.value, WINHTTP_OPTION_REDIRECT_POLICY, &redirect, sizeof(redirect));
-    if (!WinHttpSendRequest(request.value, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA,
-                            0, 0, 0) || !WinHttpReceiveResponse(request.value, nullptr))
+    auto content = body ? body->dump() : std::string{};
+    const auto headers = body ? L"Content-Type: application/json\r\n" : WINHTTP_NO_ADDITIONAL_HEADERS;
+    if (!WinHttpSendRequest(request.value, headers, body ? DWORD(-1) : 0,
+                            body ? content.data() : WINHTTP_NO_REQUEST_DATA,
+                            static_cast<DWORD>(content.size()),static_cast<DWORD>(content.size()),0) ||
+        !WinHttpReceiveResponse(request.value, nullptr))
         throw std::runtime_error("辅机HTTP连接不可用");
     DWORD status = 0, length = sizeof(status);
     if (!WinHttpQueryHeaders(request.value, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
@@ -116,10 +131,14 @@ HttpReply get_json(HINTERNET session, HINTERNET connection, const std::string& p
         bytes.resize(offset + received);
         if (!received) break;
     }
+    if (received_ns) *received_ns=steady_ns();
     auto document = Json::parse(bytes, nullptr, false);
     if (document.is_discarded()) document = Json::object();
     (void)session;
     return {status, std::move(document)};
+}
+HttpReply get_json(HINTERNET session, HINTERNET connection, const std::string& path) {
+    return request_json(session,connection,path);
 }
 
 struct Configuration {
@@ -134,6 +153,13 @@ struct Publication {
     Json selection;
     Clock::time_point received{};
     uint64_t configuration = 0;
+};
+struct SyncJob {
+    std::string marker_id;
+    uint64_t configuration = 0;
+    std::int64_t issued_at_ns = 0;
+    bool painted = false;
+    Json packet;
 };
 
 class Manager;
@@ -203,6 +229,7 @@ public:
         if (!RegisterClassExW(&descriptor) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
             throw std::runtime_error("OBS提示窗口注册失败");
         instance_ = instance;
+        sync_source_session_="obs-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(GetTickCount64());
         const auto window = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST |
             WS_EX_LAYERED | WS_EX_TRANSPARENT, kWindowClass, L"Xen OBS 道具提示", WS_POPUP,
             0, 0, kWidth, kHeight, nullptr, nullptr, instance_, this);
@@ -253,6 +280,11 @@ public:
         obs_display_add_draw_callback(menu_display_, draw_menu, this);
         obs_display_set_enabled(menu_display_, false);
         verify_capture_exclusion(menu_window_);
+        sync_window_=CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST |
+            WS_EX_LAYERED | WS_EX_TRANSPARENT,kWindowClass,L"Xen 录像同步标记",WS_POPUP,
+            0,0,560,64,nullptr,nullptr,instance_,this);
+        if (!sync_window_ || xen_obs::prepare_sync_window(sync_window_) != ERROR_SUCCESS)
+            throw std::runtime_error("录像同步窗口创建或录制属性设置失败");
         for (size_t index=0;index<hotkey_ids_.size();++index)
             hotkey_ids_[index] = GlobalAddAtomW(xen_obs::kHotkeys[index].atom_name);
         SetTimer(window, 1, 100, nullptr);
@@ -283,6 +315,7 @@ public:
         }
         if (menu_browser_) { obs_source_release(menu_browser_); menu_browser_ = nullptr; }
         if (menu_window_) { DestroyWindow(menu_window_); menu_window_ = nullptr; }
+        if (sync_window_) { DestroyWindow(sync_window_); sync_window_=nullptr; }
         set_visible(false);
         // 先解绑GPU回调并销毁display，之后才能释放它访问的browser和本对象。
         if (display_) {
@@ -329,8 +362,11 @@ private:
         }
         const bool wanted = enabled && (foreground_is_game_ || foreground == menu_window_);
         for (size_t index=0;index<hotkey_ids_.size();++index) {
-            if (wanted == hotkeys_registered_[index] || !hotkey_ids_[index]) continue;
-            if (wanted) {
+            const auto& binding = xen_obs::kHotkeys[index];
+            const bool sync = binding.capture_role && std::string_view(binding.capture_role)=="sync";
+            const bool binding_wanted = wanted && (!sync || sync_available_.load());
+            if (binding_wanted == hotkeys_registered_[index] || !hotkey_ids_[index]) continue;
+            if (binding_wanted) {
                 const auto& binding = xen_obs::kHotkeys[index];
                 hotkeys_registered_[index] = RegisterHotKey(handle_.load(), hotkey_ids_[index], binding.modifiers, binding.virtual_key) != FALSE;
                 if (!hotkeys_registered_[index] && !hotkey_error_logged_[index]) {
@@ -452,6 +488,7 @@ private:
 
     void request_capture(const char* role) noexcept {
         if (capture_process_ || pending_capture_) return;
+        if (sync_window_) ShowWindow(sync_window_,SW_HIDE);
         capture_role_ = role;
         if (menu_visible_) close_menu();
         pending_capture_ = GetForegroundWindow();
@@ -528,6 +565,187 @@ private:
         notice(*message);
     }
 
+    void fail_sync(const std::string& reason, const std::string& marker_id = {}) noexcept {
+        try {
+            {
+                std::lock_guard lock(mutex_);
+                if (!marker_id.empty() && marker_id!=sync_current_id_) return;
+                sync_failure_=reason; sync_job_.reset(); sync_show_.reset(); sync_show_permit_.reset();
+                sync_current_id_.clear(); sync_inflight_.store(false);
+            }
+            blog(LOG_WARNING,"[xen-obs-sync] 同步标记未确认：%s",reason.c_str());
+            if (const auto window=handle_.load()) PostMessageW(window,kSyncFailure,0,0);
+        } catch (...) {}
+    }
+
+    void expire_sync_show() noexcept {
+        try {
+            std::string expired;
+            {
+                std::lock_guard lock(mutex_);
+                if (sync_show_permit_ && xen_obs::sync_show_expired(*sync_show_permit_,steady_ns()))
+                    expired=sync_show_permit_->marker_id;
+            }
+            if (!expired.empty()) fail_sync(expired+"：同步显示请求超过两秒，已取消，不自动重放",expired);
+        } catch (...) {}
+    }
+
+    void request_sync_marker() noexcept {
+        if (capture_process_ || pending_capture_ || menu_visible_ || !sync_available_.load() ||
+            (sync_window_ && IsWindowVisible(sync_window_)) || sync_inflight_.exchange(true)) return;
+        try {
+            std::lock_guard lock(mutex_);
+            if (!configuration_.enabled) { sync_inflight_.store(false); return; }
+            SyncJob job; job.marker_id="SYNC-"+sync_source_session_+"-"+std::to_string(++sync_sequence_);
+            job.configuration=configuration_.revision;
+            job.issued_at_ns=steady_ns();
+            sync_current_id_=job.marker_id;
+            sync_show_permit_=xen_obs::SyncShowPermit{job.marker_id,job.configuration,job.issued_at_ns};
+            sync_job_=std::move(job);
+            condition_.notify_all();
+        } catch (...) { fail_sync("同步请求创建失败"); }
+    }
+
+    void show_sync_marker() noexcept {
+        std::string marker_id;
+        try {
+            SyncJob job;
+            {
+                std::lock_guard lock(mutex_);
+                if (!sync_show_) return;
+                job=std::move(*sync_show_); sync_show_.reset();
+                marker_id=job.marker_id;
+                if (!configuration_.enabled || configuration_.revision!=job.configuration)
+                    throw std::runtime_error("标记显示前插件设置已改变");
+                if (!sync_show_permit_ || !xen_obs::sync_show_current(*sync_show_permit_,job.marker_id,
+                        configuration_.revision,steady_ns()))
+                    throw std::runtime_error("同步显示请求已过期或被新编号替代");
+            }
+            const auto foreground=GetForegroundWindow();
+            if (!sync_window_ || !game_window(foreground) || capture_process_ || pending_capture_ || menu_visible_)
+                throw std::runtime_error("请在游戏前台且没有采集作业时同步");
+            MONITORINFO info{}; info.cbSize=sizeof(info);
+            if (!GetMonitorInfoW(MonitorFromWindow(foreground,MONITOR_DEFAULTTOPRIMARY),&info))
+                throw std::runtime_error("同步标记显示器不可用");
+            const auto& screen=info.rcMonitor;
+            RECT marker{screen.left+12,screen.top+12,screen.left+572,screen.top+76};
+            const LONG center_x=(screen.left+screen.right)/2, center_y=(screen.top+screen.bottom)/2;
+            RECT roi{center_x-160,center_y-160,center_x+160,center_y+160}, overlap{};
+            if (marker.right>screen.right || marker.bottom>screen.bottom || IntersectRect(&overlap,&marker,&roi))
+                throw std::runtime_error("显示器不足以在中央ROI外显示同步标记");
+            active_sync_=std::move(job);
+            sync_text_=wide(active_sync_.marker_id);
+            sync_paint_pending_=true;
+            sync_until_=Clock::now()+std::chrono::seconds(2);
+            SetWindowPos(sync_window_,HWND_TOPMOST,marker.left,marker.top,560,64,SWP_NOACTIVATE);
+            ShowWindow(sync_window_,SW_SHOWNOACTIVATE);
+            if (!RedrawWindow(sync_window_,nullptr,nullptr,RDW_INVALIDATE|RDW_UPDATENOW))
+                throw std::runtime_error("同步标记绘制请求失败");
+        } catch (const std::exception& error) {
+            sync_paint_pending_=false;
+            if (sync_window_) ShowWindow(sync_window_,SW_HIDE);
+            fail_sync(error.what(),marker_id);
+        } catch (...) { fail_sync("同步标记显示失败",marker_id); }
+    }
+
+    LRESULT sync_message(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcept {
+        if (message==WM_MOUSEACTIVATE) return MA_NOACTIVATE;
+        if (message==WM_NCHITTEST) return HTTRANSPARENT;
+        if (message==WM_ERASEBKGND) return 1;
+        if (message==WM_CLOSE) { ShowWindow(window,SW_HIDE); return 0; }
+        if (message==WM_PAINT) {
+            // 这是源机GDI绘制调用区间；窗口合成和录像首个可见帧仍须由成片确认。
+            const auto began=steady_ns(), utc=system_ns();
+            PAINTSTRUCT paint{}; const auto dc=BeginPaint(window,&paint);
+            RECT client{}; GetClientRect(window,&client);
+            const bool drawn=dc && xen_obs::paint_sync_window(dc,client,sync_text_.c_str());
+            const bool ended=EndPaint(window,&paint)!=FALSE;
+            const auto completed=steady_ns();
+            if (sync_paint_pending_) {
+                sync_paint_pending_=false;
+                if (!drawn || !ended) { fail_sync("同步标记绘制未完成",active_sync_.marker_id); return 0; }
+                try {
+                    active_sync_.painted=true;
+                    active_sync_.packet=xen_obs::sync_paint_packet(active_sync_.marker_id,sync_source_session_,began,completed,utc);
+                    {
+                        std::lock_guard lock(mutex_);
+                        if (!sync_show_permit_ || !xen_obs::sync_show_current(*sync_show_permit_,active_sync_.marker_id,
+                                configuration_.revision,completed))
+                            throw std::runtime_error("同步绘制完成时显示请求已过期");
+                        sync_job_=active_sync_; sync_show_permit_.reset();
+                    }
+                    condition_.notify_all();
+                    blog(LOG_INFO,"[xen-obs-sync] 绘制完成 id=%s source_begin=%lld source_end=%lld utc=%lld；非视频PTS",
+                        active_sync_.marker_id.c_str(),static_cast<long long>(began),
+                        static_cast<long long>(completed),static_cast<long long>(utc));
+                } catch (...) { fail_sync("同步标记证据创建失败或已过期",active_sync_.marker_id); }
+            }
+            return 0;
+        }
+        return DefWindowProcW(window,message,wp,lp);
+    }
+
+    void process_sync(const Configuration& config) noexcept {
+        std::optional<SyncJob> job;
+        { std::lock_guard lock(mutex_); job=std::move(sync_job_); sync_job_.reset(); }
+        if (!job) return;
+        const auto marker_id=job->marker_id;
+        try {
+            if (!config.enabled || config.revision!=job->configuration)
+                throw std::runtime_error("同步期间插件设置已改变");
+            const auto target=endpoint(config.url);
+            InternetHandle session(WinHttpOpen(L"XenObsVideoSync/1",WINHTTP_ACCESS_TYPE_NO_PROXY,
+                WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0));
+            if (!session.value) throw std::runtime_error("同步HTTP初始化失败");
+            WinHttpSetTimeouts(session.value,250,250,250,250);
+            InternetHandle connection(WinHttpConnect(session.value,target.host.c_str(),target.port,0));
+            if (!connection.value) throw std::runtime_error("同步HTTP连接失败");
+            if (!job->painted) {
+                const auto status=get_json(session.value,connection.value,"/sync-status.json");
+                if (status.status!=200 || !xen_obs::sync_status_available(status.document)) {
+                    const auto reason=string_field(status.document,"reason");
+                    throw std::runtime_error(reason.empty() ? "辅机未开启详细运行记录、Runtime未就绪或F7已被占用" : reason);
+                }
+                {
+                    std::lock_guard lock(mutex_);
+                    if (!sync_show_permit_ || !xen_obs::sync_show_current(*sync_show_permit_,marker_id,
+                            config.revision,steady_ns()))
+                        throw std::runtime_error("同步预检查完成时显示请求已过期");
+                    sync_show_=std::move(job);
+                }
+                if (!PostMessageW(handle_.load(),kShowSyncMarker,0,0))
+                    throw std::runtime_error("同步显示请求未送达");
+                return;
+            }
+            job->packet["source_send_steady_ns"]=std::to_string(steady_ns());
+            job->packet["source_send_system_unix_ns"]=std::to_string(system_ns());
+            blog(LOG_INFO,"[xen-obs-sync] 发送绘制证据 id=%s source_send=%s utc=%s",
+                job->marker_id.c_str(),job->packet.at("source_send_steady_ns").get_ref<const std::string&>().c_str(),
+                job->packet.at("source_send_system_unix_ns").get_ref<const std::string&>().c_str());
+            std::int64_t received=0;
+            const auto reply=request_json(session.value,connection.value,"/sync-marker.json",&job->packet,&received);
+            if (reply.status<200 || reply.status>=300 || !xen_obs::sync_reply_accepted(reply.document,job->marker_id)) {
+                const auto reason=string_field(reply.document,"reason");
+                throw std::runtime_error(reason.empty() ? "辅机拒绝同步标记或未返回匹配的排队回执" : reason);
+            }
+            const auto receipt=xen_obs::sync_receipt_packet(job->packet,reply.document,received);
+            // 原始四时戳独立保存，辅助机后续校准不依赖本机与辅机UTC已经一致。
+            blog(LOG_INFO,"[xen-obs-sync] 四时戳 id=%s source_send=%s aux_received=%s aux_replied=%s source_received=%lld",
+                job->marker_id.c_str(),job->packet.at("source_send_steady_ns").get_ref<const std::string&>().c_str(),
+                reply.document.at("aux_received_steady_ns").get_ref<const std::string&>().c_str(),
+                reply.document.at("aux_replied_steady_ns").get_ref<const std::string&>().c_str(),static_cast<long long>(received));
+            const auto final=request_json(session.value,connection.value,"/sync-marker.json",&receipt);
+            if (final.status<200 || final.status>=300 || !xen_obs::sync_reply_accepted(final.document,job->marker_id))
+                throw std::runtime_error("同步绘制已排队，但四时戳补充回执未确认");
+            {
+                std::lock_guard lock(mutex_);
+                if (sync_current_id_==marker_id) { sync_current_id_.clear(); sync_inflight_.store(false); }
+            }
+            blog(LOG_INFO,"[xen-obs-sync] 同步证据已排队 id=%s；落盘以辅机归档为准",job->marker_id.c_str());
+        } catch (const std::exception& error) { fail_sync(marker_id+"："+error.what(),marker_id); }
+        catch (...) { fail_sync(marker_id+"：同步传输失败",marker_id); }
+    }
+
     static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
         Manager* self = reinterpret_cast<Manager*>(GetWindowLongPtrW(window, GWLP_USERDATA));
         if (message == WM_NCCREATE) {
@@ -535,11 +753,19 @@ private:
             SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
         }
         if (self && window == self->menu_window_) return self->menu_message(window, message, wp, lp);
+        if (self && window == self->sync_window_) return self->sync_message(window,message,wp,lp);
+        if (self && message == kShowSyncMarker) { self->show_sync_marker(); return 0; }
+        if (self && message == kSyncFailure) {
+            std::string reason;
+            { std::lock_guard lock(self->mutex_); reason=self->sync_failure_; }
+            self->notice("录像同步失败："+reason); return 0;
+        }
         if (self && message == WM_HOTKEY) {
             for (size_t index=0;index<self->hotkey_ids_.size();++index) {
                 if (wp != self->hotkey_ids_[index]) continue;
                 const auto role = xen_obs::kHotkeys[index].capture_role;
-                if (role) self->request_capture(role); else self->toggle_menu();
+                if (role && std::string_view(role)=="sync") self->request_sync_marker();
+                else if (role) self->request_capture(role); else self->toggle_menu();
                 break;
             }
             return 0;
@@ -596,6 +822,10 @@ private:
             std::shared_ptr<const Publication> current;
             { std::lock_guard lock(mutex_); config = configuration_; current = publication_; }
             update_hotkeys(config.enabled);
+            expire_sync_show();
+            if (sync_window_ && IsWindowVisible(sync_window_) &&
+                (Clock::now()>=sync_until_ || !config.enabled || !foreground_is_game_))
+                ShowWindow(sync_window_,SW_HIDE);
             poll_capture();
             if (pending_capture_ && Clock::now() >= capture_after_) start_capture(config);
             if (menu_visible_) {
@@ -638,6 +868,8 @@ private:
         while (!stopping_) {
             Configuration config;
             { std::lock_guard lock(mutex_); config = configuration_; }
+            expire_sync_show();
+            process_sync(config);
             if (config.revision != last_configuration) {
                 model.reset(); cache_identity.clear(); reference = Json::object(); catalog = Json::array();
                 last_configuration = config.revision;
@@ -650,6 +882,11 @@ private:
                 WinHttpSetTimeouts(session.value, 250, 250, 250, 250);
                 InternetHandle connection(WinHttpConnect(session.value, target.host.c_str(), target.port, 0));
                 if (!connection.value) throw std::runtime_error("HTTP连接初始化失败");
+                // 同步端点单独失败不能重置道具模型/图片publication。
+                try {
+                    const auto sync_status=get_json(session.value,connection.value,"/sync-status.json");
+                    sync_available_.store(sync_status.status==200 && xen_obs::sync_status_available(sync_status.document));
+                } catch (...) { sync_available_.store(false); }
                 const auto selection = get_json(session.value, connection.value, "/selection.json");
                 if (selection.status != 200 || !selection.document.is_object())
                     throw std::runtime_error("辅机方案状态不可用");
@@ -677,15 +914,17 @@ private:
                 if (!online) { online = true; blog(LOG_INFO, "[xen-obs-overlay] 辅机只读状态已连接"); }
             } catch (const std::exception&) {
                 model.reset();
+                sync_available_.store(false);
                 { std::lock_guard lock(mutex_); publication_.reset(); }
                 if (online) { online = false; blog(LOG_WARNING, "[xen-obs-overlay] 辅机状态不可用，提示已隐藏，等待连接恢复"); }
             } catch (...) {
                 model.reset();
+                sync_available_.store(false);
                 std::lock_guard lock(mutex_); publication_.reset();
             }
             std::unique_lock lock(mutex_);
             condition_.wait_for(lock, std::chrono::milliseconds(250), [&] {
-                return stopping_ || configuration_.revision != config.revision;
+                return stopping_ || configuration_.revision != config.revision || sync_job_.has_value();
             });
         }
     }
@@ -704,6 +943,16 @@ private:
     std::shared_ptr<const Publication> publication_;
     std::thread worker_;
     HWND menu_window_ = nullptr, return_window_ = nullptr, checked_foreground_ = nullptr, pending_capture_ = nullptr;
+    HWND sync_window_ = nullptr;
+    std::atomic<bool> sync_available_{false}, sync_inflight_{false};
+    std::optional<SyncJob> sync_job_, sync_show_;
+    std::optional<xen_obs::SyncShowPermit> sync_show_permit_;
+    SyncJob active_sync_;
+    std::string sync_source_session_, sync_failure_, sync_current_id_;
+    std::wstring sync_text_;
+    uint64_t sync_sequence_ = 0;
+    bool sync_paint_pending_ = false;
+    Clock::time_point sync_until_{};
     obs_source_t* menu_browser_ = nullptr;
     obs_display_t* menu_display_ = nullptr;
     bool menu_visible_ = false, foreground_is_game_ = false;
@@ -737,10 +986,10 @@ void settings_defaults(obs_data_t* settings) {
 }
 obs_properties_t* settings_properties(void*) {
     auto* properties = obs_properties_create();
-    auto* enabled = obs_properties_add_bool(properties, "enabled", "启用道具菜单、参考图和PgUp/PgDn采集");
-    obs_property_set_long_description(enabled, "游戏中小键盘右键开关居中菜单；点选后返回游戏并显示参考图，对齐或投掷后隐藏。PgUp只采站位图，PgDn只采瞄点图，按住Ctrl蹲姿时也可使用，各自保存并同步辅机，无先后顺序要求。");
-    auto* address = obs_properties_add_text(properties, "auxiliary_url", "辅机道具网址", OBS_TEXT_DEFAULT);
-    obs_property_set_long_description(address, "填写辅机道具接口地址，例如http://192.168.3.20:5015。插件从这里读取GSI、清单和图片，并提交点选方案。");
+    auto* enabled = obs_properties_add_bool(properties, "enabled", "启用道具提示、采集和视频同步标记");
+    obs_property_set_long_description(enabled, "小键盘右键开关道具菜单，PgUp/PgDn分别采集站位/瞄点。辅机Runtime和详细运行记录就绪且F7未被控制占用时，游戏前台Ctrl+F7显示两秒录像同步编号；不启停Runtime、不发送游戏输入。N卡需启用桌面录制，并先确认短样片录到编号。");
+    auto* address = obs_properties_add_text(properties, "auxiliary_url", "辅机接口地址", OBS_TEXT_DEFAULT);
+    obs_property_set_long_description(address, "填写辅机接口地址，例如http://192.168.3.20:5015。复用原地址读取道具和同步可用状态，提交点选方案及视频同步证据，不增加监听服务。");
     auto* python = obs_properties_add_path(properties, "capture_python", "采集Python", OBS_PATH_FILE, "Python (*.exe)", nullptr);
     obs_property_set_long_description(python, "使用主机已有Python 3，安装时自动填写；只在PgUp/PgDn采集作业期间启动，无语音模型依赖。");
     auto* root = obs_properties_add_path(properties, "capture_root", "采集本地目录", OBS_PATH_DIRECTORY, nullptr, nullptr);

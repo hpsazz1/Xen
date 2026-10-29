@@ -18,6 +18,39 @@ std::uint8_t held_wasd(const InputSnapshot& input) noexcept {
 }
 }
 
+const char* AutoStopExecutionKindName(AutoStopExecutionKind kind) noexcept {
+    switch (kind) {
+    case AutoStopExecutionKind::RECORDING_STARTED: return "RECORDING_STARTED";
+    case AutoStopExecutionKind::RECORDING_STOPPED: return "RECORDING_STOPPED";
+    case AutoStopExecutionKind::WORKER_STARTED: return "WORKER_STARTED";
+    case AutoStopExecutionKind::WORKER_STOPPED: return "WORKER_STOPPED";
+    case AutoStopExecutionKind::INPUT_CHANGED: return "INPUT_CHANGED";
+    case AutoStopExecutionKind::INPUT_GAP: return "INPUT_GAP";
+    case AutoStopExecutionKind::BLOCK_CHANGED: return "BLOCK_CHANGED";
+    case AutoStopExecutionKind::REQUEST_STARTED: return "REQUEST_STARTED";
+    case AutoStopExecutionKind::REQUEST_REJECTED: return "REQUEST_REJECTED";
+    case AutoStopExecutionKind::BACKEND_BEGIN: return "BACKEND_BEGIN";
+    case AutoStopExecutionKind::BACKEND_RESULT: return "BACKEND_RESULT";
+    case AutoStopExecutionKind::ESTIMATED: return "ESTIMATED";
+    case AutoStopExecutionKind::CANCELED: return "CANCELED";
+    case AutoStopExecutionKind::MOVEMENT_RETURNED: return "MOVEMENT_RETURNED";
+    case AutoStopExecutionKind::CLEANUP_UNKNOWN: return "CLEANUP_UNKNOWN";
+    case AutoStopExecutionKind::RESCUE: return "RESCUE";
+    case AutoStopExecutionKind::MANUAL_FIRE_RETAINED: return "MANUAL_FIRE_RETAINED";
+    case AutoStopExecutionKind::RESUME_REQUESTED: return "RESUME_REQUESTED";
+    }
+    return "UNKNOWN";
+}
+const char* AutoStopBackendActionName(AutoStopBackendAction action) noexcept {
+    switch (action) {
+    case AutoStopBackendAction::NONE: return "NONE";
+    case AutoStopBackendAction::MASK: return "MASK";
+    case AutoStopBackendAction::KEYBOARD: return "KEYBOARD";
+    case AutoStopBackendAction::CLEANUP: return "CLEANUP";
+    }
+    return "UNKNOWN";
+}
+
 std::unique_lock<std::timed_mutex> AutoStopOutputArbiter::try_enter_aim(OutputArbiterSource source,
     OutputArbiterRejection* rejection) noexcept {
     std::unique_lock<std::timed_mutex> lock(mutex_, std::defer_lock);
@@ -156,6 +189,45 @@ public:
     bool trigger_idle = false;
     WasdEventCursor trigger_idle_cursor;
     std::uint64_t trigger_idle_generation = 0;
+    AutoStopTargetEvidence target_evidence, tracking_target_evidence;
+    // 独立诊断锁；生产者遇到读取竞争直接记缺口，绝不等待消费者复制或分配。
+    mutable std::mutex execution_mutex;
+    std::array<AutoStopExecutionEvent, kAutoStopExecutionCapacity> execution_events{};
+    std::size_t execution_begin = 0, execution_count = 0;
+    std::atomic<bool> diagnostics_enabled{false};
+    std::atomic<std::uint64_t> execution_sequence{0}, execution_dropped{0}, execution_generation{0};
+    std::atomic<std::uint64_t> backend_call_sequence{0};
+    void append_execution_locked(AutoStopExecutionEvent event) noexcept {
+        event.sequence = execution_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+        event.generation = execution_generation.load(std::memory_order_relaxed);
+        if (event.observed_at_ns == 0) event.observed_at_ns = now_ns();
+        if (execution_count == execution_events.size()) {
+            execution_begin = (execution_begin + 1) % execution_events.size();
+            --execution_count; execution_dropped.fetch_add(1, std::memory_order_relaxed);
+        }
+        execution_events[(execution_begin + execution_count++) % execution_events.size()] = event;
+    }
+    void record(AutoStopExecutionEvent event) noexcept {
+        if (!diagnostics_enabled.load(std::memory_order_acquire)) return;
+        std::unique_lock lock(execution_mutex, std::try_to_lock);
+        if (!lock) {
+            // 丢失事件仍占序号，后续消费者可准确识别覆盖范围内的缺口。
+            execution_sequence.fetch_add(1, std::memory_order_relaxed);
+            execution_dropped.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        if (diagnostics_enabled.load(std::memory_order_relaxed)) append_execution_locked(event);
+    }
+    // 调用者持有业务mutex；仅复制已存在的事实，不追加控制检查或改变状态。
+    void execution_context_locked(AutoStopExecutionEvent& event) const noexcept {
+        event.request_id = state.request_id;
+        event.status = state.status; event.block_reason = state.block_reason;
+        event.cleanup_unknown = state.cleanup_unknown; event.completion_ready_ns = state.completion_ready_ns;
+        event.target = target_evidence;
+        event.source_session_id = previous_source.session_id;
+        event.source_sequence = previous_source.sequence;
+        event.source_safety_epoch = previous_source.control_safety_epoch;
+    }
 
     void publish(AutoStopStatus status) {
         std::lock_guard<std::mutex> lock(mutex);
@@ -281,6 +353,8 @@ public:
         };
         InputSnapshot input;
         std::uint64_t active_id = 0, active_generation = 0, active_input_epoch = 0;
+        std::uint64_t last_traced_request = 0;
+        AutoStopTargetEvidence active_target_evidence;
         std::uint8_t software_mask = 0, original_mask = 0;
         bool debt = false, estimated = false, independent = false, target_consumed = false;
         bool independent_acquired = false;
@@ -288,13 +362,98 @@ public:
         std::uint8_t release_armed_mask = 0;
         bool mask_only = false, masked_hold = false;
         Clock::time_point lease_end;
+        const auto make_event = [&](AutoStopExecutionKind kind, const char* reason = "none") {
+            AutoStopExecutionEvent event;
+            if (!diagnostics_enabled.load(std::memory_order_acquire)) return event;
+            event.kind = kind; event.reason = reason; event.observed_at_ns = now_ns();
+            { std::lock_guard lock(mutex); execution_context_locked(event); }
+            event.request_id = active_id;
+            if (active_id) event.target = active_target_evidence;
+            event.input_epoch = intent.epoch; event.input_sequence = intent.sequence;
+            event.input_received_ns = intent.received_at_ns; event.monitor_sequence = input.sequence;
+            event.physical_wasd_mask = held_wasd(input); event.event_wasd_mask = intent.held_mask;
+            event.software_mask = software_mask; event.input_valid = input.state_valid;
+            event.event_valid = intent.input_continuous; event.input_continuous = intent.input_continuous;
+            event.history_valid = intent.history_valid; event.input_status = input.status;
+            event.left_button_held = input.virtual_keys[1]; event.end_held = input.virtual_keys[0x23];
+            event.activation_held = config.activation_virtual_key > 0 && config.activation_virtual_key < 256 &&
+                input.virtual_keys[config.activation_virtual_key];
+            event.release_held = release_key_held(input);
+            event.independent = independent; event.manual_release = manual_release;
+            return event;
+        };
+        const auto emit = [&](AutoStopExecutionKind kind, const char* reason = "none") {
+            if (diagnostics_enabled.load(std::memory_order_acquire)) record(make_event(kind, reason));
+        };
+        const auto backend_begin = [&](AutoStopBackendAction action, std::uint8_t command_mask,
+                                       std::uint64_t command_id, std::int64_t started) {
+            auto event = make_event(AutoStopExecutionKind::BACKEND_BEGIN);
+            if (!diagnostics_enabled.load(std::memory_order_acquire)) return event;
+            event.backend_action = action; event.command_mask = command_mask; event.command_id = command_id;
+            event.backend_call_id = backend_call_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+            event.call_started_ns = started;
+            record(event);
+            return event;
+        };
+        const auto backend_result = [&](AutoStopExecutionEvent event, const KeyboardReceipt& result) {
+            if (!event.backend_call_id) return;
+            event.kind = AutoStopExecutionKind::BACKEND_RESULT; event.observed_at_ns = now_ns();
+            event.receipt = result.disposition; event.datagram_sent = result.datagram_sent;
+            event.backend_completed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(result.backend_completed_at.time_since_epoch()).count();
+            event.protocol_ack_received_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(result.protocol_ack_received_at.time_since_epoch()).count();
+            record(event);
+        };
+        AutoStopExecutionEvent previous_input, previous_wasd;
+        std::uint64_t observed_input_generation = 0, observed_wasd_generation = 0;
+        std::uint64_t reported_gap_generation = 0;
+        bool previous_input_gap = false;
+        const auto trace_input = [&]() {
+            if (!diagnostics_enabled.load(std::memory_order_acquire)) return;
+            auto event = make_event(AutoStopExecutionKind::INPUT_CHANGED, "monitor_snapshot");
+            const auto generation = execution_generation.load(std::memory_order_relaxed);
+            if (observed_input_generation != generation ||
+                event.physical_wasd_mask != previous_input.physical_wasd_mask || event.input_valid != previous_input.input_valid ||
+                event.input_status != previous_input.input_status || event.left_button_held != previous_input.left_button_held ||
+                event.activation_held != previous_input.activation_held || event.release_held != previous_input.release_held ||
+                event.end_held != previous_input.end_held) {
+                record(event); previous_input = event; observed_input_generation = generation;
+            }
+        };
+        const auto trace_wasd = [&](const WasdEvent& input_event) {
+            if (!diagnostics_enabled.load(std::memory_order_acquire)) return;
+            const auto generation = execution_generation.load(std::memory_order_relaxed);
+            if (observed_wasd_generation == generation && input_event.epoch == previous_wasd.input_epoch &&
+                input_event.sequence <= previous_wasd.input_sequence) return;
+            const bool gap = observed_wasd_generation == generation && input_event.epoch == previous_wasd.input_epoch &&
+                input_event.sequence != previous_wasd.input_sequence + 1;
+            if (observed_wasd_generation != generation || gap || input_event.held_mask != previous_wasd.event_wasd_mask ||
+                input_event.state_valid != previous_wasd.event_valid || input_event.epoch != previous_wasd.input_epoch) {
+                auto event = make_event(gap ? AutoStopExecutionKind::INPUT_GAP : AutoStopExecutionKind::INPUT_CHANGED, "wasd_event");
+                event.input_epoch = input_event.epoch; event.input_sequence = input_event.sequence;
+                event.input_received_ns = input_event.received_at_steady_ns;
+                event.event_wasd_mask = input_event.held_mask; event.event_valid = input_event.state_valid;
+                record(event); previous_wasd = event;
+            }
+            previous_wasd.input_epoch = input_event.epoch; previous_wasd.input_sequence = input_event.sequence;
+            observed_wasd_generation = generation;
+        };
         Clock::time_point last_block_log{};
         AutoStopBlockReason logged_reason = AutoStopBlockReason::NONE;
         bool have_block_log = false;
+        std::uint64_t reported_block_generation = 0;
+        AutoStopBlockReason reported_block_reason = AutoStopBlockReason::NONE;
+        AutoStopStatus reported_status = AutoStopStatus::DISABLED;
         std::array<bool, 256> previous_release_keys{};
         const auto report_block = [&]() {
             AutoStopSnapshot current;
             { std::lock_guard<std::mutex> lock(mutex); current = state; }
+            if (diagnostics_enabled.load(std::memory_order_acquire)) {
+                const auto generation = execution_generation.load(std::memory_order_relaxed);
+                if (reported_block_generation != generation || reported_block_reason != current.block_reason || reported_status != current.status) {
+                    emit(AutoStopExecutionKind::BLOCK_CHANGED);
+                    reported_block_generation = generation; reported_block_reason = current.block_reason; reported_status = current.status;
+                }
+            }
             const auto now = Clock::now();
             if ((!have_block_log || current.block_reason != logged_reason) &&
                 (!have_block_log || now - last_block_log >= std::chrono::milliseconds(500))) {
@@ -315,6 +474,7 @@ public:
               estimated_generation = active_generation;
               ++state.completed; state.status = AutoStopStatus::ESTIMATED; }
             LOG_INFO("auto_stop", "请求{}反向释放及配置等待已完成，仅为估计资格", active_id);
+            emit(AutoStopExecutionKind::ESTIMATED, "model_completion_only");
             release_reservation();
         };
         auto reserve = [&]() {
@@ -332,11 +492,14 @@ public:
         };
         auto clean = [&]() {
             bool success = true;
+            const bool had_debt = debt;
             if (debt) {
                 success = reserve();
                 if (success) {
                     const auto started = now_ns();
+                    const auto trace = backend_begin(AutoStopBackendAction::CLEANUP, 0, 0, started);
                     const auto result = mouse->cleanup_wasd_keyboard();
+                    backend_result(trace, result);
                     receipt(result, started);
                     success = result.disposition == KeyboardDisposition::ACKNOWLEDGED;
                     std::lock_guard<std::mutex> lock(mutex);
@@ -358,6 +521,8 @@ public:
                 state.cleanup_unknown = true;
                 state.status = AutoStopStatus::FAULT;
             }
+            emit(success ? AutoStopExecutionKind::MOVEMENT_RETURNED : AutoStopExecutionKind::CLEANUP_UNKNOWN,
+                success ? (had_debt ? "keyboard_cleanup_acknowledged" : "no_keyboard_debt") : "keyboard_cleanup_unconfirmed");
             return success;
         };
         const auto normal_cancellation = [&](bool target_only = false) {
@@ -406,6 +571,7 @@ public:
             { std::lock_guard<std::mutex> lock(mutex); block_reason = state.block_reason; }
             LOG_INFO("auto_stop", "取消请求{}，原因={}，阻断={}", active_id, reason,
                 AutoStopBlockReasonName(block_reason));
+            emit(AutoStopExecutionKind::CANCELED, reason);
             // 正常松键或点射完成后的循环归还才承接受控输出模型；原始物理历史不补零事件。
             const bool can_resume = (normal_activation_release || cycle_resume) && independent && estimated && software_mask == 0 &&
                 !force_fault && intent.input_continuous && (config.use_counterpulse_timing || intent.history_valid) && !intent.conflicting && intent.held_mask == held_wasd(input);
@@ -430,6 +596,7 @@ public:
                 auto checked_intent = intent;
                 for (std::size_t i = 0; continuous && i < after_events.count; ++i) {
                     const auto& event = after_events.events[i];
+                    trace_wasd(event);
                     continuous = event.state_valid && event.epoch == before_cleanup_cursor.epoch &&
                         event.sequence > checked_sequence && event.sequence - checked_sequence == 1 &&
                         (direction_transition || event.held_mask == intent.held_mask);
@@ -567,6 +734,7 @@ public:
                 }
                 bool hud_followup_ready = false;
                 bool input_ok = mouse->poll_input(input) && input.state_valid && input.status == InputMonitorStatus::READY;
+                trace_input();
                 std::uint8_t released_axes = 0;
                 std::int64_t release_event_ns = 0;
                 bool manual_input_changed = false;
@@ -574,9 +742,17 @@ public:
                 if (!observe_manual_edges) release_armed_mask = 0;
                 WasdEventBatch batch;
                 bool events_ok = mouse->read_wasd_events(cursor, batch) && batch.subscribed && !batch.gap;
+                if (!events_ok && diagnostics_enabled.load(std::memory_order_acquire)) {
+                    const auto generation = execution_generation.load(std::memory_order_relaxed);
+                    if (!previous_input_gap || reported_gap_generation != generation)
+                        emit(AutoStopExecutionKind::INPUT_GAP, "wasd_history_unavailable");
+                    reported_gap_generation = generation;
+                }
+                previous_input_gap = !events_ok;
                 if (!events_ok) { history.reset(); intent = {}; release_armed_mask = 0; }
                 if (events_ok) for (std::size_t i = 0; i < batch.count; ++i) {
                     const auto& event = batch.events[i];
+                    trace_wasd(event);
                     if (!event.state_valid) { events_ok = false; history.reset(); intent = {}; break; }
                     const auto previous_intent = intent;
                     intent = history.observe(event.held_mask, event.epoch, event.sequence, event.received_at_steady_ns, event.state_valid);
@@ -620,6 +796,7 @@ public:
                     previous_release_keys[key] = input.virtual_keys[key];
                 }
                 if (rescue_pressed) {
+                    emit(AutoStopExecutionKind::RESCUE, "release_key_edge");
                     weapon_permission();
                     bool normal_switch = false;
                     {
@@ -665,6 +842,7 @@ public:
                         acknowledged ? "归还已确认" : "清理未确认，释放救援键再按可重试",
                         fault_remains ? "保留，需重启" : "未由本模块锁存",
                         acknowledged && !fault_remains ? "安全条件恢复后自动重新核验" : "保持故障阻断");
+                    emit(AutoStopExecutionKind::RESCUE, acknowledged ? "cleanup_acknowledged" : "cleanup_unconfirmed");
                     report_block();
                     std::unique_lock<std::mutex> lock(mutex);
                     wake.wait_for(lock, std::chrono::milliseconds(1));
@@ -731,6 +909,7 @@ public:
                         const auto decision = controller.request_manual_release(id, released_axes, now_ns());
                         if (decision.phase == AutoStopPhase::WAITING_ACK && decision.request_id == id) {
                             active_id = last_request_id = id;
+                            active_target_evidence = {};
                             active_generation = cancel_generation.load(); active_input_epoch = intent.epoch;
                             original_mask = intent.held_mask;
                             lease_end = Clock::now() + std::chrono::milliseconds(500);
@@ -744,6 +923,10 @@ public:
                     }
                 }
                 if (manual_release) {
+                    // 每个请求仅发布一次开始；不把后续等待轮询扩成逐毫秒日志。
+                    if (diagnostics_enabled.load(std::memory_order_acquire) && last_traced_request != active_id) {
+                        emit(AutoStopExecutionKind::REQUEST_STARTED, "manual_release"); last_traced_request = active_id;
+                    }
                     const auto valid_manual = [&]() {
                         return manual_permission(input) && input_ok && events_ok && !manual_input_changed && intent.input_continuous && intent.epoch == active_input_epoch &&
                             held_wasd(input) == original_mask && intent.held_mask == original_mask &&
@@ -759,6 +942,7 @@ public:
                         bool still_released = true;
                         for (std::size_t i = 0; i < pending.count; ++i) {
                             const auto& event = pending.events[i];
+                            trace_wasd(event);
                             intent = history.observe(event.held_mask, event.epoch, event.sequence,
                                 event.received_at_steady_ns, event.state_valid);
                             if (event.held_mask != 0) { still_released = false; manual_input_changed = true; }
@@ -799,9 +983,11 @@ public:
                                     std::lock_guard<std::mutex> lock(mutex);
                                     ++state.release_commands;
                                 }
+                                const auto trace = backend_begin(AutoStopBackendAction::KEYBOARD, decision.desired_mask, decision.command_id, started);
                                 const auto result = mouse->set_wasd_keyboard(decision.desired_mask);
                                 debt |= result.datagram_sent; receipt(result, started);
                                 const auto returned = now_ns();
+                                backend_result(trace, result);
                                 const auto ack = std::chrono::duration_cast<std::chrono::nanoseconds>(result.protocol_ack_received_at.time_since_epoch()).count();
                                 const auto completed = std::chrono::duration_cast<std::chrono::nanoseconds>(result.backend_completed_at.time_since_epoch()).count();
                                 if (result.disposition != KeyboardDisposition::ACKNOWLEDGED || ack < started || ack > completed || completed > returned)
@@ -822,6 +1008,7 @@ public:
                         }
                         if (manual_release && decision.phase == AutoStopPhase::COMPLETE_ESTIMATED) {
                             { std::lock_guard<std::mutex> lock(mutex); ++state.completed; }
+                            emit(AutoStopExecutionKind::ESTIMATED, "manual_model_completion_only");
                             cancel_active(false, "manual_release_completed", false, false, true);
                         } else if (manual_release && (decision.phase == AutoStopPhase::INVALID || decision.phase == AutoStopPhase::CANCELLED))
                             cancel_active(false, "manual_controller_canceled");
@@ -974,6 +1161,7 @@ public:
                             pending_id = 0;
                             active_generation = submitted_generation;
                             lease_end = submitted_at + std::chrono::milliseconds(500);
+                            active_target_evidence = target_evidence;
                         }
                     }
                     if (requested) {
@@ -985,6 +1173,7 @@ public:
                         }
                         active_input_epoch = intent.epoch;
                         original_mask = intent.held_mask;
+                        emit(AutoStopExecutionKind::REQUEST_STARTED, independent ? "target" : "explicit_request");
                         estimated = false;
                         masked_hold = false;
                         mask_only = independent && ((!config.use_counterpulse_timing && !intent.history_valid) || intent.conflicting);
@@ -1015,7 +1204,9 @@ public:
                                         (independent && !session_permission(false)) || (!independent && !mask_only && held_wasd(input) != original_mask) ||
                                         active_generation != cancel_generation.load() || Clock::now() >= lease_end) { cancel_active(false, "permission_changed_before_mask"); break; }
                                     const auto started = now_ns();
+                                    const auto trace = backend_begin(AutoStopBackendAction::MASK, key, 0, started);
                                     const auto result = mouse->set_wasd_mask(key, true);
+                                    backend_result(trace, result);
                                     debt |= result.datagram_sent;
                                     receipt(result, started);
                                     if (result.disposition != KeyboardDisposition::ACKNOWLEDGED) { cancel_active(true, "mask_not_acknowledged"); break; }
@@ -1035,6 +1226,7 @@ public:
                                     auto acquisition_intent = intent;
                                     for (std::size_t i = 0; acquisition_continuous && i < acquisition_events.count; ++i) {
                                         const auto& event = acquisition_events.events[i];
+                                        trace_wasd(event);
                                         acquisition_intent = acquisition_history.observe(event.held_mask, event.epoch,
                                             event.sequence, event.received_at_steady_ns, event.state_valid);
                                         acquisition_continuous = event.state_valid && event.epoch == active_input_epoch &&
@@ -1074,7 +1266,9 @@ public:
                             cancel_active(false, "permission_changed_before_zero");
                         } else {
                             const auto started = now_ns();
+                            const auto trace = backend_begin(AutoStopBackendAction::KEYBOARD, 0, 0, started);
                             const auto result = mouse->set_wasd_keyboard(0);
+                            backend_result(trace, result);
                             debt |= result.datagram_sent;
                             receipt(result, started);
                             if (result.disposition != KeyboardDisposition::ACKNOWLEDGED) cancel_active(true, "zero_not_acknowledged");
@@ -1106,10 +1300,12 @@ public:
                                 // 这里只测释放调用开始相对模型deadline的迟到，绝非设备已释放时刻。
                                 state.max_release_overshoot_ns = std::max(state.max_release_overshoot_ns, started - due);
                             }
+                            const auto trace = backend_begin(AutoStopBackendAction::KEYBOARD, decision.desired_mask, decision.command_id, started);
                             const auto result = mouse->set_wasd_keyboard(decision.desired_mask);
                             debt |= result.datagram_sent;
                             receipt(result, started);
                             const auto returned = now_ns();
+                            backend_result(trace, result);
                             const auto ack_time = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                 result.protocol_ack_received_at.time_since_epoch()).count();
                             const auto backend_time = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -1162,6 +1358,7 @@ public:
         }
         mouse->set_wasd_event_subscription(false);
         release_reservation();
+        emit(AutoStopExecutionKind::WORKER_STOPPED);
         std::lock_guard<std::mutex> lock(mutex);
         running = false;
         pending_id = 0;
@@ -1188,17 +1385,19 @@ AutoStopWorker::AutoStopWorker(std::shared_ptr<IMouseController> mouse,
     impl_->source_context = std::move(source_context);
     impl_->weapon_context = std::move(weapon_context);
 }
-void AutoStopWorker::publish_target(std::chrono::steady_clock::time_point valid_until, AutoStopBlockReason reason) noexcept {
+void AutoStopWorker::publish_target(std::chrono::steady_clock::time_point valid_until, AutoStopBlockReason reason,
+    AutoStopTargetEvidence evidence) noexcept {
     if (!impl_) return;
     try {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         if (impl_->movement_blocked()) return;
         impl_->target_until = valid_until;
+        impl_->target_evidence = evidence;
         impl_->target_reason = valid_until == Clock::time_point{} ? reason : AutoStopBlockReason::NONE;
         impl_->wake.notify_all();
     } catch (...) {}
 }
-void AutoStopWorker::publish_tracking_target(Clock::time_point valid_until) noexcept {
+void AutoStopWorker::publish_tracking_target(Clock::time_point valid_until, AutoStopTargetEvidence evidence) noexcept {
     if (!impl_) return;
     try {
         std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -1207,6 +1406,7 @@ void AutoStopWorker::publish_tracking_target(Clock::time_point valid_until) noex
         impl_->invalidate_tracking_locked(now);
         if (impl_->movement_blocked()) return;
         impl_->tracking_target_until = valid_until;
+        impl_->tracking_target_evidence = evidence;
         impl_->invalidate_tracking_locked(now);
         impl_->wake.notify_all();
     } catch (...) {}
@@ -1248,8 +1448,25 @@ bool AutoStopWorker::start(const AutoStopConfig& config, int command_timeout_ms)
         // App共享owner可跨Runtime存活；新worker不能假定上个会话已清掉设备债务。
         impl_->state.telemetry_available = true;
         impl_->state.device_protocol_available = true;
+        impl_->execution_generation.fetch_add(1, std::memory_order_relaxed);
         const auto cleanup_started = now_ns();
+        AutoStopExecutionEvent startup_cleanup;
+        if (impl_->diagnostics_enabled.load(std::memory_order_acquire)) {
+            startup_cleanup.kind = AutoStopExecutionKind::BACKEND_BEGIN;
+            startup_cleanup.backend_action = AutoStopBackendAction::CLEANUP; startup_cleanup.reason = "startup_cleanup";
+            startup_cleanup.backend_call_id = impl_->backend_call_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+            startup_cleanup.call_started_ns = cleanup_started;
+            impl_->execution_context_locked(startup_cleanup); impl_->record(startup_cleanup);
+        }
         const auto initial_cleanup = impl_->mouse->cleanup_wasd_keyboard();
+        if (startup_cleanup.backend_call_id) {
+            startup_cleanup.kind = AutoStopExecutionKind::BACKEND_RESULT;
+            startup_cleanup.observed_at_ns = now_ns(); startup_cleanup.receipt = initial_cleanup.disposition;
+            startup_cleanup.datagram_sent = initial_cleanup.datagram_sent;
+            startup_cleanup.backend_completed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(initial_cleanup.backend_completed_at.time_since_epoch()).count();
+            startup_cleanup.protocol_ack_received_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(initial_cleanup.protocol_ack_received_at.time_since_epoch()).count();
+            impl_->record(startup_cleanup);
+        }
         ++impl_->state.cleanup_attempts;
         if (initial_cleanup.disposition != KeyboardDisposition::ACKNOWLEDGED) {
             ++impl_->state.cleanup_failures;
@@ -1258,6 +1475,8 @@ bool AutoStopWorker::start(const AutoStopConfig& config, int command_timeout_ms)
             impl_->fault = true;
             impl_->arbiter->latch_output_fault();
             LOG_WARN("auto_stop", "共享设备的历史键盘债务清理未确认，拒绝启动新会话");
+            AutoStopExecutionEvent event; event.kind = AutoStopExecutionKind::CLEANUP_UNKNOWN;
+            event.reason = "startup_cleanup_unconfirmed"; impl_->execution_context_locked(event); impl_->record(event);
             return false;
         }
         if (initial_cleanup.datagram_sent || initial_cleanup.protocol_ack_received_at != Clock::time_point{}) {
@@ -1272,6 +1491,8 @@ bool AutoStopWorker::start(const AutoStopConfig& config, int command_timeout_ms)
         impl_->state.device_protocol_available = true;
         impl_->state.telemetry_available = true;
         impl_->running = true;
+        AutoStopExecutionEvent event; event.kind = AutoStopExecutionKind::WORKER_STARTED;
+        impl_->execution_context_locked(event); impl_->record(event);
         Log::register_module("auto_stop", LogLevel::INFO);
         impl_->thread = std::thread([this]() { impl_->run(); });
         return true;
@@ -1294,7 +1515,11 @@ bool AutoStopWorker::request(std::uint64_t id) noexcept {
     try {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         if (!impl_->running || impl_->fault || impl_->movement_blocked() || impl_->paused.load() || impl_->stopping.load() ||
-            impl_->pending_id || id <= impl_->last_request_id || impl_->state.status != AutoStopStatus::READY) return false;
+            impl_->pending_id || id <= impl_->last_request_id || impl_->state.status != AutoStopStatus::READY) {
+            AutoStopExecutionEvent event; event.kind = AutoStopExecutionKind::REQUEST_REJECTED;
+            event.reason = "request_not_available"; impl_->execution_context_locked(event); event.request_id = id;
+            impl_->record(event); return false;
+        }
         impl_->last_request_id = id;
         impl_->pending_id = id;
         impl_->submitted_at = Clock::now();
@@ -1321,6 +1546,10 @@ bool AutoStopWorker::retain_for_manual_fire(std::uint64_t request_id) noexcept {
             Clock::now() >= impl_->tracking_target_until ||
             (impl_->state.weapon_context.required && !impl_->state.weapon_context.valid)) return false;
         impl_->manual_fire_id = request_id;
+        AutoStopExecutionEvent event; event.kind = AutoStopExecutionKind::MANUAL_FIRE_RETAINED;
+        impl_->execution_context_locked(event); event.left_button_held = input.virtual_keys[1];
+        event.input_valid = input.state_valid; event.input_status = input.status; event.monitor_sequence = input.sequence;
+        event.physical_wasd_mask = held_wasd(input); impl_->record(event);
         impl_->resume_id = 0;
         impl_->wake.notify_all();
         return true;
@@ -1340,6 +1569,8 @@ bool AutoStopWorker::resume_movement(std::uint64_t request_id, Clock::time_point
         impl_->resume_id = request_id;
         impl_->resume_generation = impl_->estimated_generation;
         impl_->resume_not_before = not_before;
+        AutoStopExecutionEvent event; event.kind = AutoStopExecutionKind::RESUME_REQUESTED;
+        impl_->execution_context_locked(event); impl_->record(event);
         impl_->wake.notify_all();
         return true;
     } catch (...) { return false; }
@@ -1408,6 +1639,37 @@ AutoStopSnapshot AutoStopWorker::snapshot() const noexcept {
         if (impl_->arbiter) result.aim_skips = impl_->arbiter->aim_skips();
         return result;
     } catch (...) { return {}; }
+}
+
+void AutoStopWorker::set_diagnostics_enabled(bool enabled) noexcept {
+    if (!impl_) return;
+    try {
+        std::lock_guard lock(impl_->execution_mutex);
+        if (impl_->diagnostics_enabled.load(std::memory_order_relaxed) == enabled) return;
+        AutoStopExecutionEvent event;
+        event.kind = enabled ? AutoStopExecutionKind::RECORDING_STARTED : AutoStopExecutionKind::RECORDING_STOPPED;
+        if (enabled) impl_->execution_generation.fetch_add(1, std::memory_order_relaxed);
+        // 边界和偏好在同一锁内发布；stop/start不清零已有序号或删除已保存证据。
+        impl_->append_execution_locked(event);
+        impl_->diagnostics_enabled.store(enabled, std::memory_order_release);
+    } catch (...) {}
+}
+AutoStopExecutionLog AutoStopWorker::execution_log(std::uint64_t after_sequence) const {
+    AutoStopExecutionLog result;
+    if (!impl_) return result;
+    // 内存分配在诊断锁外；生产者遇到本次固定复制仍不等待。
+    result.events.reserve(kAutoStopExecutionCapacity);
+    std::lock_guard lock(impl_->execution_mutex);
+    result.enabled = impl_->diagnostics_enabled.load(std::memory_order_relaxed);
+    result.generation = impl_->execution_generation.load(std::memory_order_relaxed);
+    result.dropped_count = impl_->execution_dropped.load(std::memory_order_relaxed);
+    result.last_sequence = impl_->execution_sequence.load(std::memory_order_relaxed);
+    result.first_sequence = impl_->execution_count ? impl_->execution_events[impl_->execution_begin].sequence : 0;
+    for (std::size_t i = 0; i < impl_->execution_count; ++i) {
+        const auto& event = impl_->execution_events[(impl_->execution_begin + i) % impl_->execution_events.size()];
+        if (event.sequence > after_sequence) result.events.push_back(event);
+    }
+    return result;
 }
 
 bool AutoStopWorker::idle_for_trigger(const InputSnapshot& input) const noexcept {
