@@ -3,6 +3,8 @@
 #include <WinSock2.h>
 #include <WS2tcpip.h>
 #include <bcrypt.h>
+#include <psapi.h>
+#include <tlhelp32.h>
 #ifdef ERROR
 #undef ERROR
 #endif
@@ -11,6 +13,7 @@
 #include "movement/timeline.h"
 #include "debug_session/debug_session.h"
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <filesystem>
@@ -19,6 +22,7 @@
 #include <string_view>
 #include <thread>
 #include <array>
+#include <vector>
 #include <opencv2/imgcodecs.hpp>
 
 namespace {
@@ -600,6 +604,184 @@ void catalog_limits(const std::filesystem::path& root, const std::shared_ptr<wea
     std::filesystem::remove(directory / "bad.json");
     std::filesystem::remove(directory);
 }
+struct StressResources {
+    std::uint64_t private_bytes = 0;
+    DWORD handles = 0;
+    std::uint32_t threads = 0;
+    Json json() const {
+        return {{"private_bytes",private_bytes},{"handles",handles},{"threads",threads}};
+    }
+};
+StressResources stress_resources() {
+    StressResources sample;
+    PROCESS_MEMORY_COUNTERS_EX memory{}; memory.cb = sizeof(memory);
+    if (!GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory),sizeof(memory)) ||
+        !GetProcessHandleCount(GetCurrentProcess(),&sample.handles))
+        throw std::runtime_error("读取本进程内存或句柄失败");
+    sample.private_bytes = static_cast<std::uint64_t>(memory.PrivateUsage);
+    const auto snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,GetCurrentProcessId());
+    if (snapshot == INVALID_HANDLE_VALUE) throw std::runtime_error("读取本进程线程快照失败");
+    THREADENTRY32 entry{}; entry.dwSize = sizeof(entry);
+    if (!Thread32First(snapshot,&entry)) {
+        CloseHandle(snapshot);
+        throw std::runtime_error("读取本进程首个线程失败");
+    }
+    do {
+        if (entry.th32OwnerProcessID == GetCurrentProcessId()) ++sample.threads;
+    } while (Thread32Next(snapshot,&entry));
+    const auto error = GetLastError();
+    CloseHandle(snapshot);
+    if (error != ERROR_NO_MORE_FILES || !sample.threads)
+        throw std::runtime_error("本进程线程计数不完整");
+    return sample;
+}
+Json stress_timing(const std::vector<double>& values) {
+    auto sorted = values;
+    std::sort(sorted.begin(),sorted.end());
+    double sum = 0; for (const auto value : values) sum += value;
+    return {{"samples",values.size()},{"mean_ms",sum/values.size()},
+        {"p50_ms",sorted[(sorted.size()+1)/2-1]},
+        {"p95_ms",sorted[(sorted.size()*95+99)/100-1]},{"max_ms",sorted.back()}};
+}
+// 只拥有本模式唯一子目录中的四个文件；异常收尾也不递归处理调用方目录。
+struct StressFixture {
+    std::filesystem::path root;
+    ~StressFixture() {
+        const std::array<std::filesystem::path,8> owned{
+            root/"plans"/"t.json",root/"references"/"t"/"reference.json",
+            root/"references"/"t"/"standing.png",root/"references"/"t"/"aim.png",
+            root/"references"/"t",root/"references",root/"plans",root};
+        for (const auto& path : owned) {
+            std::error_code error;
+            std::filesystem::remove(path,error);
+            if (error) std::cerr << "[失败] 资源压力夹具清理失败：" << utf8(path) << '\n';
+        }
+    }
+};
+int resource_stress(int argc, char** argv) {
+    if (argc != 3) return 2;
+    const auto base = std::filesystem::u8path(argv[2]).lexically_normal();
+    if (!base.is_absolute() || base.filename() != "XEN-RUNTIME-CAPTURE-DRIFT-20261105-001" ||
+        base.parent_path().filename() != "temp") {
+        std::cerr << "资源压力夹具根必须是绝对temp/XEN-RUNTIME-CAPTURE-DRIFT-20261105-001目录\n";
+        return 2;
+    }
+    const auto root = base/("web-stress-"+std::to_string(GetCurrentProcessId())+"-"+
+        std::to_string(Clock::now().time_since_epoch().count()));
+    const auto require = [](bool condition, const char* message) {
+        if (!condition) throw std::runtime_error(message);
+    };
+    try {
+        for (auto path=base; !path.empty(); path=path.parent_path()) {
+            const auto attributes = GetFileAttributesW(path.c_str());
+            require(attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_REPARSE_POINT),
+                "资源压力夹具路径不能经过重解析点");
+            if (path == path.root_path()) break;
+        }
+        std::filesystem::create_directories(base);
+        require(std::filesystem::create_directory(root),"资源压力夹具唯一目录已存在");
+        {
+            StressFixture cleanup{root};
+            const auto plans=root/"plans", resources=root/"references"/"t";
+            std::filesystem::create_directory(plans);
+            std::filesystem::create_directories(root/"references");
+            std::filesystem::create_directory(resources);
+            write_plan(plans/"t.json","T1 网页资源压力测试","de_mirage");
+            Json plan; {std::ifstream input(plans/"t.json"); input>>plan;}
+            std::array<std::string,2> expected_images;
+            for (std::size_t index=0; index<expected_images.size(); ++index) {
+                // 空间渐变能覆盖全屏PNG解码；压缩后仍落在原HTTP helper的2MiB预算内。
+                cv::Mat pixels(1440,2560,CV_8UC3);
+                for (int y=0; y<pixels.rows; ++y) {
+                    auto* row=pixels.ptr<cv::Vec3b>(y);
+                    for (int x=0; x<pixels.cols; ++x) row[x]=cv::Vec3b(
+                        static_cast<unsigned char>((x/16+y/32+index*29)%256),
+                        static_cast<unsigned char>((x/32+y/8+index*47)%256),
+                        static_cast<unsigned char>((x/8+y/16+index*71)%256));
+                }
+                std::vector<unsigned char> encoded;
+                require(cv::imencode(".png",pixels,encoded,{cv::IMWRITE_PNG_COMPRESSION,3}),
+                    "合成全屏PNG编码失败");
+                require(encoded.size()<2*1024*1024-4096,"合成PNG超过原HTTP接收预算");
+                expected_images[index].assign(encoded.begin(),encoded.end());
+                std::ofstream output(resources/(index ? "aim.png" : "standing.png"),std::ios::binary);
+                output.write(expected_images[index].data(),static_cast<std::streamsize>(expected_images[index].size()));
+                require(static_cast<bool>(output),"写入合成全屏PNG失败");
+            }
+            const Json reference{{"schema_version",1},{"plan_id","t.json"},{"reference_id","t"},
+                {"manual_throw_verified",true},{"plan",plan},{"standing_image","standing.png"},{"aim_image","aim.png"},
+                {"geometry",{{"source_width",2560},{"source_height",1440},{"roi_x",1120},{"roi_y",560},
+                    {"roi_width",320},{"roi_height",320},{"scale_x",1},{"scale_y",1}}},
+                {"image_sha256",{{"standing_image",image_hash(resources/"standing.png")},
+                    {"aim_image",image_hash(resources/"aim.png")}}}};
+            {std::ofstream output(resources/"reference.json",std::ios::binary); output<<reference.dump();
+                require(static_cast<bool>(output),"写入合成参考清单失败");}
+            const auto before=stress_resources();
+            auto gsi=std::make_shared<weapon::GsiReceiver>();
+            weapon::GsiConfig gsi_config; gsi_config.enabled=true; gsi_config.port=unused_port(); gsi_config.ttl_ms=10000;
+            require(gsi_config.port && gsi->start(gsi_config),"资源压力测试GSI启动失败");
+            grenade_web::Server server;
+            grenade_web::Config config; config.bind_address="127.0.0.1"; config.port=0; config.plans_root=utf8(plans);
+            require(server.start(config,gsi),"资源压力测试网页服务启动失败");
+            const auto port=server.snapshot().port;
+            require(port!=0,"资源压力测试未取得监听端口");
+            std::string revision;
+            std::array<std::vector<double>,3> timing;
+            const auto round = [&] {
+                require(post_context(gsi_config.port,utc_seconds(),"de_mirage","T"),"合成GSI心跳失败");
+                const auto request = [&](std::size_t metric, const std::string& target) {
+                    const auto started=Clock::now();
+                    auto response=get(port,target);
+                    timing[metric].push_back(std::chrono::duration<double,std::milli>(Clock::now()-started).count());
+                    require(response.status==200,"资源压力HTTP请求未成功");
+                    return response;
+                };
+                const auto manifest=request(0,"/reference.json?plan_id=t.json").json();
+                require(manifest.is_object() && manifest.value("plan_id",std::string{})=="t.json" &&
+                    manifest.value("standing_ready",false) && manifest.value("aim_ready",false) &&
+                    manifest.value("standing_width",0)==2560 && manifest.value("standing_height",0)==1440,
+                    "资源压力参考清单或图片尺寸不一致");
+                const auto current=manifest.value("revision",std::string{});
+                require(!current.empty() && (revision.empty() || current==revision),"重复请求改变了参考修订");
+                revision=current;
+                for (std::size_t index=0; index<expected_images.size(); ++index) {
+                    const auto image=request(index+1,std::string("/reference/")+(index ? "aim" : "standing")+
+                        ".png?plan_id=t.json&revision="+revision);
+                    require(image.body==expected_images[index],"完整PNG响应字节与合成原图不同");
+                }
+            };
+            for (int index=0; index<6; ++index) round();
+            const auto warmed=stress_resources();
+            std::cout<<Json{{"phase","warmup"},{"rounds",6},{"resources",warmed.json()},
+                {"before_start",before.json()},{"png_bytes",{expected_images[0].size(),expected_images[1].size()}},
+                {"scope","synthetic_loopback_http_without_runtime_or_device"}}.dump()<<'\n'<<std::flush;
+            for (int batch=0; batch<4; ++batch) {
+                for (auto& values:timing) values.clear();
+                for (int index=0; index<12; ++index) round();
+                const auto sample=stress_resources();
+                std::cout<<Json{{"phase","batch"},{"batch",batch+1},{"rounds",12},{"resources",sample.json()},
+                    {"manifest",stress_timing(timing[0])},{"standing",stress_timing(timing[1])},
+                    {"aim",stress_timing(timing[2])}}.dump()<<'\n'<<std::flush;
+                require(sample.private_bytes<=warmed.private_bytes+32ULL*1024*1024,
+                    "暖机后私有内存增长超过32MiB，需要检查逐请求留存");
+                require(sample.handles<=warmed.handles+4,"暖机后句柄增长超过4个，需要检查套接字或文件释放");
+                require(sample.threads<=warmed.threads+2,"暖机后线程增长超过2个，需要检查后台生命周期");
+            }
+            server.stop(); gsi->stop();
+            const auto stopped=stress_resources();
+            std::cout<<Json{{"phase","stopped"},{"resources",stopped.json()},{"before_start",before.json()}}.dump()<<'\n'<<std::flush;
+            require(stopped.private_bytes<=warmed.private_bytes+32ULL*1024*1024,"服务停止后私有内存超出暖机预算");
+            require(stopped.handles<=before.handles+4,"服务停止后未回收句柄");
+            require(stopped.threads<=before.threads+2,"服务停止后未回收后台线程");
+        }
+        require(!std::filesystem::exists(root),"资源压力夹具未完整逐文件清理");
+    } catch (const std::exception& error) {
+        expect(false,error.what());
+        return 1;
+    }
+    std::cout<<"网页全屏双图资源压力检查通过；不代表真实NDI或长时游戏验收\n";
+    return 0;
+}
 int preview(int argc, char** argv) {
     grenade_web::Config config; config.bind_address = "127.0.0.1"; config.port = 0;
     std::string root;
@@ -637,6 +819,7 @@ int preview(int argc, char** argv) {
 int main(int argc, char** argv) {
     Winsock winsock;
     if (!winsock.ready) return 1;
+    if (argc > 1 && std::string_view(argv[1])=="--resource-stress") return resource_stress(argc,argv);
     if (argc > 1 && std::string(argv[1]).starts_with("--")) return preview(argc,argv);
     const auto base = argc > 1 ? std::filesystem::u8path(argv[1]) :
         std::filesystem::path("temp/XEN-GRENADE-ALIGN-20261026-001/web-fixtures");

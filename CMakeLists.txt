@@ -1589,10 +1589,13 @@ if(BUILD_TESTING)
     add_test(NAME grenade_capture_workflow_tests COMMAND "${XEN_PYTHON_EXECUTABLE}" -X utf8 -B "${PROJECT_SOURCE_DIR}/tests/grenade_capture_workflow_tests.py")
     set_tests_properties(grenade_capture_workflow_tests PROPERTIES TIMEOUT 30)
     add_executable(grenade_web_tests tests/grenade_web_tests.cpp)
-    target_link_libraries(grenade_web_tests PRIVATE grenade_web debug_session nlohmann_json::nlohmann_json ws2_32)
+    target_link_libraries(grenade_web_tests PRIVATE grenade_web debug_session nlohmann_json::nlohmann_json ws2_32 psapi)
     add_test(NAME grenade_web_tests COMMAND grenade_web_tests
         "${PROJECT_SOURCE_DIR}/temp/XEN-GRENADE-ALIGN-20261026-001/web-fixtures")
     set_tests_properties(grenade_web_tests PROPERTIES TIMEOUT 20)
+    add_test(NAME grenade_web_resource_stress_tests COMMAND grenade_web_tests --resource-stress
+        "${PROJECT_SOURCE_DIR}/temp/XEN-RUNTIME-CAPTURE-DRIFT-20261105-001")
+    set_tests_properties(grenade_web_resource_stress_tests PROPERTIES TIMEOUT 90)
     xen_deploy_runtime_dlls(grenade_web_tests OPENCV ORT NDI)
     target_link_libraries(movement_session_tests PRIVATE debug_session movement ws2_32)
     add_test(NAME movement_session_tests COMMAND movement_session_tests "${CMAKE_BINARY_DIR}/movement-session-fixtures")
@@ -2299,6 +2302,15 @@ if(BUILD_TESTING)
         target_link_libraries(ndi_runtime_timing_tests PRIVATE capture aim)
         xen_deploy_runtime_dlls(ndi_runtime_timing_tests OPENCV NDI)
         add_test(NAME ndi_runtime_timing_tests COMMAND ndi_runtime_timing_tests)
+
+        # 外部SDK替身供帧，压力仍经过真实采集池和Runtime队列；不启动实网或设备。
+        add_executable(ndi_runtime_stress_tests
+            tests/ndi_runtime_stress_tests.cpp
+            Xen/runtime/runtime_queue.cpp)
+        target_link_libraries(ndi_runtime_stress_tests PRIVATE capture aim psapi)
+        xen_deploy_runtime_dlls(ndi_runtime_stress_tests OPENCV NDI)
+        add_test(NAME ndi_runtime_stress_tests COMMAND ndi_runtime_stress_tests)
+        set_tests_properties(ndi_runtime_stress_tests PROPERTIES TIMEOUT 60)
     endif()
 
     add_executable(clock_sync_tests

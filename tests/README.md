@@ -10,6 +10,7 @@
 - [实际 EXE 退出](xen_exe_shutdown_validation_20261011.md)与[Runtime/弹窗组件组合](runtime_file_dialog_shutdown_validation_20261011.md)分别证明各自入口；桌面探针需要真实桌面操作，不是无人值守 CTest。
 - 测试中的 CPU、合成画面、回环 socket、假设备和 ACK 都不替代真实设备/游戏体验。
 - OBS菜单的分组和站位图来源可运行 `node tests/grenade_menu_tests.cjs`：直接执行 `Xen/grenade_web/page.html` 的真实JS函数，DOM仅作替身，不启动HTTP或游戏输入；覆盖自定义首token站位、完整落点、无空格独立分组、当前站位优先和既有出生点共图。文字换行与首屏布局另用实际浏览器检查。
+- `ndi_runtime_stress_tests` 在外部SDK替身供帧下执行真实NDI采集池与Runtime队列，检查固定槽、在途引用、重复启停及暖机后的私有提交量/句柄/线程趋势；`grenade_web_resource_stress_tests` 重复请求合成全屏双图，核对响应、资源和停服回收。两项均为隔离进程测试，不连接真实NDI源、模型或设备，不能替代游戏长时验收。可用 `ctest --test-dir build/nvidia -C Release -R '^(ndi_runtime_stress_tests|grenade_web_resource_stress_tests)$' --output-on-failure` 运行。
 
 ## 夹具说明
 
